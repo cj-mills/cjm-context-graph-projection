@@ -33,18 +33,21 @@ pip install -e .
 
 ## Usage
 
+Global options (`--graph-db-path`, `--manifests-dir`, `--format`) come **before**
+the subcommand:
+
 ```bash
 # Build / refresh the dev graph (memory corpus + repo map) — explicit db path.
-cjm-context-graph ingest --graph-db-path .cjm/dev-graph.db
+cjm-context-graph --graph-db-path .cjm/dev-graph.db ingest
 
 # The canonical session-start sequence.
-cjm-context-graph schema   --graph-db-path .cjm/dev-graph.db
-cjm-context-graph state    --graph-db-path .cjm/dev-graph.db
-cjm-context-graph relevant "self-hosting graph arc" --graph-db-path .cjm/dev-graph.db
-cjm-context-graph show <node-id> --graph-db-path .cjm/dev-graph.db
+cjm-context-graph --graph-db-path .cjm/dev-graph.db schema
+cjm-context-graph --graph-db-path .cjm/dev-graph.db state
+cjm-context-graph --graph-db-path .cjm/dev-graph.db relevant "self-hosting graph arc"
+cjm-context-graph --graph-db-path .cjm/dev-graph.db show <node-id>
 
 # Agent-readable JSON instead of rendered markdown.
-cjm-context-graph relevant "stage 9 rename" --graph-db-path .cjm/dev-graph.db --format agent
+cjm-context-graph --graph-db-path .cjm/dev-graph.db --format agent relevant "stage 9 rename"
 ```
 
 `--graph-db-path` is always explicit (no convenience default-repoints); the
