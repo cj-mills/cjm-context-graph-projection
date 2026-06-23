@@ -3,7 +3,7 @@
 import json
 
 from cjm_context_graph_projection.projection import (
-    _terms, node_summary, node_title,
+    _TEXT_FIELDS, _haystack, _terms, node_summary, node_title,
 )
 from cjm_context_graph_projection.render import render
 
@@ -21,6 +21,18 @@ def test_node_title_prefers_title_then_name_then_slug_then_id():
     assert node_title(_node(name="N", slug="s")) == "N"
     assert node_title(_node(slug="s")) == "s"
     assert node_title({"id": "n1", "label": "X", "properties": {}}) == "n1"
+
+
+def test_fine_tier_content_is_titled_and_searchable():
+    # Born-on-graph Decisions/Assertions carry content in `statement`/`value`, not
+    # the coarse text fields — they must still be titled + seed-matchable (the gap
+    # Inc-4 dogfooding surfaced: `relevant` must find what a session decided).
+    assert "statement" in _TEXT_FIELDS and "value" in _TEXT_FIELDS
+    dec = {"id": "d1", "label": "Decision", "properties": {"statement": "alias persists on-graph"}}
+    assert node_title(dec) == "alias persists on-graph"
+    assert "alias persists on-graph" in _haystack(dec)
+    a = {"id": "a1", "label": "Assertion", "properties": {"value": "rename:cjm-x"}}
+    assert node_title(a) == "rename:cjm-x" and "rename:cjm-x" in _haystack(a)
 
 
 def test_node_summary_carries_description_and_kind():

@@ -22,12 +22,16 @@ from .seeds import aliases_for, conceptual_key, seed_elements
 
 def memory_elements(
     memory_dir: str,  # Dir of memory markdown files
+    note_aliases: Optional[Dict[str, str]] = None,  # Confirmed {drifted-slug: canonical-slug} link aliases
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:  # (Note nodes, REFERENCES edges)
-    """Decompose every memory markdown file (except MEMORY.md) into graph elements."""
+    """Decompose every memory markdown file (except MEMORY.md) into graph elements.
+
+    Confirmed `note_aliases` (the worklist's output, read off the graph) resolve
+    drifted `[[wiki-links]]` to their real note so the once-dangling edge lands."""
     mem = Path(memory_dir)
     files = sorted(p for p in mem.glob("*.md") if p.name != "MEMORY.md")
     notes = [note_from_file(str(p), corpus_root=str(mem)) for p in files]
-    return corpus_graph_elements(notes)
+    return corpus_graph_elements(notes, note_aliases)
 
 
 def _cjm_dep_keys(pyproject: Path) -> List[str]:
@@ -78,11 +82,12 @@ def build_dev_graph_elements(
     memory_dir: str,                  # Dir of memory markdown files
     repos_dir: Optional[str] = None,  # Active cjm-* repos dir (None = skip the repo map)
     seed: bool = True,                # Include the hand-seeded fine-tier slots
+    note_aliases: Optional[Dict[str, str]] = None,  # Confirmed link aliases (drifted -> canonical)
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:  # (all nodes, all edges)
     """Assemble the full dev graph: memory notes (+ refs), the repo map (+ deps),
     and the hand-seeded fine-tier slots (the torch/hf contradiction, the stale
     version slot, the class subjects)."""
-    nodes, edges = memory_elements(memory_dir)
+    nodes, edges = memory_elements(memory_dir, note_aliases)
     if repos_dir:
         rn, re = repo_map_elements(repos_dir)
         nodes += rn

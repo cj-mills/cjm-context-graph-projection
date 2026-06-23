@@ -15,12 +15,13 @@ from cjm_context_graph_layer.ops import extend_graph
 
 from .contradictions import contradictions
 from .devgraph import build_dev_graph_elements
+from .factlayer import note_alias_map
 from .oracle import run_version_oracle
 from .projection import get_schema, relevant, show, state
 from .render import render
 from .runtime import DEFAULT_MANIFESTS, open_graph
-from .worklist import worklist
-from .write import assert_value, decide
+from .worklist import dangling_reference_sources, worklist
+from .write import alias, assert_value, decide
 
 DEFAULT_MEMORY = ("/home/innom-dt/.claude/projects/"
                   "-mnt-SN850X-8TB-EXT4-Projects-GitHub-cj-mills-cjm-substrate/memory")
@@ -30,9 +31,10 @@ DEFAULT_REPOS = "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills"
 async def _dispatch(args) -> int:
     async with open_graph(args.graph_db_path, args.manifests_dir) as gx:
         if args.command == "ingest":
+            note_aliases = await note_alias_map(gx)  # confirmed link aliases heal drifted refs
             nodes, edges = build_dev_graph_elements(
                 args.memory_dir, None if args.no_repo_map else args.repos_dir,
-                seed=not args.no_seed)
+                seed=not args.no_seed, note_aliases=note_aliases)
             res = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
             print(f"ingested: {res.nodes_added} nodes added / {res.nodes_verified} verified, "
                   f"{res.edges_added} edges added / {res.edges_existing} existing")
@@ -56,6 +58,14 @@ async def _dispatch(args) -> int:
                                      supersede=args.supersede)
             print(render("assert", res, args.format))
             return 2 if res.get("conflict") else 0
+        elif args.command == "alias":
+            actor = f"agent:session:{args.session}" if args.session else args.actor
+            evidence = (args.evidence
+                        or (dangling_reference_sources(args.memory_dir, args.drifted)
+                            if args.memory_dir else None))
+            res = await alias(gx, args.drifted, args.canonical, actor=actor, evidence=evidence)
+            print(render("alias", res, args.format))
+            return 1 if res.get("error") else 0
         elif args.command == "decide":
             res = await decide(gx, args.statement, actor=args.actor, supports=args.supports,
                                supersedes=args.supersedes, session=args.session)
@@ -109,6 +119,16 @@ def main() -> int:
     p_as.add_argument("--actor", default="agent:session")
     p_as.add_argument("--evidence", action="append", help="Supporting node id (repeatable)")
     p_as.add_argument("--supersede", action="append", help="Prior assertion id OR value to supersede (repeatable)")
+
+    p_al = sub.add_parser("alias", help="Confirm a drifted link slug as an alias of a real note")
+    p_al.add_argument("drifted", help="The drifted `[[wiki-link]]` slug (resolves to no note)")
+    p_al.add_argument("canonical", help="The real note slug it means (frontmatter `name`)")
+    p_al.add_argument("--actor", default="agent:session")
+    p_al.add_argument("--session", default=None, help="Session key (actor becomes agent:session:<key>)")
+    p_al.add_argument("--memory-dir", default=DEFAULT_MEMORY,
+                      help="Corpus dir to auto-discover the source notes as evidence")
+    p_al.add_argument("--evidence", action="append",
+                      help="Override evidence: a source-note id (repeatable)")
 
     p_de = sub.add_parser("decide", help="Record a decision + its premise edges")
     p_de.add_argument("statement")

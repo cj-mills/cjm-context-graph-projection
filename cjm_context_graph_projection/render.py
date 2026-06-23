@@ -52,6 +52,17 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         elif obj.get("soft_conflict"):
             lines.append("• soft conflict on an untyped predicate → see `worklist`")
         return "\n".join(lines)
+    if kind == "alias":
+        if obj.get("error"):
+            return f"⚠ {obj['error']}"
+        lines = [f"**aliased** `[[{obj.get('drifted')}]]` → **{obj.get('canonical')}** "
+                 f"(actor {obj.get('actor')})",
+                 f"`assertion {obj.get('assertion_id')}`"]
+        ev = obj.get("evidence") or []
+        if ev:
+            lines.append(f"_evidence: {len(ev)} source note(s) carried the broken link_")
+        lines.append("_re-`ingest` to heal the references; the link drops off `worklist`_")
+        return "\n".join(lines)
     if kind == "decide":
         lines = [f"**decided:** {obj.get('statement')}", f"`{obj.get('decision_id')}`",
                  f"_actor {obj.get('actor')}_"]

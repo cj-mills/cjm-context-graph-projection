@@ -21,6 +21,7 @@ from cjm_context_graph_layer.grammar import make_edge
 from cjm_context_graph_layer.ops import extend_graph, graph_task
 from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.aliases import resolve_subject_id
+from cjm_dev_graph_schema.identity import note_node_id
 from cjm_dev_graph_schema.nodes import (AssertionNode, DecisionNode, EntityNode,
                                         FactSlotNode, SessionNode)
 from cjm_dev_graph_schema.vocab import DevRelations
@@ -177,6 +178,34 @@ async def assert_value(
         "superseded": superseded_ids, "born_superseded": born_superseded,
         "conflict": conflict, "soft_conflict": soft,
     }
+
+
+async def alias(
+    gx: GraphHandle,
+    drifted_slug: str,     # The drifted `[[wiki-link]]` slug that resolves to no note
+    canonical_slug: str,   # The real note slug it means (its frontmatter `name`)
+    *,
+    actor: str = "agent:session",       # Who confirmed the equivalence
+    evidence: Optional[List[str]] = None,  # Source-note ids that carried the broken link (auto-discovered upstream)
+) -> Dict[str, Any]:  # The write result (incl. error when the canonical note is absent)
+    """Confirm a drifted link slug as an alias OF a real note (the worklist payoff).
+
+    A confirmed equivalence is born on-graph as an `aka` Assertion on the canonical
+    note's `(note, aka)` slot — multivalued, so a note accrues many aliases without
+    conflict. Ingest then resolves the drifted reference through it (the dangling
+    edge heals) and the worklist drops it. The canonical note MUST exist (we never
+    mint a phantom for a confirmed target); evidence is the notes the broken link
+    appeared in (provenance of the rot). Idempotent on (note, alias, actor)."""
+    canonical_id = note_node_id(canonical_slug)
+    target = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=canonical_id)
+    if target is None:
+        return {"error": f"no note `{canonical_slug}` to alias to", "drifted": drifted_slug,
+                "canonical": canonical_slug, "written": False}
+    res = await assert_value(gx, canonical_id, "aka", drifted_slug,
+                             actor=actor, evidence=evidence)
+    return {"drifted": drifted_slug, "canonical": canonical_slug, "canonical_id": canonical_id,
+            "actor": actor, "evidence": evidence or [], "assertion_id": res["assertion_id"],
+            "nodes_added": res["nodes_added"], "edges_added": res["edges_added"], "written": True}
 
 
 async def decide(

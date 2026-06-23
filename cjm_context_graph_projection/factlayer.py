@@ -89,6 +89,30 @@ async def load_assertions(gx: GraphHandle) -> List[Any]:
     return await load_label(gx, DevNodeKinds.ASSERTION)
 
 
+async def note_alias_map(gx: GraphHandle) -> Dict[str, str]:
+    """Confirmed note aliases as a {drifted-slug: canonical-slug} map.
+
+    Reads the active `aka` assertions (the propose/confirm worklist's output): each
+    claims a drifted link slug (the value) FOR a canonical note (the subject). The
+    canonical slug is read off the subject Note node. This is the index ingest uses
+    to heal drifted references and the worklist uses to drop confirmed refs."""
+    assertions = await load_assertions(gx)
+    supers = await load_supersedes(gx)
+    aka = [a for a in assertions if prop(a, "predicate") == "aka"]
+    if not aka:
+        return {}
+    active = active_assertions(aka, supers)
+    notes = await load_label(gx, DevNodeKinds.NOTE)
+    slug_by_id = {nid(n): prop(n, "slug") for n in notes}
+    out: Dict[str, str] = {}
+    for a in active:
+        canonical = slug_by_id.get(prop(a, "subject_id"))
+        drifted = prop(a, "value")
+        if canonical and drifted:
+            out[str(drifted)] = str(canonical)
+    return out
+
+
 def group_by_slot(assertions: List[Any]) -> Dict[str, List[Any]]:
     """Group assertion nodes by their `slot_id` property."""
     out: Dict[str, List[Any]] = {}

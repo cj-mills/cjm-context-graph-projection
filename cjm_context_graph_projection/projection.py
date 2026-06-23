@@ -28,8 +28,10 @@ EDGE_WEIGHTS = {
 }
 _HOP_DECAY = 0.5          # Score multiplier per BFS hop from a seed
 _SUPERSEDED_FACTOR = 0.3  # Down-weight for nodes that are the target of a SUPERSEDES edge
-# Property fields searched for seed term matches + used as a display title.
-_TEXT_FIELDS = ("title", "name", "slug", "key", "description")
+# Property fields searched for seed term matches + used as a display title. Includes
+# the fine-tier content fields (`statement` on Decisions, `value` on Assertions) so
+# born-on-graph decisions/facts are discoverable by `relevant`, not just coarse Notes.
+_TEXT_FIELDS = ("title", "name", "slug", "key", "description", "statement", "value")
 # Common words that add noise, not signal, to seed-term matching.
 _STOPWORDS = frozenset((
     "the", "and", "for", "with", "this", "that", "from", "into", "are", "was",
@@ -55,7 +57,7 @@ def _props(node: Any) -> Dict[str, Any]:
 def node_title(node: Any) -> str:
     """Best display label for a node (first non-empty text field, else its id)."""
     p = _props(node)
-    for f in ("title", "name", "slug", "key"):
+    for f in ("title", "name", "slug", "key", "statement", "value"):
         v = p.get(f)
         if isinstance(v, str) and v.strip():
             return v.strip()
