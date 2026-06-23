@@ -16,6 +16,7 @@ from cjm_context_graph_layer.ops import extend_graph
 from .contradictions import contradictions
 from .devgraph import build_dev_graph_elements
 from .factlayer import note_alias_map
+from .journal import append_write, replay_journal
 from .oracle import run_version_oracle
 from .projection import get_schema, relevant, show, state
 from .render import render
@@ -38,6 +39,18 @@ async def _dispatch(args) -> int:
             res = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
             print(f"ingested: {res.nodes_added} nodes added / {res.nodes_verified} verified, "
                   f"{res.edges_added} edges added / {res.edges_existing} existing")
+            if args.journal_path:
+                # Replay born-on-graph writes on top of the fresh projection so
+                # `rm db && ingest` fully reconstructs the graph (the migration story).
+                rc = await replay_journal(gx, args.journal_path)
+                print(f"replayed journal: {rc}")
+            return 0
+        if args.command == "replay":
+            if not args.journal_path:
+                print("error: replay needs --journal-path", file=sys.stderr)
+                return 1
+            rc = await replay_journal(gx, args.journal_path)
+            print(f"replayed journal: {rc}")
             return 0
         if args.command == "schema":
             print(render("schema", await get_schema(gx), args.format))
@@ -57,6 +70,11 @@ async def _dispatch(args) -> int:
                                      actor=args.actor, evidence=args.evidence,
                                      supersede=args.supersede)
             print(render("assert", res, args.format))
+            if args.journal_path:
+                append_write(args.journal_path, "assert",
+                             {"subject": args.subject, "predicate": args.predicate,
+                              "value": args.value, "actor": args.actor,
+                              "evidence": args.evidence, "supersede": args.supersede})
             return 2 if res.get("conflict") else 0
         elif args.command == "alias":
             actor = f"agent:session:{args.session}" if args.session else args.actor
@@ -65,11 +83,20 @@ async def _dispatch(args) -> int:
                             if args.memory_dir else None))
             res = await alias(gx, args.drifted, args.canonical, actor=actor, evidence=evidence)
             print(render("alias", res, args.format))
+            if args.journal_path and not res.get("error"):
+                append_write(args.journal_path, "alias",
+                             {"drifted": args.drifted, "canonical": args.canonical,
+                              "actor": actor, "evidence": evidence})
             return 1 if res.get("error") else 0
         elif args.command == "decide":
             res = await decide(gx, args.statement, actor=args.actor, supports=args.supports,
                                supersedes=args.supersedes, session=args.session)
             print(render("decide", res, args.format))
+            if args.journal_path:
+                append_write(args.journal_path, "decide",
+                             {"statement": args.statement, "actor": args.actor,
+                              "supports": args.supports, "supersedes": args.supersedes,
+                              "session": args.session})
         elif args.command == "oracle":
             res = await run_version_oracle(gx, args.repos_dir, only=args.only)
             print(render("oracle", res, args.format))
@@ -80,6 +107,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(prog="cjm-context-graph",
                                  description="Projection/navigation + write surface over a context graph.")
     ap.add_argument("--graph-db-path", required=True, help="Explicit sqlite db path (no default)")
+    ap.add_argument("--journal-path", default=None,
+                    help="Explicit write-journal path (JSONL). Given: write verbs append to it + "
+                         "`ingest` replays it (the db becomes a rebuildable projection). No default.")
     ap.add_argument("--manifests-dir", default=DEFAULT_MANIFESTS,
                     help="Dir with the graph-storage capability manifest")
     ap.add_argument("--format", choices=("human", "agent"), default="human")
@@ -90,6 +120,8 @@ def main() -> int:
     p_ing.add_argument("--repos-dir", default=DEFAULT_REPOS)
     p_ing.add_argument("--no-repo-map", action="store_true", help="Skip the repo map")
     p_ing.add_argument("--no-seed", action="store_true", help="Skip the hand-seeded slots")
+
+    sub.add_parser("replay", help="Replay the write journal onto the db (needs --journal-path)")
 
     sub.add_parser("schema", help="Node labels, edge types, counts")
 
