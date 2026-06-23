@@ -16,6 +16,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from cjm_dev_graph_schema.nodes import EntityNode
 from cjm_markdown_decompose_core.extract import note_from_file
 from cjm_markdown_decompose_core.ingest import corpus_graph_elements
+from cjm_python_decompose_core.extract import decompose_package
+from cjm_python_decompose_core.ingest import corpus_graph_elements as code_corpus_elements
 
 from .seeds import aliases_for, conceptual_key, seed_elements
 
@@ -78,15 +80,39 @@ def repo_map_elements(
     return nodes, edges
 
 
+def code_elements(
+    code_repos: List[str],  # Repo dirs whose own package is decomposed as code (the code source-type)
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:  # (CodeModule/CodeSymbol nodes, edges)
+    """Decompose each repo's importable package into code nodes + edges.
+
+    Each repo's durable conceptual key anchors its modules' `ABOUT` edges to the
+    repo Entity the repo map already minted (so code joins the decision/note
+    neighborhood). All repos decompose into ONE corpus build, so cross-repo
+    IMPORTS/CALLS resolve (e.g. the decomposer importing the schema lib). The
+    importable package dir is `repo/<repo_name_with_underscores>`; a repo without
+    that package is skipped. Code is a SOURCE (projected from disk), so it rebuilds
+    on every `rm db && ingest` — it is not journaled."""
+    decomposed = []
+    for repo_dir in code_repos:
+        d = Path(repo_dir)
+        pkg = d / d.name.replace("-", "_")
+        if not pkg.is_dir():
+            continue
+        decomposed.extend(decompose_package(conceptual_key(d.name), str(pkg), repo_root=str(d)))
+    return code_corpus_elements(decomposed)
+
+
 def build_dev_graph_elements(
     memory_dir: str,                  # Dir of memory markdown files
     repos_dir: Optional[str] = None,  # Active cjm-* repos dir (None = skip the repo map)
     seed: bool = True,                # Include the hand-seeded fine-tier slots
     note_aliases: Optional[Dict[str, str]] = None,  # Confirmed link aliases (drifted -> canonical)
+    code_repos: Optional[List[str]] = None,  # Repo dirs to decompose as code (None = skip code)
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:  # (all nodes, all edges)
     """Assemble the full dev graph: memory notes (+ refs), the repo map (+ deps),
-    and the hand-seeded fine-tier slots (the torch/hf contradiction, the stale
-    version slot, the class subjects)."""
+    the hand-seeded fine-tier slots (the torch/hf contradiction, the stale version
+    slot, the class subjects), and — when `code_repos` is given — the decomposed
+    code of those repos (CodeModule/CodeSymbol nodes co-residing with the notes)."""
     nodes, edges = memory_elements(memory_dir, note_aliases)
     if repos_dir:
         rn, re = repo_map_elements(repos_dir)
@@ -96,4 +122,8 @@ def build_dev_graph_elements(
         sn, se = seed_elements()
         nodes += sn
         edges += se
+    if code_repos:
+        cn, ce = code_elements(code_repos)
+        nodes += cn
+        edges += ce
     return nodes, edges

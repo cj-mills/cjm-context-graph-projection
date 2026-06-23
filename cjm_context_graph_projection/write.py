@@ -233,3 +233,33 @@ async def decide(
     return {"decision_id": decision.id, "statement": statement, "actor": actor,
             "supports": supports or [], "supersedes": supersedes or [],
             "session": session, "nodes_added": res.nodes_added, "edges_added": res.edges_added}
+
+
+async def link(
+    gx: GraphHandle,
+    source_id: str,    # The source node id (must already exist)
+    target_id: str,    # The target node id (must already exist)
+    relation: str,     # The edge relation (any string; the grammar is open by design)
+    *,
+    actor: str = "agent:session",  # Who asserted the link (recorded on the edge, not its identity)
+) -> Dict[str, Any]:  # The write result (incl. error when an endpoint is missing)
+    """Mint a deliberate edge between two EXISTING nodes (heterogeneous interlink).
+
+    The general-purpose connector behind the larger context-graph vision: any node
+    kind may link to any other (a Decision -> the CodeSymbol that implements it; a
+    future debt node -> a code node; a cross-project reference -> another graph's
+    symbol). The relation is a free string — the edge grammar is intentionally open,
+    with no node-kind-pair validation. Both endpoints MUST exist (a deliberate link
+    is never left dangling — that distinguishes it from a `[[ref]]`); the edge id is
+    deterministic from (source, relation, target), so re-linking is a no-op."""
+    src = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=source_id)
+    tgt = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=target_id)
+    missing = [nid for nid, node in ((source_id, src), (target_id, tgt)) if node is None]
+    if missing:
+        return {"error": f"missing node(s): {missing}", "source_id": source_id,
+                "target_id": target_id, "relation": relation, "written": False}
+    edge = make_edge(source_id, target_id, relation, properties={"actor": actor})
+    res = await extend_graph(gx.queue, gx.graph_id, [], [edge])
+    return {"source_id": source_id, "target_id": target_id, "relation": relation,
+            "actor": actor, "edge_id": edge["id"], "edges_added": res.edges_added,
+            "written": True}

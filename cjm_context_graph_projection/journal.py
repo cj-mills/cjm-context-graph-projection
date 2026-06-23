@@ -22,10 +22,10 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from .runtime import GraphHandle
-from .write import alias, assert_value, decide
+from .write import alias, assert_value, decide, link
 
 # The write verbs the journal records + replays (keyed by the op `verb` field).
-JOURNAL_VERBS = ("decide", "alias", "assert")
+JOURNAL_VERBS = ("decide", "alias", "assert", "link")
 
 
 def read_journal(
@@ -69,9 +69,11 @@ async def replay_journal(
 ) -> Dict[str, int]:  # Per-verb replay counts
     """Re-apply every journaled write through its core verb (idempotent).
 
-    Run AFTER the projection is built (markdown notes, repo map, seeds), so an
-    `alias`'s canonical note and an `assert`'s seed slot already exist to write
-    against. Deterministic ids make re-application a verified no-op."""
+    Run AFTER the projection is built (markdown notes, repo map, seeds, CODE), so an
+    `alias`'s canonical note, an `assert`'s seed slot, and a `link`'s endpoints (e.g.
+    a decomposed CodeSymbol) already exist to write against. Ops replay in append
+    order, so a `link` to a journaled Decision lands after that Decision's `decide`.
+    Deterministic ids make re-application a verified no-op."""
     counts = {v: 0 for v in JOURNAL_VERBS}
     counts["skipped"] = 0
     for op in read_journal(path):
@@ -87,6 +89,9 @@ async def replay_journal(
             await assert_value(gx, a["subject"], a["predicate"], a["value"],
                                actor=a.get("actor", "agent:session"),
                                evidence=a.get("evidence"), supersede=a.get("supersede"))
+        elif verb == "link":
+            await link(gx, a["source_id"], a["target_id"], a["relation"],
+                       actor=a.get("actor", "agent:session"))
         else:
             counts["skipped"] += 1
             continue

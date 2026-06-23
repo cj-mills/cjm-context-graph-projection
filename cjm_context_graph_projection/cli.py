@@ -10,6 +10,7 @@ vs markdown.
 import argparse
 import asyncio
 import sys
+from pathlib import Path
 
 from cjm_context_graph_layer.ops import extend_graph
 
@@ -22,20 +23,28 @@ from .projection import get_schema, relevant, show, state
 from .render import render
 from .runtime import DEFAULT_MANIFESTS, open_graph
 from .worklist import dangling_reference_sources, worklist
-from .write import alias, assert_value, decide
+from .write import alias, assert_value, decide, link
 
 DEFAULT_MEMORY = ("/home/innom-dt/.claude/projects/"
                   "-mnt-SN850X-8TB-EXT4-Projects-GitHub-cj-mills-cjm-substrate/memory")
 DEFAULT_REPOS = "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills"
+# The born-non-nbdev arc libs decomposed as the code source-type by default (the
+# code-on-graph corpus); plain `.py`, so the python decomposer applies cleanly.
+DEFAULT_CODE_LIBS = ("cjm-dev-graph-schema", "cjm-markdown-decompose-core",
+                     "cjm-context-graph-projection", "cjm-python-decompose-core")
 
 
 async def _dispatch(args) -> int:
     async with open_graph(args.graph_db_path, args.manifests_dir) as gx:
         if args.command == "ingest":
             note_aliases = await note_alias_map(gx)  # confirmed link aliases heal drifted refs
+            code_repos = None
+            if not args.no_code:
+                libs = args.code_lib or list(DEFAULT_CODE_LIBS)
+                code_repos = [str(Path(args.repos_dir) / name) for name in libs]
             nodes, edges = build_dev_graph_elements(
                 args.memory_dir, None if args.no_repo_map else args.repos_dir,
-                seed=not args.no_seed, note_aliases=note_aliases)
+                seed=not args.no_seed, note_aliases=note_aliases, code_repos=code_repos)
             res = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
             print(f"ingested: {res.nodes_added} nodes added / {res.nodes_verified} verified, "
                   f"{res.edges_added} edges added / {res.edges_existing} existing")
@@ -97,6 +106,14 @@ async def _dispatch(args) -> int:
                              {"statement": args.statement, "actor": args.actor,
                               "supports": args.supports, "supersedes": args.supersedes,
                               "session": args.session})
+        elif args.command == "link":
+            res = await link(gx, args.source_id, args.target_id, args.relation, actor=args.actor)
+            print(render("link", res, args.format))
+            if args.journal_path and res.get("written"):
+                append_write(args.journal_path, "link",
+                             {"source_id": args.source_id, "target_id": args.target_id,
+                              "relation": args.relation, "actor": args.actor})
+            return 1 if res.get("error") else 0
         elif args.command == "oracle":
             res = await run_version_oracle(gx, args.repos_dir, only=args.only)
             print(render("oracle", res, args.format))
@@ -120,6 +137,10 @@ def main() -> int:
     p_ing.add_argument("--repos-dir", default=DEFAULT_REPOS)
     p_ing.add_argument("--no-repo-map", action="store_true", help="Skip the repo map")
     p_ing.add_argument("--no-seed", action="store_true", help="Skip the hand-seeded slots")
+    p_ing.add_argument("--code-lib", action="append", default=None,
+                       help="Repo dir name (under --repos-dir) to decompose as code; repeatable. "
+                            "Omit for the arc libs; --no-code to skip code entirely.")
+    p_ing.add_argument("--no-code", action="store_true", help="Skip code decomposition")
 
     sub.add_parser("replay", help="Replay the write journal onto the db (needs --journal-path)")
 
@@ -172,6 +193,12 @@ def main() -> int:
     p_or = sub.add_parser("oracle", help="Run the version oracle (refresh version slots)")
     p_or.add_argument("--repos-dir", default=DEFAULT_REPOS)
     p_or.add_argument("--only", action="append", help="Restrict to a repo key/name (repeatable)")
+
+    p_ln = sub.add_parser("link", help="Mint a deliberate edge between two existing nodes")
+    p_ln.add_argument("source_id", help="Source node id (must exist)")
+    p_ln.add_argument("relation", help="Edge relation (free string; e.g. IMPLEMENTED_BY)")
+    p_ln.add_argument("target_id", help="Target node id (must exist)")
+    p_ln.add_argument("--actor", default="agent:session")
 
     args = ap.parse_args()
     return asyncio.run(_dispatch(args))

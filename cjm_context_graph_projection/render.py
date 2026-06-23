@@ -71,6 +71,12 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         if obj.get("session"):
             lines.append(f"decided in session `{obj['session']}`")
         return "\n".join(lines)
+    if kind == "link":
+        if obj.get("error"):
+            return f"⚠ {obj['error']}"
+        return (f"**linked** `{obj.get('source_id')}` —_{obj.get('relation')}_→ "
+                f"`{obj.get('target_id')}` (actor {obj.get('actor')})\n"
+                f"`edge {obj.get('edge_id')}`")
     if kind == "contradictions":
         cs = obj.get("contradictions", [])
         if not cs:
