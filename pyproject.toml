@@ -18,7 +18,7 @@ dependencies = [
     'cjm-substrate',
     'cjm-context-graph-layer>=0.0.7',
     'cjm-context-graph-primitives>=0.0.12',
-    'cjm-dev-graph-schema>=0.0.1',
+    'cjm-dev-graph-schema>=0.0.2',
     'cjm-markdown-decompose-core>=0.0.1',
 ]
 

@@ -13,6 +13,19 @@ any [`cjm-substrate`](https://github.com/cj-mills/cjm-substrate) context graph:
 - **`relevant <task>`** — the nodes structurally nearest a task, ranked
 - **`show <id>`** — one node in full, with its neighbours
 
+It also carries the **write surface** and the standing dedup queries over the
+fact-layering schema:
+
+- **`assert <subject> <predicate> <value>`** — claim a value for a
+  `(subject, predicate)` slot. Subjects resolve through rename-stable aliases;
+  ordered predicates auto-supersede older values; a conflicting value is
+  **recorded + flagged, never blocked** (warn-record-flag).
+- **`decide <statement>`** — record a Decision + its `SUPPORTED_BY` premise edges.
+- **`contradictions [scope]`** — slots whose active assertions disagree.
+- **`oracle`** — the programmatic version oracle (refreshes `version` slots).
+- **`worklist`** — the propose/confirm queue (dangling `[[refs]]` with fuzzy
+  suggestions, soft conflicts on untyped slots, typing candidates).
+
 A CLI driver (`cjm-context-graph`) is the first consumer; a TUI and an
 MCP/agent-tool endpoint are meant to reuse the same core (never parallel impls).
 
@@ -48,14 +61,25 @@ cjm-context-graph --graph-db-path .cjm/dev-graph.db show <node-id>
 
 # Agent-readable JSON instead of rendered markdown.
 cjm-context-graph --graph-db-path .cjm/dev-graph.db --format agent relevant "stage 9 rename"
+
+# Standing dedup queries + the write surface.
+cjm-context-graph --graph-db-path .cjm/dev-graph.db contradictions
+cjm-context-graph --graph-db-path .cjm/dev-graph.db oracle --only cjm-substrate
+cjm-context-graph --graph-db-path .cjm/dev-graph.db worklist
+cjm-context-graph --graph-db-path .cjm/dev-graph.db assert cjm-substrate-torch-utils \
+    rename-disposition rename:cjm-substrate-torch-utils --actor human --supersede keep
 ```
 
 `--graph-db-path` is always explicit (no convenience default-repoints); the
-graph-storage capability is loaded from `--manifests-dir`.
+graph-storage capability is loaded from `--manifests-dir`. `assert` exits non-zero
+(2) when it records a conflict, so scripts can notice without it blocking.
 
 ## Status
 
-Early — the read surface (`schema`/`state`/`relevant`/`show`) + a dev-graph
-`ingest`. Relevance v1 is structural BFS ranked by edge-type weight × recency ×
-supersession; smarter seed-finding and the write surface (`assert`/`decide`/…)
-arrive in later increments of the arc.
+First-slice complete. The read surface (`schema`/`state`/`relevant`/`show`), the
+write surface (`assert`/`decide`), the standing dedup queries (`contradictions`,
+`worklist`), and the programmatic version `oracle` are all built on the dev
+fact-layering schema. Relevance v1 is structural BFS ranked by edge-type weight ×
+recency × supersession; smarter seed-finding (embeddings) is deferred
+(evidence-driven). The fine-tier node + value-space model lives in
+[`cjm-dev-graph-schema`](https://github.com/cj-mills/cjm-dev-graph-schema).
