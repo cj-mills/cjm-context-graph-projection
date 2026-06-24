@@ -42,9 +42,12 @@ async def _dispatch(args) -> int:
             if not args.no_code:
                 libs = args.code_lib or list(DEFAULT_CODE_LIBS)
                 code_repos = [str(Path(args.repos_dir) / name) for name in libs]
+            notebook_repos = ([str(Path(args.repos_dir) / n) for n in args.notebook_lib]
+                              if args.notebook_lib else None)
             nodes, edges = build_dev_graph_elements(
                 args.memory_dir, None if args.no_repo_map else args.repos_dir,
-                seed=not args.no_seed, note_aliases=note_aliases, code_repos=code_repos)
+                seed=not args.no_seed, note_aliases=note_aliases, code_repos=code_repos,
+                notebook_repos=notebook_repos)
             res = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
             print(f"ingested: {res.nodes_added} nodes added / {res.nodes_verified} verified, "
                   f"{res.edges_added} edges added / {res.edges_existing} existing")
@@ -141,6 +144,10 @@ def main() -> int:
                        help="Repo dir name (under --repos-dir) to decompose as code; repeatable. "
                             "Omit for the arc libs; --no-code to skip code entirely.")
     p_ing.add_argument("--no-code", action="store_true", help="Skip code decomposition")
+    p_ing.add_argument("--notebook-lib", action="append", default=None,
+                       help="Repo dir name (under --repos-dir) whose nbdev NOTEBOOKS to decompose "
+                            "(the source for nbdev libs); repeatable. Use this, not --code-lib, for "
+                            "nbdev libs (ingest the notebook source, not the generated .py).")
 
     sub.add_parser("replay", help="Replay the write journal onto the db (needs --journal-path)")
 

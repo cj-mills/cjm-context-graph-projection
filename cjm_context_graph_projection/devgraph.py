@@ -18,6 +18,8 @@ from cjm_markdown_decompose_core.extract import note_from_file
 from cjm_markdown_decompose_core.ingest import corpus_graph_elements
 from cjm_python_decompose_core.extract import decompose_package
 from cjm_python_decompose_core.ingest import corpus_graph_elements as code_corpus_elements
+from cjm_notebook_decompose_core.compose import decompose_notebook_file
+from cjm_notebook_decompose_core.ingest import notebook_graph_elements
 
 from .seeds import aliases_for, conceptual_key, seed_elements
 
@@ -102,12 +104,38 @@ def code_elements(
     return code_corpus_elements(decomposed)
 
 
+def notebook_elements(
+    notebook_repos: List[str],  # Repo dirs whose nbdev notebooks are decomposed (the SOURCE for nbdev libs)
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:  # (CodeModule/Cell/CodeSymbol nodes, edges)
+    """Decompose each repo's nbdev notebooks into code/cell nodes + edges.
+
+    For an nbdev lib the NOTEBOOK is the source (the generated `.py` is a projection),
+    so ingest the notebook here rather than the `.py` via `code_elements` — they share
+    one module identity (`pkg/mod.py`), reinforcing graph-as-source-of-truth. Every
+    `.ipynb` under the repo is decomposed (checkpoints skipped; unreadable notebooks
+    skipped). Like code, notebooks are a SOURCE rebuilt on every `ingest`, not journaled."""
+    decomposed = []
+    for repo_dir in notebook_repos:
+        d = Path(repo_dir)
+        package = d.name.replace("-", "_")
+        key = conceptual_key(d.name)
+        for nb in sorted(d.rglob("*.ipynb")):
+            if ".ipynb_checkpoints" in nb.parts:
+                continue
+            try:
+                decomposed.append(decompose_notebook_file(key, str(nb), str(d), package=package))
+            except (ValueError, OSError):
+                continue  # malformed/unreadable notebook — skip (batch ingest stays robust)
+    return notebook_graph_elements(decomposed)
+
+
 def build_dev_graph_elements(
     memory_dir: str,                  # Dir of memory markdown files
     repos_dir: Optional[str] = None,  # Active cjm-* repos dir (None = skip the repo map)
     seed: bool = True,                # Include the hand-seeded fine-tier slots
     note_aliases: Optional[Dict[str, str]] = None,  # Confirmed link aliases (drifted -> canonical)
     code_repos: Optional[List[str]] = None,  # Repo dirs to decompose as code (None = skip code)
+    notebook_repos: Optional[List[str]] = None,  # Repo dirs whose nbdev notebooks to decompose (None = skip)
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:  # (all nodes, all edges)
     """Assemble the full dev graph: memory notes (+ refs), the repo map (+ deps),
     the hand-seeded fine-tier slots (the torch/hf contradiction, the stale version
@@ -126,4 +154,8 @@ def build_dev_graph_elements(
         cn, ce = code_elements(code_repos)
         nodes += cn
         edges += ce
+    if notebook_repos:
+        nn, ne = notebook_elements(notebook_repos)
+        nodes += nn
+        edges += ne
     return nodes, edges
