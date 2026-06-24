@@ -25,6 +25,7 @@ from .factlayer import note_alias_map
 from .journal import append_write, replay_journal
 from .oracle import run_version_oracle
 from .projection import get_schema, relevant, show, state
+from .refactor import refactor_candidates
 from .render import render
 from .runtime import DEFAULT_MANIFESTS, open_graph
 from .worklist import dangling_reference_sources, worklist
@@ -101,6 +102,8 @@ async def _dispatch(args) -> int:
             print(render("contradictions", await contradictions(gx, args.scope), args.format))
         elif args.command == "conventions":
             print(render("conventions", await conventions(gx, args.scope), args.format))
+        elif args.command == "refactor-candidates":
+            print(render("refactor", await refactor_candidates(gx, args.scope), args.format))
         elif args.command == "worklist":
             print(render("worklist", await worklist(gx, args.memory_dir), args.format))
         elif args.command == "assert":
@@ -163,7 +166,13 @@ async def _dispatch(args) -> int:
             return 1 if res.get("error") else 0
         elif args.command == "emit":
             res = await emit_artifact(gx, args.module_id, write=args.write)
-            print(render("emit", res, args.format))
+            out = render("emit", res, args.format)
+            # The stdout viewer prints the artifact text verbatim (it already ends with a
+            # newline) so `emit > file` is byte-faithful; status/JSON lines get a newline.
+            if args.format == "human" and not res.get("written") and not res.get("error"):
+                sys.stdout.write(out)
+            else:
+                print(out)
             return 1 if res.get("error") else 0
         return 0
 
@@ -213,6 +222,10 @@ def main() -> int:
     p_conv = sub.add_parser("conventions",
                             help="Audit notebook code conventions (undocumented / no-docstring / non-granular)")
     p_conv.add_argument("scope", nargs="?", default=None, help="Restrict to a notebook module id")
+
+    p_ref = sub.add_parser("refactor-candidates",
+                           help="Identify relocation / dead-code / consolidation / split candidates")
+    p_ref.add_argument("scope", nargs="?", default=None, help="Restrict to a repo key")
 
     p_con = sub.add_parser("contradictions", help="Slots whose active assertions disagree")
     p_con.add_argument("scope", nargs="?", default=None, help="Restrict to a subject/predicate term")

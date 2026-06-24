@@ -97,6 +97,43 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         if not (und or nod or ng):
             lines.append("_(no findings)_")
         return "\n".join(lines)
+    if kind == "refactor":
+        c = obj.get("counts", {})
+        lines = ["## Refactoring candidates (propose/confirm)",
+                 f"_relocation {c.get('relocation', 0)} · dead-code {c.get('dead_code', 0)} · "
+                 f"consolidation {c.get('consolidation', 0)} · split {c.get('split', 0)}_", ""]
+        rel = obj.get("relocation", [])
+        cycles = [r for r in rel if r.get("cycle")]
+        if cycles:
+            lines.append("**Relocation — dependency CYCLE (actionable):**")
+            for r in cycles[:30]:
+                tgt = ", ".join(f"{k} ×{v}" for k, v in r.get("caller_repos", {}).items())
+                lines.append(f"  - `{r.get('qualname')}` _in {r.get('home_repo')}_ ↔ {tgt}")
+        plain = [r for r in rel if not r.get("cycle")]
+        if plain:
+            lines.append(f"**Relocation — single-consumer cross-repo ({len(plain)}; expected for a "
+                         "foundation lib, low precision on a small corpus):**")
+            for r in plain[:15]:
+                tgt = ", ".join(f"{k} ×{v}" for k, v in r.get("caller_repos", {}).items())
+                lines.append(f"  - `{r.get('qualname')}` _in {r.get('home_repo')}_ → called from {tgt}")
+        dc = obj.get("dead_code", [])
+        if dc:
+            lines.append("**Dead-code (no in-corpus callers — weak; out-of-corpus use possible):**")
+            for d in dc[:30]:
+                lines.append(f"  - `{d.get('qualname')}` _{d.get('kind')}_ ({d.get('module_path')})")
+        con = obj.get("consolidation", [])
+        if con:
+            lines.append("**Consolidation (same name across repos):**")
+            for g in con[:30]:
+                lines.append(f"  - `{g.get('name')}` in {', '.join(g.get('repos', []))}")
+        sp = obj.get("split", [])
+        if sp:
+            lines.append("**Split (non-granular cell, divergent neighborhoods):**")
+            for g in sp[:30]:
+                lines.append(f"  - {', '.join('`' + s + '`' for s in g.get('symbols', []))}")
+        if not (rel or dc or con or sp):
+            lines.append("_(no candidates)_")
+        return "\n".join(lines)
     if kind == "contradictions":
         cs = obj.get("contradictions", [])
         if not cs:
