@@ -15,6 +15,7 @@ from pathlib import Path
 from cjm_context_graph_layer.ops import extend_graph
 
 from .contradictions import contradictions
+from .conventions import conventions
 from .devgraph import build_dev_graph_elements
 from .factlayer import note_alias_map
 from .journal import append_write, replay_journal
@@ -75,6 +76,8 @@ async def _dispatch(args) -> int:
             print(render("show", await show(gx, args.node_id, depth=args.depth), args.format))
         elif args.command == "contradictions":
             print(render("contradictions", await contradictions(gx, args.scope), args.format))
+        elif args.command == "conventions":
+            print(render("conventions", await conventions(gx, args.scope), args.format))
         elif args.command == "worklist":
             print(render("worklist", await worklist(gx, args.memory_dir), args.format))
         elif args.command == "assert":
@@ -164,6 +167,10 @@ def main() -> int:
     p_show = sub.add_parser("show", help="One node in full + its neighbours")
     p_show.add_argument("node_id")
     p_show.add_argument("--depth", type=int, default=1)
+
+    p_conv = sub.add_parser("conventions",
+                            help="Audit notebook code conventions (undocumented / no-docstring / non-granular)")
+    p_conv.add_argument("scope", nargs="?", default=None, help="Restrict to a notebook module id")
 
     p_con = sub.add_parser("contradictions", help="Slots whose active assertions disagree")
     p_con.add_argument("scope", nargs="?", default=None, help="Restrict to a subject/predicate term")

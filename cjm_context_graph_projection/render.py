@@ -77,6 +77,26 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         return (f"**linked** `{obj.get('source_id')}` —_{obj.get('relation')}_→ "
                 f"`{obj.get('target_id')}` (actor {obj.get('actor')})\n"
                 f"`edge {obj.get('edge_id')}`")
+    if kind == "conventions":
+        c = obj.get("counts", {})
+        lines = ["## Convention audit (notebook code)",
+                 f"_undocumented {c.get('undocumented', 0)} · no-docstring {c.get('no_docstring', 0)} · "
+                 f"non-granular cells {c.get('non_granular_cells', 0)}_", ""]
+        und = obj.get("undocumented", [])
+        if und:
+            lines.append("**Undocumented (no adjacent prose cell):**")
+            lines += [f"  - `{u.get('qualname')}` _(cell {u.get('cell_key')})_" for u in und[:30]]
+        nod = obj.get("no_docstring", [])
+        if nod:
+            lines.append("**Missing docstring:**")
+            lines += [f"  - `{u.get('qualname')}`" for u in nod[:30]]
+        ng = obj.get("non_granular_cells", [])
+        if ng:
+            lines.append("**Non-granular cells (>1 public def):**")
+            lines += [f"  - {', '.join('`'+s+'`' for s in g.get('symbols', []))}" for g in ng[:30]]
+        if not (und or nod or ng):
+            lines.append("_(no findings)_")
+        return "\n".join(lines)
     if kind == "contradictions":
         cs = obj.get("contradictions", [])
         if not cs:

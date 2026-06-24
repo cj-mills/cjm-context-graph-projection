@@ -13,11 +13,14 @@ import tomllib
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from cjm_context_graph_layer.grammar import make_edge
 from cjm_dev_graph_schema.nodes import EntityNode
+from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 from cjm_markdown_decompose_core.extract import note_from_file
 from cjm_markdown_decompose_core.ingest import corpus_graph_elements
 from cjm_python_decompose_core.extract import decompose_package
 from cjm_python_decompose_core.ingest import corpus_graph_elements as code_corpus_elements
+from cjm_python_decompose_core.ingest import resolve_import
 from cjm_notebook_decompose_core.compose import decompose_notebook_file
 from cjm_notebook_decompose_core.ingest import notebook_graph_elements
 
@@ -129,6 +132,49 @@ def notebook_elements(
     return notebook_graph_elements(decomposed)
 
 
+def resolve_corpus_code_edges(
+    nodes: List[Dict[str, Any]],  # All assembled node wire dicts (code + notebook + the rest)
+) -> List[Dict[str, Any]]:  # Additional CALLS/IMPORTS edges resolved across the WHOLE corpus
+    """Resolve CALLS/IMPORTS edges ACROSS the whole code + notebook corpus.
+
+    Per-source decomposition only resolves edges within one package / notebook; this
+    corpus pass builds global module + symbol maps over EVERY CodeModule/CodeSymbol
+    (from code packages AND notebooks) so a call/import crossing a notebook->.py or
+    notebook->notebook or lib->lib boundary also lands. Additive + idempotent
+    (deterministic edge ids): it unions with the within-source edges, never removes
+    them. Resolution is best-effort: imports via `resolve_import` (relative against the
+    importer's import name), calls by UNAMBIGUOUS bare name (precision over recall)."""
+    modules = [n for n in nodes if n.get("label") == DevNodeKinds.CODE_MODULE]
+    symbols = [n for n in nodes if n.get("label") == DevNodeKinds.CODE_SYMBOL]
+    import_map: Dict[str, str] = {}
+    for m in modules:
+        inm = m["properties"].get("import_name")
+        if inm:
+            import_map.setdefault(inm, m["id"])
+    name_to_ids: Dict[str, set] = {}
+    for s in symbols:
+        bare = s["properties"].get("qualname", "").split(".")[-1]
+        if bare:
+            name_to_ids.setdefault(bare, set()).add(s["id"])
+    call_map = {n: next(iter(ids)) for n, ids in name_to_ids.items() if len(ids) == 1}
+
+    edges: List[Dict[str, Any]] = []
+    for m in modules:
+        p = m["properties"]
+        is_pkg = str(p.get("module_path", "")).endswith("__init__.py")
+        inm = p.get("import_name", "") or ""
+        for raw in p.get("imports", []):
+            target = resolve_import(raw, inm, is_pkg)
+            if target and target in import_map and import_map[target] != m["id"]:
+                edges.append(make_edge(m["id"], import_map[target], DevRelations.IMPORTS))
+    for s in symbols:
+        for c in s["properties"].get("calls", []):
+            t = call_map.get(c)
+            if t and t != s["id"]:
+                edges.append(make_edge(s["id"], t, DevRelations.CALLS))
+    return edges
+
+
 def build_dev_graph_elements(
     memory_dir: str,                  # Dir of memory markdown files
     repos_dir: Optional[str] = None,  # Active cjm-* repos dir (None = skip the repo map)
@@ -158,4 +204,6 @@ def build_dev_graph_elements(
         nn, ne = notebook_elements(notebook_repos)
         nodes += nn
         edges += ne
+    if code_repos or notebook_repos:
+        edges += resolve_corpus_code_edges(nodes)  # cross-source CALLS/IMPORTS (additive, idempotent)
     return nodes, edges
