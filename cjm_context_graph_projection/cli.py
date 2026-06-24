@@ -38,6 +38,9 @@ DEFAULT_REPOS = "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills"
 # code-on-graph corpus); plain `.py`, so the python decomposer applies cleanly.
 DEFAULT_CODE_LIBS = ("cjm-dev-graph-schema", "cjm-markdown-decompose-core",
                      "cjm-context-graph-projection", "cjm-python-decompose-core")
+# The substrate core is nbdev — ingest its NOTEBOOKS (the source), with cross-cell
+# @patch/incremental methods re-attributed to their true classes by the compositor.
+DEFAULT_NOTEBOOK_LIBS = ("cjm-substrate",)
 
 
 def _editor_pop(
@@ -67,8 +70,10 @@ async def _dispatch(args) -> int:
             if not args.no_code:
                 libs = args.code_lib or list(DEFAULT_CODE_LIBS)
                 code_repos = [str(Path(args.repos_dir) / name) for name in libs]
-            notebook_repos = ([str(Path(args.repos_dir) / n) for n in args.notebook_lib]
-                              if args.notebook_lib else None)
+            notebook_repos = None
+            if not args.no_notebooks:
+                nb_libs = args.notebook_lib or list(DEFAULT_NOTEBOOK_LIBS)
+                notebook_repos = [str(Path(args.repos_dir) / n) for n in nb_libs]
             nodes, edges = build_dev_graph_elements(
                 args.memory_dir, None if args.no_repo_map else args.repos_dir,
                 seed=not args.no_seed, note_aliases=note_aliases, code_repos=code_repos,
@@ -200,8 +205,9 @@ def main() -> int:
     p_ing.add_argument("--no-code", action="store_true", help="Skip code decomposition")
     p_ing.add_argument("--notebook-lib", action="append", default=None,
                        help="Repo dir name (under --repos-dir) whose nbdev NOTEBOOKS to decompose "
-                            "(the source for nbdev libs); repeatable. Use this, not --code-lib, for "
-                            "nbdev libs (ingest the notebook source, not the generated .py).")
+                            "(the source for nbdev libs); repeatable. Omit for the default nbdev libs; "
+                            "use this, not --code-lib, for nbdev libs (the notebook source, not the .py).")
+    p_ing.add_argument("--no-notebooks", action="store_true", help="Skip notebook decomposition")
 
     sub.add_parser("replay", help="Replay the write journal onto the db (needs --journal-path)")
 
