@@ -190,6 +190,20 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         if not obj.get("written") and obj.get("emitted_text"):
             lines += ["", "```", obj["emitted_text"].rstrip("\n"), "```"]
         return "\n".join(lines)
+    if kind == "move":
+        if obj.get("error"):
+            return f"⚠ {obj['error']}"
+        status = "moved" if obj.get("written") else "would move (dry run)"
+        lines = [f"**{status}** `{obj.get('symbol')}`  {obj.get('from_module')} → {obj.get('to_module')}",
+                 f"_files: {len(obj.get('files', []))} re-emitted_"]
+        ci = obj.get("caller_imports_rewritten", [])
+        lines.append(f"caller imports rewritten: {', '.join(ci) if ci else '(none)'}")
+        d = obj.get("diagnostic", {})
+        if d.get("target_may_need_imports_for"):
+            lines.append(f"⚠ target may need imports for: {', '.join(d['target_may_need_imports_for'])}")
+        if d.get("source_still_uses_symbol"):
+            lines.append("⚠ source module still uses the symbol → it now needs `from <to> import <sym>`")
+        return "\n".join(lines)
     if kind == "emit":
         if obj.get("error"):
             return f"⚠ {obj['error']}"

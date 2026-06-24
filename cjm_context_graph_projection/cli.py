@@ -26,6 +26,7 @@ from .journal import append_write, replay_journal
 from .oracle import run_version_oracle
 from .projection import get_schema, relevant, show, state
 from .refactor import refactor_candidates
+from .refactor_ops import move
 from .render import render
 from .runtime import DEFAULT_MANIFESTS, open_graph
 from .worklist import dangling_reference_sources, worklist
@@ -169,6 +170,10 @@ async def _dispatch(args) -> int:
                                actor=args.actor, write=not args.no_write)
             print(render("author", res, args.format))
             return 1 if res.get("error") else 0
+        elif args.command == "move":
+            res = await move(gx, args.symbol_id, args.target_module_id, write=not args.no_write)
+            print(render("move", res, args.format))
+            return 1 if res.get("error") else 0
         elif args.command == "emit":
             res = await emit_artifact(gx, args.module_id, write=args.write)
             out = render("emit", res, args.format)
@@ -294,6 +299,12 @@ def main() -> int:
     p_em.add_argument("module_id", help="The CodeModule id (a .py module or a notebook)")
     p_em.add_argument("--write", action="store_true",
                       help="Write to the module's path (else print to stdout — the round-trip viewer)")
+
+    p_mv = sub.add_parser("move",
+                          help="Relocate a top-level symbol to another module (re-emit both + rewrite caller imports)")
+    p_mv.add_argument("symbol_id", help="The top-level CodeSymbol id to move")
+    p_mv.add_argument("target_module_id", help="The CodeModule id to move it into (same repo)")
+    p_mv.add_argument("--no-write", action="store_true", help="Dry run: report the plan, don't touch disk")
 
     args = ap.parse_args()
     return asyncio.run(_dispatch(args))
