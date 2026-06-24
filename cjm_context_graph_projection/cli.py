@@ -9,11 +9,15 @@ vs markdown.
 
 import argparse
 import asyncio
+import os
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from cjm_context_graph_layer.ops import extend_graph
 
+from .authoring import author, emit_artifact, read_slot
 from .contradictions import contradictions
 from .conventions import conventions
 from .devgraph import build_dev_graph_elements
@@ -33,6 +37,25 @@ DEFAULT_REPOS = "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills"
 # code-on-graph corpus); plain `.py`, so the python decomposer applies cleanly.
 DEFAULT_CODE_LIBS = ("cjm-dev-graph-schema", "cjm-markdown-decompose-core",
                      "cjm-context-graph-projection", "cjm-python-decompose-core")
+
+
+def _editor_pop(
+    initial: str,         # The current slot text to seed the buffer with
+    suffix: str = ".py",  # Temp-file suffix (editor syntax highlighting)
+) -> str:  # The edited buffer
+    """Open `$EDITOR` on the current slot text and return the saved buffer.
+
+    The minimal human authoring UI (the `git commit` pattern): zero state, rides the
+    CLI, captures the edited verbatim text. `$EDITOR`/`$VISUAL`, else `nano`."""
+    editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "nano"
+    fd, tmp = tempfile.mkstemp(suffix=suffix)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(initial)
+        subprocess.run([*editor.split(), tmp], check=True)
+        return Path(tmp).read_text()
+    finally:
+        os.unlink(tmp)
 
 
 async def _dispatch(args) -> int:
@@ -120,9 +143,28 @@ async def _dispatch(args) -> int:
                              {"source_id": args.source_id, "target_id": args.target_id,
                               "relation": args.relation, "actor": args.actor})
             return 1 if res.get("error") else 0
-        elif args.command == "oracle":
-            res = await run_version_oracle(gx, args.repos_dir, only=args.only)
-            print(render("oracle", res, args.format))
+        elif args.command == "author":
+            replace, edit = None, None
+            if args.editor:
+                cur = await read_slot(gx, args.node_id)
+                if cur.get("error"):
+                    print(render("author", cur, args.format))
+                    return 1
+                replace = _editor_pop(cur["text"])
+            elif args.replace_file:
+                replace = Path(args.replace_file).read_text()
+            elif args.replace is not None:
+                replace = args.replace
+            elif args.edit:
+                edit = (args.edit[0], args.edit[1])
+            res = await author(gx, args.node_id, replace=replace, edit=edit,
+                               actor=args.actor, write=not args.no_write)
+            print(render("author", res, args.format))
+            return 1 if res.get("error") else 0
+        elif args.command == "emit":
+            res = await emit_artifact(gx, args.module_id, write=args.write)
+            print(render("emit", res, args.format))
+            return 1 if res.get("error") else 0
         return 0
 
 
@@ -213,6 +255,26 @@ def main() -> int:
     p_ln.add_argument("relation", help="Edge relation (free string; e.g. IMPLEMENTED_BY)")
     p_ln.add_argument("target_id", help="Target node id (must exist)")
     p_ln.add_argument("--actor", default="agent:session")
+
+    p_au = sub.add_parser("author",
+                          help="Author a node's verbatim slot (CodeSymbol body / CodeText / Cell), emit the .py/.ipynb")
+    p_au.add_argument("node_id", help="The CodeSymbol / CodeText / Cell node id to author")
+    g_au = p_au.add_mutually_exclusive_group(required=True)
+    g_au.add_argument("--replace", help="Full replacement text for the slot (the Write analogue)")
+    g_au.add_argument("--replace-file", help="Read the full replacement text from a file")
+    g_au.add_argument("--edit", nargs=2, metavar=("OLD", "NEW"),
+                      help="Unique-match OLD->NEW splice within the slot (the targeted Edit analogue)")
+    g_au.add_argument("--editor", action="store_true",
+                      help="Open $EDITOR on the current slot text (the minimal human authoring UI)")
+    p_au.add_argument("--no-write", action="store_true",
+                      help="Dry run: emit + print the artifact, don't touch disk")
+    p_au.add_argument("--actor", default="agent:session")
+
+    p_em = sub.add_parser("emit",
+                          help="Emit a module/notebook's canonical artifact FROM THE GRAPH (graph -> .py/.ipynb)")
+    p_em.add_argument("module_id", help="The CodeModule id (a .py module or a notebook)")
+    p_em.add_argument("--write", action="store_true",
+                      help="Write to the module's path (else print to stdout — the round-trip viewer)")
 
     args = ap.parse_args()
     return asyncio.run(_dispatch(args))

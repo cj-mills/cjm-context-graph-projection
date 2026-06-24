@@ -140,6 +140,26 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             for u in up:
                 lines.append(f"  - _{u.get('predicate')}_ ({u.get('slots')} slot[s])")
         return "\n".join(lines)
+    if kind == "author":
+        if obj.get("error"):
+            return f"⚠ {obj['error']}"
+        status = ("written to" if obj.get("written") else
+                  "would write (dry run) to" if obj.get("artifact_path") else "emitted (no path)")
+        lines = [f"**authored** `{obj.get('slot')}` on _{obj.get('label')}_ `{obj.get('node_id')}`",
+                 f"{status} `{obj.get('artifact_path')}` ({obj.get('emitted_bytes')} bytes, "
+                 f"{obj.get('artifact')})"]
+        if obj.get("unchanged"):
+            lines.append("_(slot text unchanged — no-op edit)_")
+        if not obj.get("written") and obj.get("emitted_text"):
+            lines += ["", "```", obj["emitted_text"].rstrip("\n"), "```"]
+        return "\n".join(lines)
+    if kind == "emit":
+        if obj.get("error"):
+            return f"⚠ {obj['error']}"
+        if obj.get("written"):
+            return (f"**emitted** `{obj.get('artifact')}` → `{obj.get('artifact_path')}` "
+                    f"({obj.get('emitted_bytes')} bytes)")
+        return obj.get("text", "")
     if kind in ("show", "state"):
         node = obj.get("node")
         if node is None and "overview" in obj:
