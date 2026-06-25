@@ -26,6 +26,7 @@ from .journal import append_write, replay_journal
 from .module_ops import delete_module, new_module, regroup, rename_module
 from .oracle import run_version_oracle
 from .projection import get_schema, relevant, show, state
+from .rename_ops import rename_symbol
 from .cohesion import cohesion
 from .refactor import refactor_candidates
 from .refactor_ops import move
@@ -197,6 +198,10 @@ async def _dispatch(args) -> int:
             res = await delete_module(gx, args.module_id, force=args.force, write=not args.no_write)
             print(render("module", res, args.format))
             return 1 if res.get("error") else 0
+        elif args.command == "rename-symbol":
+            res = await rename_symbol(gx, args.symbol_id, args.new_name, write=not args.no_write)
+            print(render("rename", res, args.format))
+            return 1 if res.get("error") else 0
         elif args.command == "emit":
             res = await emit_artifact(gx, args.module_id, write=args.write)
             out = render("emit", res, args.format)
@@ -358,6 +363,12 @@ def main() -> int:
     p_dm.add_argument("module_id", help="The CodeModule id to delete")
     p_dm.add_argument("--force", action="store_true", help="Delete even if it still defines symbols (dead module)")
     p_dm.add_argument("--no-write", action="store_true", help="Dry run: report the plan, don't touch disk")
+
+    p_rs = sub.add_parser("rename-symbol",
+                          help="Rename a top-level function/class everywhere (def + refs + importer imports)")
+    p_rs.add_argument("symbol_id", help="The top-level CodeSymbol id to rename")
+    p_rs.add_argument("new_name", help="Its new bare name")
+    p_rs.add_argument("--no-write", action="store_true", help="Dry run: report the plan, don't touch disk")
 
     args = ap.parse_args()
     return asyncio.run(_dispatch(args))
