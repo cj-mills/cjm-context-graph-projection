@@ -25,6 +25,7 @@ from .factlayer import note_alias_map
 from .journal import append_write, replay_journal
 from .oracle import run_version_oracle
 from .projection import get_schema, relevant, show, state
+from .cohesion import cohesion
 from .refactor import refactor_candidates
 from .refactor_ops import move
 from .render import render
@@ -110,6 +111,8 @@ async def _dispatch(args) -> int:
             print(render("conventions", await conventions(gx, args.scope), args.format))
         elif args.command == "refactor-candidates":
             print(render("refactor", await refactor_candidates(gx, args.scope), args.format))
+        elif args.command == "cohesion":
+            print(render("cohesion", await cohesion(gx, args.scope), args.format))
         elif args.command == "worklist":
             print(render("worklist", await worklist(gx, args.memory_dir), args.format))
         elif args.command == "assert":
@@ -237,6 +240,10 @@ def main() -> int:
     p_ref = sub.add_parser("refactor-candidates",
                            help="Identify relocation / dead-code / consolidation / split candidates")
     p_ref.add_argument("scope", nargs="?", default=None, help="Restrict to a repo key")
+
+    p_coh = sub.add_parser("cohesion",
+                           help="Module cohesion audit (grab-bag under-split / scattered-helper over-split)")
+    p_coh.add_argument("scope", nargs="?", default=None, help="Restrict to a repo key")
 
     p_con = sub.add_parser("contradictions", help="Slots whose active assertions disagree")
     p_con.add_argument("scope", nargs="?", default=None, help="Restrict to a subject/predicate term")

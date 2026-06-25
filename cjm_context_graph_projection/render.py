@@ -134,6 +134,30 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         if not (rel or dc or con or sp):
             lines.append("_(no candidates)_")
         return "\n".join(lines)
+    if kind == "cohesion":
+        c = obj.get("counts", {})
+        lines = ["## Module cohesion audit (propose/confirm)",
+                 f"_under-split (grab-bag) {c.get('under_split', 0)} · "
+                 f"over-split (scattered) {c.get('over_split', 0)} · "
+                 f"dominant-core damped {c.get('dominant_damped', 0)} · "
+                 f"driver-consumer damped {c.get('over_split_driver_damped', 0)}_", ""]
+        us = obj.get("under_split", [])
+        if us:
+            lines.append("**Under-split — module fuses unrelated concerns (split candidate):**")
+            for u in us[:15]:
+                lines.append(f"  - `{u.get('module_path')}` _({u.get('repo')})_ — "
+                             f"{u.get('num_symbols')} symbols / {u.get('num_components')} clusters:")
+                for g in u.get("groups", []):
+                    lines.append(f"      · {', '.join('`' + s + '`' for s in g)}")
+        os_ = obj.get("over_split", [])
+        if os_:
+            lines.append("**Over-split — helper apart from its only consumer (merge candidate):**")
+            for o in os_[:30]:
+                lines.append(f"  - `{o.get('qualname')}` _{o.get('home_module')}_ → "
+                             f"used only by `{o.get('consumer_module')}` (×{o.get('num_callers')})")
+        if not (us or os_):
+            lines.append("_(no candidates)_")
+        return "\n".join(lines)
     if kind == "contradictions":
         cs = obj.get("contradictions", [])
         if not cs:
