@@ -275,6 +275,20 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             lines.append(f"  ⚠ {d}")
         lines.append(f"  _{obj.get('note', '')}_")
         return "\n".join(lines)
+    if kind == "readme":
+        if obj.get("error"):
+            return f"⚠ {obj['error']}"
+        if "drift" in obj:
+            status = ("DRIFTED — README.md differs from the graph projection" if obj["drift"]
+                      else "in sync with the graph")
+            return f"**regen-check** `{obj.get('repo_key')}`: {status}\n  {obj.get('readme_path')}"
+        if obj.get("written"):
+            return (f"**wrote** README for `{obj.get('repo_key')}` → {obj.get('readme_path')} "
+                    f"({obj.get('module_count')} modules / {obj.get('symbol_count')} public symbols, "
+                    f"purpose {'on-graph' if obj.get('has_purpose') else 'MISSING'})")
+        return (f"README `{obj.get('repo_key')}`: {obj.get('module_count')} modules / "
+                f"{obj.get('symbol_count')} public symbols; purpose "
+                f"{'on-graph' if obj.get('has_purpose') else 'MISSING'}")
     if kind == "flip":
         if obj.get("error"):
             return f"⚠ {obj['error']}"

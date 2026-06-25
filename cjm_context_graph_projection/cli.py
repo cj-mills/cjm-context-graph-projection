@@ -26,6 +26,7 @@ from .journal import append_write, replay_journal
 from .module_ops import delete_module, new_module, regroup, rename_module
 from .oracle import run_version_oracle
 from .projection import get_schema, relevant, show, state
+from .readme import project_readme
 from .rename_ops import rename_symbol
 from .source_state import flip_module, source_check
 from .cohesion import cohesion
@@ -218,6 +219,29 @@ async def _dispatch(args) -> int:
             res = source_check(args.source_journal_path, args.repos_dir)
             print(render("source-check", res, args.format))
             return 0
+        elif args.command == "readme":
+            res = await project_readme(gx, args.repo_key)
+            if res.get("error"):
+                print(render("readme", res, args.format))
+                return 1
+            path = Path(args.repos_dir) / args.repo_key / "README.md"
+            if args.check:
+                cur = path.read_text() if path.exists() else None
+                res["drift"] = cur != res["markdown"]
+                res["present"], res["readme_path"] = cur is not None, str(path)
+                print(render("readme", res, args.format))
+                return 1 if res["drift"] else 0
+            if args.write:
+                path.write_text(res["markdown"])
+                res["written"], res["readme_path"] = True, str(path)
+                print(render("readme", res, args.format))
+                return 0
+            # Default: print the markdown verbatim (the viewer — `readme R > README.md` is faithful).
+            if args.format == "human":
+                sys.stdout.write(res["markdown"])
+            else:
+                print(render("readme", res, args.format))
+            return 0
         elif args.command == "emit":
             res = await emit_artifact(gx, args.module_id, write=args.write)
             out = render("emit", res, args.format)
@@ -400,6 +424,14 @@ def main() -> int:
     p_sc = sub.add_parser("source-check",
                           help="N+3 soak: file-drift (membrane) + round-trip fixpoint for shadow-sourced modules")
     p_sc.add_argument("--repos-dir", default=DEFAULT_REPOS)
+
+    p_rm = sub.add_parser("readme",
+                          help="Project a repo's README from the graph (structural v1; read-only)")
+    p_rm.add_argument("repo_key", help="The repo to project a README for")
+    p_rm.add_argument("--write", action="store_true", help="Write README.md to the repo (a generated artifact)")
+    p_rm.add_argument("--check", action="store_true",
+                      help="Regen-check: compare the on-disk README.md to the graph projection")
+    p_rm.add_argument("--repos-dir", default=DEFAULT_REPOS)
 
     args = ap.parse_args()
     return asyncio.run(_dispatch(args))
