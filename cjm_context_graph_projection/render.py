@@ -275,6 +275,33 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             lines.append(f"  ⚠ {d}")
         lines.append(f"  _{obj.get('note', '')}_")
         return "\n".join(lines)
+    if kind == "flip":
+        if obj.get("error"):
+            return f"⚠ {obj['error']}"
+        verb = "captured (shadow)" if obj.get("captured") else "already current (no-op)"
+        canon = ("file is already canonical" if obj.get("file_already_canonical")
+                 else "⚠ flip implies a one-time canonicalization (e.g. import reorder)")
+        return "\n".join([
+            f"**{verb}** `{obj.get('import_name')}` ({obj.get('canonical_bytes')} bytes)",
+            f"  {canon}",
+            f"  _{obj.get('note', '')}_"])
+    if kind == "source-check":
+        n = obj.get("count", 0)
+        head = (f"**source soak**: {n} shadow module(s) · file-drift {obj.get('file_drift')} · "
+                f"round-trip-stable {obj.get('roundtrip_stable')}/{n}"
+                + ("  ✓ CLEAN" if obj.get("clean") else ""))
+        lines = [head]
+        for m in obj.get("modules", []):
+            flags = []
+            if not m.get("file_present"):
+                flags.append("file MISSING")
+            elif not m.get("file_matches_source"):
+                flags.append("FILE DRIFTED (out-of-band edit)")
+            if not m.get("roundtrip_fixpoint"):
+                flags.append("round-trip NOT a fixpoint")
+            status = "ok" if not flags else "⚠ " + "; ".join(flags)
+            lines.append(f"  - `{m.get('module')}` — {status}")
+        return "\n".join(lines)
     if kind == "emit":
         if obj.get("error"):
             return f"⚠ {obj['error']}"

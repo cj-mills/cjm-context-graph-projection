@@ -27,6 +27,7 @@ from .module_ops import delete_module, new_module, regroup, rename_module
 from .oracle import run_version_oracle
 from .projection import get_schema, relevant, show, state
 from .rename_ops import rename_symbol
+from .source_state import flip_module, source_check
 from .cohesion import cohesion
 from .refactor import refactor_candidates
 from .refactor_ops import move
@@ -202,6 +203,21 @@ async def _dispatch(args) -> int:
             res = await rename_symbol(gx, args.symbol_id, args.new_name, write=not args.no_write)
             print(render("rename", res, args.format))
             return 1 if res.get("error") else 0
+        elif args.command == "flip-module":
+            if not args.source_journal_path:
+                print("error: flip-module needs --source-journal-path", file=sys.stderr)
+                return 1
+            res = flip_module(args.source_journal_path, args.repos_dir, args.repo_key,
+                              args.module_path, import_name=args.import_name)
+            print(render("flip", res, args.format))
+            return 1 if res.get("error") else 0
+        elif args.command == "source-check":
+            if not args.source_journal_path:
+                print("error: source-check needs --source-journal-path", file=sys.stderr)
+                return 1
+            res = source_check(args.source_journal_path, args.repos_dir)
+            print(render("source-check", res, args.format))
+            return 0
         elif args.command == "emit":
             res = await emit_artifact(gx, args.module_id, write=args.write)
             out = render("emit", res, args.format)
@@ -224,6 +240,10 @@ def main() -> int:
                          "`ingest` replays it (the db becomes a rebuildable projection). No default.")
     ap.add_argument("--manifests-dir", default=DEFAULT_MANIFESTS,
                     help="Dir with the graph-storage capability manifest")
+    ap.add_argument("--source-journal-path", default=None,
+                    help="Explicit SOURCE-journal path (JSONL) for the N+3 persistence flip "
+                         "(shadow): a SEPARATE stream from --journal-path (public code source "
+                         "state vs private planning). Used by flip-module / source-check. No default.")
     ap.add_argument("--format", choices=("human", "agent"), default="human")
     sub = ap.add_subparsers(dest="command", required=True)
 
@@ -369,6 +389,17 @@ def main() -> int:
     p_rs.add_argument("symbol_id", help="The top-level CodeSymbol id to rename")
     p_rs.add_argument("new_name", help="Its new bare name")
     p_rs.add_argument("--no-write", action="store_true", help="Dry run: report the plan, don't touch disk")
+
+    p_fl = sub.add_parser("flip-module",
+                          help="N+3 Phase 1 (SHADOW): capture a module's canonical source into the source journal")
+    p_fl.add_argument("repo_key", help="The repo's durable conceptual slug")
+    p_fl.add_argument("module_path", help="Repo-relative module path (e.g. pkg/sub.py)")
+    p_fl.add_argument("--import-name", help="Dotted import name (derived from module_path if omitted)")
+    p_fl.add_argument("--repos-dir", default=DEFAULT_REPOS)
+
+    p_sc = sub.add_parser("source-check",
+                          help="N+3 soak: file-drift (membrane) + round-trip fixpoint for shadow-sourced modules")
+    p_sc.add_argument("--repos-dir", default=DEFAULT_REPOS)
 
     args = ap.parse_args()
     return asyncio.run(_dispatch(args))
