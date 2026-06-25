@@ -29,9 +29,13 @@ from cjm_python_decompose_core.ingest import corpus_graph_elements
 
 REPO = "demo-move"
 PKG = "demo"
-# a = home of S (helper); b = the move target; c = a caller that imports S from a.
+# a = home of S (shared); b = the move target; c = a caller that imports S from a.
+# `shared` references same-module `helper` (forward residual on move); `keep` references
+# `shared` (reverse residual) — both have NO import statement, so only USES-derivation can
+# regenerate them. This exercises the ZERO-RESIDUAL move in both directions.
 FILES = {
-    "demo/a.py": '"""Module a."""\n\n\ndef helper(x):\n    return x * 2\n\n\ndef shared(n):\n    return n + 1\n',
+    "demo/a.py": ('"""Module a."""\n\n\ndef helper(x):\n    return x * 2\n\n\n'
+                  'def shared(n):\n    return helper(n) + 1\n\n\ndef keep():\n    return shared(0)\n'),
     "demo/b.py": '"""Module b."""\n\n\ndef other():\n    return 0\n',
     "demo/c.py": '"""Module c."""\nfrom demo.a import shared, helper\n\n\ndef use():\n    return shared(helper(3))\n',
 }
@@ -83,6 +87,12 @@ async def main() -> int:
             ok &= _check("S appended to module b", "def shared" in b_txt and "def other" in b_txt)
             ok &= _check("caller c imports S from b now", "from demo.b import shared" in c_txt)
             ok &= _check("caller c still imports helper from a", "from demo.a import helper" in c_txt)
+            # ZERO-RESIDUAL: refs that became cross-module only via the move are synthesized.
+            ok &= _check("b synthesizes `from demo.a import helper` (moved S still needs it)",
+                         "from demo.a import helper" in b_txt)
+            ok &= _check("a synthesizes `from demo.b import shared` (a.keep still uses S)",
+                         "from demo.b import shared" in a_txt)
+            ok &= _check("move reports zero_residual", res.get("diagnostic", {}).get("zero_residual"))
             ok &= _check("all three modules are valid Python",
                          all(_parses(Path(root) / p) for p in FILES))
 

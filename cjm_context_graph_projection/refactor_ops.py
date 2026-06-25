@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from cjm_dev_graph_schema.identity import code_symbol_node_id
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
-from cjm_python_decompose_core.emit import emit_module_from_nodes
+from cjm_python_decompose_core.emit import emit_module_from_nodes, synth_import
 
 from . import factlayer as F
 from .authoring import _module_node, _module_region_wires
@@ -110,13 +110,18 @@ async def move(
     max_order = max((w["properties"].get("order_index", -1) for w in b_wires), default=-1)
     moved = _symbol_wire(node, target_module_id, max_order + 1)
 
-    # Derive both modules' import blocks: A drops the moved symbol's now-unused imports,
-    # B gains the moved symbol's bindings (they travel with it) — imports-as-projection.
+    # Derive both modules' import blocks (ZERO-RESIDUAL): bindings travel with the moved
+    # symbol (B gains them, A drops its now-unused ones), AND USES-derived synthetics close
+    # the references that only become cross-module after the move (a former same-module ref) —
+    # in both directions. `override` re-homes the moved subtree (a class moves with its methods).
+    override = {sid: target_module_id for sid in await _moved_subtree(gx, symbol_id)}
+    a_uses = await _uses_derived_imports(gx, src_module_id, override)
+    b_uses = await _uses_derived_imports(gx, target_module_id, override)
     files: List[Tuple[str, str]] = [
         (F.prop(A, "path"), emit_module_from_nodes([w for w in a_wires if w["id"] != symbol_id],
-                                                   module_node=A, derive_imports=True)),
+                                                   module_node=A, derive_imports=True, uses_derived=a_uses)),
         (F.prop(B, "path"), emit_module_from_nodes(b_wires + [moved],
-                                                   module_node=B, derive_imports=True)),
+                                                   module_node=B, derive_imports=True, uses_derived=b_uses)),
     ]
 
     # Callers: modules importing A; rewrite their `from a_import import S`.
@@ -131,22 +136,14 @@ async def move(
             files.append((F.prop(m, "path"), new_text))
             caller_hits.append(F.prop(m, "import_name", mid))
 
-    # Diagnostic (computed from the graph; the residual the true-B regenerate-step subsumes):
-    #   - B may need imports for what S calls in OTHER modules;
-    #   - A still uses S internally (it would need `from B import S`).
-    calls = await F.load_edge_pairs(gx, DevRelations.CALLS)
-    sym_module = await _symbol_module_map(gx)
-    b_needs = sorted({sym_module[t][1] for src, t in calls
-                      if src == symbol_id and t in sym_module
-                      and sym_module[t][0] not in (src_module_id, target_module_id)})
-    a_internal_use = any(t == symbol_id and sym_module.get(src, (None,))[0] == src_module_id
-                         for src, t in calls)
-
+    # The former residual is now RESOLVED in the emitted files by the USES-derived synthetics:
+    # report what was synthesized (the modules each side now imports the cross-module refs from).
     result = {
         "symbol": qual, "from_module": a_import, "to_module": b_import,
         "caller_imports_rewritten": caller_hits,
-        "diagnostic": {"target_may_need_imports_for": b_needs,
-                       "source_still_uses_symbol": a_internal_use},
+        "diagnostic": {"zero_residual": True,
+                       "target_imports_synthesized": sorted({b["module"] for b in b_uses}),
+                       "source_imports_synthesized": sorted({b["module"] for b in a_uses})},
         "files": [f for f, _ in files], "written": False,
     }
     if write:
@@ -170,3 +167,49 @@ async def _symbol_module_map(gx: GraphHandle) -> Dict[str, Tuple[str, str]]:
         mid = F.prop(s, "module_id")
         out[F.nid(s)] = (mid, modules.get(mid, ""))
     return out
+
+
+async def _uses_derived_imports(
+    gx: GraphHandle,
+    home_module_id: str,            # The module whose import block we are deriving
+    override: Dict[str, str],       # {symbol id: new module id} — the moved subtree's post-move membership
+) -> List[Dict[str, Any]]:  # Synthetic `from <mod> import <name>` for cross-module USES targets
+    """USES-derived intra-corpus imports for a module under a post-move membership override.
+
+    A reference that was SAME-module before the move has no import statement, so the frozen
+    bindings can't carry it; here we synthesize it from the live USES graph + the target's
+    (effective) defining module — closing the move residual in BOTH directions (B importing
+    what the moved symbol still needs from A; A importing the moved symbol if it still uses
+    it). Only TOP-LEVEL targets are importable (a method is reached via its class)."""
+    import_name = {F.nid(m): F.prop(m, "import_name", "")
+                   for m in await F.load_label(gx, DevNodeKinds.CODE_MODULE)}
+    idx: Dict[str, Dict[str, Any]] = {}
+    for s in await F.load_label(gx, DevNodeKinds.CODE_SYMBOL):
+        sid = F.nid(s)
+        eff = override.get(sid, F.prop(s, "module_id"))
+        qual = F.prop(s, "qualname", "") or ""
+        idx[sid] = {"name": qual.split(".")[-1], "module": eff,
+                    "import_name": import_name.get(eff, ""), "top": "." not in qual}
+    members = {sid for sid, info in idx.items() if info["module"] == home_module_id}
+    out: List[Dict[str, Any]] = []
+    seen: set = set()
+    for src, tgt in await F.load_edge_pairs(gx, DevRelations.USES):
+        t = idx.get(tgt)
+        if (src in members and t and t["top"] and t["import_name"]
+                and t["module"] != home_module_id and t["name"] not in seen):
+            seen.add(t["name"])
+            out.append(synth_import(t["name"], t["import_name"]))
+    return out
+
+
+async def _moved_subtree(gx: GraphHandle, symbol_id: str) -> set:
+    """The moved symbol + its DEFINES descendants (a class moves with its methods)."""
+    children: Dict[str, List[str]] = {}
+    for s, t in await F.load_edge_pairs(gx, DevRelations.DEFINES):
+        children.setdefault(s, []).append(t)
+    subtree, stack = set(), [symbol_id]
+    while stack:
+        x = stack.pop()
+        subtree.add(x)
+        stack.extend(children.get(x, []))
+    return subtree

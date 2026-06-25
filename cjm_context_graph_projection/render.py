@@ -223,10 +223,13 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         ci = obj.get("caller_imports_rewritten", [])
         lines.append(f"caller imports rewritten: {', '.join(ci) if ci else '(none)'}")
         d = obj.get("diagnostic", {})
-        if d.get("target_may_need_imports_for"):
-            lines.append(f"⚠ target may need imports for: {', '.join(d['target_may_need_imports_for'])}")
-        if d.get("source_still_uses_symbol"):
-            lines.append("⚠ source module still uses the symbol → it now needs `from <to> import <sym>`")
+        ti, si = d.get("target_imports_synthesized", []), d.get("source_imports_synthesized", [])
+        if ti:
+            lines.append(f"target imports synthesized from: {', '.join(ti)}")
+        if si:
+            lines.append(f"source imports synthesized from: {', '.join(si)} (it still uses the moved symbol)")
+        if d.get("zero_residual") and not (ti or si):
+            lines.append("zero residual: no cross-module imports needed beyond the bindings")
         return "\n".join(lines)
     if kind == "emit":
         if obj.get("error"):
