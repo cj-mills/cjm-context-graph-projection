@@ -218,8 +218,14 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         if obj.get("error"):
             return f"⚠ {obj['error']}"
         status = "moved" if obj.get("written") else "would move (dry run)"
-        lines = [f"**{status}** `{obj.get('symbol')}`  {obj.get('from_module')} → {obj.get('to_module')}",
-                 f"_files: {len(obj.get('files', []))} re-emitted_"]
+        # Single-symbol `move` carries `symbol`/`from_module`; batch `regroup` carries
+        # `symbols`/`from_modules` (+ `created_target`).
+        what = obj.get("symbol") or ", ".join(obj.get("symbols", []))
+        frm = obj.get("from_module") or ", ".join(obj.get("from_modules", []))
+        head = f"**{status}** `{what}`  {frm} → {obj.get('to_module')}"
+        if obj.get("created_target"):
+            head += "  _(target module created)_"
+        lines = [head, f"_files: {len(obj.get('files', []))} re-emitted_"]
         ci = obj.get("caller_imports_rewritten", [])
         lines.append(f"caller imports rewritten: {', '.join(ci) if ci else '(none)'}")
         d = obj.get("diagnostic", {})
@@ -231,6 +237,30 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         if d.get("zero_residual") and not (ti or si):
             lines.append("zero residual: no cross-module imports needed beyond the bindings")
         return "\n".join(lines)
+    if kind == "module":
+        if obj.get("error"):
+            line = f"⚠ {obj['error']}"
+            if obj.get("symbols"):
+                line += "\n  symbols: " + ", ".join(obj["symbols"])
+            return line
+        done = obj.get("written")
+        # new-module: has module_path; rename-module: has to_path; delete-module: has node_count.
+        if "node_count" in obj:
+            verb = "deleted" if done else "would delete (dry run)"
+            line = (f"**{verb}** module `{obj.get('import_name')}` ({obj.get('node_count')} nodes)"
+                    + ("  _[forced]_" if obj.get("forced") else ""))
+            return line + f"\n  path: {obj.get('path')}"
+        if "to_path" in obj:
+            verb = "renamed" if done else "would rename (dry run)"
+            ci = obj.get("caller_imports_rewritten", [])
+            return "\n".join([
+                f"**{verb}** {obj.get('from_path')} → {obj.get('to_path')}",
+                f"  import: {obj.get('from_module')} → {obj.get('to_module')}",
+                f"  importers rewritten: {', '.join(ci) if ci else '(none)'}",
+                f"  _{obj.get('note', '')}_"])
+        verb = "created" if done else "would create (dry run)"
+        return (f"**{verb}** module `{obj.get('import_name')}` ({obj.get('module_path')})"
+                f"\n  {obj.get('note', '')}")
     if kind == "emit":
         if obj.get("error"):
             return f"⚠ {obj['error']}"

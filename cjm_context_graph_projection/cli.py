@@ -23,6 +23,7 @@ from .conventions import conventions
 from .devgraph import build_dev_graph_elements
 from .factlayer import note_alias_map
 from .journal import append_write, replay_journal
+from .module_ops import delete_module, new_module, regroup, rename_module
 from .oracle import run_version_oracle
 from .projection import get_schema, relevant, show, state
 from .cohesion import cohesion
@@ -177,6 +178,25 @@ async def _dispatch(args) -> int:
             res = await move(gx, args.symbol_id, args.target_module_id, write=not args.no_write)
             print(render("move", res, args.format))
             return 1 if res.get("error") else 0
+        elif args.command == "new-module":
+            res = await new_module(gx, args.repo_key, args.module_path,
+                                   import_name=args.import_name, write=not args.no_write)
+            print(render("module", res, args.format))
+            return 1 if res.get("error") else 0
+        elif args.command == "regroup":
+            res = await regroup(gx, args.repo_key, args.target_module_path, args.symbol_ids,
+                                import_name=args.import_name, write=not args.no_write)
+            print(render("move", res, args.format))
+            return 1 if res.get("error") else 0
+        elif args.command == "rename-module":
+            res = await rename_module(gx, args.module_id, args.new_module_path,
+                                      new_import_name=args.import_name, write=not args.no_write)
+            print(render("module", res, args.format))
+            return 1 if res.get("error") else 0
+        elif args.command == "delete-module":
+            res = await delete_module(gx, args.module_id, force=args.force, write=not args.no_write)
+            print(render("module", res, args.format))
+            return 1 if res.get("error") else 0
         elif args.command == "emit":
             res = await emit_artifact(gx, args.module_id, write=args.write)
             out = render("emit", res, args.format)
@@ -312,6 +332,32 @@ def main() -> int:
     p_mv.add_argument("symbol_id", help="The top-level CodeSymbol id to move")
     p_mv.add_argument("target_module_id", help="The CodeModule id to move it into (same repo)")
     p_mv.add_argument("--no-write", action="store_true", help="Dry run: report the plan, don't touch disk")
+
+    p_nm = sub.add_parser("new-module", help="Mint an empty CodeModule node (a regroup/move target)")
+    p_nm.add_argument("repo_key", help="The repo's durable conceptual slug")
+    p_nm.add_argument("module_path", help="Repo-relative path of the new module (e.g. pkg/sub.py)")
+    p_nm.add_argument("--import-name", help="Dotted import name (derived from module_path if omitted)")
+    p_nm.add_argument("--no-write", action="store_true", help="Dry run: report the plan, don't add the node")
+
+    p_rg = sub.add_parser("regroup",
+                          help="Gather symbols into a module (create if absent) — the under/over-split executor")
+    p_rg.add_argument("repo_key", help="The repo the symbols + target live in (same-repo)")
+    p_rg.add_argument("target_module_path", help="Repo-relative path of the module to gather into")
+    p_rg.add_argument("symbol_ids", nargs="+", help="The top-level CodeSymbol ids to relocate")
+    p_rg.add_argument("--import-name", help="Target's dotted import name (derived if omitted)")
+    p_rg.add_argument("--no-write", action="store_true", help="Dry run: report the plan, don't touch disk")
+
+    p_rn = sub.add_parser("rename-module",
+                          help="Rename a .py module (re-emit at the new path + rewrite importer imports)")
+    p_rn.add_argument("module_id", help="The CodeModule id to rename")
+    p_rn.add_argument("new_module_path", help="Its new repo-relative path")
+    p_rn.add_argument("--import-name", help="New dotted import name (derived if omitted)")
+    p_rn.add_argument("--no-write", action="store_true", help="Dry run: report the plan, don't touch disk")
+
+    p_dm = sub.add_parser("delete-module", help="Delete a module's file + its graph subtree (guarded)")
+    p_dm.add_argument("module_id", help="The CodeModule id to delete")
+    p_dm.add_argument("--force", action="store_true", help="Delete even if it still defines symbols (dead module)")
+    p_dm.add_argument("--no-write", action="store_true", help="Dry run: report the plan, don't touch disk")
 
     args = ap.parse_args()
     return asyncio.run(_dispatch(args))
