@@ -156,7 +156,8 @@ async def emit_artifact(
     if cells:
         artifact, text = "notebook", render_notebook(cells)
     else:
-        text = emit_module_from_nodes(await _module_region_wires(gx, module_id))
+        text = emit_module_from_nodes(await _module_region_wires(gx, module_id),
+                                      module_node=module, derive_imports=True)
         artifact = "module"
     res = {"module_id": module_id, "artifact": artifact, "artifact_path": artifact_path,
            "emitted_bytes": len(text.encode("utf-8")), "text": text, "written": False}

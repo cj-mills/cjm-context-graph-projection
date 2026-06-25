@@ -110,9 +110,13 @@ async def move(
     max_order = max((w["properties"].get("order_index", -1) for w in b_wires), default=-1)
     moved = _symbol_wire(node, target_module_id, max_order + 1)
 
+    # Derive both modules' import blocks: A drops the moved symbol's now-unused imports,
+    # B gains the moved symbol's bindings (they travel with it) — imports-as-projection.
     files: List[Tuple[str, str]] = [
-        (F.prop(A, "path"), emit_module_from_nodes([w for w in a_wires if w["id"] != symbol_id])),
-        (F.prop(B, "path"), emit_module_from_nodes(b_wires + [moved])),
+        (F.prop(A, "path"), emit_module_from_nodes([w for w in a_wires if w["id"] != symbol_id],
+                                                   module_node=A, derive_imports=True)),
+        (F.prop(B, "path"), emit_module_from_nodes(b_wires + [moved],
+                                                   module_node=B, derive_imports=True)),
     ]
 
     # Callers: modules importing A; rewrite their `from a_import import S`.

@@ -64,10 +64,12 @@ async def part_a_b(gx, repos_dir) -> bool:
     mod_id = code_module_node_id(repo_key, f"{PKG}/parse.py")
     disk = Path(repos_dir) / LIB / PKG / "parse.py"
 
-    # A. round-trip from the graph == the file on disk (read-only).
+    # A. round-trip from the graph (imports DERIVED): bodies byte-exact, imports canonical.
+    # parse.py's imports are already in canonical order, so the whole file is byte-exact here
+    # even though emit_artifact now regenerates the import block (imports-as-projection).
     em = await emit_artifact(gx, mod_id, write=False)
-    ok &= _check("emit_artifact reproduces a real module byte-exact from the graph",
-                 not em.get("error") and em["text"] == disk.read_text())
+    ok &= _check("emit_artifact reproduces a real module from the graph (imports derived, bodies byte-exact)",
+                 not em.get("error") and _parses(em["text"]) and em["text"] == disk.read_text())
 
     # B. author a real top-level symbol (DRY-RUN): targeted edit, no disk write.
     sym_id = code_symbol_node_id(mod_id, "parse_module")
