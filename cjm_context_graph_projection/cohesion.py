@@ -8,10 +8,10 @@ directions of regrouping as candidates a human/agent confirms or rejects:
 
 - `under_split` (grab-bag): a module of >= `min_symbols` public top-level symbols whose
   COUPLING graph splits into >= 2 components with NO dominant cluster (largest component
-  <= half the symbols). Coupling = a direct call, a shared in-corpus call-neighborhood, OR
-  a shared significant NAME token. The disconnected components are reported as suggested
-  split groups. `cjm-pytorch-utils/core.py` (image / device / seed / stats fused in one
-  module) is the worked example.
+  <= half the symbols). Coupling = a direct USES reference, a shared in-corpus reference
+  neighborhood, OR a shared significant NAME token. The disconnected components are reported
+  as suggested split groups. `cjm-pytorch-utils/core.py` (image / device / seed / stats
+  fused in one module) is the worked example.
 - `over_split` (scattered concept): a public symbol whose in-corpus callers are ALL in a
   SINGLE OTHER module of the SAME repo — a helper living apart from its only consumer, a
   candidate to merge in. The within-repo analogue of refactor's cross-repo relocation (the
@@ -23,13 +23,14 @@ pure call-coupling fragments them — but they share `is` / `error`, so token co
 them and they are correctly NOT flagged (demonstrating cohesion > the nbdev one-def-per-cell
 rule). The "no dominant cluster" gate further damps a module that is a coherent core class
 plus a few satellite types/enums (one big cluster) — only a module with NO center is a
-grab-bag. EVIDENCE-DRIVEN LIMIT (surfaced by this oracle on the substrate core): type-rich
-modules (dataclasses/enums/exceptions related by inheritance/composition, not calls) are
-still under-measured — TYPE/REFERENCE coupling is a missing edge the decomposer does not yet
-extract; until it does, both buckets stay PROPOSE/CONFIRM, low precision by design (a
-rejected proposal is itself a useful label — [[true-b-projected-structure-discussion]] Ext-A,
-propose/confirm verdicts = training data). The compute is a PURE function over node/edge
-lists; the async wrapper loads the slices.
+grab-bag. Coupling is measured over USES (the reference superset of CALLS — N+2-B2), so a
+type-only relationship (a base class, a field/param/return annotation type, a referenced
+constant) couples symbols too: this closes the call-graph-cohesion blind spot on type-rich
+modules (dataclasses/enums/exception hierarchies related by inheritance/composition, not
+calls) that the first cut surfaced. Both buckets stay PROPOSE/CONFIRM, low precision by
+design (a rejected proposal is itself a useful label — [[true-b-projected-structure-discussion]]
+Ext-A, propose/confirm verdicts = training data). The compute is a PURE function over
+node/edge lists; the async wrapper loads the slices.
 """
 
 import re
@@ -92,11 +93,15 @@ def _components(ids: List[str], adj: Dict[str, Set[str]]) -> List[List[str]]:
 def compute_cohesion(
     symbols: Iterable[Any],            # CodeSymbol nodes (GraphNodes or wire dicts)
     modules: Iterable[Any],            # CodeModule nodes (for repo_key + module_path)
-    calls: Iterable[Tuple[str, str]],  # CALLS (caller_sym_id, callee_sym_id) pairs
+    uses: Iterable[Tuple[str, str]],   # USES (referencer_sym_id, referenced_sym_id) pairs — the CALLS superset
     scope: Optional[str] = None,       # Restrict to one repo_key (None = whole corpus)
     min_symbols: int = 4,              # Min public symbols for a module to be grab-bag-audited
 ) -> Dict[str, Any]:  # The cohesion result (counts + finding lists)
-    """Compute module cohesion candidates from the code graph slices (pure)."""
+    """Compute module cohesion candidates from the code graph slices (pure).
+
+    Coupling is measured over USES (the reference superset of CALLS), so type-only
+    relationships (a base class, a field/annotation type) couple symbols too — closing
+    the call-graph-cohesion blind spot on type-rich modules."""
     mod = {F.nid(m): (F.prop(m, "repo_key", ""), F.prop(m, "module_path", "")) for m in modules}
     sym: Dict[str, Dict[str, Any]] = {}
     for s in symbols:
@@ -111,7 +116,7 @@ def compute_cohesion(
 
     callers: Dict[str, Set[str]] = {}   # callee -> caller ids
     callees: Dict[str, Set[str]] = {}   # caller -> callee ids
-    for src, tgt in calls:
+    for src, tgt in uses:
         if src in sym and tgt in sym:
             callers.setdefault(tgt, set()).add(src)
             callees.setdefault(src, set()).add(tgt)
@@ -158,7 +163,7 @@ def compute_cohesion(
     # such a module is expected layering, NOT a scattered concept (the over_split analogue of
     # refactor's "expected foundation layering" relocation tier).
     fanout: Dict[str, Set[str]] = {}
-    for src, tgt in calls:
+    for src, tgt in uses:
         if src in sym and tgt in sym:
             sm, tm = sym[src]["module_id"], sym[tgt]["module_id"]
             if sm and tm and sm != tm:
@@ -208,5 +213,5 @@ async def cohesion(
     """Audit module cohesion: grab-bag (under_split) + scattered-helper (over_split) candidates."""
     symbols = await F.load_label(gx, DevNodeKinds.CODE_SYMBOL)
     modules = await F.load_label(gx, DevNodeKinds.CODE_MODULE)
-    calls = await F.load_edge_pairs(gx, DevRelations.CALLS)
-    return compute_cohesion(symbols, modules, calls, scope)
+    uses = await F.load_edge_pairs(gx, DevRelations.USES)
+    return compute_cohesion(symbols, modules, uses, scope)
