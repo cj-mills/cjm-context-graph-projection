@@ -41,6 +41,27 @@ def memory_elements(
     return corpus_graph_elements(notes, note_aliases)
 
 
+def notes_corpus_elements(
+    corpus_root: str,                  # Root of an arbitrary markdown notes corpus (e.g. christianjmills/posts)
+    profile: str = "quarto_post",      # Relationship-harvest profile (see the markdown core's PROFILES)
+    note_aliases: Optional[Dict[str, str]] = None,  # Confirmed {drifted-slug: canonical-slug} link aliases
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:  # (nodes, edges)
+    """Decompose an arbitrary `<dir>/index.md` markdown corpus into graph elements.
+
+    The corpus analogue of `memory_elements`, generalized off the hardcoded dev
+    memory dir: every `index.md` under the root (the SSG permalink convention —
+    `posts/<slug>/index.md`, nested allowed) becomes a Note identified by its
+    directory permalink, with the per-source-type relationship harvesters (the
+    `profile`, default Quarto blog posts) lighting up Topic/Series/cross-post
+    edges. Self-contained — this is the FEDERATION SEAM's first leaf: ingested
+    into its OWN `--graph-db-path` (a separate persistent graph), kept distinct
+    from the private dev/planning graph (a public corpus → its own boundary)."""
+    root = Path(corpus_root)
+    files = sorted(root.rglob("index.md"))
+    notes = [note_from_file(str(p), corpus_root=str(root), profile=profile) for p in files]
+    return corpus_graph_elements(notes, note_aliases)
+
+
 def _cjm_dep_keys(pyproject: Path) -> List[str]:
     """The cjm-* dependency names from a pyproject (version specifiers stripped)."""
     try:

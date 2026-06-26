@@ -2,10 +2,11 @@
 
 import json
 
-from cjm_dev_graph_schema.identity import code_module_node_id, entity_node_id
+from cjm_dev_graph_schema.identity import (code_module_node_id, entity_node_id,
+                                           note_node_id, series_node_id, topic_node_id)
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 from cjm_context_graph_projection.devgraph import (_cjm_dep_keys, notebook_elements,
-                                                   repo_map_elements)
+                                                   notes_corpus_elements, repo_map_elements)
 from cjm_context_graph_projection.seeds import conceptual_key
 
 PYPROJECT = """\
@@ -20,6 +21,46 @@ def _make_repo(root, name, deps_toml):
     d.mkdir()
     (d / "pyproject.toml").write_text(deps_toml)
     return d
+
+
+def _post(root, slug, body, categories=None, series_link=None):
+    d = root / slug
+    d.mkdir()
+    fm = ["---", f'title: "{slug}"', "date: 2024-1-1"]
+    if categories:
+        fm.append(f"categories: [{', '.join(categories)}]")
+    fm.append("---")
+    lines = list(fm) + [body]
+    if series_link:
+        lines.append(f"Part of the [series]({series_link}).")
+    (d / "index.md").write_text("\n".join(lines) + "\n")
+
+
+def test_notes_corpus_elements_permalink_identity_and_facets(tmp_path):
+    posts = tmp_path / "posts"
+    posts.mkdir()
+    _post(posts, "the-learning-game-book-notes", "Body.", categories=["education", "history"],
+          series_link="/series/notes/education-notes.html")
+    _post(posts, "dumbing-us-down-book-notes",
+          "See [other](/posts/the-learning-game-book-notes/).",
+          categories=["education", "history"], series_link="/series/notes/education-notes.html")
+
+    nodes, edges = notes_corpus_elements(str(posts))
+    labels = [n["label"] for n in nodes]
+    # Permalink identity: each post is its own Note (no `index` collision).
+    note_ids = {n["id"] for n in nodes if n["label"] == DevNodeKinds.NOTE}
+    assert note_node_id("the-learning-game-book-notes") in note_ids
+    assert note_node_id("dumbing-us-down-book-notes") in note_ids
+    # Shared facets deduped: 2 Topics + 1 Series across the two posts.
+    assert labels.count(DevNodeKinds.TOPIC) == 2
+    assert labels.count(DevNodeKinds.SERIES) == 1
+    # Both converge on the education Topic + the series; cross-post REFERENCES present.
+    in_series = [e for e in edges if e["relation_type"] == DevRelations.IN_SERIES]
+    assert {e["target_id"] for e in in_series} == {series_node_id("education-notes")}
+    assert any(e["relation_type"] == DevRelations.TAGGED
+               and e["target_id"] == topic_node_id("education") for e in edges)
+    assert any(e["relation_type"] == DevRelations.REFERENCES
+               and e["properties"].get("cross_post") for e in edges)
 
 
 def test_cjm_dep_keys_strips_specifiers_and_filters(tmp_path):

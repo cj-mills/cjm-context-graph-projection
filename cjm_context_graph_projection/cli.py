@@ -20,7 +20,7 @@ from cjm_context_graph_layer.ops import extend_graph
 from .authoring import author, emit_artifact, read_slot
 from .contradictions import contradictions
 from .conventions import conventions
-from .devgraph import build_dev_graph_elements
+from .devgraph import build_dev_graph_elements, notes_corpus_elements
 from .factlayer import note_alias_map
 from .journal import append_write, replay_journal
 from .module_ops import delete_module, new_module, regroup, rename_module
@@ -90,6 +90,15 @@ async def _dispatch(args) -> int:
             if args.journal_path:
                 # Replay born-on-graph writes on top of the fresh projection so
                 # `rm db && ingest` fully reconstructs the graph (the migration story).
+                rc = await replay_journal(gx, args.journal_path)
+                print(f"replayed journal: {rc}")
+            return 0
+        if args.command == "ingest-notes":
+            nodes, edges = notes_corpus_elements(args.notes_corpus, args.profile)
+            res = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
+            print(f"ingested notes: {res.nodes_added} nodes added / {res.nodes_verified} verified, "
+                  f"{res.edges_added} edges added / {res.edges_existing} existing")
+            if args.journal_path:
                 rc = await replay_journal(gx, args.journal_path)
                 print(f"replayed journal: {rc}")
             return 0
@@ -285,6 +294,16 @@ def main() -> int:
                             "(the source for nbdev libs); repeatable. Omit for the default nbdev libs; "
                             "use this, not --code-lib, for nbdev libs (the notebook source, not the .py).")
     p_ing.add_argument("--no-notebooks", action="store_true", help="Skip notebook decomposition")
+
+    p_inn = sub.add_parser("ingest-notes",
+                           help="Ingest an arbitrary markdown notes corpus into the "
+                                "(separate) --graph-db-path — the federation seam: a "
+                                "second self-contained persistent graph, kept distinct "
+                                "from the private dev/planning graph (a public corpus).")
+    p_inn.add_argument("--notes-corpus", required=True,
+                       help="Root dir of the markdown corpus (every <dir>/index.md becomes a Note).")
+    p_inn.add_argument("--profile", default="quarto_post",
+                       help="Relationship-harvest profile (default quarto_post; see the markdown core's PROFILES).")
 
     sub.add_parser("replay", help="Replay the write journal onto the db (needs --journal-path)")
 
