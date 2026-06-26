@@ -58,7 +58,8 @@ def notes_corpus_elements(
     from the private dev/planning graph (a public corpus → its own boundary)."""
     root = Path(corpus_root)
     files = sorted(root.rglob("index.md"))
-    notes = [note_from_file(str(p), corpus_root=str(root), profile=profile) for p in files]
+    notes = [note_from_file(str(p), corpus_root=str(root), profile=profile, with_sections=True)
+             for p in files]
     return corpus_graph_elements(notes, note_aliases)
 
 

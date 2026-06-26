@@ -30,7 +30,7 @@ def _post(root, slug, body, categories=None, series_link=None):
     if categories:
         fm.append(f"categories: [{', '.join(categories)}]")
     fm.append("---")
-    lines = list(fm) + [body]
+    lines = list(fm) + ["# Overview", "", body]  # a heading -> one Section node
     if series_link:
         lines.append(f"Part of the [series]({series_link}).")
     (d / "index.md").write_text("\n".join(lines) + "\n")
@@ -61,6 +61,9 @@ def test_notes_corpus_elements_permalink_identity_and_facets(tmp_path):
                and e["target_id"] == topic_node_id("education") for e in edges)
     assert any(e["relation_type"] == DevRelations.REFERENCES
                and e["properties"].get("cross_post") for e in edges)
+    # The notes corpus decomposes bodies into Section nodes (opt-in, posts only).
+    assert labels.count(DevNodeKinds.SECTION) >= 1
+    assert any(e["relation_type"] == DevRelations.HAS_SECTION for e in edges)
 
 
 def test_cjm_dep_keys_strips_specifiers_and_filters(tmp_path):
