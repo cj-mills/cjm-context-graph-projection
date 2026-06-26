@@ -26,6 +26,7 @@ from .journal import append_write, replay_journal
 from .module_ops import delete_module, new_module, regroup, rename_module
 from .oracle import run_version_oracle
 from .projection import get_schema, relevant, show, state
+from .onboarding import project_onboarding
 from .readme import project_readme
 from .rename_ops import rename_symbol
 from .source_state import flip_module, source_check
@@ -261,6 +262,23 @@ async def _dispatch(args) -> int:
             else:
                 print(out)
             return 1 if res.get("error") else 0
+        elif args.command == "onboarding":
+            res = await project_onboarding(gx, config_path=args.config)
+            path = Path(args.out)
+            if args.check:
+                cur = path.read_text() if path.exists() else None
+                drift = cur != res["markdown"]
+                print(f"onboarding: drift={drift} present={cur is not None} "
+                      f"notes={res['note_count']} missing_push={res['missing_push']} -> {path}")
+                return 1 if drift else 0
+            if args.write:
+                path.write_text(res["markdown"])
+                print(f"onboarding: wrote {len(res['markdown'].encode())} bytes "
+                      f"notes={res['note_count']} missing_push={res['missing_push']} -> {path}")
+                return 0
+            # Default: print the surface verbatim (the viewer — `onboarding > file` is faithful).
+            sys.stdout.write(res["markdown"])
+            return 0
         return 0
 
 
@@ -451,6 +469,18 @@ def main() -> int:
     p_rm.add_argument("--check", action="store_true",
                       help="Regen-check: compare the on-disk README.md to the graph projection")
     p_rm.add_argument("--repos-dir", default=DEFAULT_REPOS)
+
+    p_ob = sub.add_parser("onboarding",
+                          help="Project the MEMORY onboarding surface from the graph "
+                               "(minimal resident core + landmark map + how-to-pull; read-only)")
+    p_ob.add_argument("--out", default=f"{DEFAULT_REPOS}/cjm-substrate/.cjm/onboarding-surface.md",
+                      help="Where to write/compare the surface")
+    p_ob.add_argument("--config", default=f"{DEFAULT_REPOS}/cjm-substrate/.cjm/onboarding.config.json",
+                      help="JSON overriding the dev seeds (push_slugs / landmarks / arc_lead); "
+                           "absent -> built-in defaults. The promotion loop edits this.")
+    p_ob.add_argument("--write", action="store_true", help="Write the surface to --out")
+    p_ob.add_argument("--check", action="store_true",
+                      help="Regen-check: compare --out to the projection (drift)")
 
     args = ap.parse_args()
     return asyncio.run(_dispatch(args))
