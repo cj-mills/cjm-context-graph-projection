@@ -18,6 +18,8 @@ from cjm_context_graph_layer.ops import graph_task
 from cjm_context_graph_primitives.query import NodeQuery
 from cjm_markdown_decompose_core.project import note_view_from_graph_node, render_onboarding_surface
 
+from .projection import graph_overview
+
 # --- Substrate dev seeds (PROVISIONAL — start minimal-and-promote) -----------
 # Radically-minimal PUSH core: only what must be resident BEFORE any query. The
 # promotion loop adds a slug here when a real session traces a failure to a
@@ -103,6 +105,29 @@ def _load_seeds(
     return slugs, landmarks, arc_lead, hooks
 
 
+def _short(text: Any, limit: int = 70) -> str:
+    """Cap a hub title to one bounded line."""
+    s = " ".join(str(text or "").split())
+    return (s[: limit - 1].rstrip() + "…") if len(s) > limit else s
+
+
+def _render_coverage(overview: Dict[str, Any]) -> str:
+    """Render the AUTO whole-graph facets (the 'facets of the default query').
+
+    A `by kind` structural-coverage line + the top hub anchors (most-connected
+    notes), each a `relevant` handle. Auto-derived, so this stays current as the
+    graph grows — it augments (does not replace) the curated landmark map above."""
+    by_kind = " · ".join(f"{f['kind']}×{f['count']}" for f in overview.get("by_kind", []))
+    lines = ["### Graph at a glance (auto-derived — augments the curated map)",
+             f"_By kind:_ {by_kind}"]
+    hubs = overview.get("hubs", [])
+    if hubs:
+        lines.append("_Hub anchors (most-connected notes — `relevant` one to expand its area):_")
+        lines += [f"- **{_short(h['title'])}** ×{h['degree']} → `relevant \"{_short(h['title'])}\"`"
+                  for h in hubs]
+    return "\n".join(lines)
+
+
 async def project_onboarding(
     gx: Any,                              # The open graph context (gx.queue / gx.graph_id)
     config_path: Optional[str] = None,   # Optional JSON seed override (promotion-loop data)
@@ -111,14 +136,17 @@ async def project_onboarding(
 
     Queries every `Note` node (the coverage map), renders the minimal surface, and
     flags any push slug absent on-graph (a stale allowlist entry — a promotion-loop
-    signal)."""
+    signal). The landmark map is the curated seeds AUGMENTED with an auto-derived
+    whole-graph facet view (`graph_overview` — by-kind coverage + hub anchors), so
+    the territory stays current without hand-seeding every area."""
     push_slugs, landmarks, arc_lead, push_hooks = _load_seeds(config_path)
     res = await graph_task(gx.queue, gx.graph_id, "query_nodes",
                            query=NodeQuery(label="Note").to_dict())
     notes = [note_view_from_graph_node(n) for n in (res.nodes or [])]
+    coverage = _render_coverage(await graph_overview(gx))
     markdown = render_onboarding_surface(
         notes, push_slugs, landmarks, arc_lead,
-        how_to_query=SUBSTRATE_HOW_TO_QUERY, push_hooks=push_hooks)
+        how_to_query=SUBSTRATE_HOW_TO_QUERY, push_hooks=push_hooks, coverage=coverage)
     present = {n.slug for n in notes}
     return {
         "markdown": markdown,

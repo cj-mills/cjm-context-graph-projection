@@ -15,6 +15,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from cjm_context_graph_layer.ops import graph_task
+from cjm_context_graph_primitives.query import EdgeQuery
 
 from .runtime import GraphHandle
 
@@ -103,6 +104,53 @@ def _terms(task: str) -> List[str]:
 async def get_schema(gx: GraphHandle) -> Dict[str, Any]:
     """The graph's ontology: node labels, edge types, per-label counts."""
     return await graph_task(gx.queue, gx.graph_id, "get_schema")
+
+
+async def graph_overview(
+    gx: GraphHandle,
+    top_hubs: int = 10,                       # How many hub anchors to surface
+    hub_labels: tuple = ("Note",),            # Labels eligible to BE a landmark anchor (the area carriers)
+) -> Dict[str, Any]:  # {by_kind:[{kind,count}], hubs:[{id,title,degree}]}
+    """The whole-graph orientation view — the facets of the DEFAULT (empty) query.
+
+    Two auto-derived projections that make the onboarding landmark map a PROJECTION
+    instead of a hand-seeded list: (1) `by_kind` = the structural coverage (schema
+    counts per label — what KINDS of things exist); (2) `hubs` = the most-connected
+    nodes by edge degree, restricted to the area-carrying labels (`Note`). The hubs
+    empirically recover the curated areas (the Foundational-Picture / arc clusters),
+    so connectivity is a usable proxy for 'the landmarks' — no hand-seeding to find
+    the territory. Named/grouped areas (community detection) are deferred."""
+    schema = await get_schema(gx)
+    counts = (schema.get("counts") or {})
+    by_kind = [{"kind": k, "count": c} for k, c in
+               sorted(counts.items(), key=lambda kv: kv[1], reverse=True)]
+
+    res = await graph_task(gx.queue, gx.graph_id, "query_edges",
+                           query=EdgeQuery(project=["source_id", "target_id"],
+                                           limit=10_000_000).to_dict())
+    rows = _get(res, "rows", None)
+    if rows is None:  # non-project fallback (whole edges)
+        rows = [{"source_id": _get(e, "source_id"), "target_id": _get(e, "target_id")}
+                for e in (_get(res, "edges", []) or [])]
+    degree: Dict[str, int] = {}
+    for r in rows:
+        for end in (r.get("source_id"), r.get("target_id")):
+            if end:
+                degree[end] = degree.get(end, 0) + 1
+
+    title_of: Dict[str, str] = {}
+    for label in hub_labels:
+        nodes = await graph_task(gx.queue, gx.graph_id, "find_nodes_by_label",
+                                 label=label, limit=5000)
+        for n in (nodes or []):
+            title_of[_get(n, "id")] = node_title(n)
+    hubs = []
+    for nid in sorted(degree, key=lambda i: degree[i], reverse=True):
+        if nid in title_of:
+            hubs.append({"id": nid, "title": title_of[nid], "degree": degree[nid]})
+            if len(hubs) >= top_hubs:
+                break
+    return {"by_kind": by_kind, "hubs": hubs}
 
 
 async def _all_nodes(gx: GraphHandle, per_label: int = 1000) -> List[Any]:

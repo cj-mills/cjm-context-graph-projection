@@ -6,6 +6,7 @@ from cjm_context_graph_projection.projection import (
     _TEXT_FIELDS, _facet_axis_value, _facet_breakdown, _haystack, _terms,
     node_summary, node_title,
 )
+from cjm_context_graph_projection.onboarding import _render_coverage
 from cjm_context_graph_projection.render import _short, render
 
 
@@ -130,6 +131,20 @@ def test_render_relevant_facets_bounded_even_with_giant_content():
     assert "200 hits across 1 kinds / 1 seed-clusters" in out
     assert "explore \"t\" --facet kind=Section" in out  # a re-runnable descent handle
     assert max(len(line) for line in out.splitlines()) < 400  # no line blows the budget
+
+
+def test_render_coverage_by_kind_and_hub_handles():
+    # The auto landmark view = facets of the default query: by-kind coverage + hub
+    # anchors, each a re-runnable `relevant` handle. Augments, never enumerates.
+    overview = {"by_kind": [{"kind": "Section", "count": 498}, {"kind": "Note", "count": 85}],
+                "hubs": [{"id": "h1", "title": "Substrate Foundational Picture", "degree": 100},
+                         {"id": "h2", "title": "Current Arc Status", "degree": 59}]}
+    out = _render_coverage(overview)
+    assert "Section×498 · Note×85" in out
+    assert '- **Substrate Foundational Picture** ×100 → `relevant "Substrate Foundational Picture"`' in out
+    assert max(len(line) for line in out.splitlines()) < 200  # bounded lines
+    # No hubs -> just the by-kind line (e.g. a fresh/empty graph).
+    assert "Hub anchors" not in _render_coverage({"by_kind": [{"kind": "Note", "count": 1}], "hubs": []})
 
 
 def test_render_explore_complete_vs_refacet():
