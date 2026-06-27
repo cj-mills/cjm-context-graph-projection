@@ -25,7 +25,7 @@ from .factlayer import note_alias_map
 from .journal import append_write, replay_journal
 from .module_ops import delete_module, new_module, regroup, rename_module
 from .oracle import run_version_oracle
-from .projection import get_schema, relevant, show, state
+from .projection import explore, get_schema, relevant, show, state
 from .onboarding import project_onboarding
 from .readme import project_readme
 from .rename_ops import rename_symbol
@@ -117,6 +117,16 @@ async def _dispatch(args) -> int:
         elif args.command == "relevant":
             print(render("relevant", await relevant(gx, args.task, depth=args.depth, k=args.k),
                          args.format))
+        elif args.command == "explore":
+            filters = []
+            for f in (args.facet or []):
+                if "=" not in f:
+                    print(f"error: --facet expects axis=value (got '{f}')", file=sys.stderr)
+                    return 2
+                axis, value = f.split("=", 1)
+                filters.append({"axis": axis, "value": value})
+            res = await explore(gx, args.task, filters, depth=args.depth, budget=args.budget)
+            print(render("explore", res, args.format))
         elif args.command == "show":
             print(render("show", await show(gx, args.node_id, depth=args.depth), args.format))
         elif args.command == "read":
@@ -342,10 +352,19 @@ def main() -> int:
     p_state = sub.add_parser("state", help="Graph overview, or a subject's effective view")
     p_state.add_argument("subject", nargs="?", default=None, help="Node id or subject term")
 
-    p_rel = sub.add_parser("relevant", help="Nodes structurally nearest a task, ranked")
+    p_rel = sub.add_parser("relevant",
+                           help="Level-0 pull: the result set's SHAPE (total + facets + descend handles) + a top-k teaser")
     p_rel.add_argument("task", help="Task / query text")
     p_rel.add_argument("--depth", type=int, default=2)
     p_rel.add_argument("--k", type=int, default=12)
+
+    p_exp = sub.add_parser("explore",
+                           help="Descend a facet of a `relevant` query in full (bounded; re-facets if large)")
+    p_exp.add_argument("task", help="The original query text (must match the `relevant` call)")
+    p_exp.add_argument("--facet", action="append", metavar="AXIS=VALUE",
+                       help="Filter by kind=<label> or seed=<seed-id> (repeatable; compose = AND)")
+    p_exp.add_argument("--depth", type=int, default=2)
+    p_exp.add_argument("--budget", type=int, default=15, help="Max members before re-faceting")
 
     p_show = sub.add_parser("show", help="One node in full + its neighbours")
     p_show.add_argument("node_id")

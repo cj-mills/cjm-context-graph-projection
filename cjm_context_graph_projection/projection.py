@@ -159,21 +159,23 @@ def _recency_factor(node: Any) -> float:
     return 1.0 + 0.5 * (1.0 / (1.0 + age_days / 30.0))  # ~1.5 fresh -> ~1.0 old
 
 
-async def relevant(
+async def _score_task(
     gx: GraphHandle,
     task: str,        # The task / query text
     depth: int = 2,   # BFS expansion depth from each seed
-    k: int = 12,      # Max ranked results
-) -> Dict[str, Any]:  # {task, seeds, results:[{...,score,why}]}
-    """Structurally nearest nodes to a task, ranked (the relevance read).
+) -> "tuple":  # (scores, nodes_by_id, why, seed_of, seeds)
+    """Score every node reachable from the task's seeds — the FULL relevance set.
 
-    Seeds by term match; expand each via `get_context(depth)`; score every
-    reached node by edge-type weight x hop-decay x recency, down-weighting
-    superseded nodes; return the bounded top-k with a one-line `why`."""
+    The shared scorer behind `relevant` (top-k view) and `explore` (faceted
+    descent): seeds by term match; expand each via `get_context(depth)`; score
+    each reached node by edge-type weight x hop-decay x recency, down-weighting
+    superseded nodes. `seed_of[nid]` records which seed gave the winning score —
+    the seed-neighbourhood facet (which cluster a hit belongs to)."""
     seeds = await find_seeds(gx, task)
     scores: Dict[str, float] = {}
     nodes_by_id: Dict[str, Any] = {}
     why: Dict[str, str] = {}
+    seed_of: Dict[str, str] = {}
 
     for rank, seed in enumerate(seeds):
         sid = _get(seed, "id")
@@ -212,14 +214,108 @@ async def relevant(
                 score *= _SUPERSEDED_FACTOR
             if score > scores.get(nid, 0.0):
                 scores[nid] = score
+                seed_of[nid] = sid
                 why[nid] = (f"matches task" if nid == sid
                             else f"{rel or 'linked'} {('->' if d == 1 else f'{d} hops from')} "
                                  f"“{node_title(seed)}”")
+    return scores, nodes_by_id, why, seed_of, seeds
 
-    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)[:k]
+
+def _facet_axis_value(node_id: str, axis: str, nodes_by_id: Dict[str, Any],
+                      seed_of: Dict[str, str]) -> Any:
+    """A node's value on a facet axis: its label (kind) or its seed-cluster id."""
+    if axis == "kind":
+        return _get(nodes_by_id.get(node_id), "label", "?")
+    if axis == "seed":
+        return seed_of.get(node_id)
+    return None
+
+
+def _facet_breakdown(node_ids: List[str], axis: str, task: str, filters: List[Dict[str, Any]],
+                     nodes_by_id: Dict[str, Any], seed_of: Dict[str, str],
+                     seeds: List[Any]) -> List[Dict[str, Any]]:
+    """Count `node_ids` by `axis`, biggest first, each with a re-runnable descent HANDLE.
+
+    A handle is a `(task, filters)` spec — a replayable query, not an in-memory
+    offset — so a sub-agent can re-derive exactly this cluster on its own (facets
+    are the divide-and-conquer work-partition)."""
+    counts: Dict[Any, int] = {}
+    for nid in node_ids:
+        v = _facet_axis_value(nid, axis, nodes_by_id, seed_of)
+        counts[v] = counts.get(v, 0) + 1
+    seed_title = {_get(s, "id"): node_title(s) for s in seeds}
+    out = []
+    for value, count in sorted(counts.items(), key=lambda kv: kv[1], reverse=True):
+        entry = {"axis": axis, "value": value, "count": count,
+                 "handle": {"task": task, "filters": filters + [{"axis": axis, "value": value}]}}
+        if axis == "seed":
+            entry["title"] = seed_title.get(value, str(value))
+        out.append(entry)
+    return out
+
+
+async def relevant(
+    gx: GraphHandle,
+    task: str,        # The task / query text
+    depth: int = 2,   # BFS expansion depth from each seed
+    k: int = 12,      # Max ranked results in the teaser
+) -> Dict[str, Any]:  # {task, total_hits, seeds, facets, results}
+    """The bounded level-0 pull: the full reached set's SHAPE + a top-k teaser.
+
+    `relevant` already scores the WHOLE reached set and (previously) discarded all
+    but the top-k — so the agent couldn't see the other hits existed (invisible
+    truncation). This now also returns the set's `total_hits` + facet breakdowns
+    (by kind, by seed-cluster), each carrying a re-runnable `explore` handle, so
+    the shape is visible in fixed-budget form and any cluster can be descended in
+    full. The `results` teaser preserves the old ranked view (back-compat)."""
+    scores, nodes_by_id, why, seed_of, seeds = await _score_task(gx, task, depth)
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
     results = [{**node_summary(nodes_by_id[nid]), "score": round(sc, 3), "why": why.get(nid, "")}
-               for nid, sc in ranked if nid in nodes_by_id]
-    return {"task": task, "seeds": [node_summary(s) for s in seeds], "results": results}
+               for nid, sc in ranked[:k] if nid in nodes_by_id]
+    all_ids = list(scores)
+    facets = {
+        "by_kind": _facet_breakdown(all_ids, "kind", task, [], nodes_by_id, seed_of, seeds),
+        "by_seed": _facet_breakdown(all_ids, "seed", task, [], nodes_by_id, seed_of, seeds),
+    }
+    return {"task": task, "total_hits": len(scores),
+            "seeds": [node_summary(s) for s in seeds], "facets": facets, "results": results}
+
+
+async def explore(
+    gx: GraphHandle,
+    task: str,                        # The original query text (re-scored deterministically)
+    filters: List[Dict[str, Any]],    # [{axis, value}] — a node must match ALL (compound = recursive re-facet)
+    depth: int = 2,                   # BFS expansion depth (must match the level-0 query)
+    budget: int = 15,                 # Max members enumerated before re-faceting instead of dumping
+) -> Dict[str, Any]:  # {task, filters, total, complete, members, subfacets?}
+    """Descend into one cluster of a query: its members, BOUNDED, re-faceting if large.
+
+    Filters compose (kind=X AND seed=Y), so descent is recursive: when a cluster
+    still exceeds `budget`, rather than dump it we return the top-`budget` members
+    PLUS a `subfacets` breakdown on an axis not yet filtered — each a compound
+    handle to descend further. So no `explore` output ever exceeds a fixed budget,
+    at any corpus size (the bounded-by-construction invariant)."""
+    scores, nodes_by_id, why, seed_of, seeds = await _score_task(gx, task, depth)
+    used = {f["axis"] for f in filters}
+
+    def passes(nid: str) -> bool:
+        return all(_facet_axis_value(nid, f["axis"], nodes_by_id, seed_of) == f["value"]
+                   for f in filters)
+
+    selected = sorted(((nid, sc) for nid, sc in scores.items() if passes(nid)),
+                      key=lambda kv: kv[1], reverse=True)
+    total = len(selected)
+    if total <= budget:
+        members = [{**node_summary(nodes_by_id[nid]), "score": round(sc, 3), "why": why.get(nid, "")}
+                   for nid, sc in selected]
+        return {"task": task, "filters": filters, "total": total, "complete": True, "members": members}
+
+    members = [{**node_summary(nodes_by_id[nid]), "score": round(sc, 3)} for nid, sc in selected[:budget]]
+    next_axis = next((a for a in ("seed", "kind") if a not in used), None)
+    subfacets = (_facet_breakdown([nid for nid, _ in selected], next_axis, task, filters,
+                                  nodes_by_id, seed_of, seeds) if next_axis else [])
+    return {"task": task, "filters": filters, "total": total, "complete": False,
+            "shown": len(members), "members": members, "subfacets": subfacets}
 
 
 async def state(

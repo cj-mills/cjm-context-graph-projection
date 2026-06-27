@@ -9,12 +9,29 @@ import json
 from typing import Any, Dict, List
 
 
+def _short(text: Any, limit: int = 160) -> str:
+    """Cap display text to one bounded line (the full content is a `show`/`read <id>` away).
+
+    The bounded-by-construction invariant applies per-LINE too: a node's title or
+    description can be arbitrarily long (a giant heading, a full Decision statement),
+    so any single rendered line is capped — no output forces `head`/`tail`."""
+    s = " ".join(str(text or "").split())
+    return (s[: limit - 1].rstrip() + "…") if len(s) > limit else s
+
+
 def _line(summary: Dict[str, Any]) -> str:
-    """One markdown line for a node summary: title, label, id, optional description."""
-    bits = [f"**{summary.get('title')}**", f"_{summary.get('label')}_", f"`{summary.get('id')}`"]
+    """One bounded markdown line for a node summary: title, label, id, optional description."""
+    bits = [f"**{_short(summary.get('title'), 140)}**", f"_{summary.get('label')}_",
+            f"`{summary.get('id')}`"]
     head = " · ".join(b for b in bits if b)
     desc = summary.get("description")
-    return f"- {head}" + (f" — {desc}" if desc else "")
+    return f"- {head}" + (f" — {_short(desc, 200)}" if desc else "")
+
+
+def _handle_cmd(handle: Dict[str, Any]) -> str:
+    """A descent handle rendered as a copy-pasteable `explore` command (re-runnable)."""
+    flags = " ".join(f"--facet {f['axis']}={f['value']}" for f in handle.get("filters", []))
+    return f'explore "{handle.get("task")}" {flags}'.rstrip()
 
 
 def _human(kind: str, obj: Dict[str, Any]) -> str:
@@ -27,13 +44,42 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                  "**Edge types:** " + ", ".join(obj.get("edge_types", []))]
         return "\n".join(lines)
     if kind == "relevant":
+        total = obj.get("total_hits", len(obj.get("results", [])))
+        facets = obj.get("facets", {})
+        by_kind, by_seed = facets.get("by_kind", []), facets.get("by_seed", [])
         lines = [f"## Relevant to: {obj.get('task')}", "",
-                 "_seeds:_ " + ", ".join(s.get("title", "?") for s in obj.get("seeds", [])) or "_(none)_",
-                 ""]
+                 f"_{total} hits across {len(by_kind)} kinds / {len(by_seed)} seed-clusters — "
+                 f"the top matches are a teaser; descend any cluster IN FULL with `explore` "
+                 f"(nothing below is silently truncated)._", ""]
+        if by_kind:
+            lines.append("**By kind:**")
+            lines += [f"- **{f['value']}** ×{f['count']} → `{_handle_cmd(f['handle'])}`" for f in by_kind]
+            lines.append("")
+        if by_seed:
+            lines.append("**By seed-cluster:**")
+            lines += [f"- “{_short(f.get('title', f['value']), 90)}” ×{f['count']} → `{_handle_cmd(f['handle'])}`"
+                      for f in by_seed]
+            lines.append("")
+        lines.append("**Top matches (teaser):**")
         for r in obj.get("results", []):
-            lines.append(_line(r) + f"  \n  ↳ _{r.get('why')}_ (score {r.get('score')})")
+            lines.append(_line(r) + f"  \n  ↳ _{_short(r.get('why'), 120)}_ (score {r.get('score')})")
         if not obj.get("results"):
             lines.append("_(no results — try different terms)_")
+        return "\n".join(lines)
+    if kind == "explore":
+        flt = ", ".join(f"{f['axis']}={f['value']}" for f in obj.get("filters", []))
+        head = "all shown" if obj.get("complete") else f"showing top {obj.get('shown')} — re-facet below for the rest"
+        lines = [f"## Explore: {obj.get('task')}  _[{flt}]_", "",
+                 f"_{obj.get('total')} in this cluster ({head})._", ""]
+        for m in obj.get("members", []):
+            lines.append(_line(m) + (f"  \n  ↳ _{_short(m['why'], 120)}_ (score {m.get('score')})" if m.get("why")
+                                     else f"  (score {m.get('score')})"))
+        sub = obj.get("subfacets", [])
+        if sub:
+            lines += ["", f"**Refine (by {sub[0]['axis']}) — descend further:**"]
+            lines += [f"- “{_short(f.get('title', f['value']), 90)}” ×{f['count']} → `{_handle_cmd(f['handle'])}`"
+                      if f["axis"] == "seed" else
+                      f"- **{f['value']}** ×{f['count']} → `{_handle_cmd(f['handle'])}`" for f in sub]
         return "\n".join(lines)
     if kind == "assert":
         head = (f"**asserted** `{obj.get('predicate')}` = _{obj.get('value')}_ "

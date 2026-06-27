@@ -3,9 +3,10 @@
 import json
 
 from cjm_context_graph_projection.projection import (
-    _TEXT_FIELDS, _haystack, _terms, node_summary, node_title,
+    _TEXT_FIELDS, _facet_axis_value, _facet_breakdown, _haystack, _terms,
+    node_summary, node_title,
 )
-from cjm_context_graph_projection.render import render
+from cjm_context_graph_projection.render import _short, render
 
 
 def _node(**props):
@@ -57,3 +58,76 @@ def test_render_relevant_human_lists_results():
                         "description": "d", "score": 9.0, "why": "matches task"}]}
     out = render("relevant", obj, "human")
     assert "Relevant to: graph arc" in out and "Arc" in out and "matches task" in out
+
+
+# --- Bounded faceted pull protocol -------------------------------------------
+
+def _scored(*pairs):
+    """Build (nodes_by_id, seed_of) from (id, label, seed) triples."""
+    nodes_by_id = {i: {"id": i, "label": lab, "properties": {}} for i, lab, _ in pairs}
+    seed_of = {i: s for i, _, s in pairs}
+    return nodes_by_id, seed_of
+
+
+def test_facet_axis_value_kind_and_seed():
+    nodes_by_id, seed_of = _scored(("n1", "Section", "s1"))
+    assert _facet_axis_value("n1", "kind", nodes_by_id, seed_of) == "Section"
+    assert _facet_axis_value("n1", "seed", nodes_by_id, seed_of) == "s1"
+
+
+def test_facet_breakdown_counts_sorted_with_compound_handles():
+    nodes_by_id, seed_of = _scored(
+        ("n1", "Section", "s1"), ("n2", "Section", "s1"),
+        ("n3", "Decision", "s2"))
+    seeds = [{"id": "s1", "properties": {"title": "Cluster One"}},
+             {"id": "s2", "properties": {"title": "Cluster Two"}}]
+    facets = _facet_breakdown(["n1", "n2", "n3"], "kind", "task X",
+                              [{"axis": "seed", "value": "s1"}], nodes_by_id, seed_of, seeds)
+    # Biggest bucket first; handle COMPOSES onto the existing filter (recursive descent).
+    assert [(f["value"], f["count"]) for f in facets] == [("Section", 2), ("Decision", 1)]
+    assert facets[0]["handle"] == {"task": "task X",
+                                   "filters": [{"axis": "seed", "value": "s1"},
+                                               {"axis": "kind", "value": "Section"}]}
+    # A seed-axis breakdown attaches the seed's display title.
+    sf = _facet_breakdown(["n1", "n2", "n3"], "seed", "task X", [], nodes_by_id, seed_of, seeds)
+    assert sf[0]["value"] == "s1" and sf[0]["title"] == "Cluster One"
+
+
+def test_short_caps_long_text_and_collapses_whitespace():
+    assert _short("a\n  b   c") == "a b c"
+    capped = _short("x" * 500, 100)
+    assert len(capped) == 100 and capped.endswith("…")
+    assert _short("short", 100) == "short"
+
+
+def test_render_relevant_facets_bounded_even_with_giant_content():
+    # A node whose title/why are enormous must NOT produce an unbounded line
+    # (the bounded-by-construction invariant applies per-line).
+    huge = "Z" * 5000
+    obj = {"task": "t", "total_hits": 200,
+           "seeds": [], "results": [{"id": "a", "label": "Decision", "title": huge,
+                                     "description": huge, "score": 9.0, "why": huge}],
+           "facets": {"by_kind": [{"axis": "kind", "value": "Section", "count": 122,
+                                   "handle": {"task": "t", "filters": [{"axis": "kind", "value": "Section"}]}}],
+                      "by_seed": [{"axis": "seed", "value": "s1", "title": huge, "count": 99,
+                                   "handle": {"task": "t", "filters": [{"axis": "seed", "value": "s1"}]}}]}}
+    out = render("relevant", obj, "human")
+    assert "200 hits across 1 kinds / 1 seed-clusters" in out
+    assert "explore \"t\" --facet kind=Section" in out  # a re-runnable descent handle
+    assert max(len(line) for line in out.splitlines()) < 400  # no line blows the budget
+
+
+def test_render_explore_complete_vs_refacet():
+    complete = render("explore", {"task": "t", "filters": [{"axis": "kind", "value": "Decision"}],
+                                  "total": 2, "complete": True,
+                                  "members": [{"id": "d", "label": "Decision", "title": "D", "score": 5.0}]}, "human")
+    assert "all shown" in complete
+    refacet = render("explore", {"task": "t", "filters": [{"axis": "kind", "value": "Section"}],
+                                 "total": 122, "complete": False, "shown": 15,
+                                 "members": [{"id": "s", "label": "Section", "title": "S", "score": 5.0}],
+                                 "subfacets": [{"axis": "seed", "value": "s1", "title": "Cluster",
+                                                "count": 81, "handle": {"task": "t",
+                                                "filters": [{"axis": "kind", "value": "Section"},
+                                                            {"axis": "seed", "value": "s1"}]}}]}, "human")
+    assert "re-facet below" in refacet and "Refine (by seed)" in refacet
+    assert "--facet kind=Section --facet seed=s1" in refacet  # compound descent handle
