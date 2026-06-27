@@ -42,6 +42,21 @@ def test_node_summary_carries_description_and_kind():
                  "description": "d", "note_type": "project"}
 
 
+def test_section_body_is_searchable_and_summarised():
+    # M1 sections must be findable by CONTENT (the `text` body), not just their heading,
+    # and a surfaced section without a `description` synthesises a snippet from its body.
+    assert "text" in _TEXT_FIELDS
+    sec = {"id": "s1", "label": "Section",
+           "properties": {"title": "Heading", "text": "preamble lede about lossless round-trip " * 10}}
+    assert "lossless round-trip" in _haystack(sec)  # body is in the match haystack
+    summ = node_summary(sec)
+    assert summ["title"] == "Heading" and summ["description"].startswith("preamble lede")
+    assert len(summ["description"]) <= 160 and summ["description"].endswith("…")  # snippet, bounded
+    # A real description still wins over the body snippet.
+    assert node_summary({"id": "s2", "label": "Section",
+                         "properties": {"name": "x", "description": "real", "text": "body"}})["description"] == "real"
+
+
 def test_render_schema_human_and_agent():
     obj = {"node_labels": ["Note", "Entity"], "edge_types": ["REFERENCES"],
            "counts": {"Note": 65, "Entity": 40}}

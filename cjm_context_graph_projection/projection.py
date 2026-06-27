@@ -28,10 +28,13 @@ EDGE_WEIGHTS = {
 }
 _HOP_DECAY = 0.5          # Score multiplier per BFS hop from a seed
 _SUPERSEDED_FACTOR = 0.3  # Down-weight for nodes that are the target of a SUPERSEDES edge
-# Property fields searched for seed term matches + used as a display title. Includes
-# the fine-tier content fields (`statement` on Decisions, `value` on Assertions) so
-# born-on-graph decisions/facts are discoverable by `relevant`, not just coarse Notes.
-_TEXT_FIELDS = ("title", "name", "slug", "key", "description", "statement", "value")
+# Property fields searched for seed term matches. Includes the fine-tier content
+# fields (`statement` on Decisions, `value` on Assertions) so born-on-graph
+# decisions/facts are discoverable; and `text` — a Section's body / a CodeText
+# region — so memory bodies (M1) and code regions are findable by their CONTENT,
+# not just their heading. Seed scoring counts DISTINCT query terms (capped at the
+# query's term count), so a long field can't dominate beyond a focused match.
+_TEXT_FIELDS = ("title", "name", "slug", "key", "description", "statement", "value", "text")
 # Common words that add noise, not signal, to seed-term matching.
 _STOPWORDS = frozenset((
     "the", "and", "for", "with", "this", "that", "from", "into", "are", "was",
@@ -70,6 +73,12 @@ def node_summary(node: Any) -> Dict[str, Any]:
     out = {"id": _get(node, "id"), "label": _get(node, "label"), "title": node_title(node)}
     if isinstance(p.get("description"), str) and p["description"]:
         out["description"] = p["description"]
+    elif isinstance(p.get("text"), str) and p["text"].strip():
+        # Fine content nodes (Section / CodeText) carry no `description` — synthesize a
+        # short body snippet so a surfaced section is self-describing, not just a heading
+        # (the render layer caps it again; the full body is a `read <id>` away).
+        snip = " ".join(p["text"].split())
+        out["description"] = (snip[:159] + "…") if len(snip) > 160 else snip
     for extra in ("note_type", "entity_kind", "status", "root_kind"):
         if p.get(extra):
             out[extra] = p[extra]
