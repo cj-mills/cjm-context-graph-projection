@@ -323,6 +323,12 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             return (f"**emitted** `{obj.get('artifact')}` → `{obj.get('artifact_path')}` "
                     f"({obj.get('emitted_bytes')} bytes)")
         return obj.get("text", "")
+    if kind == "read":
+        if obj.get("error"):
+            return f"⚠ {obj['error']}"
+        if obj.get("kind") == "nested":
+            return f"⚠ {obj.get('hint')} (enclosing module `{obj.get('module_id')}`)"
+        return obj.get("text", "")
     if kind in ("show", "state"):
         node = obj.get("node")
         if node is None and "overview" in obj:

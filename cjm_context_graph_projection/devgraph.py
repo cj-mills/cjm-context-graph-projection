@@ -33,11 +33,18 @@ def memory_elements(
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:  # (Note nodes, REFERENCES edges)
     """Decompose every memory markdown file (except MEMORY.md) into graph elements.
 
+    Decomposed `lossless=True` (M1): each note carries its verbatim `frontmatter_raw`
+    and its body becomes ordered Section nodes with heading-inclusive `raw` spans (+ a
+    level-0 preamble), so the file reconstructs BYTE-EXACT from the graph — memory is
+    the high-stakes corpus (the sole human-readable planning record), so the bar is
+    whole-file fidelity, not the posts' Scope-A section grain. The `read` verb delivers
+    these bodies, which is what lets graph-pull replace reading the `.md` files.
+
     Confirmed `note_aliases` (the worklist's output, read off the graph) resolve
     drifted `[[wiki-links]]` to their real note so the once-dangling edge lands."""
     mem = Path(memory_dir)
     files = sorted(p for p in mem.glob("*.md") if p.name != "MEMORY.md")
-    notes = [note_from_file(str(p), corpus_root=str(mem)) for p in files]
+    notes = [note_from_file(str(p), corpus_root=str(mem), lossless=True) for p in files]
     return corpus_graph_elements(notes, note_aliases)
 
 

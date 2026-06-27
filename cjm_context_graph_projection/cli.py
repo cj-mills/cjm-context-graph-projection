@@ -17,7 +17,7 @@ from pathlib import Path
 
 from cjm_context_graph_layer.ops import extend_graph
 
-from .authoring import author, emit_artifact, read_slot
+from .authoring import author, emit_artifact, read_node, read_slot
 from .contradictions import contradictions
 from .conventions import conventions
 from .devgraph import build_dev_graph_elements, notes_corpus_elements
@@ -119,6 +119,18 @@ async def _dispatch(args) -> int:
                          args.format))
         elif args.command == "show":
             print(render("show", await show(gx, args.node_id, depth=args.depth), args.format))
+        elif args.command == "read":
+            res = await read_node(gx, args.node_id)
+            out = render("read", res, args.format)
+            # Content delivery: print the verbatim text exactly (a note body already ends
+            # with its file's trailing newline) so `read > file` is byte-faithful; status/
+            # JSON lines (errors, nested-symbol hints) get the usual newline.
+            if (args.format == "human" and not res.get("error")
+                    and res.get("kind") != "nested"):
+                sys.stdout.write(out)
+            else:
+                print(out)
+            return 1 if res.get("error") else 0
         elif args.command == "contradictions":
             print(render("contradictions", await contradictions(gx, args.scope), args.format))
         elif args.command == "conventions":
@@ -338,6 +350,11 @@ def main() -> int:
     p_show = sub.add_parser("show", help="One node in full + its neighbours")
     p_show.add_argument("node_id")
     p_show.add_argument("--depth", type=int, default=1)
+
+    p_read = sub.add_parser("read",
+                            help="Deliver a node's verbatim CONTENT (Note body / Section / "
+                                 "CodeSymbol body / CodeText / Cell / module) — the read dual of author/emit")
+    p_read.add_argument("node_id")
 
     p_conv = sub.add_parser("conventions",
                             help="Audit notebook code conventions (undocumented / no-docstring / non-granular)")

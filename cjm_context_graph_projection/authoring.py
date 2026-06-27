@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from cjm_context_graph_layer.ops import graph_task
 from cjm_context_graph_primitives.provenance import SourceRef
 from cjm_dev_graph_schema.vocab import DevNodeKinds
+from cjm_markdown_decompose_core.project import note_text_from_graph_nodes
 from cjm_notebook_decompose_core.project import render_notebook
 from cjm_python_decompose_core.emit import emit_module_from_nodes
 
@@ -134,6 +135,67 @@ async def read_slot(
                 "label": _label_of(node)}
     slot, _artifact, label = resolved
     return {"node_id": node_id, "label": label, "slot": slot, "text": str(F.prop(node, slot, ""))}
+
+
+async def _note_section_wires(
+    gx: GraphHandle, note_id: str,
+) -> List[Dict[str, Any]]:  # Section wire dicts for one Note (whole-note reconstruction)
+    """All of a Note's Section nodes, as wire dicts (carrying `raw`/`order`)."""
+    return [_as_wire(n, DevNodeKinds.SECTION)
+            for n in await F.load_label(gx, DevNodeKinds.SECTION)
+            if F.prop(n, "note_id") == note_id]
+
+
+async def read_node(
+    gx: GraphHandle,
+    node_id: str,  # The node whose verbatim content to deliver
+) -> Dict[str, Any]:  # {label, kind, text, ...} or {error}
+    """Deliver a node's verbatim CONTENT — the read DUAL of `author`/`emit`.
+
+    The file-crutch killer: graph-pull can RANK and POINT at a node (`relevant`/`show`)
+    but `show` renders only docstring + neighbours, so reading content still meant
+    opening the `.md`/`.py`. This delivers the verbatim text for any content-bearing
+    node, heterogeneously — the same slot abstraction `author` writes:
+
+      - Note     -> the WHOLE file reconstructed lossless (frontmatter_raw + ordered
+                    section `raw` spans) — needs a `lossless` ingest (M1).
+      - Section  -> that one section's verbatim `raw` span (the fine, per-section unit).
+      - CodeModule -> the module/notebook reassembled read-only (reuses `emit`).
+      - CodeSymbol body / CodeText / Cell -> that authorable verbatim slot.
+
+    A nested symbol (a method) carries no own body — its text lives in the enclosing
+    class block, so we point there rather than returning empty."""
+    node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=node_id)
+    if node is None:
+        return {"error": f"no node `{node_id}`", "node_id": node_id}
+    label = _label_of(node)
+    p = F.props(node)
+    if label == DevNodeKinds.NOTE:
+        secs = await _note_section_wires(gx, node_id)
+        if not secs and not p.get("frontmatter_raw"):
+            return {"error": "note has no body on-graph (ingested non-lossless?)",
+                    "node_id": node_id, "label": label}
+        return {"node_id": node_id, "label": label, "kind": "note", "sections": len(secs),
+                "text": note_text_from_graph_nodes(_as_wire(node, label), secs)}
+    if label == DevNodeKinds.SECTION:
+        return {"node_id": node_id, "label": label, "kind": "section",
+                "anchor": p.get("anchor"), "text": str(p.get("raw") or p.get("text") or "")}
+    if label == DevNodeKinds.CODE_MODULE:
+        em = await emit_artifact(gx, node_id, write=False)
+        if em.get("error"):
+            return em
+        return {"node_id": node_id, "label": label, "kind": em.get("artifact", "module"),
+                "artifact_path": em.get("artifact_path"), "text": em.get("text", "")}
+    resolved = _slot_for(node)
+    if resolved is not None:
+        slot, _artifact, lab = resolved
+        return {"node_id": node_id, "label": lab, "kind": "slot", "slot": slot,
+                "text": str(F.prop(node, slot, ""))}
+    if label == DevNodeKinds.CODE_SYMBOL:
+        return {"node_id": node_id, "label": label, "kind": "nested", "text": "",
+                "module_id": p.get("module_id"),
+                "hint": "nested symbol (no own body) — read its enclosing class or module"}
+    return {"error": "node has no readable verbatim content", "node_id": node_id, "label": label}
 
 
 async def emit_artifact(
