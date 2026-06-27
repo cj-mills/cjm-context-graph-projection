@@ -430,8 +430,8 @@ def main() -> int:
     p_ln.add_argument("--actor", default="agent:session")
 
     p_au = sub.add_parser("author",
-                          help="Author a node's verbatim slot (CodeSymbol body / CodeText / Cell), emit the .py/.ipynb")
-    p_au.add_argument("node_id", help="The CodeSymbol / CodeText / Cell node id to author")
+                          help="Author a node's verbatim slot (CodeSymbol body / CodeText / Cell / memory Section), emit the .py/.ipynb/.md")
+    p_au.add_argument("node_id", help="The CodeSymbol / CodeText / Cell / Section node id to author")
     g_au = p_au.add_mutually_exclusive_group(required=True)
     g_au.add_argument("--replace", help="Full replacement text for the slot (the Write analogue)")
     g_au.add_argument("--replace-file", help="Read the full replacement text from a file")
@@ -444,10 +444,10 @@ def main() -> int:
     p_au.add_argument("--actor", default="agent:session")
 
     p_em = sub.add_parser("emit",
-                          help="Emit a module/notebook's canonical artifact FROM THE GRAPH (graph -> .py/.ipynb)")
-    p_em.add_argument("module_id", help="The CodeModule id (a .py module or a notebook)")
+                          help="Emit a container's canonical artifact FROM THE GRAPH (graph -> .py/.ipynb/.md)")
+    p_em.add_argument("module_id", help="The CodeModule id (a .py module / notebook) or a Note id")
     p_em.add_argument("--write", action="store_true",
-                      help="Write to the module's path (else print to stdout — the round-trip viewer)")
+                      help="Write to the container's path (else print to stdout — the round-trip viewer)")
 
     p_mv = sub.add_parser("move",
                           help="Relocate a top-level symbol to another module (re-emit both + rewrite caller imports)")

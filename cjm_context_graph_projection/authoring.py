@@ -1,9 +1,15 @@
 """The B write surface: AUTHOR a verbatim-text slot on-graph, emit the canonical artifact.
 
 The make-or-break authoring increment of [[graph-as-source-of-truth-inversion]]. A
-`CodeSymbol` body, a `CodeText` region, and a notebook `Cell` source are the SAME kind
-of thing — a VERBATIM-TEXT SLOT on a node — so `author` targets that slot abstraction,
-not a node kind: it edits code symbols, code-text regions, and notebook cells uniformly.
+`CodeSymbol` body, a `CodeText` region, a notebook `Cell` source, and a memory
+`Section`'s verbatim `raw` span are the SAME kind of thing — a VERBATIM-TEXT SLOT on a
+node — so `author` targets that slot abstraction, not a node kind: it edits code
+symbols, code-text regions, notebook cells, and memory sections uniformly.
+
+The slot composes a per-kind canonical ARTIFACT: code regions -> a `.py` module, a cell
+-> an `.ipynb`, a memory section -> its enclosing `.md` note (reusing M1's lossless
+`frontmatter_raw + concat(section.raw)` reconstruction). Memory authoring (M2a) is the
+prose case of the [[memory-files-retirement-plan]].
 
 Two modes (the lesson from the pre-arc NotebookEdit pain, where every change meant
 rewriting the whole cell):
@@ -12,12 +18,18 @@ rewriting the whole cell):
   low-token targeted path).
 
 Persistence = Fork-1(a) (file stays the source; the graph is the editing surface): the
-edit is applied to the module's regions READ FROM THE GRAPH, the canonical artifact is
+edit is applied to the container's regions READ FROM THE GRAPH, the canonical artifact is
 re-emitted (graph OWNS formatting), and the FILE on disk is the durable record — the next
 `ingest` re-derives the graph from it (code/notebooks are rebuilt sources, NOT journaled;
 a targeted OLD->NEW splice isn't replay-idempotent anyway, so the journal correctly waits
 for true-B, which will journal the resulting body STATE, not the diff). So author against a
 freshly-ingested graph; emit reproduces the file byte-exact except the authored change.
+
+Fork-1(a) holds for memory authoring too in this cut: the `.md` stays the source and is
+re-emitted on each author, so graph-edits and hand-edits coexist safely (no clobber).
+True-B for memory — journaling the section STATE so the `.md` becomes a pure projection
+that survives a db rebuild — is the explicit M3 on-ramp, deferred until the editing
+surface is trusted (mirrors the code path's deferral).
 """
 
 from pathlib import Path
@@ -26,6 +38,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from cjm_context_graph_layer.ops import graph_task
 from cjm_context_graph_primitives.provenance import SourceRef
 from cjm_dev_graph_schema.vocab import DevNodeKinds
+from cjm_markdown_decompose_core.extract import note_from_file
 from cjm_markdown_decompose_core.project import note_text_from_graph_nodes
 from cjm_notebook_decompose_core.project import render_notebook
 from cjm_python_decompose_core.emit import emit_module_from_nodes
@@ -38,6 +51,7 @@ _SLOTS = {
     DevNodeKinds.CODE_SYMBOL: ("body", "module"),    # a top-level symbol's body -> a .py module
     DevNodeKinds.CODE_TEXT: ("text", "module"),      # a non-def region's text -> a .py module
     DevNodeKinds.CELL: ("source", "notebook"),       # a notebook cell's source -> an .ipynb
+    DevNodeKinds.SECTION: ("raw", "note"),           # a memory section's verbatim span -> a .md note (M2a)
 }
 
 
@@ -66,6 +80,8 @@ def _slot_for(node: Any) -> Optional[Tuple[str, str, str]]:
         return "body", "module", DevNodeKinds.CODE_SYMBOL
     if "text" in p and "region_key" in p:
         return "text", "module", DevNodeKinds.CODE_TEXT
+    if "note_id" in p and "anchor" in p:
+        return "raw", "note", DevNodeKinds.SECTION
     return None
 
 
@@ -198,29 +214,76 @@ async def read_node(
     return {"error": "node has no readable verbatim content", "node_id": node_id, "label": label}
 
 
+async def section_divergence(
+    gx: GraphHandle,
+    note_id: str,                       # The Note whose graph state to compare against its file
+    *,
+    file_path: Optional[str] = None,    # Override the file path (else the Note's stored `path`)
+) -> Dict[str, Any]:  # {in_sync, changed, added, removed, ...} or {error}
+    """Read-only: detect, at SECTION grain, where a note's `.md` has drifted from the graph.
+
+    The memory analogue of `source_check`'s whole-module drift membrane, at the finer
+    section grain M1 unlocked: re-decompose the file lossless and compare each section's
+    on-disk `raw` span with the graph's STORED `raw`, reporting `changed` / `added` /
+    `removed` anchors. The atomic DETECTION primitive both the deferred memory-true-B
+    reconcile and the code-contributor merge need (which sections changed out-of-band).
+
+    A PURE diagnostic — no graph mutation, no file write, and deliberately NO who-wins
+    policy (that merge IS the deferred true-B reconcile; this only surfaces the drift,
+    mirroring `source_check`'s 'surfaced, never silently overridden')."""
+    node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=note_id)
+    if node is None:
+        return {"error": f"no note `{note_id}`", "note_id": note_id}
+    if _label_of(node) != DevNodeKinds.NOTE:
+        return {"error": "not a Note", "note_id": note_id, "label": _label_of(node)}
+    path = file_path or F.prop(node, "path")
+    if not path or not Path(path).exists():
+        return {"error": f"no file at `{path}`", "note_id": note_id, "path": path}
+
+    graph_secs = {str(F.props(w).get("anchor")): str(F.props(w).get("raw") or "")
+                  for w in await _note_section_wires(gx, note_id)}
+    file_note = note_from_file(path, corpus_root=str(Path(path).parent), lossless=True)
+    file_secs = {s.anchor: s.raw for s in file_note.sections}
+
+    changed = sorted(a for a in graph_secs.keys() & file_secs.keys()
+                     if graph_secs[a] != file_secs[a])
+    added = sorted(file_secs.keys() - graph_secs.keys())     # in the file, not yet on-graph
+    removed = sorted(graph_secs.keys() - file_secs.keys())   # on-graph, gone from the file
+    return {"note_id": note_id, "path": path,
+            "in_sync": not (changed or added or removed),
+            "changed": changed, "added": added, "removed": removed,
+            "graph_sections": len(graph_secs), "file_sections": len(file_secs)}
+
+
 async def emit_artifact(
     gx: GraphHandle,
-    module_id: str,        # The CodeModule id (a .py module or a notebook) to emit
+    module_id: str,        # The CodeModule id (a .py module / notebook) or a Note id to emit
     *,
-    write: bool = False,   # Write to the module's path on disk (else just return the text)
+    write: bool = False,   # Write to the container's path on disk (else just return the text)
 ) -> Dict[str, Any]:  # {artifact, artifact_path, text, written} or {error}
-    """Emit a module's canonical artifact FROM THE GRAPH (graph -> .py / .ipynb).
+    """Emit a container's canonical artifact FROM THE GRAPH (graph -> .py / .ipynb / .md).
 
-    The round-trip read leg, standalone: reassemble a module from its stored regions/cells
-    with no mutation — proves the graph is a sufficient source, and (true-B preview) lets
-    a generated file be refreshed from the graph. Detects notebook vs `.py` by whether the
-    module has `Cell` children."""
+    The round-trip read leg, standalone: reassemble the file from its stored
+    regions/cells/sections with no mutation — proves the graph is a sufficient source, and
+    (true-B preview) lets a generated file be refreshed from the graph. Detects a Note
+    (-> `.md` via M1's lossless reconstruction) by label, else notebook vs `.py` by whether
+    the module has `Cell` children."""
     module = await _module_node(gx, module_id)
     if module is None:
         return {"error": f"no module `{module_id}`", "module_id": module_id}
     artifact_path = F.prop(module, "path")
-    cells = await _notebook_cell_wires(gx, module_id)
-    if cells:
-        artifact, text = "notebook", render_notebook(cells)
+    if _label_of(module) == DevNodeKinds.NOTE:
+        secs = await _note_section_wires(gx, module_id)
+        artifact = "note"
+        text = note_text_from_graph_nodes(_as_wire(module, DevNodeKinds.NOTE), secs)
     else:
-        text = emit_module_from_nodes(await _module_region_wires(gx, module_id),
-                                      module_node=module, derive_imports=True)
-        artifact = "module"
+        cells = await _notebook_cell_wires(gx, module_id)
+        if cells:
+            artifact, text = "notebook", render_notebook(cells)
+        else:
+            text = emit_module_from_nodes(await _module_region_wires(gx, module_id),
+                                          module_node=module, derive_imports=True)
+            artifact = "module"
     res = {"module_id": module_id, "artifact": artifact, "artifact_path": artifact_path,
            "emitted_bytes": len(text.encode("utf-8")), "text": text, "written": False}
     if write and artifact_path:
@@ -231,7 +294,7 @@ async def emit_artifact(
 
 async def author(
     gx: GraphHandle,
-    node_id: str,                          # The node whose verbatim slot to author (CodeSymbol / CodeText / Cell)
+    node_id: str,                          # The node whose verbatim slot to author (CodeSymbol / CodeText / Cell / Section)
     *,
     replace: Optional[str] = None,         # Full replacement text (replace mode)
     edit: Optional[Tuple[str, str]] = None,  # (old, new) unique-match splice (edit mode)
@@ -240,8 +303,9 @@ async def author(
 ) -> Dict[str, Any]:  # The write result (incl. error, the emitted artifact path + text)
     """Author a node's verbatim-text slot, then emit its canonical artifact to disk.
 
-    Reads the enclosing module's regions FROM THE GRAPH, applies the edit in memory,
-    reassembles the canonical `.py` (or `.ipynb` for a cell), and writes the file — the
+    Reads the enclosing container's regions FROM THE GRAPH (a CodeModule's regions/cells,
+    or a Note's sections), applies the edit in memory, reassembles the canonical artifact
+    (`.py` / `.ipynb` for a cell / `.md` for a memory section), and writes the file — the
     graph is the editing surface, the file the durable source. Returns the artifact path
     + emitted text (and, on `write=False`, emits without touching disk: a dry-run/preview)."""
     node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=node_id)
@@ -250,7 +314,7 @@ async def author(
     resolved = _slot_for(node)
     if resolved is None:
         return {"error": "node has no authorable verbatim slot (not a top-level CodeSymbol / "
-                         "CodeText / Cell)", "node_id": node_id, "label": _label_of(node),
+                         "CodeText / Cell / Section)", "node_id": node_id, "label": _label_of(node),
                 "written": False}
     slot, artifact, label = resolved
     current = str(F.prop(node, slot, ""))
@@ -258,23 +322,38 @@ async def author(
     if err is not None:
         return {"error": err, "node_id": node_id, "label": label, "slot": slot, "written": False}
 
-    module_id = F.prop(node, "module_id")
-    module = await _module_node(gx, module_id)
-    if module is None:
-        return {"error": f"enclosing module `{module_id}` not found", "node_id": node_id,
+    # Resolve the enclosing container: a CodeModule for code/notebooks, a Note for memory.
+    container_key = "note_id" if artifact == "note" else "module_id"
+    container_id = F.prop(node, container_key)
+    container = await _module_node(gx, container_id)  # get_node — works for a Note too
+    if container is None:
+        return {"error": f"enclosing container `{container_id}` not found", "node_id": node_id,
                 "written": False}
-    artifact_path = F.prop(module, "path")
+    artifact_path = F.prop(container, "path")
 
-    # Read the module's regions/cells from the graph, inject the mutated slot, reassemble.
+    # Read the container's regions/cells/sections from the graph, inject the mutated slot.
     if artifact == "notebook":
-        wires = await _notebook_cell_wires(gx, module_id)
+        wires = await _notebook_cell_wires(gx, container_id)
+    elif artifact == "note":
+        wires = await _note_section_wires(gx, container_id)
+        # The whole note is reconstructed from its sections' `raw`; a non-lossless ingest
+        # (sections without `raw`) would silently truncate it — refuse rather than corrupt.
+        if any(not str(w["properties"].get("raw") or "")
+               for w in wires if w["id"] != node_id):
+            return {"error": "note not lossless-ingested (a section has no `raw` span); "
+                             "re-ingest with lossless=True before authoring", "node_id": node_id,
+                    "label": label, "written": False}
     else:
-        wires = await _module_region_wires(gx, module_id)
+        wires = await _module_region_wires(gx, container_id)
     for w in wires:
         if w["id"] == node_id:
             w["properties"][slot] = new_text
-    emitted = (render_notebook(wires) if artifact == "notebook"
-               else emit_module_from_nodes(wires))
+    if artifact == "notebook":
+        emitted = render_notebook(wires)
+    elif artifact == "note":
+        emitted = note_text_from_graph_nodes(_as_wire(container, DevNodeKinds.NOTE), wires)
+    else:
+        emitted = emit_module_from_nodes(wires)
 
     result = {
         "node_id": node_id, "label": label, "slot": slot, "actor": actor,
@@ -290,6 +369,9 @@ async def author(
         merge: Dict[str, Any] = {slot: new_text}
         if label == DevNodeKinds.CODE_SYMBOL:
             merge["body_hash"] = SourceRef.compute_hash(new_text.encode("utf-8"))
+        elif label == DevNodeKinds.SECTION:
+            # Mirror the extractor: a section's content_hash is over its `raw` span.
+            merge["content_hash"] = SourceRef.compute_hash(new_text.encode("utf-8"))
         await graph_task(gx.queue, gx.graph_id, "update_node", node_id=node_id, properties=merge)
         result["written"] = True
     return result

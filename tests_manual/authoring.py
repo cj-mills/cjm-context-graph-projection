@@ -17,6 +17,13 @@ persistent dev-graph + real repo files are NEVER written):
   D. NOTEBOOK-CELL authoring (temp `.ipynb`): the SAME `author` verb on a `Cell` node —
      the unification (a verbatim-text slot, whatever the node kind); the `.ipynb` reflects
      the edit and the cell round-trips.
+  E. MEMORY-NOTE round-trip (real corpus, read-only): `emit_artifact` a real `.md` note
+     FROM THE GRAPH and assert byte-identical to the file (M1 lossless, the note-emit leg).
+  F. MEMORY-SECTION authoring (temp `.md`, M2a): the SAME `author` verb on a `Section.raw`
+     slot — `replace` + targeted `edit` land in the emitted `.md`, frontmatter + sibling
+     sections stay byte-stable, edits compose, and the authored note round-trips.
+  G. SECTION-SLOT guards: a non-lossless note is refused (reconstruction would truncate);
+     non-unique / absent OLD are refused (the shared targeted-edit safety).
 
 Run in a core env with the substrate runtime + the libs installed -e:
 
@@ -31,11 +38,12 @@ import sys
 import tempfile
 from pathlib import Path
 
-from cjm_context_graph_layer.ops import extend_graph
+from cjm_context_graph_layer.ops import extend_graph, graph_task
 from cjm_dev_graph_schema.identity import (cell_node_id, code_module_node_id,
-                                           code_symbol_node_id, code_text_node_id)
+                                           code_symbol_node_id, code_text_node_id,
+                                           note_node_id, section_node_id)
 
-from cjm_context_graph_projection.authoring import author, emit_artifact
+from cjm_context_graph_projection.authoring import author, emit_artifact, read_slot
 from cjm_context_graph_projection.devgraph import build_dev_graph_elements
 from cjm_context_graph_projection.runtime import open_graph
 from cjm_context_graph_projection.seeds import conceptual_key
@@ -45,6 +53,10 @@ from cjm_python_decompose_core.ingest import corpus_graph_elements
 from cjm_notebook_decompose_core.compose import (decompose_notebook_file,
                                                  module_path_for_notebook)
 from cjm_notebook_decompose_core.ingest import notebook_graph_elements
+
+from cjm_markdown_decompose_core.extract import note_from_file
+from cjm_markdown_decompose_core.ingest import corpus_graph_elements as md_corpus_graph_elements
+from cjm_markdown_decompose_core.sections import PREAMBLE_ANCHOR
 
 REPOS = "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills"
 MEMORY = ("/home/innom-dt/.claude/projects/"
@@ -185,6 +197,111 @@ async def part_d(gx) -> bool:
     return ok
 
 
+async def part_e(gx) -> bool:
+    """E. ROUND-TRIP a real memory note from the graph (read-only, real corpus)."""
+    ok = True
+    note_id = note_node_id("memory-files-retirement-plan")
+    node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=note_id)
+    ok &= _check("a real memory note is on-graph (lossless ingest)", node is not None)
+    if node is None:
+        return ok
+    em = await emit_artifact(gx, note_id, write=False)
+    ok &= _check("emit_artifact routes a Note as a `.md` artifact", em.get("artifact") == "note")
+    path = em.get("artifact_path")
+    disk = Path(path).read_text() if path else ""
+    ok &= _check("emit reproduces the real .md note BYTE-EXACT from the graph (M1 lossless)",
+                 not em.get("error") and bool(disk) and em.get("text") == disk)
+    return ok
+
+
+async def part_f(gx) -> bool:
+    """F. AUTHOR a memory section + EMIT to a temp `.md` (the SAME verb on a Section slot)."""
+    ok = True
+    with tempfile.TemporaryDirectory() as tmp:
+        f = Path(tmp) / "demo_note.md"
+        original = ("---\n"
+                    "name: demo-note\n"
+                    "description: A demo memory note.\n"
+                    "metadata:\n"
+                    "  type: project\n"
+                    "---\n\n"
+                    "Preamble line.\n\n"
+                    "## Alpha\n\n"
+                    "Alpha body.\n\n"
+                    "## Beta\n\n"
+                    "Beta body.\n")
+        f.write_text(original)
+        note = note_from_file(str(f), corpus_root=tmp, lossless=True)
+        nodes, edges = md_corpus_graph_elements([note])
+        await extend_graph(gx.queue, gx.graph_id, nodes, edges)
+
+        note_id = note_node_id("demo-note")
+        alpha_id = section_node_id(note_id, "alpha")
+        beta_id = section_node_id(note_id, "beta")
+
+        # read_slot delivers the section's verbatim raw (the --editor pop input).
+        rs = await read_slot(gx, alpha_id)
+        ok &= _check("read_slot returns the section's heading-inclusive `raw` span",
+                     rs.get("slot") == "raw" and rs.get("text", "").startswith("## Alpha"))
+
+        # replace alpha's whole raw span, written to the temp .md.
+        r1 = await author(gx, alpha_id, replace="## Alpha\n\nAlpha body, EDITED.\n\n", write=True)
+        ok &= _check("author --replace wrote the temp .md", r1.get("written"))
+        ok &= _check("artifact routed as a note", r1.get("artifact") == "note")
+        after1 = f.read_text()
+        ok &= _check("replaced section landed on disk", "Alpha body, EDITED." in after1)
+        ok &= _check("frontmatter is byte-stable after author",
+                     after1.startswith("---\nname: demo-note\n"))
+        ok &= _check("untouched sibling section `Beta` is byte-stable",
+                     "## Beta\n\nBeta body.\n" in after1 and "Preamble line.\n" in after1)
+
+        # targeted edit on the OTHER section (re-emits the whole note from graph state).
+        r2 = await author(gx, beta_id, edit=("Beta body.", "Beta body, EDITED."), write=True)
+        ok &= _check("author --edit wrote the temp .md", r2.get("written"))
+        after2 = f.read_text()
+        ok &= _check("targeted edit landed + replace edit persisted (graph carries both)",
+                     "Beta body, EDITED." in after2 and "Alpha body, EDITED." in after2)
+
+        # round-trip: re-decompose the authored note -> render == file (byte-exact, idempotent).
+        from cjm_markdown_decompose_core.project import render_note_text
+        note2 = note_from_file(str(f), corpus_root=tmp, lossless=True)
+        ok &= _check("authored note round-trips (re-decompose -> render == file)",
+                     render_note_text(note2.frontmatter_raw, note2.sections) == after2)
+    return ok
+
+
+async def part_g(gx) -> bool:
+    """G. Section-slot guards: refuse a non-lossless note (would truncate); OLD-match safety."""
+    ok = True
+    with tempfile.TemporaryDirectory() as tmp:
+        # A NON-lossless, multi-section note: siblings carry no `raw` span.
+        nl = Path(tmp) / "nonlossless.md"
+        nl.write_text("---\nname: nonlossless-note\n---\n\n"
+                      "## Gamma\n\nGamma body.\n\n## Epsilon\n\nEpsilon body.\n")
+        note = note_from_file(str(nl), corpus_root=tmp, with_sections=True, lossless=False)
+        n1, e1 = md_corpus_graph_elements([note])
+        await extend_graph(gx.queue, gx.graph_id, n1, e1)
+        gamma_id = section_node_id(note_node_id("nonlossless-note"), "gamma")
+        res = await author(gx, gamma_id, replace="## Gamma\n\nx\n\n", write=False)
+        ok &= _check("authoring a NON-lossless note is refused (would truncate siblings)",
+                     bool(res.get("error")) and "lossless" in res.get("error", ""))
+
+        # OLD-match ergonomics on a lossless section (shared _apply).
+        ll = Path(tmp) / "lossless.md"
+        ll.write_text("---\nname: lossless-note\n---\n\n## Delta\n\nrepeat repeat tail.\n")
+        note2 = note_from_file(str(ll), corpus_root=tmp, lossless=True)
+        n2, e2 = md_corpus_graph_elements([note2])
+        await extend_graph(gx.queue, gx.graph_id, n2, e2)
+        delta_id = section_node_id(note_node_id("lossless-note"), "delta")
+        dup = await author(gx, delta_id, edit=("repeat", "X"), write=False)
+        ok &= _check("non-unique OLD is refused (section slot)",
+                     bool(dup.get("error")) and "unique" in dup.get("error", ""))
+        miss = await author(gx, delta_id, edit=("zzz-nope", "x"), write=False)
+        ok &= _check("absent OLD is refused (section slot)",
+                     bool(miss.get("error")) and "not found" in miss.get("error", ""))
+    return ok
+
+
 def _parses(text: str) -> bool:
     try:
         ast.parse(text)
@@ -214,6 +331,12 @@ async def main() -> int:
             ok &= await part_c(gx)
             print("D — notebook-cell authoring (temp .ipynb, same verb):")
             ok &= await part_d(gx)
+            print("E — round-trip a real memory note from the graph (read-only):")
+            ok &= await part_e(gx)
+            print("F — author a memory section + emit to disk (temp .md, M2a):")
+            ok &= await part_f(gx)
+            print("G — section-slot guards (non-lossless refusal, OLD-match safety):")
+            ok &= await part_g(gx)
 
     print("\nRESULT:", "ALL PASS" if ok else "FAILURES")
     return 0 if ok else 1
