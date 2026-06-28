@@ -409,6 +409,22 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             lines.append(f"  ↳ absorbed `{a['anchor']}` of `{a['slug']}` "
                          f"({a['prior_bytes']}→{a['new_bytes']} B; backup {a['backup']})")
         return "\n".join(lines)
+    if kind == "structure":
+        if obj.get("error"):
+            return f"⚠ {obj['error']}"
+        status = "written" if obj.get("written") else "dry-run"
+        if "sections" in obj:  # new-note
+            return f"**{status}** created note `{obj['slug']}` ({obj['sections']} sections) → `{obj.get('path')}`"
+        bits = [f"`{obj['slug']}`"]
+        if obj.get("added"):
+            bits.append(f"+section {obj['added']}")
+        if obj.get("updated"):
+            bits.append(f"~boundary {obj['updated']}")
+        if obj.get("removed"):
+            bits.append(f"removed(reported, not applied) {obj['removed']}")
+        if obj.get("frontmatter_changed"):
+            bits.append("frontmatter~")
+        return f"**{status}** " + " · ".join(bits)
     return json.dumps(obj, indent=2, default=str)
 
 

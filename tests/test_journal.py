@@ -79,6 +79,16 @@ def test_section_append_roundtrip_carries_replaces(tmp_path):
     assert ops[1]["args"]["replaces"] == "## Beta\n\nnew\n"  # prior state recorded for undo
 
 
+def test_render_structure_human():
+    nn = render("structure", {"slug": "n", "path": "/n.md", "sections": 3, "written": True}, "human")
+    assert "created note" in nn and "n" in nn
+    add = render("structure", {"slug": "n", "added": ["gamma"], "updated": ["beta"],
+                               "removed": [], "frontmatter_changed": False, "written": True}, "human")
+    assert "gamma" in add and "beta" in add
+    err = render("structure", {"error": "no note `x`", "written": False}, "human")
+    assert "no note" in err
+
+
 def test_render_reconcile_memory_human():
     clean = render("reconcile-memory", {"clean": True, "notes_with_drift": 0,
                                         "absorbed_count": 0, "drift": [], "absorbed": []}, "human")

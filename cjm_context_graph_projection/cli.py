@@ -26,6 +26,7 @@ from .journal import append_write, replay_journal
 from .module_ops import delete_module, new_module, regroup, rename_module
 from .oracle import run_version_oracle
 from .reconcile import reconcile_memory
+from .structure import add_section, new_note
 from .projection import explore, get_schema, relevant, show, state
 from .onboarding import project_onboarding
 from .readme import project_readme
@@ -223,6 +224,16 @@ async def _dispatch(args) -> int:
                                          absorb_all=args.absorb_all, journal_path=args.journal_path,
                                          backup_dir=args.backup_dir)
             print(render("reconcile-memory", res, args.format))
+            return 1 if res.get("error") else 0
+        elif args.command == "add-section":
+            raw = Path(args.content_file).read_text() if args.content_file else args.content
+            res = await add_section(gx, args.slug, raw, after=args.after, write=not args.no_write)
+            print(render("structure", res, args.format))
+            return 1 if res.get("error") else 0
+        elif args.command == "new-note":
+            content = Path(args.content_file).read_text() if args.content_file else args.content
+            res = await new_note(gx, args.path, content, write=not args.no_write)
+            print(render("structure", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "move":
             res = await move(gx, args.symbol_id, args.target_module_id, write=not args.no_write)
@@ -457,6 +468,22 @@ def main() -> int:
     p_au.add_argument("--no-write", action="store_true",
                       help="Dry run: emit + print the artifact, don't touch disk")
     p_au.add_argument("--actor", default="agent:session")
+
+    p_asec = sub.add_parser("add-section",
+                            help="M2 gradient: add a section to a note (append, or --after ANCHOR), born on-graph")
+    p_asec.add_argument("slug", help="The note to add to (by slug)")
+    g_asec = p_asec.add_mutually_exclusive_group(required=True)
+    g_asec.add_argument("--content", help="The new section's heading-inclusive text (## H\\n\\n...)")
+    g_asec.add_argument("--content-file", help="Read the new section's text from a file")
+    p_asec.add_argument("--after", default=None, help="Insert after this anchor (default: append at end)")
+    p_asec.add_argument("--no-write", action="store_true", help="Dry run: apply to graph, don't write the .md")
+
+    p_nn = sub.add_parser("new-note", help="M2 gradient: create a new memory note, born on-graph")
+    p_nn.add_argument("--path", required=True, help="Where to write the new .md")
+    g_nn = p_nn.add_mutually_exclusive_group(required=True)
+    g_nn.add_argument("--content", help="The full note text (frontmatter + body)")
+    g_nn.add_argument("--content-file", help="Read the full note text from a file")
+    p_nn.add_argument("--no-write", action="store_true", help="Dry run: parse + report, don't write/ingest")
 
     p_rc = sub.add_parser("reconcile-memory",
                           help="M2b soak: report (dry-run) or --absorb out-of-band .md section drift")
