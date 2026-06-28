@@ -214,6 +214,25 @@ async def read_node(
     return {"error": "node has no readable verbatim content", "node_id": node_id, "label": label}
 
 
+async def graph_section_raws(
+    gx: GraphHandle,
+    note_id: str,  # The enclosing Note id
+) -> Dict[str, str]:  # {anchor: verbatim raw span} as STORED on the graph
+    """Each of a note's sections' on-graph `raw` span, keyed by anchor (the divergence/
+    reconcile read leg)."""
+    return {str(F.props(w).get("anchor")): str(F.props(w).get("raw") or "")
+            for w in await _note_section_wires(gx, note_id)}
+
+
+def file_section_raws(
+    path: str,  # The note's `.md` file path
+) -> Dict[str, str]:  # {anchor: verbatim raw span} as currently ON DISK (re-decomposed lossless)
+    """Each of a note's sections' `raw` span as the FILE currently decomposes (the other
+    side of the divergence/reconcile diff)."""
+    note = note_from_file(path, corpus_root=str(Path(path).parent), lossless=True)
+    return {s.anchor: s.raw for s in note.sections}
+
+
 async def section_divergence(
     gx: GraphHandle,
     note_id: str,                       # The Note whose graph state to compare against its file
@@ -240,10 +259,8 @@ async def section_divergence(
     if not path or not Path(path).exists():
         return {"error": f"no file at `{path}`", "note_id": note_id, "path": path}
 
-    graph_secs = {str(F.props(w).get("anchor")): str(F.props(w).get("raw") or "")
-                  for w in await _note_section_wires(gx, note_id)}
-    file_note = note_from_file(path, corpus_root=str(Path(path).parent), lossless=True)
-    file_secs = {s.anchor: s.raw for s in file_note.sections}
+    graph_secs = await graph_section_raws(gx, note_id)
+    file_secs = file_section_raws(path)
 
     changed = sorted(a for a in graph_secs.keys() & file_secs.keys()
                      if graph_secs[a] != file_secs[a])
@@ -359,8 +376,12 @@ async def author(
         "node_id": node_id, "label": label, "slot": slot, "actor": actor,
         "artifact": artifact, "artifact_path": artifact_path,
         "unchanged": new_text == current, "emitted_bytes": len(emitted.encode("utf-8")),
-        "written": False, "emitted_text": emitted,
+        "written": False, "emitted_text": emitted, "new_text": new_text,
     }
+    if artifact == "note":
+        # The durable section identity (slug, anchor) the journal records for M2b's shadow.
+        result["note_slug"] = F.prop(container, "slug")
+        result["anchor"] = F.prop(node, "anchor")
     if write and artifact_path:
         Path(artifact_path).write_text(emitted)
         # Persist the slot change INTO the graph node too, so the graph stays consistent

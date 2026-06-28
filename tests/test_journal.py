@@ -58,3 +58,34 @@ def test_render_link_human_and_error():
     err = render("link", {"error": "missing node(s): ['x']", "written": False}, "human")
     assert "missing node(s)" in err
     assert render("link", ok, "agent").strip().startswith("{")  # agent form = JSON
+
+
+def test_section_verb_is_journaled():
+    from cjm_context_graph_projection.journal import JOURNAL_VERBS
+    assert "section" in JOURNAL_VERBS  # M2b: memory section raw STATE is durable/replayable
+
+
+def test_section_append_roundtrip_carries_replaces(tmp_path):
+    p = str(tmp_path / "writes.jsonl")
+    # a deliberate author op + a self-describing reconcile:absorb op (carries `replaces`).
+    assert append_write(p, "section", {"slug": "n", "anchor": "beta",
+                                       "raw": "## Beta\n\nnew\n", "actor": "agent:session"}) is True
+    assert append_write(p, "section", {"slug": "n", "anchor": "beta", "raw": "## Beta\n\nfile\n",
+                                       "actor": "reconcile:absorb",
+                                       "replaces": "## Beta\n\nnew\n"}) is True
+    ops = read_journal(p)
+    assert [o["verb"] for o in ops] == ["section", "section"]
+    assert ops[1]["args"]["actor"] == "reconcile:absorb"
+    assert ops[1]["args"]["replaces"] == "## Beta\n\nnew\n"  # prior state recorded for undo
+
+
+def test_render_reconcile_memory_human():
+    clean = render("reconcile-memory", {"clean": True, "notes_with_drift": 0,
+                                        "absorbed_count": 0, "drift": [], "absorbed": []}, "human")
+    assert "clean" in clean
+    drifty = render("reconcile-memory", {"clean": False, "notes_with_drift": 1, "absorbed_count": 1,
+        "drift": [{"slug": "n", "path": "/n.md", "added": [], "removed": [],
+                   "changed": [{"anchor": "beta", "graph": "old", "file": "new"}]}],
+        "absorbed": [{"slug": "n", "anchor": "beta", "backup": "/n.md.bak",
+                      "prior_bytes": 3, "new_bytes": 3}]}, "human")
+    assert "beta" in drifty and "absorbed" in drifty

@@ -25,6 +25,7 @@ from .factlayer import note_alias_map
 from .journal import append_write, replay_journal
 from .module_ops import delete_module, new_module, regroup, rename_module
 from .oracle import run_version_oracle
+from .reconcile import reconcile_memory
 from .projection import explore, get_schema, relevant, show, state
 from .onboarding import project_onboarding
 from .readme import project_readme
@@ -208,6 +209,20 @@ async def _dispatch(args) -> int:
             res = await author(gx, args.node_id, replace=replace, edit=edit,
                                actor=args.actor, write=not args.no_write)
             print(render("author", res, args.format))
+            # M2b shadow: a memory-section author also journals its raw STATE (the .md stays the
+            # ingest source for now; the journal shadows + soaks). Code/notebook authoring stays
+            # un-journaled (Fork-1(a)). Skip no-op edits; append_write dedups identical states.
+            if (res.get("artifact") == "note" and args.journal_path
+                    and res.get("written") and not res.get("unchanged")):
+                append_write(args.journal_path, "section",
+                             {"slug": res.get("note_slug"), "anchor": res.get("anchor"),
+                              "raw": res.get("new_text"), "actor": args.actor})
+            return 1 if res.get("error") else 0
+        elif args.command == "reconcile-memory":
+            res = await reconcile_memory(gx, note_slug=args.note, absorb_anchors=args.absorb,
+                                         absorb_all=args.absorb_all, journal_path=args.journal_path,
+                                         backup_dir=args.backup_dir)
+            print(render("reconcile-memory", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "move":
             res = await move(gx, args.symbol_id, args.target_module_id, write=not args.no_write)
@@ -442,6 +457,16 @@ def main() -> int:
     p_au.add_argument("--no-write", action="store_true",
                       help="Dry run: emit + print the artifact, don't touch disk")
     p_au.add_argument("--actor", default="agent:session")
+
+    p_rc = sub.add_parser("reconcile-memory",
+                          help="M2b soak: report (dry-run) or --absorb out-of-band .md section drift")
+    p_rc.add_argument("--note", default=None, help="Restrict to one note (by slug); else the whole corpus")
+    p_rc.add_argument("--absorb", nargs="*", metavar="ANCHOR", default=None,
+                      help="Absorb these changed anchors into the journal (file-wins); needs --journal-path")
+    p_rc.add_argument("--absorb-all", action="store_true",
+                      help="Absorb ALL changed sections in scope (needs --journal-path)")
+    p_rc.add_argument("--backup-dir", default=None,
+                      help="Snapshot affected .md files here before absorbing (default: alongside the file)")
 
     p_em = sub.add_parser("emit",
                           help="Emit a container's canonical artifact FROM THE GRAPH (graph -> .py/.ipynb/.md)")

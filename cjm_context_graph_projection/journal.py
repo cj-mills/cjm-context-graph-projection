@@ -22,10 +22,13 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from .runtime import GraphHandle
-from .write import alias, assert_value, decide, link
+from .write import alias, assert_value, author_section, decide, link
 
 # The write verbs the journal records + replays (keyed by the op `verb` field).
-JOURNAL_VERBS = ("decide", "alias", "assert", "link")
+# `section` = M2b: a memory section's verbatim `raw` STATE (born-on-graph authoring; the .md
+# becomes a projection). Replayed via update_node, so a drifted node's content-hash guard
+# (which a re-extend would trip) is sidestepped.
+JOURNAL_VERBS = ("decide", "alias", "assert", "link", "section")
 
 
 def read_journal(
@@ -92,6 +95,12 @@ async def replay_journal(
         elif verb == "link":
             await link(gx, a["source_id"], a["target_id"], a["relation"],
                        actor=a.get("actor", "agent:session"))
+        elif verb == "section":
+            # M2b: re-apply a section's verbatim raw STATE (update_node; idempotent). Replays
+            # AFTER decomposition built the section from the `.md`; a missing section (the file
+            # dropped it) is a tolerated no-op. The audit-only `replaces`/ts fields are ignored.
+            await author_section(gx, a["slug"], a["anchor"], a["raw"],
+                                 actor=a.get("actor", "agent:session"))
         else:
             counts["skipped"] += 1
             continue

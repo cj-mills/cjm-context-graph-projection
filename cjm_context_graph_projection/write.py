@@ -19,9 +19,10 @@ from typing import Any, Dict, List, Optional
 
 from cjm_context_graph_layer.grammar import make_edge
 from cjm_context_graph_layer.ops import extend_graph, graph_task
+from cjm_context_graph_primitives.provenance import SourceRef
 from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.aliases import resolve_subject_id
-from cjm_dev_graph_schema.identity import note_node_id
+from cjm_dev_graph_schema.identity import note_node_id, section_node_id
 from cjm_dev_graph_schema.nodes import (AssertionNode, DecisionNode, EntityNode,
                                         FactSlotNode, SessionNode)
 from cjm_dev_graph_schema.vocab import DevRelations
@@ -263,3 +264,35 @@ async def link(
     return {"source_id": source_id, "target_id": target_id, "relation": relation,
             "actor": actor, "edge_id": edge["id"], "edges_added": res.edges_added,
             "written": True}
+
+
+async def author_section(
+    gx: GraphHandle,
+    slug: str,                     # The note's stable slug (frontmatter `name`) — durable identity
+    anchor: str,                   # The section's heading anchor ("_preamble" for the level-0 span)
+    raw: str,                      # The section's verbatim heading-inclusive `raw` STATE (not a diff)
+    *,
+    actor: str = "agent:session",  # Who authored it (deliberate `author` vs `reconcile:absorb`)
+) -> Dict[str, Any]:  # The write result (incl. error when the section is absent)
+    """Apply a memory section's verbatim `raw` STATE to the graph — the born-on-graph leg
+    behind M2b (true-B for memory): new memory content lives in the write JOURNAL and the
+    `.md` becomes a projection of it. The journaled, replayable verb behind shadow authoring.
+
+    The GRAPH-ONLY mutation (no file emit — that is `author`/`emit`'s job, or the `.md` is the
+    generated projection under cutover): sets the Section node's `raw` (+ content_hash) via
+    `update_node`, NOT `extend_graph`. Deliberate — a plain re-extend of a changed node raises
+    the content-hash integrity guard, so the journaled STATE must be applied by mutation (the
+    section-divergence probe characterized exactly this). Replay-idempotent: re-applying the
+    same raw is a verified no-op. The section MUST already exist — minting a NEW section/note is
+    the deferred M2a gradient; a missing section is reported, never silently created."""
+    note_id = note_node_id(slug)
+    section_id = section_node_id(note_id, anchor)
+    existing = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=section_id)
+    if existing is None:
+        return {"error": f"no section `{anchor}` on note `{slug}` (new-section authoring is deferred)",
+                "slug": slug, "anchor": anchor, "written": False}
+    unchanged = str(F.prop(existing, "raw", "")) == raw
+    merge = {"raw": raw, "content_hash": SourceRef.compute_hash(raw.encode("utf-8"))}
+    await graph_task(gx.queue, gx.graph_id, "update_node", node_id=section_id, properties=merge)
+    return {"slug": slug, "anchor": anchor, "section_id": section_id, "actor": actor,
+            "unchanged": unchanged, "written": True}

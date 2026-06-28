@@ -391,6 +391,24 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                 arrow = "→" if n["direction"] == "out" else "←"
                 lines.append(f"- {arrow} _{n['relation']}_ {_line(n['node'])[2:]}")
         return "\n".join(lines)
+    if kind == "reconcile-memory":
+        if obj.get("error"):
+            return f"**error:** {obj['error']}"
+        if obj.get("clean"):
+            return "**reconcile-memory:** clean — no `.md`<->graph section drift"
+        lines = [f"**reconcile-memory** — {obj['notes_with_drift']} note(s) with drift, "
+                 f"{obj['absorbed_count']} section(s) absorbed"]
+        for d in obj.get("drift", []):
+            lines.append(f"- `{d['slug']}` — changed {[c['anchor'] for c in d['changed']]}"
+                         + (f" · added {d['added']}" if d['added'] else "")
+                         + (f" · removed {d['removed']}" if d['removed'] else ""))
+            for c in d["changed"]:
+                lines += [f"    · `{c['anchor']}` graph: {_short(c['graph'], 90)}",
+                          f"    · `{c['anchor']}`  file: {_short(c['file'], 90)}"]
+        for a in obj.get("absorbed", []):
+            lines.append(f"  ↳ absorbed `{a['anchor']}` of `{a['slug']}` "
+                         f"({a['prior_bytes']}→{a['new_bytes']} B; backup {a['backup']})")
+        return "\n".join(lines)
     return json.dumps(obj, indent=2, default=str)
 
 
