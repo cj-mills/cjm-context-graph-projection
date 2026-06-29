@@ -80,19 +80,22 @@ SUBSTRATE_HOW_TO_QUERY = (
 
 def _load_seeds(
     config_path: Optional[str],  # JSON config overriding the dev seeds (else built-in defaults)
-) -> Tuple[List[str], List[Tuple[str, str]], str, Dict[str, str]]:  # (push_slugs, landmarks, arc_lead, push_hooks)
+) -> Tuple[List[str], List[Tuple[str, str]], str, str, Dict[str, str]]:  # (push_slugs, landmarks, arc_lead, how_to_query, push_hooks)
     """Load the onboarding seeds, an optional JSON config overriding the dev defaults.
 
     The promotion loop edits the JSON (data), not this module (code): keys `push_slugs`
     (each a slug string OR `{slug, hook}` — the hook a terse COMPLETE push statement),
-    `landmarks` (list of [label, hint]), `arc_lead`; each optional."""
+    `landmarks` (list of [label, hint]), `arc_lead`, `how_to_query` (the substrate
+    'how to query' prose — names the `cg-read`/`cg-write` wrappers + the journal
+    guardrails); each optional, each falling back to its in-code default."""
+    raw_push, landmarks = DEFAULT_PUSH_SLUGS, DEFAULT_LANDMARKS
+    arc_lead, how_to_query = DEFAULT_ARC_LEAD, SUBSTRATE_HOW_TO_QUERY
     if config_path and Path(config_path).exists():
         cfg = json.loads(Path(config_path).read_text())
         raw_push = cfg.get("push_slugs", DEFAULT_PUSH_SLUGS)
         landmarks = [tuple(x) for x in cfg.get("landmarks", DEFAULT_LANDMARKS)]
         arc_lead = cfg.get("arc_lead", DEFAULT_ARC_LEAD)
-    else:
-        raw_push, landmarks, arc_lead = DEFAULT_PUSH_SLUGS, DEFAULT_LANDMARKS, DEFAULT_ARC_LEAD
+        how_to_query = cfg.get("how_to_query", SUBSTRATE_HOW_TO_QUERY)
     slugs: List[str] = []
     hooks: Dict[str, str] = {}
     for item in raw_push:
@@ -102,7 +105,7 @@ def _load_seeds(
                 hooks[item["slug"]] = item["hook"]
         else:
             slugs.append(item)
-    return slugs, landmarks, arc_lead, hooks
+    return slugs, landmarks, arc_lead, how_to_query, hooks
 
 
 def _load_mirror_paths(
@@ -153,14 +156,14 @@ async def project_onboarding(
     signal). The landmark map is the curated seeds AUGMENTED with an auto-derived
     whole-graph facet view (`graph_overview` — by-kind coverage + hub anchors), so
     the territory stays current without hand-seeding every area."""
-    push_slugs, landmarks, arc_lead, push_hooks = _load_seeds(config_path)
+    push_slugs, landmarks, arc_lead, how_to_query, push_hooks = _load_seeds(config_path)
     res = await graph_task(gx.queue, gx.graph_id, "query_nodes",
                            query=NodeQuery(label="Note").to_dict())
     notes = [note_view_from_graph_node(n) for n in (res.nodes or [])]
     coverage = _render_coverage(await graph_overview(gx))
     markdown = render_onboarding_surface(
         notes, push_slugs, landmarks, arc_lead,
-        how_to_query=SUBSTRATE_HOW_TO_QUERY, push_hooks=push_hooks, coverage=coverage)
+        how_to_query=how_to_query, push_hooks=push_hooks, coverage=coverage)
     present = {n.slug for n in notes}
     return {
         "markdown": markdown,

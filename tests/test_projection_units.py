@@ -6,7 +6,9 @@ from cjm_context_graph_projection.projection import (
     _TEXT_FIELDS, _facet_axis_value, _facet_breakdown, _haystack, _terms,
     node_summary, node_title,
 )
-from cjm_context_graph_projection.onboarding import _render_coverage
+from cjm_context_graph_projection.onboarding import (
+    SUBSTRATE_HOW_TO_QUERY, _load_seeds, _render_coverage,
+)
 from cjm_context_graph_projection.render import _short, render
 
 
@@ -145,6 +147,23 @@ def test_render_coverage_by_kind_and_hub_handles():
     assert max(len(line) for line in out.splitlines()) < 200  # bounded lines
     # No hubs -> just the by-kind line (e.g. a fresh/empty graph).
     assert "Hub anchors" not in _render_coverage({"by_kind": [{"kind": "Note", "count": 1}], "hubs": []})
+
+
+def test_load_seeds_how_to_query_overrides_per_key(tmp_path):
+    # The substrate 'how to query' prose is now a config-overridable seed (data,
+    # not code) — the same default-in-code / override-in-JSON contract as arc_lead.
+    # No config -> falls back to the in-code default.
+    *_, how_to_query, _ = _load_seeds(None)
+    assert how_to_query == SUBSTRATE_HOW_TO_QUERY
+    # Config supplying `how_to_query` -> that prose wins.
+    cfg = tmp_path / "onboarding.config.json"
+    cfg.write_text(json.dumps({"how_to_query": "## Q\n- use `cg-write`"}))
+    *_, how_to_query, _ = _load_seeds(str(cfg))
+    assert how_to_query == "## Q\n- use `cg-write`"
+    # Config WITHOUT the key -> per-key fallback (override one seed, keep the rest).
+    cfg.write_text(json.dumps({"arc_lead": "LEAD"}))
+    _push, _landmarks, arc_lead, how_to_query, _hooks = _load_seeds(str(cfg))
+    assert arc_lead == "LEAD" and how_to_query == SUBSTRATE_HOW_TO_QUERY
 
 
 def test_render_explore_complete_vs_refacet():
