@@ -105,6 +105,20 @@ def _load_seeds(
     return slugs, landmarks, arc_lead, hooks
 
 
+def _load_mirror_paths(
+    config_path: Optional[str],  # JSON config (else no mirrors)
+) -> List[str]:
+    """Extra paths the surface is ALSO written to on `--write` (config data, not code).
+
+    The M3 cutover: the harness-auto-loaded `MEMORY.md` becomes a GENERATED mirror
+    of the projected surface, so one `onboarding --write` keeps both in sync. Key
+    `mirror_paths` (list of paths) in the JSON; absent -> no mirrors."""
+    if config_path and Path(config_path).exists():
+        cfg = json.loads(Path(config_path).read_text())
+        return list(cfg.get("mirror_paths", []))
+    return []
+
+
 def _short(text: Any, limit: int = 70) -> str:
     """Cap a hub title to one bounded line."""
     s = " ".join(str(text or "").split())
@@ -152,4 +166,5 @@ async def project_onboarding(
         "markdown": markdown,
         "note_count": len(notes),
         "missing_push": [s for s in push_slugs if s not in present],
+        "mirror_paths": _load_mirror_paths(config_path),
     }

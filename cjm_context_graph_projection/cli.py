@@ -312,17 +312,23 @@ async def _dispatch(args) -> int:
             return 1 if res.get("error") else 0
         elif args.command == "onboarding":
             res = await project_onboarding(gx, config_path=args.config)
-            path = Path(args.out)
+            # --out is the canonical surface; mirror_paths (config) are kept in sync
+            # too (the M3 cutover: the auto-loaded MEMORY.md is a generated mirror).
+            targets = [Path(args.out)] + [Path(p) for p in res.get("mirror_paths", [])]
             if args.check:
-                cur = path.read_text() if path.exists() else None
-                drift = cur != res["markdown"]
-                print(f"onboarding: drift={drift} present={cur is not None} "
-                      f"notes={res['note_count']} missing_push={res['missing_push']} -> {path}")
+                drift = any((t.read_text() if t.exists() else None) != res["markdown"]
+                            for t in targets)
+                present = all(t.exists() for t in targets)
+                print(f"onboarding: drift={drift} present={present} "
+                      f"notes={res['note_count']} missing_push={res['missing_push']} "
+                      f"-> {', '.join(str(t) for t in targets)}")
                 return 1 if drift else 0
             if args.write:
-                path.write_text(res["markdown"])
+                for t in targets:
+                    t.write_text(res["markdown"])
                 print(f"onboarding: wrote {len(res['markdown'].encode())} bytes "
-                      f"notes={res['note_count']} missing_push={res['missing_push']} -> {path}")
+                      f"notes={res['note_count']} missing_push={res['missing_push']} "
+                      f"-> {', '.join(str(t) for t in targets)}")
                 return 0
             # Default: print the surface verbatim (the viewer — `onboarding > file` is faithful).
             sys.stdout.write(res["markdown"])
