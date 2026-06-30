@@ -29,7 +29,7 @@ from .module_ops import delete_module, new_module, regroup, rename_module
 from .oracle import run_version_oracle
 from .reconcile import reconcile_memory
 from .structure import add_section, new_note
-from .projection import explore, get_schema, relevant, show, state
+from .projection import explore, get_schema, locate, relevant, show, state
 from .onboarding import project_onboarding
 from .readme import project_readme
 from .rename_ops import rename_symbol
@@ -153,6 +153,8 @@ async def _dispatch(args) -> int:
             print(render("explore", res, args.format))
         elif args.command == "show":
             print(render("show", await show(gx, args.node_id, depth=args.depth), args.format))
+        elif args.command == "locate":
+            print(render("locate", await locate(gx, args.term, limit=args.limit), args.format))
         elif args.command == "read":
             res = await read_node(gx, args.node_id)
             out = render("read", res, args.format)
@@ -435,6 +437,11 @@ def main() -> int:
     p_show = sub.add_parser("show", help="One node in full + its neighbours")
     p_show.add_argument("node_id")
     p_show.add_argument("--depth", type=int, default=1)
+
+    p_loc = sub.add_parser("locate",
+                           help="Resolve a name / file / slug / id to node(s) + on-disk path")
+    p_loc.add_argument("term", help="A node id, or a name/title/slug/key/module-path/file-path substring")
+    p_loc.add_argument("--limit", type=int, default=25)
 
     p_read = sub.add_parser("read",
                             help="Deliver a node's verbatim CONTENT (Note body / Section / "

@@ -15,7 +15,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from cjm_context_graph_layer.ops import graph_task
-from cjm_context_graph_primitives.query import EdgeQuery
+from cjm_context_graph_primitives.query import EdgeQuery, NodeQuery, PropertyPredicate
 
 from .runtime import GraphHandle
 
@@ -393,3 +393,49 @@ async def state(
     schema = await get_schema(gx)
     return {"overview": schema,
             "hint": "run `relevant <task>` for task-scoped context, or `show <id>` to drill in"}
+
+
+# The identifying properties a human handle might name (matched case-insensitively,
+# substring). `path`/`module_path` make 'where does this FILE live' a lookup; the
+# rest cover symbol/note/entity names + slugs/keys. NOT a content search (that's
+# `relevant`) — this resolves a HANDLE to a node + its on-disk location.
+_LOCATE_PROPS = ("name", "title", "slug", "key", "module_path", "import_name", "path")
+
+
+def _locate_row(node: Any) -> Dict[str, Any]:  # {id, label, title, path}
+    """The lookup view of a node: id + label + display title + on-disk path (if any)."""
+    return {"id": _get(node, "id"), "label": _get(node, "label"),
+            "title": node_title(node), "path": _props(node).get("path")}
+
+
+async def locate(
+    gx: GraphHandle,
+    term: str,         # A node id, OR a name/title/slug/key/module-path/file-path substring (case-insensitive)
+    limit: int = 25,   # Cap the match list
+) -> Dict[str, Any]:  # {term, matches:[{id, label, title, path}], count, truncated}
+    """Resolve a human HANDLE to node(s) + their on-disk path — the inverse of `show`.
+
+    The file-archeology killer (a soak gap: you rarely know a node's deterministic id
+    up front, but you DO know its name — `classify_readiness` — its file —
+    `readiness.py` — or its slug). A full node id resolves directly; otherwise `term`
+    is matched (case-insensitive substring) across the identifying properties and each
+    hit is reported with its `path`, so 'what's the id of X' and 'where does X live'
+    are one read instead of a SQL expedition. Content search stays with `relevant`."""
+    node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=term)
+    if node is not None:
+        return {"term": term, "matches": [_locate_row(node)], "count": 1, "truncated": False}
+    # Union of per-property `contains` matches (NodeQuery `where` is AND-only, so OR
+    # across properties = one query per property, deduped by id).
+    seen: Dict[str, Any] = {}
+    for prop in _LOCATE_PROPS:
+        q = NodeQuery(where=[PropertyPredicate(prop=prop, op="contains", value=term)],
+                      limit=limit + 1)
+        res = await graph_task(gx.queue, gx.graph_id, "query_nodes", query=q.to_dict())
+        for n in (res.nodes or []):
+            nid = _get(n, "id")
+            if nid is not None:
+                seen.setdefault(nid, n)
+    rows = sorted((_locate_row(n) for n in seen.values()),
+                  key=lambda r: (r["label"] or "", r["title"] or ""))
+    return {"term": term, "matches": rows[:limit], "count": len(rows),
+            "truncated": len(rows) > limit}

@@ -402,6 +402,18 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         if obj.get("kind") == "nested":
             return f"⚠ {obj.get('hint')} (enclosing module `{obj.get('module_id')}`)"
         return obj.get("text", "")
+    if kind == "locate":
+        matches = obj.get("matches", [])
+        if not matches:
+            return f"## Locate `{obj.get('term')}`\n\n_(no node matches that handle — try `relevant` for a content search)_"
+        head = f"## Locate `{obj.get('term')}` ({obj.get('count', len(matches))}" \
+               + (" — truncated" if obj.get("truncated") else "") + ")"
+        lines = [head, ""]
+        for m in matches:
+            lines.append(f"- **{_short(m.get('title', ''), 80)}** · _{m.get('label')}_ `{m.get('id')}`")
+            if m.get("path"):
+                lines.append(f"    📄 `{m['path']}`")
+        return "\n".join(lines)
     if kind in ("show", "state"):
         node = obj.get("node")
         if node is None and "overview" in obj:
@@ -409,6 +421,9 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         if node is None:
             return f"_{obj.get('error') or obj.get('note') or 'not found'}_"
         lines = [f"## {node.get('title')}  _{node.get('label')}_", f"`{node.get('id')}`", ""]
+        path = (obj.get("properties") or {}).get("path")
+        if path:
+            lines += [f"📄 `{path}`", ""]  # where it lives on disk (the locate-at-a-glance line)
         if node.get("description"):
             lines += [node["description"], ""]
         nb = obj.get("neighbours", [])

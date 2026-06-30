@@ -3,7 +3,7 @@
 import json
 
 from cjm_context_graph_projection.projection import (
-    _TEXT_FIELDS, _facet_axis_value, _facet_breakdown, _haystack, _terms,
+    _TEXT_FIELDS, _facet_axis_value, _facet_breakdown, _haystack, _locate_row, _terms,
     node_summary, node_title,
 )
 from cjm_context_graph_projection.onboarding import (
@@ -67,6 +67,40 @@ def test_render_schema_human_and_agent():
     assert "Node labels" in human and "Note (65)" in human
     agent = render("schema", obj, "agent")
     assert json.loads(agent)["counts"]["Note"] == 65
+
+
+def test_locate_row_carries_id_label_title_path():
+    # The lookup view of a node: id + label + display title + on-disk path.
+    node = {"id": "m1", "label": "CodeModule",
+            "properties": {"title": "pkg/readiness.py", "path": "/abs/pkg/readiness.py"}}
+    assert _locate_row(node) == {"id": "m1", "label": "CodeModule",
+                                 "title": "pkg/readiness.py", "path": "/abs/pkg/readiness.py"}
+    # A node with no `path` (e.g. a Decision) -> path is None, still resolvable.
+    dec = {"id": "d1", "label": "Decision", "properties": {"statement": "ship it"}}
+    assert _locate_row(dec) == {"id": "d1", "label": "Decision", "title": "ship it", "path": None}
+
+
+def test_render_locate_lists_matches_with_path_and_handles_empty():
+    obj = {"term": "readiness",
+           "matches": [{"id": "m1", "label": "CodeModule", "title": "pkg/readiness.py",
+                        "path": "/abs/pkg/readiness.py"},
+                       {"id": "s1", "label": "CodeSymbol", "title": "classify_readiness", "path": None}],
+           "count": 2, "truncated": False}
+    out = render("locate", obj, "human")
+    assert "Locate `readiness` (2)" in out
+    assert "classify_readiness" in out and "`/abs/pkg/readiness.py`" in out
+    empty = render("locate", {"term": "zzz", "matches": [], "count": 0, "truncated": False}, "human")
+    assert "no node matches" in empty
+
+
+def test_render_show_surfaces_on_disk_path():
+    obj = {"node": {"id": "m1", "label": "CodeModule", "title": "pkg/readiness.py"},
+           "properties": {"path": "/abs/pkg/readiness.py"}, "neighbours": []}
+    out = render("show", obj, "human")
+    assert "📄 `/abs/pkg/readiness.py`" in out
+    # A node without a path (e.g. a plain term) shows no path line.
+    assert "📄" not in render("show", {"node": {"id": "x", "label": "Entity", "title": "t"},
+                                       "properties": {}, "neighbours": []}, "human")
 
 
 def test_render_relevant_human_lists_results():
