@@ -402,6 +402,30 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         if obj.get("kind") == "nested":
             return f"⚠ {obj.get('hint')} (enclosing module `{obj.get('module_id')}`)"
         return obj.get("text", "")
+    if kind == "list":
+        if obj.get("error"):
+            return f"⚠ {obj['error']}"
+        mode, key, rows = obj.get("mode"), obj.get("key"), obj.get("rows", [])
+        head = {"label": "Nodes", "predicate": "Assertions", "relation": "Edges"}.get(mode, "List")
+        title = f"## {head} · `{key}` ({obj.get('count', len(rows))}" \
+                + (" — truncated" if obj.get("truncated") else "") + ")"
+        if not rows:
+            return f"{title}\n\n_(none)_"
+        lines = [title, ""]
+        for r in rows:
+            if mode == "label":
+                line = f"- **{_short(r.get('title', ''), 80)}** `{r.get('id')}`"
+                if r.get("path"):
+                    line += f"  📄 `{r['path']}`"
+                lines.append(line)
+            elif mode == "predicate":
+                lines.append(f"- **{_short(r.get('subject', ''), 70)}** = _{r.get('value')}_ "
+                             f"(actor {r.get('actor')}) `{r.get('subject_id')}`")
+            else:  # relation
+                lines.append(f"- **{_short(r.get('source', ''), 60)}** → "
+                             f"**{_short(r.get('target', ''), 60)}**  "
+                             f"`{r.get('source_id')}` → `{r.get('target_id')}`")
+        return "\n".join(lines)
     if kind == "locate":
         matches = obj.get("matches", [])
         if not matches:

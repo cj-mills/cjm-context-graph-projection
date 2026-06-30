@@ -19,6 +19,7 @@ from cjm_context_graph_layer.ops import extend_graph
 
 from .authoring import author, emit_artifact, read_node, read_slot
 from .contradictions import contradictions
+from .listing import list_graph
 from .readiness import readiness
 from .conventions import conventions
 from .devgraph import build_dev_graph_elements, notes_corpus_elements
@@ -171,6 +172,11 @@ async def _dispatch(args) -> int:
             print(render("contradictions", await contradictions(gx, args.scope), args.format))
         elif args.command == "readiness":
             print(render("readiness", await readiness(gx, args.scope), args.format))
+        elif args.command == "list":
+            res = await list_graph(gx, label=args.label, predicate=args.predicate,
+                                   relation=args.relation, limit=args.limit)
+            print(render("list", res, args.format))
+            return 1 if res.get("error") else 0
         elif args.command == "conventions":
             print(render("conventions", await conventions(gx, args.scope), args.format))
         elif args.command == "refactor-candidates":
@@ -466,6 +472,14 @@ def main() -> int:
     p_rd = sub.add_parser("readiness",
                           help="Derived ready/blocked/done work-item frontier (task_state + GATED_BY)")
     p_rd.add_argument("scope", nargs="?", default=None, help="Restrict to work-items whose label matches")
+
+    p_ls = sub.add_parser("list",
+                          help="Enumerate a class: nodes by --label / assertions by --predicate / edges by --relation")
+    g_ls = p_ls.add_mutually_exclusive_group(required=True)
+    g_ls.add_argument("--label", help="All nodes carrying this label (e.g. Decision, CodeModule)")
+    g_ls.add_argument("--predicate", help="All active assertions of this predicate (e.g. task_state)")
+    g_ls.add_argument("--relation", help="All edges of this relation type (e.g. GATED_BY)")
+    p_ls.add_argument("--limit", type=int, default=50)
 
     p_wl = sub.add_parser("worklist", help="Propose/confirm queue (dangling refs, soft conflicts)")
     p_wl.add_argument("--memory-dir", default=DEFAULT_MEMORY,
