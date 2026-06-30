@@ -19,6 +19,7 @@ from cjm_context_graph_layer.ops import extend_graph
 
 from .authoring import author, emit_artifact, read_node, read_slot
 from .contradictions import contradictions
+from .readiness import readiness
 from .conventions import conventions
 from .devgraph import build_dev_graph_elements, notes_corpus_elements
 from .factlayer import note_alias_map
@@ -166,6 +167,8 @@ async def _dispatch(args) -> int:
             return 1 if res.get("error") else 0
         elif args.command == "contradictions":
             print(render("contradictions", await contradictions(gx, args.scope), args.format))
+        elif args.command == "readiness":
+            print(render("readiness", await readiness(gx, args.scope), args.format))
         elif args.command == "conventions":
             print(render("conventions", await conventions(gx, args.scope), args.format))
         elif args.command == "refactor-candidates":
@@ -452,6 +455,10 @@ def main() -> int:
 
     p_con = sub.add_parser("contradictions", help="Slots whose active assertions disagree")
     p_con.add_argument("scope", nargs="?", default=None, help="Restrict to a subject/predicate term")
+
+    p_rd = sub.add_parser("readiness",
+                          help="Derived ready/blocked/done work-item frontier (task_state + GATED_BY)")
+    p_rd.add_argument("scope", nargs="?", default=None, help="Restrict to work-items whose label matches")
 
     p_wl = sub.add_parser("worklist", help="Propose/confirm queue (dangling refs, soft conflicts)")
     p_wl.add_argument("--memory-dir", default=DEFAULT_MEMORY,

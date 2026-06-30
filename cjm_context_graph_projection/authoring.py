@@ -202,6 +202,12 @@ async def read_node(
             return em
         return {"node_id": node_id, "label": label, "kind": em.get("artifact", "module"),
                 "artifact_path": em.get("artifact_path"), "text": em.get("text", "")}
+    if label == DevNodeKinds.DECISION:
+        # A born-on-graph Decision carries its content in `statement` (no `.md` to open) —
+        # the read DUAL that closes the `show`-only gap dogfooded this session: `read`-ing a
+        # Decision returned "no readable content", forcing a fall-back to SQL/`show`.
+        return {"node_id": node_id, "label": label, "kind": "statement",
+                "text": str(p.get("statement") or "")}
     resolved = _slot_for(node)
     if resolved is not None:
         slot, _artifact, lab = resolved

@@ -214,6 +214,33 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             for a in c.get("assertions", []):
                 lines.append(f"    - _{a.get('value')}_ (actor {a.get('actor')}) `{a.get('assertion_id')}`")
         return "\n".join(lines)
+    if kind == "readiness":
+        c = obj.get("counts", {})
+        lines = ["## Readiness frontier",
+                 f"_ready {c.get('ready', 0)} · blocked {c.get('blocked', 0)} · "
+                 f"done {c.get('done', 0)}_  (ready/blocked are DERIVED, never stored)", ""]
+        ready = obj.get("ready", [])
+        if ready:
+            lines.append("**Ready (all prerequisites done):**")
+            for r in ready:
+                gates = r.get("gates", [])
+                suffix = f"  _(gated by {len(gates)}, all done)_" if gates else ""
+                lines.append(f"  - ✅ **{_short(r.get('label', ''), 100)}** `{r.get('id')}`{suffix}")
+        blocked = obj.get("blocked", [])
+        if blocked:
+            lines.append("**Blocked (waiting on prerequisites):**")
+            for b in blocked:
+                lines.append(f"  - ⛔ **{_short(b.get('label', ''), 100)}** `{b.get('id')}`")
+                for g in b.get("blocked_by", []):
+                    lines.append(f"      ↳ needs _{_short(g.get('label', ''), 80)}_ `{g.get('id')}`")
+        done = obj.get("done", [])
+        if done:
+            lines.append("**Done:**")
+            for d in done:
+                lines.append(f"  - ◾ {_short(d.get('label', ''), 100)} `{d.get('id')}`")
+        if not (ready or blocked or done):
+            lines.append("_(no work-items — author `task_state` to populate)_")
+        return "\n".join(lines)
     if kind == "oracle":
         c = obj.get("counts", {})
         lines = ["## Version oracle",
