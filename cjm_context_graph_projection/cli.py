@@ -24,8 +24,8 @@ from .readiness import readiness
 from .conventions import conventions
 from .devgraph import build_dev_graph_elements, notes_corpus_elements
 from .factlayer import note_alias_map
-from .journal import (M3_BASELINE_ACTOR, append_write, m3_baseline_import,
-                      m3_baseline_paths, replay_journal)
+from .journal import (M3_BASELINE_ACTOR, append_write, journal_sourced_note_paths,
+                      m3_baseline_import, replay_journal)
 from .module_ops import delete_module, new_module, regroup, rename_module
 from .oracle import run_version_oracle
 from .reconcile import reconcile_memory
@@ -86,9 +86,9 @@ async def _dispatch(args) -> int:
             if not args.no_notebooks:
                 nb_libs = args.notebook_lib or list(DEFAULT_NOTEBOOK_LIBS)
                 notebook_repos = [str(Path(args.repos_dir) / n) for n in nb_libs]
-            # M3 authority flip: notes with a genesis `import:m3-baseline` op are
-            # reconstructed from the journal during replay, so don't read their `.md` here.
-            skip_memory_paths = m3_baseline_paths(args.journal_path) if args.journal_path else None
+            # Authority flip: notes with a genesis `new-note` op (migrated OR born on-graph)
+            # are reconstructed from the journal during replay, so don't read their `.md` here.
+            skip_memory_paths = journal_sourced_note_paths(args.journal_path) if args.journal_path else None
             nodes, edges = build_dev_graph_elements(
                 args.memory_dir, None if args.no_repo_map else args.repos_dir,
                 seed=not args.no_seed, note_aliases=note_aliases, code_repos=code_repos,
@@ -266,6 +266,16 @@ async def _dispatch(args) -> int:
             content = Path(args.content_file).read_text() if args.content_file else args.content
             res = await new_note(gx, args.path, content, write=not args.no_write)
             print(render("structure", res, args.format))
+            # Born on-graph from BIRTH: journal a `new-note` genesis op (actor agent:session,
+            # NOT the m3-baseline provenance) capturing the exact written bytes — so the note is
+            # journal-sourced immediately (its `.md` is skipped on the next ingest, reconstructed
+            # by replay) with no post-hoc m3-baseline needed. Journal the on-disk bytes for
+            # byte-faithful round-trip; dedups on re-run via append_write.
+            if args.journal_path and res.get("written") and not res.get("error"):
+                abspath = str(Path(args.path).resolve())
+                append_write(args.journal_path, "new-note",
+                             {"path": abspath, "content": Path(args.path).read_text(),
+                              "actor": "agent:session"})
             return 1 if res.get("error") else 0
         elif args.command == "move":
             res = await move(gx, args.symbol_id, args.target_module_id, write=not args.no_write)

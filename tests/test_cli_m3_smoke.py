@@ -33,6 +33,25 @@ def test_m3_baseline_cli_dispatches_and_journals(tmp_path):
     assert ops[0]["args"]["content"] == (mem / "feedback_demo.md").read_text()
 
 
+def test_new_note_cli_journals_natively(tmp_path):
+    # A note BORN on-graph via `new-note` journals its OWN genesis op (actor agent:session,
+    # not m3-baseline) so it is journal-sourced from birth — no post-hoc m3-baseline needed.
+    mem = tmp_path / "memory"
+    mem.mkdir()
+    note = mem / "born_demo.md"
+    db = str(tmp_path / "dev.db")
+    journal = str(tmp_path / "writes.jsonl")
+    content = "---\nname: born-demo\ndescription: d\n---\n\nbody\n"
+
+    r = _run("--graph-db-path", db, "--journal-path", journal,
+             "new-note", "--path", str(note), "--content", content)
+    assert r.returncode == 0, f"new-note dispatch failed: {r.stderr or r.stdout}"
+    ops = read_journal(journal)
+    assert [o["verb"] for o in ops] == ["new-note"]
+    assert ops[0]["args"]["actor"] == "agent:session"      # born on-graph, NOT m3-baseline
+    assert ops[0]["args"]["content"] == note.read_text()    # exact written bytes captured
+
+
 def test_m3_baseline_cli_requires_journal(tmp_path):
     db = str(tmp_path / "dev.db")
     r = _run("--graph-db-path", db, "m3-baseline", "--slug", "x")

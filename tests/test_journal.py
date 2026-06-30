@@ -84,20 +84,22 @@ def test_new_note_verb_is_journaled():
     assert "new-note" in JOURNAL_VERBS  # M3: a whole note's baseline text is durable/replayable
 
 
-def test_m3_baseline_paths_filters_by_actor(tmp_path):
-    from cjm_context_graph_projection.journal import M3_BASELINE_ACTOR, m3_baseline_paths
+def test_journal_sourced_note_paths_matches_any_actor(tmp_path):
+    # The authority-flip skip key is the `new-note` OP, not its actor: a MIGRATED note
+    # (import:m3-baseline) AND a note BORN on-graph via `new-note` (agent:session) are both
+    # journal-sourced, so ingest must skip BOTH .md files. Actor is provenance, not the key.
+    from cjm_context_graph_projection.journal import M3_BASELINE_ACTOR, journal_sourced_note_paths
     p = str(tmp_path / "writes.jsonl")
     a = str((tmp_path / "a.md").resolve())
     b = str((tmp_path / "b.md").resolve())
     append_write(p, "new-note", {"path": a, "content": "x\n", "actor": M3_BASELINE_ACTOR})
-    # a non-genesis new-note op (a later born-on-graph note) is NOT a flip target.
     append_write(p, "new-note", {"path": b, "content": "y\n", "actor": "agent:session"})
-    assert m3_baseline_paths(p) == [a]  # only the import:m3-baseline op flips ingest off the .md
+    assert journal_sourced_note_paths(p) == [a, b]  # both flip ingest off their .md
 
 
 def test_m3_baseline_import_emits_baseline_and_is_idempotent(tmp_path):
-    from cjm_context_graph_projection.journal import (M3_BASELINE_ACTOR, m3_baseline_import,
-                                                      m3_baseline_paths, read_journal)
+    from cjm_context_graph_projection.journal import (M3_BASELINE_ACTOR, journal_sourced_note_paths,
+                                                      m3_baseline_import, read_journal)
     mem = tmp_path / "memory"
     mem.mkdir()
     note = mem / "feedback_demo.md"
@@ -110,7 +112,7 @@ def test_m3_baseline_import_emits_baseline_and_is_idempotent(tmp_path):
     assert ops[0]["verb"] == "new-note"
     assert ops[0]["args"]["actor"] == M3_BASELINE_ACTOR
     assert ops[0]["args"]["content"] == note.read_text()  # EXACT baseline bytes captured
-    assert m3_baseline_paths(journal) == [str(note.resolve())]
+    assert journal_sourced_note_paths(journal) == [str(note.resolve())]
 
     # Re-running is a no-op (already has a baseline op); an unknown slug is reported, not raised.
     r2 = m3_baseline_import(str(mem), journal, slugs=["demo-note", "ghost"])

@@ -102,7 +102,7 @@ def m3_baseline_import(
         targets = sorted(by_slug)
     else:
         targets = list(slugs or [])
-    already = {str(Path(p).resolve()) for p in m3_baseline_paths(journal_path)}
+    already = {str(Path(p).resolve()) for p in journal_sourced_note_paths(journal_path)}
 
     imported: List[Dict[str, Any]] = []
     skipped_existing: List[str] = []
@@ -125,19 +125,21 @@ def m3_baseline_import(
             "corpus_notes": len(by_slug)}
 
 
-def m3_baseline_paths(
+def journal_sourced_note_paths(
     path: str,  # Journal file path (JSONL)
-) -> List[str]:  # Absolute `.md` paths of notes carrying an `import:m3-baseline` genesis op
-    """The memory `.md` files `ingest` must NOT read — they're journal-sourced now (M3).
+) -> List[str]:  # Absolute `.md` paths of notes carrying ANY `new-note` genesis op
+    """The memory `.md` files `ingest` must NOT read — they're journal-sourced now.
 
     The per-note authority flip is keyed off the journal itself: a note with a genesis
-    `new-note` op (actor `import:m3-baseline`) is reconstructed by replay, so reading its
-    `.md` during projection would double-build it. This is the slice->corpus seam — the set
-    grows as more notes are imported, and the flip is complete when it covers the whole dir."""
+    `new-note` op is reconstructed by replay, so reading its `.md` during projection would
+    double-build it. The skip key is the OP, not the actor — `import:m3-baseline` (migrated)
+    and `agent:session` (born on-graph via `new-note`) are uniform here; actor is PROVENANCE
+    only. This is the slice->corpus seam: the set grows as notes are imported OR created
+    natively, and the flip is complete when it covers the whole dir."""
     out: List[str] = []
     for op in read_journal(path):
-        if op.get("verb") == "new-note" and op.get("args", {}).get("actor") == M3_BASELINE_ACTOR:
-            p = op["args"].get("path")
+        if op.get("verb") == "new-note":
+            p = op.get("args", {}).get("path")
             if p:
                 out.append(str(Path(p).resolve()))
     return out
