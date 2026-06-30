@@ -114,7 +114,19 @@ async def run(real_memory) -> bool:
         slugs = [s for s in slugs if s in slug_to_path]
     baseline = {s: slug_to_path[s].read_text() for s in slugs}
 
-    # --- Genesis import the slice ---
+    # --- Curation ops appended BEFORE genesis (the real ordering the flip introduced) ---
+    # A `link` between two notes + an `assert` on a note, journaled while the .md was still the
+    # source. Genesis ops get appended AFTER these, so a single-pass replay would hit them before
+    # the note exists (dropping the edge / minting a stray term entity). Pass-1 genesis must fix it.
+    a_id, b_id = note_node_id(slugs[0]), note_node_id(slugs[1])
+    append_write(journal, "link",
+                 {"source_id": a_id, "target_id": b_id, "relation": "ELABORATES",
+                  "actor": "curation"})
+    append_write(journal, "assert",
+                 {"subject": a_id, "predicate": "status", "value": "curated",
+                  "actor": "curation", "evidence": None, "supersede": None})
+
+    # --- Genesis import the slice (appended AFTER the curation ops) ---
     imp = m3_baseline_import(str(mem), journal, slugs=slugs)
     ok &= check(f"genesis import emitted {imp['imported_count']} baseline op(s) {slugs}",
                 imp["imported_count"] == len(slugs) and not imp["unknown"])
@@ -129,6 +141,18 @@ async def run(real_memory) -> bool:
             print(f"    byte-diff on {s}: emit {len(emitted[s])}b vs baseline {len(baseline[s])}b")
     ok &= check("DoD#1 journal-only rebuild byte-clean (slice .md NOT read; emit == pre-cutover)",
                 clean)
+
+    # === DoD 1b: curation links/assertions ordered BEFORE genesis carry over (two-pass replay) ===
+    async with open_graph(db1) as gx:
+        refs = await F.load_edge_pairs(gx, "ELABORATES")
+        fslots = [n for n in await F.load_label(gx, DevNodeKinds.FACT_SLOT)
+                  if F.prop(n, "predicate") == "status"]
+        ents = await F.load_label(gx, DevNodeKinds.ENTITY)
+    link_ok = (a_id, b_id) in refs                                   # the edge landed on the notes
+    assert_ok = any(F.prop(s, "subject_id") == a_id for s in fslots)  # assertion on the note...
+    no_stray = not any(F.prop(e, "kind") == "term" for e in ents)     # ...not a stray term entity
+    ok &= check("DoD#1b curation link+assert (journaled before genesis) carry over to the on-graph note",
+                link_ok and assert_ok and no_stray)
 
     # === DoD 2: edits survive without the .md (born-on-graph, journaled) ===
     edit_slug = slugs[0]

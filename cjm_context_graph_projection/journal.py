@@ -143,50 +143,63 @@ def m3_baseline_paths(
     return out
 
 
+async def _apply_op(gx: GraphHandle, op: Dict[str, Any]) -> str:
+    """Apply one journaled op through its core verb; return the verb ('' = skipped)."""
+    verb, a = op.get("verb"), op.get("args", {})
+    if verb == "new-note":
+        # M3 genesis: MINT a whole note (Note + Section nodes) from journaled baseline text,
+        # graph-only (extend_graph), so a note no longer read from its `.md` is reconstructed
+        # from the journal alone. Idempotent (deterministic ids -> verified no-op on rebuild).
+        await reconstruct_note(gx, a["path"], a["content"])
+    elif verb == "decide":
+        await decide(gx, a["statement"], actor=a.get("actor", "agent:session"),
+                     supports=a.get("supports"), supersedes=a.get("supersedes"),
+                     session=a.get("session"))
+    elif verb == "alias":
+        await alias(gx, a["drifted"], a["canonical"], actor=a.get("actor", "agent:session"),
+                    evidence=a.get("evidence"))
+    elif verb == "assert":
+        await assert_value(gx, a["subject"], a["predicate"], a["value"],
+                           actor=a.get("actor", "agent:session"),
+                           evidence=a.get("evidence"), supersede=a.get("supersede"))
+    elif verb == "link":
+        await link(gx, a["source_id"], a["target_id"], a["relation"],
+                   actor=a.get("actor", "agent:session"))
+    elif verb == "section":
+        # M2b: re-apply a section's verbatim raw STATE (update_node; idempotent). A missing
+        # section is a tolerated no-op. The audit-only `replaces`/ts fields are ignored.
+        await author_section(gx, a["slug"], a["anchor"], a["raw"],
+                             actor=a.get("actor", "agent:session"))
+    else:
+        return ""
+    return verb
+
+
 async def replay_journal(
     gx: GraphHandle,
     path: str,  # Journal file path (JSONL)
 ) -> Dict[str, int]:  # Per-verb replay counts
     """Re-apply every journaled write through its core verb (idempotent).
 
-    Run AFTER the projection is built (markdown notes, repo map, seeds, CODE), so an
-    `alias`'s canonical note, an `assert`'s seed slot, and a `link`'s endpoints (e.g.
-    a decomposed CodeSymbol) already exist to write against. Ops replay in append
-    order, so a `link` to a journaled Decision lands after that Decision's `decide`.
-    Deterministic ids make re-application a verified no-op."""
+    TWO-PASS — STRUCTURE THEN CONTENT. Pass 1 replays the `new-note` GENESIS ops (M3) so all
+    journal-sourced Note + Section nodes exist; pass 2 replays everything else in append order.
+    This is REQUIRED post-cutover: the genesis ops are appended LAST (the flip is a late event)
+    but earlier curation `link`/`assert`/`alias`/`section` ops TARGET those notes/sections — a
+    single pass would replay them before the node exists, so `link` would drop the edge and
+    `assert` would mint a stray `term` entity. Minting the genesis nodes first lets every later
+    op land on the same deterministic id (so curation edges/assertions carry over automatically,
+    no re-authoring). Append order WITHIN pass 2 is preserved, so a `link` to a journaled
+    Decision still lands after that Decision's `decide`. Deterministic ids make re-application a
+    verified no-op; a pre-cutover `section` op for an as-yet-unbuilt section is still tolerated."""
     counts = {v: 0 for v in JOURNAL_VERBS}
     counts["skipped"] = 0
-    for op in read_journal(path):
-        verb, a = op.get("verb"), op.get("args", {})
-        if verb == "decide":
-            await decide(gx, a["statement"], actor=a.get("actor", "agent:session"),
-                         supports=a.get("supports"), supersedes=a.get("supersedes"),
-                         session=a.get("session"))
-        elif verb == "alias":
-            await alias(gx, a["drifted"], a["canonical"], actor=a.get("actor", "agent:session"),
-                        evidence=a.get("evidence"))
-        elif verb == "assert":
-            await assert_value(gx, a["subject"], a["predicate"], a["value"],
-                               actor=a.get("actor", "agent:session"),
-                               evidence=a.get("evidence"), supersede=a.get("supersede"))
-        elif verb == "link":
-            await link(gx, a["source_id"], a["target_id"], a["relation"],
-                       actor=a.get("actor", "agent:session"))
-        elif verb == "section":
-            # M2b: re-apply a section's verbatim raw STATE (update_node; idempotent). Replays
-            # AFTER decomposition built the section from the `.md`; a missing section (the file
-            # dropped it) is a tolerated no-op. The audit-only `replaces`/ts fields are ignored.
-            await author_section(gx, a["slug"], a["anchor"], a["raw"],
-                                 actor=a.get("actor", "agent:session"))
-        elif verb == "new-note":
-            # M3 genesis: MINT a whole note (Note + Section nodes) from journaled baseline text,
-            # graph-only (extend_graph), so a note no longer read from its `.md` is reconstructed
-            # from the journal alone. Idempotent (deterministic ids -> verified no-op on rebuild).
-            # A pre-import `section` op replaying earlier is the tolerated no-op above (its raw is
-            # already folded into this baseline `content`); later edits replay AFTER and apply.
-            await reconstruct_note(gx, a["path"], a["content"])
+    ops = read_journal(path)
+    genesis = [op for op in ops if op.get("verb") == "new-note"]
+    rest = [op for op in ops if op.get("verb") != "new-note"]
+    for op in genesis + rest:
+        verb = await _apply_op(gx, op)
+        if verb:
+            counts[verb] += 1
         else:
             counts["skipped"] += 1
-            continue
-        counts[verb] += 1
     return counts
