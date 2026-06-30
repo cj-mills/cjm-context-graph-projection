@@ -22,7 +22,8 @@ from .contradictions import contradictions
 from .conventions import conventions
 from .devgraph import build_dev_graph_elements, notes_corpus_elements
 from .factlayer import note_alias_map
-from .journal import M3_BASELINE_ACTOR, append_write, m3_baseline_paths, replay_journal
+from .journal import (M3_BASELINE_ACTOR, append_write, m3_baseline_import,
+                      m3_baseline_paths, replay_journal)
 from .module_ops import delete_module, new_module, regroup, rename_module
 from .oracle import run_version_oracle
 from .reconcile import reconcile_memory
