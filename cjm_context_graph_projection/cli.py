@@ -22,7 +22,7 @@ from .contradictions import contradictions
 from .conventions import conventions
 from .devgraph import build_dev_graph_elements, notes_corpus_elements
 from .factlayer import note_alias_map
-from .journal import append_write, replay_journal
+from .journal import M3_BASELINE_ACTOR, append_write, m3_baseline_paths, replay_journal
 from .module_ops import delete_module, new_module, regroup, rename_module
 from .oracle import run_version_oracle
 from .reconcile import reconcile_memory
@@ -83,10 +83,13 @@ async def _dispatch(args) -> int:
             if not args.no_notebooks:
                 nb_libs = args.notebook_lib or list(DEFAULT_NOTEBOOK_LIBS)
                 notebook_repos = [str(Path(args.repos_dir) / n) for n in nb_libs]
+            # M3 authority flip: notes with a genesis `import:m3-baseline` op are
+            # reconstructed from the journal during replay, so don't read their `.md` here.
+            skip_memory_paths = m3_baseline_paths(args.journal_path) if args.journal_path else None
             nodes, edges = build_dev_graph_elements(
                 args.memory_dir, None if args.no_repo_map else args.repos_dir,
                 seed=not args.no_seed, note_aliases=note_aliases, code_repos=code_repos,
-                notebook_repos=notebook_repos)
+                notebook_repos=notebook_repos, skip_memory_paths=skip_memory_paths)
             res = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
             print(f"ingested: {res.nodes_added} nodes added / {res.nodes_verified} verified, "
                   f"{res.edges_added} edges added / {res.edges_existing} existing")
@@ -105,6 +108,23 @@ async def _dispatch(args) -> int:
                 rc = await replay_journal(gx, args.journal_path)
                 print(f"replayed journal: {rc}")
             return 0
+        if args.command == "m3-baseline":
+            if not args.journal_path:
+                print("error: m3-baseline needs --journal-path (the genesis ops are journaled)",
+                      file=sys.stderr)
+                return 1
+            if not args.all and not args.slug:
+                print("error: m3-baseline needs --slug SLUG (repeatable) or --all", file=sys.stderr)
+                return 1
+            res = m3_baseline_import(args.memory_dir, args.journal_path,
+                                     slugs=args.slug, all_notes=args.all)
+            print(f"m3-baseline: imported {res['imported_count']} note(s) "
+                  f"(actor {M3_BASELINE_ACTOR}); skipped_existing={res['skipped_existing']} "
+                  f"unknown={res['unknown']} corpus={res['corpus_notes']}")
+            for it in res["imported"]:
+                print(f"  + {it['slug']} ({it['bytes']} bytes) <- {it['path']}")
+            print("NEXT -> rebuild (cg-rebuild): ingest now SKIPS these .md; replay reconstructs them.")
+            return 1 if res["unknown"] else 0
         if args.command == "replay":
             if not args.journal_path:
                 print("error: replay needs --journal-path", file=sys.stderr)
@@ -378,6 +398,16 @@ def main() -> int:
                        help="Relationship-harvest profile (default quarto_post; see the markdown core's PROFILES).")
 
     sub.add_parser("replay", help="Replay the write journal onto the db (needs --journal-path)")
+
+    p_m3 = sub.add_parser("m3-baseline",
+                          help="M3 genesis import: journal a per-note baseline `new-note` op "
+                               "(actor import:m3-baseline) so ingest stops reading its .md "
+                               "(the authority flip; needs --journal-path)")
+    p_m3.add_argument("--memory-dir", default=DEFAULT_MEMORY)
+    p_m3.add_argument("--slug", action="append", default=None,
+                      help="Note slug to import (repeatable); the thin-slice selector")
+    p_m3.add_argument("--all", action="store_true",
+                      help="Import the WHOLE corpus (slice->corpus widening; mechanical)")
 
     sub.add_parser("schema", help="Node labels, edge types, counts")
 

@@ -19,16 +19,26 @@ re-applying the log collides into verified no-ops.
 import json
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+
+from cjm_markdown_decompose_core.extract import note_from_file
 
 from .runtime import GraphHandle
+from .structure import reconstruct_note
 from .write import alias, assert_value, author_section, decide, link
+
+# The provenance actor stamped on the M3 one-time genesis import (a per-note `new-note` op
+# capturing the pre-cutover baseline). The lineage floor every later edit traces back to.
+M3_BASELINE_ACTOR = "import:m3-baseline"
 
 # The write verbs the journal records + replays (keyed by the op `verb` field).
 # `section` = M2b: a memory section's verbatim `raw` STATE (born-on-graph authoring; the .md
 # becomes a projection). Replayed via update_node, so a drifted node's content-hash guard
 # (which a re-extend would trip) is sidestepped.
-JOURNAL_VERBS = ("decide", "alias", "assert", "link", "section")
+# `new-note` = M3: a whole note's baseline TEXT (frontmatter + body). Replayed via
+# `reconstruct_note` (extend_graph, graph-only), it MINTS the Note + Section nodes from the
+# journal alone — so `ingest` can stop reading that note's `.md` (the authority flip).
+JOURNAL_VERBS = ("decide", "alias", "assert", "link", "section", "new-note")
 
 
 def read_journal(
@@ -66,6 +76,73 @@ def append_write(
     return True
 
 
+def m3_baseline_import(
+    memory_dir: str,                  # Dir of memory markdown files
+    journal_path: str,                # The write journal to append genesis ops to
+    *,
+    slugs: Optional[List[str]] = None,  # Restrict to these note slugs (None + all_notes=False -> nothing)
+    all_notes: bool = False,            # Import the WHOLE corpus (the slice->corpus widening)
+) -> Dict[str, Any]:  # {imported: [{slug, path, bytes}], skipped_existing: [...], unknown: [...]}
+    """One-time M3 GENESIS IMPORT: emit a per-note `new-note` baseline op into the journal.
+
+    The authority flip's Fork 1 ([[memory-files-retirement-plan]]): for each selected note,
+    capture its EXACT current `.md` bytes as a `new-note` op stamped `import:m3-baseline` — the
+    lineage floor every later edit traces back to. After this, `ingest` stops reading that note's
+    `.md` (it's reconstructed by replay). Idempotent: `append_write` dedups an identical op, and
+    a note already carrying a baseline op is reported as `skipped_existing`, so re-running is safe
+    and the slice widens to the corpus mechanically (add slugs / `--all`)."""
+    mem = Path(memory_dir)
+    by_slug: Dict[str, Path] = {}
+    for p in sorted(mem.glob("*.md")):
+        if p.name == "MEMORY.md":
+            continue
+        by_slug[note_from_file(str(p), corpus_root=str(mem), lossless=True).slug] = p
+
+    if all_notes:
+        targets = sorted(by_slug)
+    else:
+        targets = list(slugs or [])
+    already = {str(Path(p).resolve()) for p in m3_baseline_paths(journal_path)}
+
+    imported: List[Dict[str, Any]] = []
+    skipped_existing: List[str] = []
+    unknown: List[str] = []
+    for slug in targets:
+        p = by_slug.get(slug)
+        if p is None:
+            unknown.append(slug)
+            continue
+        abspath = str(p.resolve())
+        if abspath in already:
+            skipped_existing.append(slug)
+            continue
+        content = p.read_text()
+        append_write(journal_path, "new-note",
+                     {"path": abspath, "content": content, "actor": M3_BASELINE_ACTOR})
+        imported.append({"slug": slug, "path": abspath, "bytes": len(content.encode("utf-8"))})
+    return {"imported": imported, "imported_count": len(imported),
+            "skipped_existing": skipped_existing, "unknown": unknown,
+            "corpus_notes": len(by_slug)}
+
+
+def m3_baseline_paths(
+    path: str,  # Journal file path (JSONL)
+) -> List[str]:  # Absolute `.md` paths of notes carrying an `import:m3-baseline` genesis op
+    """The memory `.md` files `ingest` must NOT read — they're journal-sourced now (M3).
+
+    The per-note authority flip is keyed off the journal itself: a note with a genesis
+    `new-note` op (actor `import:m3-baseline`) is reconstructed by replay, so reading its
+    `.md` during projection would double-build it. This is the slice->corpus seam — the set
+    grows as more notes are imported, and the flip is complete when it covers the whole dir."""
+    out: List[str] = []
+    for op in read_journal(path):
+        if op.get("verb") == "new-note" and op.get("args", {}).get("actor") == M3_BASELINE_ACTOR:
+            p = op["args"].get("path")
+            if p:
+                out.append(str(Path(p).resolve()))
+    return out
+
+
 async def replay_journal(
     gx: GraphHandle,
     path: str,  # Journal file path (JSONL)
@@ -101,6 +178,13 @@ async def replay_journal(
             # dropped it) is a tolerated no-op. The audit-only `replaces`/ts fields are ignored.
             await author_section(gx, a["slug"], a["anchor"], a["raw"],
                                  actor=a.get("actor", "agent:session"))
+        elif verb == "new-note":
+            # M3 genesis: MINT a whole note (Note + Section nodes) from journaled baseline text,
+            # graph-only (extend_graph), so a note no longer read from its `.md` is reconstructed
+            # from the journal alone. Idempotent (deterministic ids -> verified no-op on rebuild).
+            # A pre-import `section` op replaying earlier is the tolerated no-op above (its raw is
+            # already folded into this baseline `content`); later edits replay AFTER and apply.
+            await reconstruct_note(gx, a["path"], a["content"])
         else:
             counts["skipped"] += 1
             continue

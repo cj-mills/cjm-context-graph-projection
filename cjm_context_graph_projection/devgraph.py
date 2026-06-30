@@ -30,6 +30,7 @@ from .seeds import aliases_for, conceptual_key, seed_elements
 def memory_elements(
     memory_dir: str,  # Dir of memory markdown files
     note_aliases: Optional[Dict[str, str]] = None,  # Confirmed {drifted-slug: canonical-slug} link aliases
+    skip_paths: Optional[List[str]] = None,  # `.md` paths NOT to read (journal-sourced under M3)
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:  # (Note nodes, REFERENCES edges)
     """Decompose every memory markdown file (except MEMORY.md) into graph elements.
 
@@ -40,10 +41,16 @@ def memory_elements(
     whole-file fidelity, not the posts' Scope-A section grain. The `read` verb delivers
     these bodies, which is what lets graph-pull replace reading the `.md` files.
 
+    `skip_paths` are the files the M3 authority flip has moved on-graph (a genesis
+    `new-note` op reconstructs them from the journal), so reading them here would
+    double-build the note — the per-note flip that widens slice->corpus mechanically.
+
     Confirmed `note_aliases` (the worklist's output, read off the graph) resolve
     drifted `[[wiki-links]]` to their real note so the once-dangling edge lands."""
     mem = Path(memory_dir)
-    files = sorted(p for p in mem.glob("*.md") if p.name != "MEMORY.md")
+    skip = {str(Path(p).resolve()) for p in (skip_paths or [])}
+    files = sorted(p for p in mem.glob("*.md")
+                   if p.name != "MEMORY.md" and str(p.resolve()) not in skip)
     notes = [note_from_file(str(p), corpus_root=str(mem), lossless=True) for p in files]
     return corpus_graph_elements(notes, note_aliases)
 
@@ -211,12 +218,16 @@ def build_dev_graph_elements(
     note_aliases: Optional[Dict[str, str]] = None,  # Confirmed link aliases (drifted -> canonical)
     code_repos: Optional[List[str]] = None,  # Repo dirs to decompose as code (None = skip code)
     notebook_repos: Optional[List[str]] = None,  # Repo dirs whose nbdev notebooks to decompose (None = skip)
+    skip_memory_paths: Optional[List[str]] = None,  # Memory `.md` paths NOT to read (journal-sourced under M3)
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:  # (all nodes, all edges)
     """Assemble the full dev graph: memory notes (+ refs), the repo map (+ deps),
     the hand-seeded fine-tier slots (the torch/hf contradiction, the stale version
     slot, the class subjects), and — when `code_repos` is given — the decomposed
-    code of those repos (CodeModule/CodeSymbol nodes co-residing with the notes)."""
-    nodes, edges = memory_elements(memory_dir, note_aliases)
+    code of those repos (CodeModule/CodeSymbol nodes co-residing with the notes).
+
+    `skip_memory_paths` (the M3 genesis-imported notes) are left to journal replay to
+    reconstruct rather than read from disk — the authority flip, scoped per note."""
+    nodes, edges = memory_elements(memory_dir, note_aliases, skip_paths=skip_memory_paths)
     if repos_dir:
         rn, re = repo_map_elements(repos_dir)
         nodes += rn

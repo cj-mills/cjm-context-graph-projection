@@ -159,3 +159,25 @@ async def new_note(
         r = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
         res.update(written=True, nodes_added=r.nodes_added, edges_added=r.edges_added)
     return res
+
+
+async def reconstruct_note(
+    gx: GraphHandle,
+    path: str,            # The note's `.md` path (recorded on the Note for emit/divergence)
+    content: str,         # The full note text (frontmatter + body) as the journal captured it
+) -> Dict[str, Any]:  # {slug, sections, nodes_added, edges_added}
+    """Reconstruct a whole note (Note + ordered Section nodes) FROM JOURNALED text — the M3
+    genesis-replay leg of the [[memory-files-retirement-plan]] authority flip.
+
+    The GRAPH-ONLY dual of `new_note`: re-decompose `content` lossless (M1) and apply the
+    elements via `extend_graph` WITHOUT writing the `.md` — the journal is now the source,
+    so the file is a generated backup written by a separate `emit`, never by replay (mirrors
+    `author_section`'s graph-only posture). The whole-note re-decompose is the genesis baseline
+    every later split/merge/`section` edit traces back to; deterministic ids make a second
+    rebuild a verified no-op, and a `section` op replaying before this (the pre-import edits,
+    already folded into `content`) is the tolerated no-op the single-pass replay relies on."""
+    note = note_from_text(path, content, corpus_root=str(Path(path).parent), lossless=True)
+    nodes, edges = corpus_graph_elements([note])
+    r = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
+    return {"slug": note.slug, "path": path, "sections": len(note.sections),
+            "nodes_added": r.nodes_added, "edges_added": r.edges_added}
