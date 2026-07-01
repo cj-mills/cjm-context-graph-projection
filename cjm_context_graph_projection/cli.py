@@ -261,6 +261,16 @@ async def _dispatch(args) -> int:
             raw = Path(args.content_file).read_text() if args.content_file else args.content
             res = await add_section(gx, args.slug, raw, after=args.after, write=not args.no_write)
             print(render("structure", res, args.format))
+            # M3 structural journaling: a live add-section is journal-sourced too — record the
+            # add-section op (slug/raw/after) so a rebuild re-splices the section on-graph (the
+            # `.md` is a generated backup, skipped by ingest for journal-sourced notes). Only on a
+            # REAL add (`added` non-empty): the anchor-exists no-op and every dry-run change
+            # nothing. append_write dedups an identical op on re-run.
+            if (args.journal_path and res.get("added") and not res.get("error")
+                    and not args.no_write):
+                append_write(args.journal_path, "add-section",
+                             {"slug": args.slug, "raw": res.get("section_raw"),
+                              "after": res.get("after"), "actor": args.actor})
             return 1 if res.get("error") else 0
         elif args.command == "new-note":
             content = Path(args.content_file).read_text() if args.content_file else args.content
@@ -552,6 +562,7 @@ def main() -> int:
     g_asec.add_argument("--content-file", help="Read the new section's text from a file")
     p_asec.add_argument("--after", default=None, help="Insert after this anchor (default: append at end)")
     p_asec.add_argument("--no-write", action="store_true", help="Dry run: apply to graph, don't write the .md")
+    p_asec.add_argument("--actor", default="agent:session")
 
     p_nn = sub.add_parser("new-note", help="M2 gradient: create a new memory note, born on-graph")
     p_nn.add_argument("--path", required=True, help="Where to write the new .md")

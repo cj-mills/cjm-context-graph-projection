@@ -48,6 +48,16 @@ async def _anchors_in_order(gx, slug):
     return [a for _, a in sorted(secs)]
 
 
+async def _section_raws(gx, slug):  # ordered [(anchor, raw)] — the full structural STATE
+    note_id = note_node_id(slug)
+    from cjm_context_graph_projection.authoring import _note_section_wires
+    from cjm_context_graph_projection import factlayer as F
+    secs = sorted(((int(F.props(w).get("order") or 0), str(F.props(w).get("anchor")),
+                   str(F.props(w).get("raw") or "")) for w in await _note_section_wires(gx, note_id)),
+                  key=lambda t: t[0])
+    return [(a, r) for _, a, r in secs]
+
+
 async def part_a(gx, tmp) -> bool:
     ok = True
     path = str(Path(tmp) / "new.md")
@@ -139,6 +149,68 @@ async def part_d(gx, tmp) -> bool:
     return ok
 
 
+async def _ingest_note(gx, path, tmp):  # ingest a plain .md onto a scratch graph
+    from cjm_markdown_decompose_core.extract import note_from_file as _nff
+    from cjm_markdown_decompose_core.ingest import corpus_graph_elements
+    from cjm_context_graph_layer.ops import extend_graph
+    n = _nff(path, corpus_root=tmp, lossless=True)
+    nodes, edges = corpus_graph_elements([n])
+    await extend_graph(gx.queue, gx.graph_id, nodes, edges)
+
+
+async def part_e(tmp) -> bool:
+    """The DURABILITY fix (approach A): a journaled `add-section` op is re-spliced on rebuild, so
+    a journal-sourced note's later structure survives `rm db && replay`. The money check: a graph
+    built the LIVE way (ingest + live add-section) is byte-identical to one built purely by
+    REPLAYING the journal (new-note genesis + add-section ops) — replay == live structure."""
+    from cjm_context_graph_projection.journal import append_write, replay_journal
+    from cjm_context_graph_projection.authoring import read_slot
+    ok = True
+    slug = "structural-replay"
+    content = _md(slug)  # preamble + Alpha + Beta
+    gamma = "## Gamma\n\nGamma body.\n"
+    delta = "## Delta\n\nDelta body.\n"
+
+    # LIVE build: ingest the base .md, then two live add-sections (append Gamma, insert Delta
+    # after alpha — same order the journal records).
+    live_path = str(Path(tmp) / "live.md")
+    Path(live_path).write_text(content)
+    async with open_graph(str(Path(tmp) / "live.db")) as gx_live:
+        await _ingest_note(gx_live, live_path, tmp)
+        await add_section(gx_live, slug, gamma, write=True)
+        await add_section(gx_live, slug, delta, after="alpha", write=True)
+        live_raws = await _section_raws(gx_live, slug)
+
+    # REPLAY build: a journal with the note's genesis + the two structural adds, replayed onto a
+    # FRESH graph — no .md is read (graph-only reconstruction).
+    journal = str(Path(tmp) / "e.writes.jsonl")
+    jpath = str(Path(Path(tmp) / "replay.md").resolve())
+    append_write(journal, "new-note", {"path": jpath, "content": content, "actor": "agent:session"})
+    append_write(journal, "add-section", {"slug": slug, "raw": gamma, "after": None, "actor": "agent:session"})
+    append_write(journal, "add-section", {"slug": slug, "raw": delta, "after": "alpha", "actor": "agent:session"})
+    async with open_graph(str(Path(tmp) / "replay.db")) as gx2:
+        await replay_journal(gx2, journal)
+        replay_raws = await _section_raws(gx2, slug)
+        anchors = [a for a, _ in replay_raws]
+        ok &= _check("replay reconstructed genesis + both structural adds",
+                     {"_preamble", "alpha", "beta", "gamma", "delta"} <= set(anchors))
+        ok &= _check("replayed --after add landed in order (delta after alpha, before beta)",
+                     anchors.index("delta") == anchors.index("alpha") + 1 and anchors.index("delta") < anchors.index("beta"))
+        ok &= _check("replayed append add is LAST", anchors[-1] == "gamma")
+        ok &= _check("REPLAY == LIVE structure, byte-for-byte (anchors + raws)", replay_raws == live_raws)
+        ok &= _check("replayed section body is readable on-graph",
+                     "Gamma body." in (await read_slot(gx2, section_node_id(note_node_id(slug), "gamma"))).get("text", ""))
+        # IDEMPOTENT: replaying the journal a SECOND time duplicates nothing (anchor-exists no-op).
+        await replay_journal(gx2, journal)
+        ok &= _check("second full replay is idempotent (no duplicate sections)",
+                     await _section_raws(gx2, slug) == replay_raws)
+        # The anchor-exists guard as a direct no-op (not an error).
+        dup = await add_section(gx2, slug, "## Gamma\n\ndifferent.\n", write=False)
+        ok &= _check("add-section of an existing anchor is a no-op, not a dup",
+                     dup.get("existing") is True and dup.get("added") == [] and not dup.get("error"))
+    return ok
+
+
 async def main() -> int:
     ok = True
     with tempfile.TemporaryDirectory() as tmp:
@@ -151,6 +223,8 @@ async def main() -> int:
             ok &= await part_c(gx, tmp)
             print("D — guards:")
             ok &= await part_d(gx, tmp)
+        print("E — add-section journaling + replay (durability):")
+        ok &= await part_e(tmp)
     print("\nRESULT:", "ALL PASS" if ok else "FAILURES")
     return 0 if ok else 1
 

@@ -40,7 +40,7 @@ from cjm_context_graph_projection import factlayer as F
 from cjm_context_graph_projection.authoring import emit_artifact
 from cjm_context_graph_projection.devgraph import build_dev_graph_elements
 from cjm_context_graph_projection.factlayer import note_alias_map
-from cjm_context_graph_projection.journal import (m3_baseline_import, m3_baseline_paths,
+from cjm_context_graph_projection.journal import (m3_baseline_import, journal_sourced_note_paths,
                                                   append_write, replay_journal)
 from cjm_context_graph_projection.onboarding import project_onboarding
 from cjm_context_graph_projection.reconcile import reconcile_memory
@@ -62,7 +62,7 @@ async def _rebuild(db, memory_dir, journal_path):
     """A journal-only-aware rebuild: build the projection (slice `.md` SKIPPED) + replay."""
     async with open_graph(db) as gx:
         aliases = await note_alias_map(gx)
-        skip = m3_baseline_paths(journal_path)
+        skip = journal_sourced_note_paths(journal_path)
         nodes, edges = build_dev_graph_elements(memory_dir, None, seed=False,
                                                 note_aliases=aliases, skip_memory_paths=skip)
         await extend_graph(gx.queue, gx.graph_id, nodes, edges)
@@ -191,7 +191,7 @@ async def run(real_memory) -> bool:
                 g2f and f2g)
 
     # === DoD 4: lineage intact (post-import edit traces to the genesis baseline) ===
-    base_paths = set(m3_baseline_paths(journal))
+    base_paths = set(journal_sourced_note_paths(journal))
     edit_has_genesis = str(slug_to_path[edit_slug].resolve()) in base_paths
     ok &= check("DoD#4 lineage: the edited note carries an import:m3-baseline genesis op",
                 edit_has_genesis)

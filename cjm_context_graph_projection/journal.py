@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional
 from cjm_markdown_decompose_core.extract import note_from_file
 
 from .runtime import GraphHandle
-from .structure import reconstruct_note
+from .structure import add_section, reconstruct_note
 from .write import alias, assert_value, author_section, decide, link
 
 # The provenance actor stamped on the M3 one-time genesis import (a per-note `new-note` op
@@ -38,7 +38,10 @@ M3_BASELINE_ACTOR = "import:m3-baseline"
 # `new-note` = M3: a whole note's baseline TEXT (frontmatter + body). Replayed via
 # `reconstruct_note` (extend_graph, graph-only), it MINTS the Note + Section nodes from the
 # journal alone — so `ingest` can stop reading that note's `.md` (the authority flip).
-JOURNAL_VERBS = ("decide", "alias", "assert", "link", "section", "new-note")
+# `add-section` = M2a: a STRUCTURAL add (slug/raw/after) on an already-genesis'd note. Replayed
+# graph-only via `add_section` in pass 2 (append order), it re-splices a section born on-graph
+# AFTER the note's genesis — the piece that keeps a journal-sourced note's later structure durable.
+JOURNAL_VERBS = ("decide", "alias", "assert", "link", "section", "new-note", "add-section")
 
 
 def read_journal(
@@ -172,6 +175,14 @@ async def _apply_op(gx: GraphHandle, op: Dict[str, Any]) -> str:
         # section is a tolerated no-op. The audit-only `replaces`/ts fields are ignored.
         await author_section(gx, a["slug"], a["anchor"], a["raw"],
                              actor=a.get("actor", "agent:session"))
+    elif verb == "add-section":
+        # M2a structural add, replayed GRAPH-ONLY (write_md=False): re-splice the section from
+        # the journaled slug/raw/after against the CURRENT graph. Runs in pass 2 (append order)
+        # so it lands after its note's genesis (pass 1) and composes with interleaved `section`
+        # STATE ops in the exact causal order they were journaled. Idempotent: `add_section`
+        # no-ops when the target anchor already exists, so a rebuild never duplicates it.
+        await add_section(gx, a["slug"], a["raw"], after=a.get("after"),
+                          write=True, write_md=False)
     else:
         return ""
     return verb
@@ -192,7 +203,15 @@ async def replay_journal(
     op land on the same deterministic id (so curation edges/assertions carry over automatically,
     no re-authoring). Append order WITHIN pass 2 is preserved, so a `link` to a journaled
     Decision still lands after that Decision's `decide`. Deterministic ids make re-application a
-    verified no-op; a pre-cutover `section` op for an as-yet-unbuilt section is still tolerated."""
+    verified no-op; a pre-cutover `section` op for an as-yet-unbuilt section is still tolerated.
+
+    `add-section` is a pass-2 STRUCTURAL op (a section born on-graph AFTER its note's genesis).
+    It stays in append order — NOT hoisted to pass 1 like `new-note` — because an add-section is
+    always journaled AFTER the note it extends already carries a genesis op, so genesis→add
+    ordering holds without hoisting, and append order is exactly what lets an add compose with the
+    `section` STATE ops interleaved around it (boundary shift then final content, in causal order).
+    Its own idempotency (anchor-exists no-op) covers a note not yet journal-sourced whose backup
+    `.md` an ingest still read."""
     counts = {v: 0 for v in JOURNAL_VERBS}
     counts["skipped"] = 0
     ops = read_journal(path)

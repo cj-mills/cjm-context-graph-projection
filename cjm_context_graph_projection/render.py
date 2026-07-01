@@ -482,6 +482,8 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         if "sections" in obj:  # new-note
             return f"**{status}** created note `{obj['slug']}` ({obj['sections']} sections) → `{obj.get('path')}`"
         bits = [f"`{obj['slug']}`"]
+        if obj.get("existing"):
+            bits.append(f"section `{obj.get('anchor')}` already exists — no-op")
         if obj.get("added"):
             bits.append(f"+section {obj['added']}")
         if obj.get("updated"):

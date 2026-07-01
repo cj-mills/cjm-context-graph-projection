@@ -19,6 +19,7 @@ the `.md` is no longer the source. Section REMOVAL is deferred too (needs `delet
 removed sections are REPORTED, not applied.
 """
 
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -27,6 +28,7 @@ from cjm_dev_graph_schema.identity import note_node_id
 
 from cjm_markdown_decompose_core.extract import note_from_text
 from cjm_markdown_decompose_core.ingest import corpus_graph_elements
+from cjm_markdown_decompose_core.sections import heading_anchor
 
 from . import factlayer as F
 from .authoring import _note_section_wires
@@ -40,13 +42,18 @@ async def _apply_note_text(
     new_text: str,         # The full desired note text (frontmatter + body)
     path: str,             # The note's file path
     *,
-    write: bool = True,    # Write the new text to the `.md` (Fork-1(a) / shadow source)
+    write: bool = True,    # Apply the diff to the graph (else a true dry-run — mutate nothing)
+    write_md: Optional[bool] = None,  # Write the `.md` too (default: follow `write`; replay sets False)
 ) -> Dict[str, Any]:  # {added, updated, removed, frontmatter_changed, written, ...}
     """Re-decompose `new_text` and apply the section/frontmatter DIFF to the graph.
 
     New sections -> `extend_graph`; existing sections whose `raw`/`order` shifted ->
     `update_node` (the content-hash-guard-safe path); changed frontmatter -> `update_node`.
-    Removed sections are reported but NOT deleted (deferred). Writes the `.md` last."""
+    Removed sections are reported but NOT deleted (deferred). Writes the `.md` last.
+
+    `write_md` DECOUPLES the file write from the graph apply: journal REPLAY (the journal is the
+    source; the `.md` is a generated backup — emit's job) applies to the graph but skips the file
+    via `write_md=False`, mirroring `reconstruct_note`/`author_section`'s graph-only posture."""
     decomposed = note_from_text(path, new_text, corpus_root=str(Path(path).parent), lossless=True)
     desired = {s.anchor: s for s in decomposed.sections}
     graph = {str(F.props(w).get("anchor")): (str(F.props(w).get("raw") or ""),
@@ -70,7 +77,10 @@ async def _apply_note_text(
     fm_changed = decomposed.frontmatter_raw != str(F.prop(note_node, "frontmatter_raw") or "")
 
     # Apply to the graph + write the file ONLY on write=True; write=False is a true dry-run
-    # (compute + return the diff, mutate nothing) — same posture as `author --no-write`.
+    # (compute + return the diff, mutate nothing) — same posture as `author --no-write`. The
+    # `.md` write is gated separately by `write_md` (default: follow `write`) so replay can apply
+    # graph-only (`write_md=False`) while a live add still refreshes the backup file.
+    do_file = write if write_md is None else write_md
     if write:
         for s in updates:
             await graph_task(gx.queue, gx.graph_id, "update_node", node_id=s.id,
@@ -81,11 +91,11 @@ async def _apply_note_text(
         if fm_changed:
             await graph_task(gx.queue, gx.graph_id, "update_node", node_id=F.nid(note_node),
                              properties={"frontmatter_raw": decomposed.frontmatter_raw})
-        if path:
+        if do_file and path:
             Path(path).write_text(new_text)
     return {"slug": slug, "path": path, "added": sorted(added), "updated": sorted(updated),
             "removed": removed, "frontmatter_changed": fm_changed,
-            "written": bool(write and path), "emitted_text": new_text}
+            "written": bool(do_file and path), "emitted_text": new_text}
 
 
 async def add_section(
@@ -94,13 +104,19 @@ async def add_section(
     section_raw: str,                # The new section's heading-inclusive verbatim text ("## H\n\n...")
     *,
     after: Optional[str] = None,     # Insert after this anchor (None = append at end of body)
-    write: bool = True,              # Write the new `.md` (else dry-run)
+    write: bool = True,              # Apply to the graph (else dry-run)
+    write_md: Optional[bool] = None, # Write the `.md` too (default: follow `write`; replay sets False)
 ) -> Dict[str, Any]:  # The apply result (incl. error)
     """Add a section to an existing note (append, or insert after an anchor), born on-graph.
 
     Reconstructs the note text FROM THE GRAPH (the editing surface), splices the new section
     in, and applies the diff. Adding a section moves the PRIOR section's `raw` boundary, so the
-    apply updates that section too — handled generically by the re-decompose diff."""
+    apply updates that section too — handled generically by the re-decompose diff.
+
+    IDEMPOTENT by anchor: if a section already slugs to the new heading's anchor, this is a no-op
+    (`added: []`, `existing: True`) — so replaying a journaled `add-section` op re-creates the
+    section EXACTLY ONCE and never duplicates it (the structural analogue of `author_section`'s
+    state-set idempotency). The returned `section_raw`/`after` are what the CLI journals."""
     note_node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=note_node_id(slug))
     if note_node is None:
         return {"error": f"no note `{slug}`", "slug": slug, "written": False}
@@ -113,6 +129,14 @@ async def add_section(
     raws = [r for _, _, r in secs]
     if not section_raw.endswith("\n"):
         section_raw += "\n"
+    # Idempotency guard: derive the new heading's anchor and no-op if it already exists. This is
+    # what makes journal replay safe — re-running the op (or a rebuild that ingested the backup
+    # `.md`) finds the section present and adds nothing, instead of splicing a disambiguated dup.
+    _h = re.match(r"\s*#+\s+(.+)", section_raw)
+    if _h and heading_anchor(_h.group(1).strip()) in anchors:
+        return {"slug": slug, "anchor": heading_anchor(_h.group(1).strip()), "added": [],
+                "existing": True, "written": False, "path": path,
+                "section_raw": section_raw, "after": after}
 
     def _lead(prev: str) -> str:  # a blank line before the new heading (markdown hygiene)
         return "" if prev.endswith("\n\n") else ("\n" if prev.endswith("\n") else "\n\n")
@@ -129,7 +153,11 @@ async def add_section(
     else:
         return {"error": f"no section `{after}` in note `{slug}` to insert after",
                 "slug": slug, "written": False}
-    return await _apply_note_text(gx, note_node, slug, new_text, path, write=write)
+    res = await _apply_note_text(gx, note_node, slug, new_text, path, write=write, write_md=write_md)
+    # Carry the applied section text + insertion point back so the CLI journals the exact op
+    # (slug/raw/after) that replay re-splices from.
+    res["section_raw"], res["after"] = section_raw, after
+    return res
 
 
 async def new_note(
