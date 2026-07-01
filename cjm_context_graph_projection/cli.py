@@ -33,6 +33,7 @@ from .structure import add_section, new_note
 from .projection import explore, get_schema, locate, relevant, show, state
 from .onboarding import project_onboarding
 from .readme import project_readme
+from .viz import project_viz
 from .rename_ops import rename_symbol
 from .source_state import flip_module, source_check
 from .cohesion import cohesion
@@ -385,6 +386,18 @@ async def _dispatch(args) -> int:
             # Default: print the surface verbatim (the viewer — `onboarding > file` is faithful).
             sys.stdout.write(res["markdown"])
             return 0
+        elif args.command == "viz":
+            res = await project_viz(gx, args.scope)
+            if args.write:
+                Path(args.out).write_text(res["html"])
+                print(f"viz: wrote {len(res['html'].encode())} bytes "
+                      f"({res['node_count']} nodes / {res['edge_count']} edges; "
+                      f"{res['counts']['ready']} ready · {res['counts']['blocked']} blocked · "
+                      f"{res['counts']['done']} done) -> {args.out}", file=sys.stderr)
+                return 0
+            # Default: print the HTML verbatim (the viewer — `viz > graph.html` is byte-faithful).
+            sys.stdout.write(res["html"])
+            return 0
         return 0
 
 
@@ -655,6 +668,15 @@ def main() -> int:
     p_ob.add_argument("--write", action="store_true", help="Write the surface to --out")
     p_ob.add_argument("--check", action="store_true",
                       help="Regen-check: compare --out to the projection (drift)")
+
+    p_vz = sub.add_parser("viz",
+                          help="Project the readiness frontier + dependency DAG to a self-contained "
+                               "interactive HTML page (read-only; another graph projection)")
+    p_vz.add_argument("--scope", default=None,
+                      help="Restrict to work-items whose label matches this term (substring)")
+    p_vz.add_argument("--out", default=f"{DEFAULT_REPOS}/cjm-substrate/.cjm/graph-viz.html",
+                      help="Where to write the HTML (with --write)")
+    p_vz.add_argument("--write", action="store_true", help="Write the HTML to --out")
 
     args = ap.parse_args()
     return asyncio.run(_dispatch(args))
