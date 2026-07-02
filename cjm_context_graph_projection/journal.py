@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional
 
 from cjm_markdown_decompose_core.extract import note_from_file
 
+from .display import set_display_rule
 from .runtime import GraphHandle
 from .structure import add_section, reconstruct_note
 from .write import alias, assert_value, author_section, decide, link
@@ -41,7 +42,11 @@ M3_BASELINE_ACTOR = "import:m3-baseline"
 # `add-section` = M2a: a STRUCTURAL add (slug/raw/after) on an already-genesis'd note. Replayed
 # graph-only via `add_section` in pass 2 (append order), it re-splices a section born on-graph
 # AFTER the note's genesis — the piece that keeps a journal-sourced note's later structure durable.
-JOURNAL_VERBS = ("decide", "alias", "assert", "link", "section", "new-note", "add-section")
+# `display-rule` = the graph-carried presentation vocabulary (DEC 16bcd96e): a per-kind
+# DisplayRule node authored/updated by deterministic id, so the journal's LAST op per kind
+# wins on replay (upsert semantics — rules are data, not content).
+JOURNAL_VERBS = ("decide", "alias", "assert", "link", "section", "new-note", "add-section",
+                 "display-rule")
 
 
 def read_journal(
@@ -159,7 +164,7 @@ async def _apply_op(gx: GraphHandle, op: Dict[str, Any]) -> str:
     elif verb == "decide":
         await decide(gx, a["statement"], actor=a.get("actor", "agent:session"),
                      supports=a.get("supports"), supersedes=a.get("supersedes"),
-                     session=a.get("session"))
+                     session=a.get("session"), title=a.get("title"))
     elif verb == "alias":
         await alias(gx, a["drifted"], a["canonical"], actor=a.get("actor", "agent:session"),
                     evidence=a.get("evidence"))
@@ -183,6 +188,11 @@ async def _apply_op(gx: GraphHandle, op: Dict[str, Any]) -> str:
         # no-ops when the target anchor already exists, so a rebuild never duplicates it.
         await add_section(gx, a["slug"], a["raw"], after=a.get("after"),
                           write=True, write_md=False)
+    elif verb == "display-rule":
+        # Presentation vocabulary: upsert by deterministic per-kind id, so replaying
+        # the append-ordered ops converges on the LAST authored rule per kind.
+        await set_display_rule(gx, a["for_label"], a.get("title_template"),
+                               a.get("gloss_template"), actor=a.get("actor", "agent:session"))
     else:
         return ""
     return verb

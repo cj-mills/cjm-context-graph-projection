@@ -20,11 +20,14 @@ def _short(text: Any, limit: int = 160) -> str:
 
 
 def _line(summary: Dict[str, Any]) -> str:
-    """One bounded markdown line for a node summary: title, label, id, optional description."""
+    """One bounded markdown line for a node summary: title, label, id, optional description.
+
+    A rule-derived `gloss` (the one-line orientation field) fills the description
+    slot for kinds that carry no `description` (the relational kinds)."""
     bits = [f"**{_short(summary.get('title'), 140)}**", f"_{summary.get('label')}_",
             f"`{summary.get('id')}`"]
     head = " · ".join(b for b in bits if b)
-    desc = summary.get("description")
+    desc = summary.get("description") or summary.get("gloss")
     return f"- {head}" + (f" — {_short(desc, 200)}" if desc else "")
 
 
@@ -123,6 +126,17 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         return (f"**linked** `{obj.get('source_id')}` —_{obj.get('relation')}_→ "
                 f"`{obj.get('target_id')}` (actor {obj.get('actor')})\n"
                 f"`edge {obj.get('edge_id')}`")
+    if kind == "display-rule":
+        if obj.get("error"):
+            return f"⚠ {obj['error']}"
+        verb = "updated" if obj.get("updated") else "authored"
+        lines = [f"**display-rule {verb}** for kind `{obj.get('for_label')}`",
+                 f"`rule {obj.get('rule_id')}`"]
+        if obj.get("title_template") is not None:
+            lines.append(f"  title: `{obj['title_template']}`")
+        if obj.get("gloss_template") is not None:
+            lines.append(f"  gloss: `{obj['gloss_template']}`")
+        return "\n".join(lines)
     if kind == "conventions":
         c = obj.get("counts", {})
         lines = ["## Convention audit (notebook code)",
@@ -417,6 +431,8 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                 line = f"- **{_short(r.get('title', ''), 80)}** `{r.get('id')}`"
                 if r.get("path"):
                     line += f"  📄 `{r['path']}`"
+                if r.get("gloss"):
+                    line += f"\n    ↳ _{_short(r['gloss'], 140)}_"
                 lines.append(line)
             elif mode == "predicate":
                 lines.append(f"- **{_short(r.get('subject', ''), 70)}** = _{r.get('value')}_ "
@@ -462,6 +478,8 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             lines += [f"📄 `{path}`", ""]  # where it lives on disk (the locate-at-a-glance line)
         if node.get("description"):
             lines += [node["description"], ""]
+        elif node.get("gloss"):
+            lines += [f"_{node['gloss']}_", ""]
         nb = obj.get("neighbours", [])
         if nb:
             lines.append("**Neighbours:**")

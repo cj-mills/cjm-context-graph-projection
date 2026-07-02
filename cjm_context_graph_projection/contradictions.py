@@ -16,17 +16,21 @@ from typing import Any, Dict, List, Optional
 from cjm_dev_graph_schema import predicates as P
 
 from . import factlayer as F
+from .display import node_title
 from .runtime import GraphHandle
 
 
 def _subject_label(slot_assertions: List[Any], entities_by_id: Dict[str, Any]) -> str:
-    """Best display label for a slot's subject (from the entity, else the carried id)."""
+    """Best display label for a slot's subject (from the entity, else the carried id).
+
+    Folded onto the one display seam (`node_title` — its cascade covers the old
+    name/key fallbacks), so a subject renders the same here as everywhere else."""
     if not slot_assertions:
         return "?"
     subj = F.prop(slot_assertions[0], "subject_id")
     ent = entities_by_id.get(subj)
     if ent is not None:
-        return F.prop(ent, "name") or F.prop(ent, "key") or subj
+        return node_title(ent)
     return subj or "?"
 
 

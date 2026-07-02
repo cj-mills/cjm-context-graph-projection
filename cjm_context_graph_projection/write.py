@@ -217,13 +217,17 @@ async def decide(
     supports: Optional[List[str]] = None,    # Premise Assertion ids the decision rests on
     supersedes: Optional[List[str]] = None,  # Prior Decision ids this one replaces
     session: Optional[str] = None,           # Session key this was decided in
+    title: Optional[str] = None,             # Explicit display title (tier-1 override; else the first-clause extractor)
 ) -> Dict[str, Any]:  # The write result
     """Record a Decision + its `SUPPORTED_BY` premise edges (reasoning substrate).
 
     Minimal in the cut: bank the premise edges now; the premise-drift checker is
     deferred. Idempotent on the canonical statement."""
     decision = DecisionNode(statement=statement, actor=actor)
-    nodes: List[Dict[str, Any]] = [decision.to_graph_node()]
+    node = decision.to_graph_node()
+    if title:
+        node["properties"]["display_title"] = title
+    nodes: List[Dict[str, Any]] = [node]
     edges: List[Dict[str, Any]] = decision.supported_by_edges(supports or [])
     edges += [decision.supersedes_edge(s) for s in (supersedes or [])]
     if session:
@@ -233,7 +237,8 @@ async def decide(
     res = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
     return {"decision_id": decision.id, "statement": statement, "actor": actor,
             "supports": supports or [], "supersedes": supersedes or [],
-            "session": session, "nodes_added": res.nodes_added, "edges_added": res.edges_added}
+            "session": session, "title": title,
+            "nodes_added": res.nodes_added, "edges_added": res.edges_added}
 
 
 async def link(

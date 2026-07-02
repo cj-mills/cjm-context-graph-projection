@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Set
 from cjm_context_graph_layer.ops import graph_task
 
 from . import factlayer as F
-from .projection import node_title
+from .display import annotate_display, node_title
 from .runtime import GraphHandle
 
 
@@ -22,11 +22,13 @@ async def _labels_for(
     ids: Set[str],  # Node ids to resolve to display titles
 ) -> Dict[str, str]:  # id -> best display title (id itself when unresolved)
     """Best display title per id (bounded — only the ids in the shown page)."""
-    out: Dict[str, str] = {}
+    nodes: Dict[str, Any] = {}
     for nid in ids:
         node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=nid)
-        out[nid] = node_title(node) if node is not None else nid
-    return out
+        if node is not None:
+            nodes[nid] = node
+    await annotate_display(gx, list(nodes.values()))
+    return {nid: (node_title(nodes[nid]) if nid in nodes else nid) for nid in ids}
 
 
 async def _list_label(gx: GraphHandle, label: str, limit: int, offset: int = 0,
@@ -38,11 +40,15 @@ async def _list_label(gx: GraphHandle, label: str, limit: int, offset: int = 0,
     the filter scans the whole label, so the window is over the MATCHES)."""
     cap = 1_000_000 if contains else offset + limit + 1
     nodes = await F.load_label(gx, label, limit=cap)
+    # Annotate before filtering/windowing so `contains` matches what a human SEES
+    # (rule titles included). No-rule labels cost nothing here.
+    await annotate_display(gx, nodes)
     if contains:
         c = contains.lower()
         nodes = [n for n in nodes if c in node_title(n).lower()]
     window = nodes[offset:offset + limit]
-    rows = [{"id": F.nid(n), "title": node_title(n), "path": F.prop(n, "path")}
+    rows = [{"id": F.nid(n), "title": node_title(n), "path": F.prop(n, "path"),
+             **({"gloss": F.prop(n, "display_gloss")} if F.prop(n, "display_gloss") else {})}
             for n in window]
     return {"mode": "label", "key": label, "rows": rows, "count": len(rows),
             "offset": offset, "contains": contains,

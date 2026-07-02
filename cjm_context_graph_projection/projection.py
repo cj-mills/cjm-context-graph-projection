@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 from cjm_context_graph_layer.ops import graph_task
 from cjm_context_graph_primitives.query import EdgeQuery, NodeQuery, PropertyPredicate
 
+from .display import annotate_display, node_title
 from .runtime import GraphHandle
 
 # Edge-type weights for relevance ranking: trust/reasoning/contradiction edges
@@ -58,16 +59,6 @@ def _props(node: Any) -> Dict[str, Any]:
     return _get(node, "properties", {}) or {}
 
 
-def node_title(node: Any) -> str:
-    """Best display label for a node (first non-empty text field, else its id)."""
-    p = _props(node)
-    for f in ("title", "name", "slug", "key", "statement", "value"):
-        v = p.get(f)
-        if isinstance(v, str) and v.strip():
-            return v.strip()
-    return _get(node, "id", "?")
-
-
 def node_summary(node: Any) -> Dict[str, Any]:
     """Compact, provenance-carrying summary of a node (the unit of a bounded read)."""
     p = _props(node)
@@ -80,6 +71,10 @@ def node_summary(node: Any) -> Dict[str, Any]:
         # (the render layer caps it again; the full body is a `read <id>` away).
         snip = " ".join(p["text"].split())
         out["description"] = (snip[:159] + "…") if len(snip) > 160 else snip
+    if isinstance(p.get("display_gloss"), str) and p["display_gloss"].strip():
+        # The rule-derived orientation line (annotate_display stamps it) — one live
+        # line of what the node says/points to; richer detail stays a `read` away.
+        out["gloss"] = p["display_gloss"].strip()
     for extra in ("note_type", "entity_kind", "status", "root_kind"):
         if p.get(extra):
             out[extra] = p[extra]
@@ -140,12 +135,16 @@ async def graph_overview(
 
     title_of: Dict[str, str] = {}
     kind_of: Dict[str, str] = {}
+    hub_nodes: List[Any] = []
     for label in hub_labels:
         nodes = await graph_task(gx.queue, gx.graph_id, "find_nodes_by_label",
                                  label=label, limit=5000)
         for n in (nodes or []):
-            title_of[_get(n, "id")] = node_title(n)
             kind_of[_get(n, "id")] = label
+            hub_nodes.append(n)
+    await annotate_display(gx, hub_nodes)  # rule-labelled kinds get real hub titles
+    for n in hub_nodes:
+        title_of[_get(n, "id")] = node_title(n)
     hubs = []
     for nid in sorted(degree, key=lambda i: degree[i], reverse=True):
         if nid in title_of:
@@ -241,6 +240,7 @@ async def show(
     node_id = _get(node, "id")
     ctx = await graph_task(gx.queue, gx.graph_id, "get_context", node_id=node_id, depth=depth)
     by_id = {_get(n, "id"): n for n in (_get(ctx, "nodes", []) or [])}
+    await annotate_display(gx, [node, *by_id.values()])  # rule titles before summarizing
     neighbours = []
     for e in (_get(ctx, "edges", []) or []):
         src, tgt, rel = _get(e, "source_id"), _get(e, "target_id"), _get(e, "relation_type")
@@ -371,6 +371,8 @@ async def relevant(
     full. The `results` teaser preserves the old ranked view (back-compat)."""
     scores, nodes_by_id, why, seed_of, seeds = await _score_task(gx, task, depth)
     ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    await annotate_display(gx, [nodes_by_id[nid] for nid, _ in ranked[:k]
+                                if nid in nodes_by_id] + list(seeds))
     results = [{**node_summary(nodes_by_id[nid]), "score": round(sc, 3), "why": why.get(nid, "")}
                for nid, sc in ranked[:k] if nid in nodes_by_id]
     all_ids = list(scores)
@@ -406,6 +408,8 @@ async def explore(
     selected = sorted(((nid, sc) for nid, sc in scores.items() if passes(nid)),
                       key=lambda kv: kv[1], reverse=True)
     total = len(selected)
+    await annotate_display(gx, [nodes_by_id[nid] for nid, _ in selected[:max(budget, 15)]
+                                if nid in nodes_by_id])
     if total <= budget:
         members = [{**node_summary(nodes_by_id[nid]), "score": round(sc, 3), "why": why.get(nid, "")}
                    for nid, sc in selected]
@@ -472,6 +476,7 @@ async def locate(
     are one read instead of a SQL expedition. Content search stays with `relevant`."""
     res = await resolve_node_ref(gx, term)
     if res.get("node") is not None:
+        await annotate_display(gx, [res["node"]])
         return {"term": term, "matches": [_locate_row(res["node"])], "count": 1, "truncated": False}
     if "candidates" in res:  # ambiguous id prefix: the candidates ARE the lookup result
         rows = [{"id": c["id"], "label": c["label"], "title": c["title"], "path": None}
@@ -488,6 +493,7 @@ async def locate(
             nid = _get(n, "id")
             if nid is not None:
                 seen.setdefault(nid, n)
+    await annotate_display(gx, list(seen.values()))
     rows = sorted((_locate_row(n) for n in seen.values()),
                   key=lambda r: (r["label"] or "", r["title"] or ""))
     return {"term": term, "matches": rows[:limit], "count": len(rows),
@@ -513,7 +519,7 @@ async def grep(
     needle = term.lower()
     if not needle:
         return {"term": term, "matches": [], "count": 0, "truncated": False}
-    rows = []
+    hits: List[tuple] = []
     for n in await _all_nodes(gx, per_label=1_000_000):
         p = _props(n)
         for f in _TEXT_FIELDS:
@@ -527,9 +533,12 @@ async def grep(
             start, end = max(0, i - context), min(len(s), i + len(term) + context)
             snippet = (("…" if start else "") + " ".join(s[start:end].split())
                        + ("…" if end < len(s) else ""))
-            rows.append({"id": _get(n, "id"), "label": _get(n, "label"),
-                         "title": node_title(n), "field": f, "snippet": snippet})
+            hits.append((n, f, snippet))
             break  # one hit per node — the match list stays a node list
+    await annotate_display(gx, [n for n, _, _ in hits])
+    rows = [{"id": _get(n, "id"), "label": _get(n, "label"),
+             "title": node_title(n), "field": f, "snippet": snippet}
+            for n, f, snippet in hits]
     rows.sort(key=lambda r: (r["label"] or "", r["title"] or ""))
     return {"term": term, "matches": rows[:limit], "count": len(rows),
             "truncated": len(rows) > limit}

@@ -19,6 +19,7 @@ from cjm_context_graph_layer.ops import extend_graph
 
 from .authoring import author, emit_artifact, read_node, read_slot
 from .contradictions import contradictions
+from .display import set_display_rule
 from .listing import list_graph
 from .readiness import readiness
 from .conventions import conventions
@@ -223,13 +224,25 @@ async def _dispatch(args) -> int:
             return 1 if res.get("error") else 0
         elif args.command == "decide":
             res = await decide(gx, args.statement, actor=args.actor, supports=args.supports,
-                               supersedes=args.supersedes, session=args.session)
+                               supersedes=args.supersedes, session=args.session,
+                               title=args.title)
             print(render("decide", res, args.format))
             if args.journal_path:
                 append_write(args.journal_path, "decide",
                              {"statement": args.statement, "actor": args.actor,
                               "supports": args.supports, "supersedes": args.supersedes,
-                              "session": args.session})
+                              "session": args.session, "title": args.title})
+        elif args.command == "display-rule":
+            res = await set_display_rule(gx, args.for_label, args.title, args.gloss,
+                                         actor=args.actor)
+            print(render("display-rule", res, args.format))
+            # Presentation vocabulary is journal-sourced like every born-on-graph write:
+            # the last display-rule op per kind wins on replay (deterministic-id upsert).
+            if args.journal_path and res.get("written"):
+                append_write(args.journal_path, "display-rule",
+                             {"for_label": args.for_label, "title_template": args.title,
+                              "gloss_template": args.gloss, "actor": args.actor})
+            return 1 if res.get("error") else 0
         elif args.command == "link":
             res = await link(gx, args.source_id, args.target_id, args.relation, actor=args.actor)
             print(render("link", res, args.format))
@@ -564,6 +577,20 @@ def main() -> int:
     p_de.add_argument("--supports", action="append", help="Premise assertion id (repeatable)")
     p_de.add_argument("--supersedes", action="append", help="Prior decision id (repeatable)")
     p_de.add_argument("--session", default=None, help="Session key this was decided in")
+    p_de.add_argument("--title", default=None,
+                      help="Explicit display title (tier-1 override; else the statement's "
+                           "first clause is extracted)")
+
+    p_dr = sub.add_parser("display-rule",
+                          help="Author/update the graph-carried DisplayRule for a node kind — "
+                               "the presentation vocabulary (templates: {prop}, {->REL}, "
+                               "{<-REL.prop}, {#<-REL}, |N truncates; one-hop, frozen-small)")
+    p_dr.add_argument("for_label", help="The node label (kind) the rule renders (e.g. FactSlot)")
+    p_dr.add_argument("--title", default=None,
+                      help="Title template: short stable identity (~60 chars)")
+    p_dr.add_argument("--gloss", default=None,
+                      help="Gloss template: one orientation line (what it says/points to/state)")
+    p_dr.add_argument("--actor", default="agent:session")
 
     p_or = sub.add_parser("oracle", help="Run the version oracle (refresh version slots)")
     p_or.add_argument("--repos-dir", default=DEFAULT_REPOS)
