@@ -85,6 +85,8 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                       f"- **{f['value']}** ×{f['count']} → `{_handle_cmd(f['handle'])}`" for f in sub]
         return "\n".join(lines)
     if kind == "assert":
+        if obj.get("error"):
+            return f"⚠ {obj['error']}"
         head = (f"**asserted** `{obj.get('predicate')}` = _{obj.get('value')}_ "
                 f"on **{obj.get('subject')}** (actor {obj.get('actor')})")
         lines = [head, f"`slot {obj.get('slot_id')}`", f"`assertion {obj.get('assertion_id')}`"]

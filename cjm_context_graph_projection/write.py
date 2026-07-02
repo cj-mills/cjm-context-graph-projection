@@ -28,7 +28,18 @@ from cjm_dev_graph_schema.nodes import (AssertionNode, DecisionNode, EntityNode,
 from cjm_dev_graph_schema.vocab import DevRelations
 
 from . import factlayer as F
+from .projection import ambiguity_error, resolve_node_ref
 from .runtime import GraphHandle
+
+# A subject shaped like a PARTIAL node id (hex+dashes, >=6 chars) but NOT a full
+# UUID. Gates the never-mint rule: an unresolved PREFIX is a typo'd reference (the
+# 2026-07-02 register footgun minted a term named `77f55f42`), while an unresolved
+# FULL UUID keeps the legacy mint path — asserting onto a deterministic id before
+# its entity node exists is a legitimate pattern (repo_purpose resolves the same
+# way, so both sides converge on the same subject).
+_ID_PREFIX_SHAPED_RE = re.compile(r"^[0-9a-fA-F][0-9a-fA-F-]{5,35}$")
+_FULL_UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                           r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
 
 def _term_slug(text: str) -> str:
@@ -43,18 +54,32 @@ async def resolve_subject(
 ) -> Dict[str, Any]:  # {subject_id, subject_label, created_node|None}
     """Resolve a subject to an entity id (rename-stable), minting a `term` entity
     if it resolves to nothing — so `assert` always has a real subject node."""
-    # 1. Already a node id?
-    existing = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=subject)
-    if existing is not None:
-        label = (F.prop(existing, "name") or F.prop(existing, "title")
-                 or F.prop(existing, "key") or subject)
-        return {"subject_id": subject, "subject_label": label, "created_node": None}
+    # 1. Already a node id — full, or a unique id PREFIX (the read verbs accept
+    # prefixes, so the write surface must too: a prefix falling through to the
+    # term-minting fallback silently asserts onto a phantom `term` entity named
+    # like a hex chunk — the 2026-07-02 register footgun). Ambiguity is an ERROR,
+    # never a guess and never a mint.
+    res = await resolve_node_ref(gx, subject)
+    if "candidates" in res:
+        return {"error": ambiguity_error(subject, res["candidates"]), "subject_id": None}
+    node = res.get("node")
+    if node is not None:
+        p = F.props(node)
+        label = (p.get("name") or p.get("title") or p.get("key") or subject)
+        return {"subject_id": F.nid(node), "subject_label": label, "created_node": None}
     # 2. Resolve via the alias index (key / current name / prior name / variant slug).
     index, _ = await F.alias_index(gx)
     rid = resolve_subject_id(index, subject)
     if rid is not None:
         return {"subject_id": rid, "subject_label": subject, "created_node": None}
-    # 3. Unresolved -> mint a term entity (don't fail; don't guess an existing one).
+    # 3. A PREFIX-shaped subject that resolved to nothing is a typo'd reference, not
+    # a concept — minting a hex-named term would be the same phantom, so fail loud.
+    # (A full unresolved UUID falls through to the legacy mint, per the note above.)
+    if _ID_PREFIX_SHAPED_RE.match(subject) and not _FULL_UUID_RE.match(subject):
+        return {"error": f"subject `{subject}` is shaped like a node-id prefix but "
+                         f"matches no node (and no alias) — not minting a term entity",
+                "subject_id": None}
+    # 4. Unresolved -> mint a term entity (don't fail; don't guess an existing one).
     ent = EntityNode(kind="term", key=_term_slug(subject), name=subject)
     return {"subject_id": ent.id, "subject_label": subject, "created_node": ent.to_graph_node()}
 
@@ -98,6 +123,9 @@ async def assert_value(
     returns the conflict on unordered disagreement; reports a soft signal on
     untyped disagreement. Idempotent on re-assertion of the same value+actor."""
     r = await resolve_subject(gx, subject)
+    if r.get("error"):
+        return {"error": r["error"], "subject": subject, "predicate": predicate,
+                "value": value, "written": False}
     subject_id, subject_label, created = r["subject_id"], r["subject_label"], r["created_node"]
 
     slot = FactSlotNode(subject_id=subject_id, predicate=predicate, subject_label=subject_label)

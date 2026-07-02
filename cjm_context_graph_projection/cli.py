@@ -204,12 +204,14 @@ async def _dispatch(args) -> int:
                                      actor=args.actor, evidence=args.evidence,
                                      supersede=args.supersede)
             print(render("assert", res, args.format))
-            if args.journal_path:
+            # Never journal a REFUSED write (ambiguous/typo'd id-shaped subject) —
+            # replay must not re-attempt it.
+            if args.journal_path and not res.get("error"):
                 append_write(args.journal_path, "assert",
                              {"subject": args.subject, "predicate": args.predicate,
                               "value": args.value, "actor": args.actor,
                               "evidence": args.evidence, "supersede": args.supersede})
-            return 2 if res.get("conflict") else 0
+            return 1 if res.get("error") else (2 if res.get("conflict") else 0)
         elif args.command == "alias":
             actor = f"agent:session:{args.session}" if args.session else args.actor
             evidence = (args.evidence
