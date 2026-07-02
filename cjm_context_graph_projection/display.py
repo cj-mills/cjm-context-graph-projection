@@ -230,6 +230,11 @@ class Displayer:
             return idx.get(rel, {}).get(node_id, [])
 
         # Fetch each referenced FIRST neighbour once (deduped across the batch).
+        # The batch itself seeds the cache — a `show`/`overview` batch usually already
+        # CONTAINS the neighbours — and the misses land in ONE batched `query_nodes`
+        # (`NodeQuery.ids`): per-node round-trips serialize through the worker queue,
+        # which priced a 100-slot list at ~10s.
+        cache: Dict[str, Any] = {F.nid(n): n for n in nodes if F.nid(n)}
         neighbour_ids: Set[str] = set()
         for n in targets:
             nid = F.nid(n)
@@ -237,11 +242,9 @@ class Displayer:
                 for p in parts:
                     if p[0] == "edge" and not p[1]:
                         ids = neighbours(nid, p[2], p[3])
-                        if ids:
+                        if ids and ids[0] not in cache:
                             neighbour_ids.add(ids[0])
-        cache: Dict[str, Any] = {}
-        for nid in neighbour_ids:
-            cache[nid] = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=nid)
+        cache.update(await F.load_nodes(gx, list(neighbour_ids)))
 
         for n in targets:
             nid = F.nid(n)

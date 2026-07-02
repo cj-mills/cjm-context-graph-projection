@@ -133,25 +133,25 @@ async def graph_overview(
             if end:
                 degree[end] = degree.get(end, 0) + 1
 
-    title_of: Dict[str, str] = {}
+    node_of: Dict[str, Any] = {}
     kind_of: Dict[str, str] = {}
-    hub_nodes: List[Any] = []
     for label in hub_labels:
         nodes = await graph_task(gx.queue, gx.graph_id, "find_nodes_by_label",
                                  label=label, limit=5000)
         for n in (nodes or []):
             kind_of[_get(n, "id")] = label
-            hub_nodes.append(n)
-    await annotate_display(gx, hub_nodes)  # rule-labelled kinds get real hub titles
-    for n in hub_nodes:
-        title_of[_get(n, "id")] = node_title(n)
-    hubs = []
+            node_of[_get(n, "id")] = n
+    hub_ids = []
     for nid in sorted(degree, key=lambda i: degree[i], reverse=True):
-        if nid in title_of:
-            hubs.append({"id": nid, "title": title_of[nid], "degree": degree[nid],
-                         "kind": kind_of[nid]})
-            if len(hubs) >= top_hubs:
+        if nid in node_of:
+            hub_ids.append(nid)
+            if len(hub_ids) >= top_hubs:
                 break
+    # Annotate ONLY the selected hubs (annotating every loaded node priced the
+    # whole-graph overview at its rule-neighbour fan-out — the 20s serve boot).
+    await annotate_display(gx, [node_of[i] for i in hub_ids])
+    hubs = [{"id": nid, "title": node_title(node_of[nid]), "degree": degree[nid],
+             "kind": kind_of[nid]} for nid in hub_ids]
     return {"by_kind": by_kind, "hubs": hubs}
 
 

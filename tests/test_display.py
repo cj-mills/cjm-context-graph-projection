@@ -119,11 +119,11 @@ def test_annotate_stamps_rule_output_but_never_overwrites_tier_one(monkeypatch):
     async def fake_pairs(gx, rel):
         return [("slot1", "ent1")] if rel == "ABOUT" else []
 
-    async def fake_task(queue, graph_id, op, **kw):
-        return cache.get(kw.get("node_id"))
+    async def fake_load_nodes(gx, ids):  # the batched miss-fetch
+        return {i: cache[i] for i in ids if i in cache}
 
     monkeypatch.setattr("cjm_context_graph_projection.display.F.load_edge_pairs", fake_pairs)
-    monkeypatch.setattr("cjm_context_graph_projection.display.graph_task", fake_task)
+    monkeypatch.setattr("cjm_context_graph_projection.display.F.load_nodes", fake_load_nodes)
 
     gx = type("Gx", (), {"queue": None, "graph_id": "g"})()
     asyncio.run(d.annotate(gx, [slot, stamped]))

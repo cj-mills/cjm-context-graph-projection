@@ -143,8 +143,10 @@ EXPLORER_HTML = r"""<!doctype html>
   // (Comma syntax: Cytoscape's color parser rejects modern space-separated hsl().)
   const kindColor = k => { let h = 0; for (const c of String(k)) h = (h * 31 + c.charCodeAt(0)) >>> 0;
                            return 'hsl(' + (h % 360) + ',62%,60%)'; };
+  // 90 chars ≈ 2-3 wrapped canvas lines (text-max-width 150 @ font-size 10) — sized for
+  // the display-rule composed titles ("task_state @ FINDING (…)"), not bare slugs.
   const short = s => { s = String(s || '').replace(/\s+/g, ' ');
-                       return s.length > 46 ? s.slice(0, 45) + '…' : s; };
+                       return s.length > 91 ? s.slice(0, 90) + '…' : s; };
 
   async function api(path, verbHint) {
     const t0 = performance.now();

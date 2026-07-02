@@ -73,11 +73,7 @@ async def _resolve_labels(
     ids: Set[str],  # Node ids to label
 ) -> Dict[str, str]:  # id -> best display title (id itself when unresolved)
     """Best display title for each id (the work-items + their gate targets)."""
-    nodes: Dict[str, Any] = {}
-    for nid in ids:
-        node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=nid)
-        if node is not None:
-            nodes[nid] = node
+    nodes = await F.load_nodes(gx, list(ids))
     await annotate_display(gx, list(nodes.values()))
     return {nid: (node_title(nodes[nid]) if nid in nodes else nid) for nid in ids}
 

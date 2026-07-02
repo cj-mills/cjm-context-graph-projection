@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from cjm_context_graph_layer.edits import resolve_active
 from cjm_context_graph_layer.ops import graph_task
-from cjm_context_graph_primitives.query import EdgeQuery
+from cjm_context_graph_primitives.query import EdgeQuery, NodeQuery
 from cjm_dev_graph_schema.aliases import build_alias_index
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 
@@ -53,6 +53,25 @@ async def load_label(
     """All nodes of a label (bounded by `limit`)."""
     res = await graph_task(gx.queue, gx.graph_id, "find_nodes_by_label", label=label, limit=limit)
     return list(res or [])
+
+
+async def load_nodes(
+    gx: GraphHandle,
+    ids: List[str],  # Node ids to fetch
+) -> Dict[str, Any]:  # id -> node (absent ids omitted)
+    """Batch-fetch nodes by id in ONE worker round-trip (`NodeQuery.ids`).
+
+    Per-id `get_node` calls serialize through the worker task queue (~100ms each),
+    so any page-of-ids read (list subjects, readiness labels, display neighbours)
+    must batch or it prices a page at seconds."""
+    if not ids:
+        return {}
+    q = NodeQuery(ids=sorted(set(ids)), limit=len(set(ids)))
+    res = await graph_task(gx.queue, gx.graph_id, "query_nodes", query=q.to_dict())
+    out: Dict[str, Any] = {}
+    for n in (getattr(res, "nodes", None) or (res.get("nodes") if isinstance(res, dict) else None) or []):
+        out[nid(n)] = n
+    return out
 
 
 async def load_edge_pairs(
