@@ -29,13 +29,24 @@ async def _labels_for(
     return out
 
 
-async def _list_label(gx: GraphHandle, label: str, limit: int) -> Dict[str, Any]:
-    """Every node carrying `label` (id + title + on-disk path), bounded by `limit`."""
-    nodes = await F.load_label(gx, label, limit=limit + 1)
+async def _list_label(gx: GraphHandle, label: str, limit: int, offset: int = 0,
+                      contains: Optional[str] = None) -> Dict[str, Any]:
+    """Nodes carrying `label`, windowed by `offset`+`limit`, optionally title-filtered.
+
+    The window is what keeps a thousands-strong kind browsable at a fixed budget:
+    page with `offset`, or narrow with `contains` (case-insensitive title substring —
+    the filter scans the whole label, so the window is over the MATCHES)."""
+    cap = 1_000_000 if contains else offset + limit + 1
+    nodes = await F.load_label(gx, label, limit=cap)
+    if contains:
+        c = contains.lower()
+        nodes = [n for n in nodes if c in node_title(n).lower()]
+    window = nodes[offset:offset + limit]
     rows = [{"id": F.nid(n), "title": node_title(n), "path": F.prop(n, "path")}
-            for n in nodes[:limit]]
-    return {"mode": "label", "key": label, "rows": rows,
-            "count": len(rows), "truncated": len(nodes) > limit}
+            for n in window]
+    return {"mode": "label", "key": label, "rows": rows, "count": len(rows),
+            "offset": offset, "contains": contains,
+            "truncated": len(nodes) > offset + limit}
 
 
 async def _list_predicate(gx: GraphHandle, predicate: str, limit: int) -> Dict[str, Any]:
@@ -83,7 +94,9 @@ async def list_graph(
     label: Optional[str] = None,      # Enumerate nodes of this label
     predicate: Optional[str] = None,  # Enumerate active assertions of this predicate
     relation: Optional[str] = None,   # Enumerate edges of this relation type
-    limit: int = 50,                  # Cap the row list
+    limit: int = 50,                  # Cap the row list (the window size for label mode)
+    offset: int = 0,                  # Label mode: window start (page through big kinds)
+    contains: Optional[str] = None,   # Label mode: title substring filter (case-insensitive)
 ) -> Dict[str, Any]:  # {mode, key, rows, count, truncated} or {error}
     """Enumerate one CLASS of the graph: nodes by label / assertions by predicate / edges
     by relation. Exactly one of `label`/`predicate`/`relation` selects the mode."""
@@ -94,7 +107,7 @@ async def list_graph(
                 "given": [k for k, _ in chosen]}
     mode, key = chosen[0]
     if mode == "label":
-        return await _list_label(gx, key, limit)
+        return await _list_label(gx, key, limit, offset=offset, contains=contains)
     if mode == "predicate":
         return await _list_predicate(gx, key, limit)
     return await _list_relation(gx, key, limit)

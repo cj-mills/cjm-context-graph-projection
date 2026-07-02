@@ -426,6 +426,18 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                              f"**{_short(r.get('target', ''), 60)}**  "
                              f"`{r.get('source_id')}` → `{r.get('target_id')}`")
         return "\n".join(lines)
+    if kind == "grep":
+        matches = obj.get("matches", [])
+        if not matches:
+            return (f"## Grep `{obj.get('term')}`\n\n_(no node's text contains that "
+                    f"substring — try `relevant` for a ranked term search)_")
+        head = f"## Grep `{obj.get('term')}` ({obj.get('count', len(matches))}" \
+               + (" — truncated" if obj.get("truncated") else "") + ")"
+        lines = [head, ""]
+        for m in matches:
+            lines.append(f"- **{_short(m.get('title', ''), 80)}** · _{m.get('label')}_ `{m.get('id')}`")
+            lines.append(f"    ↳ `{m.get('field')}`: {m.get('snippet')}")
+        return "\n".join(lines)
     if kind == "locate":
         matches = obj.get("matches", [])
         if not matches:

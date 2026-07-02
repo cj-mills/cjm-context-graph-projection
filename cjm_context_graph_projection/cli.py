@@ -30,11 +30,13 @@ from .module_ops import delete_module, new_module, regroup, rename_module
 from .oracle import run_version_oracle
 from .reconcile import reconcile_memory
 from .structure import add_section, new_note
-from .projection import explore, get_schema, locate, relevant, show, state
+from .projection import explore, get_schema, grep, locate, relevant, show, state
 from .onboarding import project_onboarding
 from .readme import project_readme
 from .viz import project_viz
 from .rename_ops import rename_symbol
+from .serve import serve_graphs
+from .explorer_page import EXPLORER_HTML
 from .source_state import flip_module, source_check
 from .cohesion import cohesion
 from .refactor import refactor_candidates
@@ -76,6 +78,13 @@ def _editor_pop(
 
 
 async def _dispatch(args) -> int:
+    if args.command == "serve":
+        # The long-lived read-only explorer: opens N graphs itself (primary + --also),
+        # so it doesn't ride the single-graph context below.
+        await serve_graphs([args.graph_db_path, *(args.also or [])], host=args.host,
+                           port=args.port, manifests_dir=args.manifests_dir,
+                           index_html=EXPLORER_HTML)
+        return 0
     async with open_graph(args.graph_db_path, args.manifests_dir) as gx:
         if args.command == "ingest":
             note_aliases = await note_alias_map(gx)  # confirmed link aliases heal drifted refs
@@ -157,6 +166,8 @@ async def _dispatch(args) -> int:
             print(render("show", await show(gx, args.node_id, depth=args.depth), args.format))
         elif args.command == "locate":
             print(render("locate", await locate(gx, args.term, limit=args.limit), args.format))
+        elif args.command == "grep":
+            print(render("grep", await grep(gx, args.term, limit=args.limit), args.format))
         elif args.command == "read":
             res = await read_node(gx, args.node_id)
             out = render("read", res, args.format)
@@ -175,7 +186,8 @@ async def _dispatch(args) -> int:
             print(render("readiness", await readiness(gx, args.scope), args.format))
         elif args.command == "list":
             res = await list_graph(gx, label=args.label, predicate=args.predicate,
-                                   relation=args.relation, limit=args.limit)
+                                   relation=args.relation, limit=args.limit,
+                                   offset=args.offset, contains=args.contains)
             print(render("list", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "conventions":
@@ -482,6 +494,12 @@ def main() -> int:
     p_loc.add_argument("term", help="A node id, or a name/title/slug/key/module-path/file-path substring")
     p_loc.add_argument("--limit", type=int, default=25)
 
+    p_gr = sub.add_parser("grep",
+                          help="Exact-substring CONTENT search over node text fields "
+                               "(the literal complement of locate/relevant)")
+    p_gr.add_argument("term", help="The exact substring / phrase (case-insensitive)")
+    p_gr.add_argument("--limit", type=int, default=25)
+
     p_read = sub.add_parser("read",
                             help="Deliver a node's verbatim CONTENT (Note body / Section / "
                                  "CodeSymbol body / CodeText / Cell / module) — the read dual of author/emit")
@@ -513,6 +531,10 @@ def main() -> int:
     g_ls.add_argument("--predicate", help="All active assertions of this predicate (e.g. task_state)")
     g_ls.add_argument("--relation", help="All edges of this relation type (e.g. GATED_BY)")
     p_ls.add_argument("--limit", type=int, default=50)
+    p_ls.add_argument("--offset", type=int, default=0,
+                      help="Label mode: window start (page through a big kind)")
+    p_ls.add_argument("--contains", default=None,
+                      help="Label mode: case-insensitive title substring filter")
 
     p_wl = sub.add_parser("worklist", help="Propose/confirm queue (dangling refs, soft conflicts)")
     p_wl.add_argument("--memory-dir", default=DEFAULT_MEMORY,
@@ -668,6 +690,16 @@ def main() -> int:
     p_ob.add_argument("--write", action="store_true", help="Write the surface to --out")
     p_ob.add_argument("--check", action="store_true",
                       help="Regen-check: compare --out to the projection (drift)")
+
+    p_sv = sub.add_parser("serve",
+                          help="Serve the read-only graph EXPLORER (the richer viz instrument): "
+                               "opens --graph-db-path (+ each --also) once and maps the read "
+                               "verbs to timed JSON endpoints + a browser client")
+    p_sv.add_argument("--also", action="append", default=None, metavar="DB_PATH",
+                      help="Additional graph db to serve alongside --graph-db-path (repeatable; "
+                           "the multi-graph corpus one switcher-click apart)")
+    p_sv.add_argument("--host", default="127.0.0.1", help="Bind address (default loopback)")
+    p_sv.add_argument("--port", type=int, default=8766)
 
     p_vz = sub.add_parser("viz",
                           help="Project the readiness frontier + dependency DAG to a self-contained "

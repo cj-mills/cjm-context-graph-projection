@@ -181,9 +181,15 @@ async def read_node(
 
     A nested symbol (a method) carries no own body — its text lives in the enclosing
     class block, so we point there rather than returning empty."""
-    node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=node_id)
+    from .projection import ambiguity_error, resolve_node_ref
+    res = await resolve_node_ref(gx, node_id)
+    if "candidates" in res:
+        return {"error": ambiguity_error(node_id, res["candidates"]),
+                "node_id": node_id, "candidates": res["candidates"]}
+    node = res.get("node")
     if node is None:
         return {"error": f"no node `{node_id}`", "node_id": node_id}
+    node_id = F.nid(node) or node_id
     label = _label_of(node)
     p = F.props(node)
     if label == DevNodeKinds.NOTE:

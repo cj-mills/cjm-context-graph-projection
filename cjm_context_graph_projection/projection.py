@@ -139,15 +139,18 @@ async def graph_overview(
                 degree[end] = degree.get(end, 0) + 1
 
     title_of: Dict[str, str] = {}
+    kind_of: Dict[str, str] = {}
     for label in hub_labels:
         nodes = await graph_task(gx.queue, gx.graph_id, "find_nodes_by_label",
                                  label=label, limit=5000)
         for n in (nodes or []):
             title_of[_get(n, "id")] = node_title(n)
+            kind_of[_get(n, "id")] = label
     hubs = []
     for nid in sorted(degree, key=lambda i: degree[i], reverse=True):
         if nid in title_of:
-            hubs.append({"id": nid, "title": title_of[nid], "degree": degree[nid]})
+            hubs.append({"id": nid, "title": title_of[nid], "degree": degree[nid],
+                         "kind": kind_of[nid]})
             if len(hubs) >= top_hubs:
                 break
     return {"by_kind": by_kind, "hubs": hubs}
@@ -186,15 +189,56 @@ async def find_seeds(
     return [n for _, n in scored[:k]]
 
 
+# A ref shaped like (part of) a node id: hex + dashes, at least 6 chars. Names/terms
+# don't match, so prefix resolution never hijacks a term lookup.
+_ID_PREFIX_RE = re.compile(r"^[0-9a-fA-F][0-9a-fA-F-]{5,35}$")
+
+
+async def resolve_node_ref(
+    gx: GraphHandle,
+    ref: str,  # A full node id, or a unique id PREFIX (>= 6 hex chars)
+) -> Dict[str, Any]:  # {node} | {candidates:[{id,label,title}]} | {} (no match / not id-shaped)
+    """Resolve a node reference: exact id first, then unique id-prefix.
+
+    The human habit this serves: ids get cited by their first chunk (`a85327b1` for the
+    full UUID) — every id-taking verb should accept that. An AMBIGUOUS prefix returns the
+    candidates instead of guessing; the caller surfaces them."""
+    node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=ref)
+    if node is not None:
+        return {"node": node}
+    if not _ID_PREFIX_RE.match(ref):
+        return {}
+    pref = ref.lower()
+    hits = [n for n in await _all_nodes(gx, per_label=1_000_000)
+            if str(_get(n, "id", "")).lower().startswith(pref)]
+    if len(hits) == 1:
+        return {"node": hits[0]}
+    if hits:
+        return {"candidates": [{"id": _get(n, "id"), "label": _get(n, "label"),
+                                "title": node_title(n)} for n in hits[:10]]}
+    return {}
+
+
+def ambiguity_error(ref: str, candidates: List[Dict[str, Any]]) -> str:
+    """One-line error naming the candidates, so the caller's next call can be exact."""
+    opts = "; ".join(f"{c['id']} ({c['label']})" for c in candidates)
+    return f"ambiguous id prefix `{ref}` — candidates: {opts}"
+
+
 async def show(
     gx: GraphHandle,
-    node_id: str,   # Node to expand
+    node_id: str,   # Node to expand (full id, or a unique id prefix)
     depth: int = 1, # Neighbourhood depth
 ) -> Dict[str, Any]:  # {node, neighbours:[{node, relation, direction}]}
     """One node in full, with its immediate neighbours + the relation to each."""
-    node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=node_id)
+    res = await resolve_node_ref(gx, node_id)
+    if "candidates" in res:
+        return {"node": None, "neighbours": [], "candidates": res["candidates"],
+                "error": ambiguity_error(node_id, res["candidates"])}
+    node = res.get("node")
     if node is None:
         return {"node": None, "neighbours": [], "error": f"no node {node_id}"}
+    node_id = _get(node, "id")
     ctx = await graph_task(gx.queue, gx.graph_id, "get_context", node_id=node_id, depth=depth)
     by_id = {_get(n, "id"): n for n in (_get(ctx, "nodes", []) or [])}
     neighbours = []
@@ -383,8 +427,13 @@ async def state(
 
     A subject is resolved as a node id first, then as a term match (first seed)."""
     if subject:
-        node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=subject)
-        if node is None:
+        res = await resolve_node_ref(gx, subject)
+        if "candidates" in res:
+            return {"subject": subject, "candidates": res["candidates"],
+                    "error": ambiguity_error(subject, res["candidates"])}
+        if res.get("node") is not None:
+            subject = _get(res["node"], "id")
+        else:
             seeds = await find_seeds(gx, subject, k=1)
             if not seeds:
                 return {"subject": subject, "resolved": None, "note": "no matching node"}
@@ -421,9 +470,13 @@ async def locate(
     is matched (case-insensitive substring) across the identifying properties and each
     hit is reported with its `path`, so 'what's the id of X' and 'where does X live'
     are one read instead of a SQL expedition. Content search stays with `relevant`."""
-    node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=term)
-    if node is not None:
-        return {"term": term, "matches": [_locate_row(node)], "count": 1, "truncated": False}
+    res = await resolve_node_ref(gx, term)
+    if res.get("node") is not None:
+        return {"term": term, "matches": [_locate_row(res["node"])], "count": 1, "truncated": False}
+    if "candidates" in res:  # ambiguous id prefix: the candidates ARE the lookup result
+        rows = [{"id": c["id"], "label": c["label"], "title": c["title"], "path": None}
+                for c in res["candidates"]]
+        return {"term": term, "matches": rows, "count": len(rows), "truncated": False}
     # Union of per-property `contains` matches (NodeQuery `where` is AND-only, so OR
     # across properties = one query per property, deduped by id).
     seen: Dict[str, Any] = {}
@@ -437,5 +490,46 @@ async def locate(
                 seen.setdefault(nid, n)
     rows = sorted((_locate_row(n) for n in seen.values()),
                   key=lambda r: (r["label"] or "", r["title"] or ""))
+    return {"term": term, "matches": rows[:limit], "count": len(rows),
+            "truncated": len(rows) > limit}
+
+
+async def grep(
+    gx: GraphHandle,
+    term: str,          # Exact substring / phrase to find (case-insensitive)
+    limit: int = 25,    # Cap the match list
+    context: int = 60,  # Snippet context chars either side of the hit
+) -> Dict[str, Any]:  # {term, matches:[{id, label, title, field, snippet}], count, truncated}
+    """Exact-substring CONTENT search over every node's text fields — the literal third leg.
+
+    Fills the gap between `locate` (identifying-property lookup — misses body content) and
+    `relevant` (term-overlap seed ranking — common words seed elsewhere, so an exact phrase
+    the corpus contains can still rank out of sight; found driving the explorer, 2026-07-01).
+    One hit per node (its first matching field), with a whitespace-normalized snippet around
+    the hit so the match is judgeable without a `read`. Content search stays `relevant`'s
+    business for RANKING; this is for WHEN YOU KNOW THE WORDS — so the scan is EXHAUSTIVE
+    (`_all_nodes`' default per-label cap would silently miss nodes past 1000: found on the
+    capability graph's 6.5k Segments, where grep hits came and went with load order)."""
+    needle = term.lower()
+    if not needle:
+        return {"term": term, "matches": [], "count": 0, "truncated": False}
+    rows = []
+    for n in await _all_nodes(gx, per_label=1_000_000):
+        p = _props(n)
+        for f in _TEXT_FIELDS:
+            v = p.get(f)
+            if not v:
+                continue
+            s = str(v)
+            i = s.lower().find(needle)
+            if i < 0:
+                continue
+            start, end = max(0, i - context), min(len(s), i + len(term) + context)
+            snippet = (("…" if start else "") + " ".join(s[start:end].split())
+                       + ("…" if end < len(s) else ""))
+            rows.append({"id": _get(n, "id"), "label": _get(n, "label"),
+                         "title": node_title(n), "field": f, "snippet": snippet})
+            break  # one hit per node — the match list stays a node list
+    rows.sort(key=lambda r: (r["label"] or "", r["title"] or ""))
     return {"term": term, "matches": rows[:limit], "count": len(rows),
             "truncated": len(rows) > limit}
