@@ -287,6 +287,28 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         if not (ready or blocked or done):
             lines.append("_(no work-items — author `task_state` to populate)_")
         return "\n".join(lines)
+    if kind == "register-drift":
+        c = obj.get("counts", {})
+        lines = ["## Register drift",
+                 f"_registers {c.get('registers', 0)} · in-sync {c.get('in_sync', 0)} · "
+                 f"drifting {c.get('drifting', 0)} · hubless {c.get('hubless', 0)}_"
+                 "  (cache vs role assertions — propose only)", ""]
+        for r in obj.get("registers", []):
+            missing, stale = r.get("missing_cache", []), r.get("stale_cache", [])
+            mark = "✓" if not (missing or stale) else "✗"
+            lines.append(f"- {mark} **{_short(r.get('hub_label', ''), 60)}** "
+                         f"(`role={r.get('value')}`): members {r.get('members', 0)} · "
+                         f"cached {r.get('cached', 0)} `{r.get('hub_id')}`")
+            for m in missing:
+                lines.append(f"    ↳ missing from cache: _{_short(m.get('label', ''), 80)}_ `{m.get('id')}`")
+            for m in stale:
+                lines.append(f"    ↳ stale cache link: _{_short(m.get('label', ''), 80)}_ `{m.get('id')}`")
+        for h in obj.get("hubless", []):
+            lines.append(f"- ◌ `role={h.get('value')}`: {h.get('members', 0)} member(s), no "
+                         f"`{h.get('value')}-register` hub (counts only — a hub is earned, not required)")
+        if not (obj.get("registers") or obj.get("hubless")):
+            lines.append("_(no role assertions — nothing to reconcile)_")
+        return "\n".join(lines)
     if kind == "oracle":
         c = obj.get("counts", {})
         lines = ["## Version oracle",

@@ -22,6 +22,7 @@ from .contradictions import contradictions
 from .display import set_display_rule
 from .listing import list_graph
 from .readiness import readiness
+from .registers import register_drift
 from .conventions import conventions
 from .devgraph import build_dev_graph_elements, notes_corpus_elements
 from .factlayer import note_alias_map
@@ -185,6 +186,8 @@ async def _dispatch(args) -> int:
             print(render("contradictions", await contradictions(gx, args.scope), args.format))
         elif args.command == "readiness":
             print(render("readiness", await readiness(gx, args.scope), args.format))
+        elif args.command == "register-drift":
+            print(render("register-drift", await register_drift(gx), args.format))
         elif args.command == "list":
             res = await list_graph(gx, label=args.label, predicate=args.predicate,
                                    relation=args.relation, limit=args.limit,
@@ -548,6 +551,10 @@ def main() -> int:
     p_rd = sub.add_parser("readiness",
                           help="Derived ready/blocked/done work-item frontier (task_state + GATED_BY)")
     p_rd.add_argument("scope", nargs="?", default=None, help="Restrict to work-items whose label matches")
+
+    p_rg = sub.add_parser("register-drift",
+                          help="Reconcile each <value>-register hub's REFERENCES cache against "
+                               "the active role assertions (propose/confirm, never auto-fix)")
 
     p_ls = sub.add_parser("list",
                           help="Enumerate a class: nodes by --label / assertions by --predicate / edges by --relation")
