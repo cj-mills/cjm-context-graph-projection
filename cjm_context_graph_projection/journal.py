@@ -26,7 +26,7 @@ from cjm_markdown_decompose_core.extract import note_from_file
 from .display import set_display_rule
 from .runtime import GraphHandle
 from .structure import add_section, reconstruct_note
-from .write import alias, assert_value, author_section, decide, link
+from .write import add_check, alias, assert_value, author_section, decide, link
 
 # The provenance actor stamped on the M3 one-time genesis import (a per-note `new-note` op
 # capturing the pre-cutover baseline). The lineage floor every later edit traces back to.
@@ -46,7 +46,7 @@ M3_BASELINE_ACTOR = "import:m3-baseline"
 # DisplayRule node authored/updated by deterministic id, so the journal's LAST op per kind
 # wins on replay (upsert semantics — rules are data, not content).
 JOURNAL_VERBS = ("decide", "alias", "assert", "link", "section", "new-note", "add-section",
-                 "display-rule")
+                 "display-rule", "check")
 
 
 def read_journal(
@@ -175,6 +175,11 @@ async def _apply_op(gx: GraphHandle, op: Dict[str, Any]) -> str:
     elif verb == "link":
         await link(gx, a["source_id"], a["target_id"], a["relation"],
                    actor=a.get("actor", "agent:session"))
+    elif verb == "check":
+        # DoD gradient: re-attach a check (deterministic (item, text) id -> verified
+        # no-op on rebuild). Replaying its `task_state=open` after a later journaled
+        # `done` lands born-superseded (ordered predicate), so replay converges.
+        await add_check(gx, a["item_id"], a["text"], actor=a.get("actor", "agent:session"))
     elif verb == "section":
         # M2b: re-apply a section's verbatim raw STATE (update_node; idempotent). A missing
         # section is a tolerated no-op. The audit-only `replaces`/ts fields are ignored.

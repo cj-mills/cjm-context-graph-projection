@@ -14,6 +14,19 @@ state. A pure read can't corrupt (strictly safer than the file-mutating refactor
 ops). This is the never-hand-maintain-a-derived-field RULE (DEC-RULE `eb25ea0d`)
 satisfied at layer 1: there is simply no write path for ready/blocked.
 
+DoD-as-graph-objects rides the same machinery on the CLOSING side: a `Check`
+node hangs off its work item via `CHECKS` (never `GATED_BY` — a DoD gates closing
+an item, not starting it; checks are satisfied BY doing the work) and carries its
+own `task_state`. Derived, never stored:
+
+    closable ≡ the item is `open` AND it has checks AND every check is `done`
+    drift    ≡ the item is `done` AND >=1 of its checks is still `open`
+
+`done` itself stays human-authored — checks VERIFY the judgment (drift) and
+surface when it is due (closable); they never auto-close. A `GATED_BY` edge MAY
+target a check (partial dependency on one aspect of another item) — checks count
+toward gate satisfaction but never appear as frontier work-items themselves.
+
 Same family as `contradictions` / `worklist` / the version oracle: a derived view
 over authored facts + edges.
 """
@@ -32,6 +45,7 @@ from .runtime import GraphHandle
 def classify_readiness(
     task_state: Dict[str, str],   # work-item id -> its ACTIVE task_state (open | done)
     gates: Dict[str, List[str]],  # work-item id -> the prerequisite ids it is GATED_BY
+    hidden: Optional[Set[str]] = None,  # ids to EXCLUDE from the partitions (Check nodes) — they still satisfy gates
 ) -> Dict[str, List[Dict[str, Any]]]:  # {done, ready, blocked} partitions
     """Pure: partition work-items into done / ready / blocked from authored ground truth.
 
@@ -39,10 +53,15 @@ def classify_readiness(
     BLOCKED (naming the unmet gates). A gate id with no `done` task_state counts as
     NOT done — an unmet prerequisite (absence is never silently treated as
     satisfied, so a gate pointing at a non-work-item surfaces as a standing block).
+    `hidden` ids (Check nodes — they carry `task_state` too) are never partitioned
+    as work-items but DO count toward gate satisfaction, so a `GATED_BY` targeting
+    one check of another item works (partial dependency).
     `ready`/`blocked` are computed here and NEVER written back (the derived-field rule)."""
     done_ids: Set[str] = {i for i, s in task_state.items() if s == P.TASK_DONE}
     done, ready, blocked = [], [], []
     for item, state in sorted(task_state.items()):
+        if hidden and item in hidden:
+            continue
         if state == P.TASK_DONE:
             done.append({"id": item})
             continue
@@ -53,6 +72,22 @@ def classify_readiness(
         else:
             ready.append({"id": item, "gates": item_gates})
     return {"done": done, "ready": ready, "blocked": blocked}
+
+
+def summarize_checks(
+    task_state: Dict[str, str],       # node id -> ACTIVE task_state (items AND checks)
+    checks_of: Dict[str, List[str]],  # work-item id -> its Check ids (CHECKS edges)
+) -> Dict[str, Dict[str, Any]]:  # item id -> {total, done, open: [check ids]}
+    """Pure: per-item DoD summary from the checks' own task_states.
+
+    A check with no `done` task_state is open (absence is never satisfied — the
+    same absence rule as gates)."""
+    out: Dict[str, Dict[str, Any]] = {}
+    for item, cids in checks_of.items():
+        open_ids = [c for c in sorted(cids) if task_state.get(c) != P.TASK_DONE]
+        out[item] = {"total": len(cids), "done": len(cids) - len(open_ids),
+                     "open": open_ids}
+    return out
 
 
 def _active_task_states(
@@ -98,11 +133,27 @@ async def readiness(
     for src, tgt in gate_pairs:
         gates.setdefault(src, []).append(tgt)
 
-    parts = classify_readiness(task_state, gates)
+    # DoD checks: fold into closable/drift, never into the work-item partitions.
+    check_pairs = await F.load_edge_pairs(gx, DevRelations.CHECKS)
+    checks_of: Dict[str, List[str]] = {}
+    for chk, item in check_pairs:
+        checks_of.setdefault(item, []).append(chk)
+    check_ids: Set[str] = {chk for chk, _ in check_pairs}
+
+    parts = classify_readiness(task_state, gates, hidden=check_ids)
+    dod = summarize_checks(task_state, checks_of)
+
+    closable_ids = sorted(
+        e["id"] for bucket in (parts["ready"], parts["blocked"]) for e in bucket
+        if e["id"] in dod and dod[e["id"]]["open"] == [] )
+    drift_pairs = [(e["id"], dod[e["id"]]["open"]) for e in parts["done"]
+                   if e["id"] in dod and dod[e["id"]]["open"]]
 
     ids: Set[str] = {e["id"] for bucket in parts.values() for e in bucket}
     for b in parts["blocked"]:
         ids.update(b["blocked_by"])
+    for _, open_checks in drift_pairs:
+        ids.update(open_checks)
     labels = await _resolve_labels(gx, ids)
 
     scope_l = scope.lower() if scope else None
@@ -113,14 +164,27 @@ async def readiness(
     def _keep(nid: str) -> bool:
         return scope_l is None or scope_l in _label(nid).lower()
 
+    def _checks(nid: str) -> Dict[str, Any]:
+        d = dod.get(nid)
+        return {"checks": {"done": d["done"], "total": d["total"]}} if d else {}
+
     ready = [{"id": e["id"], "label": _label(e["id"]),
-              "gates": [{"id": g, "label": _label(g)} for g in e["gates"]]}
+              "gates": [{"id": g, "label": _label(g)} for g in e["gates"]],
+              **_checks(e["id"])}
              for e in parts["ready"] if _keep(e["id"])]
     blocked = [{"id": e["id"], "label": _label(e["id"]),
-                "blocked_by": [{"id": g, "label": _label(g)} for g in e["blocked_by"]]}
+                "blocked_by": [{"id": g, "label": _label(g)} for g in e["blocked_by"]],
+                **_checks(e["id"])}
                for e in parts["blocked"] if _keep(e["id"])]
-    done = [{"id": e["id"], "label": _label(e["id"])}
+    done = [{"id": e["id"], "label": _label(e["id"]), **_checks(e["id"])}
             for e in parts["done"] if _keep(e["id"])]
+    closable = [{"id": i, "label": _label(i), **_checks(i)}
+                for i in closable_ids if _keep(i)]
+    drift = [{"id": i, "label": _label(i),
+              "open_checks": [{"id": c, "label": _label(c)} for c in open_checks]}
+             for i, open_checks in drift_pairs if _keep(i)]
 
     return {"ready": ready, "blocked": blocked, "done": done,
-            "counts": {"ready": len(ready), "blocked": len(blocked), "done": len(done)}}
+            "closable": closable, "drift": drift,
+            "counts": {"ready": len(ready), "blocked": len(blocked), "done": len(done),
+                       "closable": len(closable), "drift": len(drift)}}

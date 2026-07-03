@@ -1,6 +1,6 @@
 """The readiness frontier: pure derivation (classify) + its render (no graph needed)."""
 
-from cjm_context_graph_projection.readiness import classify_readiness
+from cjm_context_graph_projection.readiness import classify_readiness, summarize_checks
 from cjm_context_graph_projection.render import render
 
 
@@ -79,3 +79,76 @@ def test_render_readiness_empty():
     out = render("readiness", {"ready": [], "blocked": [], "done": [],
                                "counts": {"ready": 0, "blocked": 0, "done": 0}}, "human")
     assert "no work-items" in out
+
+
+def test_classify_hidden_check_satisfies_gate_but_never_partitions():
+    # A Check carries task_state too: it must count toward gate satisfaction
+    # (partial dependency on one aspect of another item) yet NEVER appear as a
+    # frontier work-item itself.
+    parts = classify_readiness(
+        task_state={"arc": "open", "chk": "done"},
+        gates={"arc": ["chk"]},
+        hidden={"chk"})
+    assert [r["id"] for r in parts["ready"]] == ["arc"]
+    all_ids = {e["id"] for bucket in parts.values() for e in bucket}
+    assert "chk" not in all_ids
+
+
+def test_classify_hidden_open_check_still_blocks_a_gate():
+    parts = classify_readiness(
+        task_state={"arc": "open", "chk": "open"},
+        gates={"arc": ["chk"]},
+        hidden={"chk"})
+    assert parts["blocked"][0] == {"id": "arc", "blocked_by": ["chk"]}
+    assert parts["ready"] == []
+
+
+def test_summarize_checks_counts_and_absence_is_open():
+    # A check with no `done` task_state is open — absence is never satisfied
+    # (the same absence rule as gates).
+    dod = summarize_checks(
+        task_state={"c1": "done", "c2": "open"},
+        checks_of={"item": ["c1", "c2", "c3"]})
+    assert dod["item"] == {"total": 3, "done": 1, "open": ["c2", "c3"]}
+
+
+def test_summarize_checks_all_done_is_closable_shape():
+    dod = summarize_checks(task_state={"c1": "done"}, checks_of={"item": ["c1"]})
+    assert dod["item"]["open"] == [] and dod["item"]["done"] == dod["item"]["total"] == 1
+
+
+def test_render_readiness_marks_closable_and_dod_progress():
+    obj = {"ready": [{"id": "a", "label": "Item A", "gates": [],
+                      "checks": {"done": 2, "total": 2}},
+                     {"id": "b", "label": "Item B", "gates": [],
+                      "checks": {"done": 1, "total": 3}}],
+           "blocked": [], "done": [],
+           "closable": [{"id": "a", "label": "Item A", "checks": {"done": 2, "total": 2}}],
+           "drift": [],
+           "counts": {"ready": 2, "blocked": 0, "done": 0, "closable": 1, "drift": 0}}
+    out = render("readiness", obj, "human")
+    assert "closable 1" in out
+    assert "🏁 _DoD 2/2 met — closable_" in out
+    assert "_[DoD 1/3]_" in out
+
+
+def test_render_readiness_drift_section_names_open_checks():
+    obj = {"ready": [], "blocked": [],
+           "done": [{"id": "d", "label": "Item D", "checks": {"done": 1, "total": 2}}],
+           "closable": [],
+           "drift": [{"id": "d", "label": "Item D",
+                      "open_checks": [{"id": "c2", "label": "replay stays byte-clean"}]}],
+           "counts": {"ready": 0, "blocked": 0, "done": 1, "closable": 0, "drift": 1}}
+    out = render("readiness", obj, "human")
+    assert "DoD-drift 1" in out
+    assert "DoD drift (marked done, checks still open):" in out
+    assert "⚠ **Item D**" in out and "open check _replay stays byte-clean_ `c2`" in out
+
+
+def test_render_readiness_without_checks_is_unchanged_shape():
+    # No checks anywhere -> no DoD noise in the classic frontier.
+    obj = {"ready": [{"id": "a", "label": "A", "gates": []}], "blocked": [], "done": [],
+           "closable": [], "drift": [],
+           "counts": {"ready": 1, "blocked": 0, "done": 0, "closable": 0, "drift": 0}}
+    out = render("readiness", obj, "human")
+    assert "DoD" not in out and "closable" not in out

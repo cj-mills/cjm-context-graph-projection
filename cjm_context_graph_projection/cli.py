@@ -45,7 +45,7 @@ from .refactor_ops import move
 from .render import render
 from .runtime import DEFAULT_MANIFESTS, open_graph
 from .worklist import dangling_reference_sources, worklist
-from .write import alias, assert_value, decide, link
+from .write import add_check, alias, assert_value, decide, link
 
 DEFAULT_MEMORY = ("/home/innom-dt/.claude/projects/"
                   "-mnt-SN850X-8TB-EXT4-Projects-GitHub-cj-mills-cjm-substrate/memory")
@@ -252,6 +252,16 @@ async def _dispatch(args) -> int:
                 append_write(args.journal_path, "link",
                              {"source_id": args.source_id, "target_id": args.target_id,
                               "relation": args.relation, "actor": args.actor})
+            return 1 if res.get("error") else 0
+        elif args.command == "check":
+            res = await add_check(gx, args.item, args.text, actor=args.actor)
+            print(render("check", res, args.format))
+            # Journal the RESOLVED item id (a prefix resolves against TODAY's db;
+            # replay must land on the same node regardless of future prefix collisions).
+            if args.journal_path and res.get("written"):
+                append_write(args.journal_path, "check",
+                             {"item_id": res["item_id"], "text": args.text,
+                              "actor": args.actor})
             return 1 if res.get("error") else 0
         elif args.command == "author":
             replace, edit = None, None
@@ -582,6 +592,15 @@ def main() -> int:
     p_de.add_argument("--title", default=None,
                       help="Explicit display title (tier-1 override; else the statement's "
                            "first clause is extracted)")
+
+    p_ck = sub.add_parser("check",
+                          help="Attach a definition-of-done check to a work item (Check node + "
+                               "CHECKS edge + task_state=open, journaled). Close it later with "
+                               "`assert <check-id> task_state done --evidence <proof>`; readiness "
+                               "derives closable/drift from it")
+    p_ck.add_argument("item", help="The work item (node id, or a unique id prefix)")
+    p_ck.add_argument("text", help="The check statement")
+    p_ck.add_argument("--actor", default="agent:session")
 
     p_dr = sub.add_parser("display-rule",
                           help="Author/update the graph-carried DisplayRule for a node kind — "

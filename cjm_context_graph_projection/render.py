@@ -128,6 +128,14 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         return (f"**linked** `{obj.get('source_id')}` —_{obj.get('relation')}_→ "
                 f"`{obj.get('target_id')}` (actor {obj.get('actor')})\n"
                 f"`edge {obj.get('edge_id')}`")
+    if kind == "check":
+        if obj.get("error"):
+            return f"⚠ {obj['error']}"
+        return (f"**check attached** to **{_short(obj.get('item_label', ''), 80)}** "
+                f"`{obj.get('item_id')}`\n"
+                f"_{obj.get('text')}_\n"
+                f"`check {obj.get('check_id')}` (task_state=open; close with "
+                f"`assert {obj.get('check_id')} task_state done --evidence <proof>`)")
     if kind == "display-rule":
         if obj.get("error"):
             return f"⚠ {obj['error']}"
@@ -232,28 +240,50 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         return "\n".join(lines)
     if kind == "readiness":
         c = obj.get("counts", {})
+        extra = ""
+        if c.get("closable"):
+            extra += f" · closable {c['closable']}"
+        if c.get("drift"):
+            extra += f" · DoD-drift {c['drift']}"
         lines = ["## Readiness frontier",
                  f"_ready {c.get('ready', 0)} · blocked {c.get('blocked', 0)} · "
-                 f"done {c.get('done', 0)}_  (ready/blocked are DERIVED, never stored)", ""]
+                 f"done {c.get('done', 0)}{extra}_  (ready/blocked are DERIVED, never stored)", ""]
+        closable_ids = {e.get("id") for e in obj.get("closable", [])}
+
+        def _dod(e):
+            ck = e.get("checks")
+            if not ck:
+                return ""
+            if e.get("id") in closable_ids:
+                return f"  🏁 _DoD {ck['done']}/{ck['total']} met — closable_"
+            return f"  _[DoD {ck['done']}/{ck['total']}]_"
+
         ready = obj.get("ready", [])
         if ready:
             lines.append("**Ready (all prerequisites done):**")
             for r in ready:
                 gates = r.get("gates", [])
                 suffix = f"  _(gated by {len(gates)}, all done)_" if gates else ""
-                lines.append(f"  - ✅ **{_short(r.get('label', ''), 100)}** `{r.get('id')}`{suffix}")
+                lines.append(f"  - ✅ **{_short(r.get('label', ''), 100)}** `{r.get('id')}`{suffix}{_dod(r)}")
         blocked = obj.get("blocked", [])
         if blocked:
             lines.append("**Blocked (waiting on prerequisites):**")
             for b in blocked:
-                lines.append(f"  - ⛔ **{_short(b.get('label', ''), 100)}** `{b.get('id')}`")
+                lines.append(f"  - ⛔ **{_short(b.get('label', ''), 100)}** `{b.get('id')}`{_dod(b)}")
                 for g in b.get("blocked_by", []):
                     lines.append(f"      ↳ needs _{_short(g.get('label', ''), 80)}_ `{g.get('id')}`")
+        drift = obj.get("drift", [])
+        if drift:
+            lines.append("**DoD drift (marked done, checks still open):**")
+            for d in drift:
+                lines.append(f"  - ⚠ **{_short(d.get('label', ''), 100)}** `{d.get('id')}`")
+                for ck in d.get("open_checks", []):
+                    lines.append(f"      ↳ open check _{_short(ck.get('label', ''), 80)}_ `{ck.get('id')}`")
         done = obj.get("done", [])
         if done:
             lines.append("**Done:**")
             for d in done:
-                lines.append(f"  - ◾ {_short(d.get('label', ''), 100)} `{d.get('id')}`")
+                lines.append(f"  - ◾ {_short(d.get('label', ''), 100)} `{d.get('id')}`{_dod(d)}")
         if not (ready or blocked or done):
             lines.append("_(no work-items — author `task_state` to populate)_")
         return "\n".join(lines)

@@ -23,8 +23,8 @@ from cjm_context_graph_primitives.provenance import SourceRef
 from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.aliases import resolve_subject_id
 from cjm_dev_graph_schema.identity import note_node_id, section_node_id
-from cjm_dev_graph_schema.nodes import (AssertionNode, DecisionNode, EntityNode,
-                                        FactSlotNode, SessionNode)
+from cjm_dev_graph_schema.nodes import (AssertionNode, CheckNode, DecisionNode,
+                                        EntityNode, FactSlotNode, SessionNode)
 from cjm_dev_graph_schema.vocab import DevRelations
 
 from . import factlayer as F
@@ -297,6 +297,44 @@ async def link(
     return {"source_id": source_id, "target_id": target_id, "relation": relation,
             "actor": actor, "edge_id": edge["id"], "edges_added": res.edges_added,
             "written": True}
+
+
+async def add_check(
+    gx: GraphHandle,
+    item: str,        # The work item (node id, or a unique id prefix)
+    text: str,        # The check statement
+    *,
+    actor: str = "agent:session",  # Who attached it
+) -> Dict[str, Any]:  # The write result (incl. error when the item is missing/ambiguous)
+    """Attach a definition-of-done check to a work item (DoD-as-graph-objects).
+
+    One journaled op = Check node + `CHECKS` edge + a `task_state=open` assertion,
+    so the check is born on the same derivation machinery as the items it verifies.
+    Close it later with `assert <check-id> task_state done --evidence <proof>`; the
+    readiness projector derives `closable` (open item, all checks done) and `drift`
+    (done item, open checks) — never ready/blocked, which a DoD must not gate.
+    Deterministic (item, text) identity makes re-attaching (and journal replay) a
+    verified no-op; a replayed `open` after a later `done` lands born-superseded
+    (ordered-predicate supersession), so a rebuild converges on the true state.
+    The item MUST exist — a check is never left dangling (like `link`)."""
+    res = await resolve_node_ref(gx, item)
+    if "candidates" in res:
+        return {"error": ambiguity_error(item, res["candidates"]), "item": item,
+                "text": text, "written": False}
+    node = res.get("node")
+    if node is None:
+        return {"error": f"no node `{item}` to attach a check to", "item": item,
+                "text": text, "written": False}
+    item_id = F.nid(node)
+    props = F.props(node)
+    item_label = str(props.get("display_title") or props.get("title")
+                     or props.get("name") or props.get("statement") or item_id)
+    check = CheckNode(item_id=item_id, text=text, actor=actor)
+    await extend_graph(gx.queue, gx.graph_id, [check.to_graph_node()], [check.checks_edge()])
+    state = await assert_value(gx, check.id, P.TASK_STATE, P.TASK_OPEN, actor=actor)
+    return {"check_id": check.id, "item_id": item_id, "item_label": item_label,
+            "text": text, "actor": actor,
+            "assertion_id": state.get("assertion_id"), "written": True}
 
 
 async def author_section(
