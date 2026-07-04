@@ -773,7 +773,8 @@ def main() -> int:
     p_fl = sub.add_parser("flip-module",
                           help="N+3 Phase 1 (SHADOW): capture a module's canonical source into the source journal")
     p_fl.add_argument("repo_key", help="The repo's durable conceptual slug")
-    p_fl.add_argument("module_path", help="Repo-relative module path (e.g. pkg/sub.py)")
+    p_fl.add_argument("module_path", help="Repo-relative source path (e.g. pkg/sub.py, or "
+                                          "nbs/core/mod.ipynb for a notebook-sourced module)")
     p_fl.add_argument("--import-name", help="Dotted import name (derived from module_path if omitted)")
     p_fl.add_argument("--repos-dir", default=DEFAULT_REPOS)
 
@@ -786,13 +787,13 @@ def main() -> int:
                           help="N+3 Phase 2: make the journal a module's source of truth "
                                "(guarded — requires a clean shadow); the file becomes a generated committed artifact")
     p_co.add_argument("repo_key", help="The repo's durable conceptual slug")
-    p_co.add_argument("module_path", help="Repo-relative module path (e.g. pkg/sub.py)")
+    p_co.add_argument("module_path", help="Repo-relative source path (.py or nbs/*.ipynb)")
     p_co.add_argument("--repos-dir", default=DEFAULT_REPOS)
 
     p_ea = sub.add_parser("emit-artifact",
                           help="(Re)generate a module's file from its journaled source (the journal is authoritative)")
     p_ea.add_argument("repo_key", help="The repo's durable conceptual slug")
-    p_ea.add_argument("module_path", help="Repo-relative module path (e.g. pkg/sub.py)")
+    p_ea.add_argument("module_path", help="Repo-relative source path (.py or nbs/*.ipynb)")
     p_ea.add_argument("--repos-dir", default=DEFAULT_REPOS)
     p_ea.add_argument("--no-write", action="store_true", help="Dry run: report drift, don't touch the file")
 

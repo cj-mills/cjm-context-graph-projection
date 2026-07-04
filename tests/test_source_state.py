@@ -153,3 +153,85 @@ def test_absorb_authored_text_canonicalizes_and_keeps_file_in_sync():
         assert "import os" not in f.read_text()
         assert latest_source_ops(j)[("demo", "demo/m.py")]["text"] == f.read_text()
         assert source_check(j, repos)["regen_clean"]
+
+
+# --- Notebook-sourced modules (the nbdev transition window) ---
+
+import json
+
+from cjm_context_graph_projection.source_state import canonical_emit_notebook
+
+NOTEBOOK = json.dumps({
+    "cells": [
+        {"cell_type": "code", "id": "c0", "metadata": {}, "execution_count": 1,
+         "outputs": [], "source": ["#| default_exp core\n"]},
+        {"cell_type": "markdown", "id": "c1", "metadata": {},
+         "source": ["# Core\n", "\n", "The `alpha` helper.\n"]},
+        {"cell_type": "code", "id": "c2", "metadata": {"tags": ["x"]}, "execution_count": 2,
+         "outputs": [{"name": "stdout", "output_type": "stream", "text": ["2\n"]}],
+         "source": ["#| export\n", "def alpha(x):\n", "    return x + 1\n"]},
+    ],
+    "metadata": {"kernelspec": {"display_name": "python3", "language": "python",
+                                "name": "python3"}},
+    "nbformat": 4, "nbformat_minor": 5}, indent=1) + "\n"
+
+
+def test_canonical_emit_notebook_is_a_fixpoint_and_strips_derived_state():
+    once = canonical_emit_notebook(NOTEBOOK)
+    assert canonical_emit_notebook(once) == once  # canonical form is stable
+    nb = json.loads(once)
+    # Cell sources round-trip verbatim; outputs/exec counts/metadata are derived -> stripped.
+    assert "".join(nb["cells"][2]["source"]) == "#| export\ndef alpha(x):\n    return x + 1\n"
+    assert nb["cells"][2]["outputs"] == [] and nb["cells"][2]["execution_count"] is None
+    assert nb["metadata"] == {} and nb["cells"][2]["metadata"] == {}
+    assert [c["id"] for c in nb["cells"]] == ["c0", "c1", "c2"]  # nbformat ids survive
+
+
+def _notebook_repo(d):
+    """A repo with one nbdev notebook at nbs/00_core.ipynb; returns (journal, repos, file)."""
+    repos = Path(d) / "repos"
+    f = repos / "cjm-demo" / "nbs" / "00_core.ipynb"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(NOTEBOOK)
+    return str(Path(d) / "source.jsonl"), str(repos), f
+
+
+def test_flip_notebook_journals_canonical_cell_state():
+    with tempfile.TemporaryDirectory() as d:
+        j, repos, f = _notebook_repo(d)
+        res = flip_module(j, repos, "cjm-demo", "nbs/00_core.ipynb")
+        assert res["captured"] and not res["file_already_canonical"]  # outputs/metadata strip
+        assert res["import_name"] == "cjm_demo.core"  # derived from #| default_exp
+        a = latest_source_ops(j)[("cjm-demo", "nbs/00_core.ipynb")]
+        assert a["text"] == canonical_emit_notebook(NOTEBOOK)
+
+
+def test_flip_notebook_rejects_malformed_json():
+    with tempfile.TemporaryDirectory() as d:
+        j, repos, f = _notebook_repo(d)
+        f.write_text("{ not a notebook")
+        res = flip_module(j, repos, "cjm-demo", "nbs/00_core.ipynb")
+        assert not res["captured"] and "cannot decompose" in res["error"]
+
+
+def test_notebook_walk_flip_emit_cutover_then_regen_gate():
+    with tempfile.TemporaryDirectory() as d:
+        j, repos, f = _notebook_repo(d)
+        flip_module(j, repos, "cjm-demo", "nbs/00_core.ipynb")
+        # The file still carries outputs/metadata -> the guarded cutover refuses.
+        refused = cutover_module(j, repos, "cjm-demo", "nbs/00_core.ipynb")
+        assert not refused["cut_over"] and "drifted" in refused["error"]
+        # emit-artifact canonicalizes the file (the one-time canonicalization event) ...
+        assert emit_source_artifact(j, repos, "cjm-demo", "nbs/00_core.ipynb")["written"]
+        # ... and the cutover goes through; the journal is now the source of truth.
+        assert cutover_module(j, repos, "cjm-demo", "nbs/00_core.ipynb")["cut_over"]
+        chk = source_check(j, repos)
+        assert chk["clean"] and chk["regen_clean"] and chk["graph_sourced_count"] == 1
+        assert chk["modules"][0]["module"] == "cjm_demo.core"
+        # A post-cutover file edit = a DIVERGED ARTIFACT -> the regen gate fails.
+        f.write_text(f.read_text().replace("x + 1", "x + 2"))
+        assert not source_check(j, repos)["regen_clean"]
+        # Re-flip absorbs the edit (the window editing discipline); the gate is clean again.
+        res = flip_module(j, repos, "cjm-demo", "nbs/00_core.ipynb")
+        assert res["captured"] and res["file_already_canonical"]
+        assert source_check(j, repos)["regen_clean"]

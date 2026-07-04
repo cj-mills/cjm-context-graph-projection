@@ -148,3 +148,43 @@ def test_code_elements_ingests_graph_sourced_modules_from_the_journal(tmp_path):
     (pkg / "a.py").unlink()
     nodes, _ = code_elements([str(repo)], source_journal_path=j)
     assert any(n["label"] == "CodeSymbol" and n["properties"]["name"] == "fa" for n in nodes)
+
+
+def test_notebook_elements_scans_only_nbs_when_present(tmp_path):
+    """quarto's `_proc` copies (and `dist/` etc.) share export targets with the real
+    notebooks — scanning them ingests duplicate module identities. `nbs/` is the source."""
+    d = _make_nbdev_repo(tmp_path, "cjm-foo")
+    (d / "_proc").mkdir()
+    (d / "_proc" / "00_core.ipynb").write_text((d / "nbs" / "00_core.ipynb").read_text())
+    nodes, _ = notebook_elements([str(d)])
+    mods = [n for n in nodes if n["label"] == DevNodeKinds.CODE_MODULE]
+    assert len(mods) == 1  # the _proc duplicate was not scanned
+    assert mods[0]["properties"]["path"].endswith("nbs/00_core.ipynb")
+
+
+def test_notebook_elements_ingests_graph_sourced_notebooks_from_the_journal(tmp_path):
+    """The notebook authority flip: a cut-over notebook's cells come from the SOURCE
+    journal, not the file; a missing artifact file still ingests."""
+    from cjm_context_graph_projection.source_state import (cutover_module,
+                                                           emit_source_artifact, flip_module)
+
+    d = _make_nbdev_repo(tmp_path, "cjm-foo")
+    j = str(tmp_path / "source.jsonl")
+    key = conceptual_key("cjm-foo")
+    flip_module(j, str(tmp_path), key, "nbs/00_core.ipynb")
+    emit_source_artifact(j, str(tmp_path), key, "nbs/00_core.ipynb")  # canonicalize the file
+    assert cutover_module(j, str(tmp_path), key, "nbs/00_core.ipynb")["cut_over"]
+
+    # Post-cutover, an out-of-band file edit must NOT reach the graph — journal wins.
+    nb_file = d / "nbs" / "00_core.ipynb"
+    nb_file.write_text(nb_file.read_text().replace("x + 1", "x + 999"))
+    nodes, _ = notebook_elements([str(d)], source_journal_path=j)
+    cells = [n for n in nodes if n["label"] == DevNodeKinds.CELL]
+    assert cells and not any("999" in n["properties"]["source"] for n in cells)
+
+    # The artifact file deleted entirely: the notebook still ingests from the journal.
+    nb_file.unlink()
+    nodes, _ = notebook_elements([str(d)], source_journal_path=j)
+    assert any(n["label"] == DevNodeKinds.CELL for n in nodes)
+    mod_id = code_module_node_id(key, "cjm_foo/core.py")
+    assert any(n["id"] == mod_id for n in nodes)

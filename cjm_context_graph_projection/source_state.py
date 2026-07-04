@@ -21,6 +21,13 @@ Two deliberate design choices (user-ratified):
 shadow diff faithfully predicts the cutover: `decompose_text` → the same `corpus_graph_elements`
 wire dicts ingest builds → `emit_module_from_nodes(derive_imports=True)` ("graph owns
 formatting", imports-as-projection).
+
+**Notebook modules** (the nbdev transition window, [[off-nbdev-endpoint]]): a `module_path`
+ending in `.ipynb` dispatches every verb to the CELL substrate — the journaled state is the
+canonical `.ipynb` text (`render_notebook(parse_notebook(text))`: verbatim cell sources,
+outputs/metadata stripped — outputs are derived, regenerated on demand). The notebook is the
+TRANSITIONAL source shape; the exported `.py` stays nbdev-export's during the window and the
+whole nbdev surface retires at the post-transition transformation.
 """
 
 import json
@@ -28,6 +35,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from cjm_notebook_decompose_core.project import render_notebook
+from cjm_notebook_decompose_core.read import parse_notebook
 from cjm_python_decompose_core.emit import emit_module_from_nodes
 from cjm_python_decompose_core.extract import decompose_text
 from cjm_python_decompose_core.ingest import corpus_graph_elements
@@ -51,6 +60,50 @@ def canonical_emit(
     module_node = next((n for n in nodes if n["label"] == "CodeModule"), None)
     regions = [n for n in nodes if n["label"] in ("CodeSymbol", "CodeText")]
     return emit_module_from_nodes(regions, module_node=module_node, derive_imports=True)
+
+
+def canonical_emit_notebook(
+    text: str,  # The `.ipynb` file text (JSON)
+) -> str:  # The canonical notebook the graph-sourced module would emit
+    """The notebook analogue of `canonical_emit`: parse to cells, re-render canonically.
+
+    Cell sources round-trip verbatim (verbatim-first at the cell level); outputs,
+    execution counts, and metadata are STRIPPED — they are derived state, regenerated
+    on demand, never part of the journaled source. Raises `json.JSONDecodeError`
+    (a `ValueError`) on malformed notebook JSON."""
+    return render_notebook(parse_notebook(text).cells)
+
+
+def _is_notebook(module_path: str) -> bool:
+    """Whether a source-state module is notebook-sourced (dispatch key for every verb)."""
+    return module_path.endswith(".ipynb")
+
+
+def _canonical(
+    repo_key: str,                       # The repo's durable conceptual slug
+    module_path: str,                    # Repo-relative source path (`.py` or `.ipynb`)
+    path: str,                           # File path (provenance locator)
+    text: str,                           # The module/notebook source text
+    import_name: Optional[str] = None,   # Override the derived dotted import name (`.py` only)
+) -> str:  # The canonical source the graph would emit for this module
+    """Dispatch canonical emit on the source kind (`.ipynb` → cell substrate, else `.py`)."""
+    if _is_notebook(module_path):
+        return canonical_emit_notebook(text)
+    return canonical_emit(repo_key, module_path, path, text, import_name)
+
+
+def _derive_import_name(
+    repo_key: str,     # The repo's durable conceptual slug (assumed == its dir/package stem)
+    module_path: str,  # Repo-relative source path
+    text: str,         # The source text (a notebook's `#| default_exp` names its export target)
+) -> str:  # The dotted import name of what this source builds ("" if it exports nothing)
+    """Derive the import name a source state maps to. A `.py` path converts directly; a
+    notebook maps to its nbdev export target (`<package>.<default_exp>`), or "" for a
+    non-exporting notebook."""
+    if _is_notebook(module_path):
+        exp = parse_notebook(text).default_exp
+        return f"{repo_key.replace('-', '_')}.{exp}" if exp else ""
+    return (module_path[:-3] if module_path.endswith(".py") else module_path).replace("/", ".")
 
 
 def read_source_journal(
@@ -143,10 +196,10 @@ def flip_module(
         return {"error": f"no file at {file_path}", "captured": False}
     file_text = Path(file_path).read_text()
     try:
-        canonical = canonical_emit(repo_key, module_path, file_path, file_text, import_name)
-    except SyntaxError as e:
+        canonical = _canonical(repo_key, module_path, file_path, file_text, import_name)
+    except (SyntaxError, ValueError) as e:
         return {"error": f"cannot decompose {module_path}: {e}", "captured": False}
-    imp = import_name or (module_path[:-3] if module_path.endswith(".py") else module_path).replace("/", ".")
+    imp = import_name or _derive_import_name(repo_key, module_path, canonical)
     appended = append_source(source_journal_path, repo_key, module_path, imp, canonical)
     return {"repo_key": repo_key, "module_path": module_path, "import_name": imp,
             "file_path": file_path, "captured": appended,
@@ -182,10 +235,10 @@ def cutover_module(
     journaled = a.get("text", "")
     file_path = _resolve_path(repos_dir, repo_key, module_path)
     try:
-        if canonical_emit(repo_key, module_path, file_path, journaled, a.get("import_name")) != journaled:
+        if _canonical(repo_key, module_path, file_path, journaled, a.get("import_name")) != journaled:
             return {"error": f"journaled source for {repo_key}/{module_path} is not a "
                              "round-trip fixpoint — re-flip before cutting over", "cut_over": False}
-    except SyntaxError as e:
+    except (SyntaxError, ValueError) as e:
         return {"error": f"journaled source for {repo_key}/{module_path} does not parse: {e}",
                 "cut_over": False}
     artifact_written = False
@@ -250,11 +303,11 @@ def absorb_authored_text(
     canonicalization changed anything (e.g. a now-dead import pruned) — rewrite the
     file so artifact == journal and the regen gate stays clean by construction."""
     try:
-        canonical = canonical_emit(repo_key, module_path, file_path, emitted_text, import_name)
-    except SyntaxError as e:
+        canonical = _canonical(repo_key, module_path, file_path, emitted_text, import_name)
+    except (SyntaxError, ValueError) as e:
         return {"error": f"authored text for {repo_key}/{module_path} does not parse: {e}",
                 "absorbed": False}
-    imp = import_name or (module_path[:-3] if module_path.endswith(".py") else module_path).replace("/", ".")
+    imp = import_name or _derive_import_name(repo_key, module_path, canonical)
     appended = append_source(source_journal_path, repo_key, module_path, imp, canonical)
     canonicalized = canonical != emitted_text
     if canonicalized:
@@ -291,9 +344,9 @@ def source_check(
         file_text = Path(file_path).read_text() if Path(file_path).exists() else None
         file_matches = file_text == journaled
         try:
-            reemit = canonical_emit(repo_key, module_path, file_path, journaled, a.get("import_name"))
+            reemit = _canonical(repo_key, module_path, file_path, journaled, a.get("import_name"))
             fixpoint = reemit == journaled
-        except SyntaxError:
+        except (SyntaxError, ValueError):
             fixpoint = False
         graph_sourced = (repo_key, module_path) in flipped
         if graph_sourced and not (file_matches and fixpoint):

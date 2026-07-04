@@ -14,12 +14,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from cjm_context_graph_layer.grammar import make_edge
+from cjm_context_graph_primitives.provenance import SourceRef
 from cjm_dev_graph_schema.nodes import EntityNode
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 from cjm_markdown_decompose_core.extract import note_from_file
 from cjm_markdown_decompose_core.ingest import corpus_graph_elements
-from cjm_notebook_decompose_core.compose import decompose_notebook_file
+from cjm_notebook_decompose_core.compose import (decompose_notebook, decompose_notebook_file,
+                                                 module_path_for_notebook)
 from cjm_notebook_decompose_core.ingest import notebook_graph_elements
+from cjm_notebook_decompose_core.read import parse_notebook
 from cjm_python_decompose_core.extract import decompose_package, decompose_text
 from cjm_python_decompose_core.ingest import (corpus_graph_elements as code_corpus_elements,
                                               resolve_import)
@@ -171,28 +174,72 @@ def code_elements(
     return code_corpus_elements(decomposed)
 
 
+def _decompose_notebook_text(
+    repo_key: str,   # The repo's durable conceptual slug
+    path: str,       # The notebook's file path (provenance locator)
+    repo_root: str,  # Repo root (for the fallback module path)
+    package: str,    # Importable package name (for export-target module paths)
+    text: str,       # The notebook source text (from the source journal)
+):  # The DecomposedNotebook
+    """Decompose a notebook from journaled TEXT — the graph-sourced ingest leg
+    (the notebook analogue of `decompose_text` over a journaled `.py` state)."""
+    parsed = parse_notebook(text)
+    module_path = module_path_for_notebook(path, repo_root, parsed.default_exp, package)
+    import_name = module_path[:-3].replace("/", ".") if module_path.endswith(".py") else None
+    return decompose_notebook(repo_key, parsed, module_path, path,
+                              SourceRef.compute_hash(text.encode("utf-8")),
+                              import_name=import_name)
+
+
 def notebook_elements(
     notebook_repos: List[str],  # Repo dirs whose nbdev notebooks are decomposed (the SOURCE for nbdev libs)
+    source_journal_path: Optional[str] = None,  # Source journal — its GRAPH-SOURCED notebooks ingest from the journal, not the file
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:  # (CodeModule/Cell/CodeSymbol nodes, edges)
     """Decompose each repo's nbdev notebooks into code/cell nodes + edges.
 
     For an nbdev lib the NOTEBOOK is the source (the generated `.py` is a projection),
     so ingest the notebook here rather than the `.py` via `code_elements` — they share
-    one module identity (`pkg/mod.py`), reinforcing graph-as-source-of-truth. Every
-    `.ipynb` under the repo is decomposed (checkpoints skipped; unreadable notebooks
-    skipped). Like code, notebooks are a SOURCE rebuilt on every `ingest`, not journaled."""
+    one module identity (`pkg/mod.py`), reinforcing graph-as-source-of-truth. Only the
+    `nbs/` tree is scanned when the repo has one (quarto's `_proc` copies and `dist/`
+    duplicates are residue, not source); a repo without `nbs/` falls back to a full
+    scan (checkpoints skipped; unreadable notebooks skipped). Notebooks are a SOURCE
+    rebuilt on every `ingest` — EXCEPT one past the N+3 Phase-2 cutover, whose text
+    comes from the SOURCE journal keyed by its repo-relative `.ipynb` path (the same
+    authority flip as `code_elements`; its file is a generated committed artifact)."""
+    flipped = graph_sourced_modules(source_journal_path) if source_journal_path else set()
+    journaled = latest_source_ops(source_journal_path) if flipped else {}
     decomposed = []
+    seen = set()
+    repo_dirs_by_key = {}
     for repo_dir in notebook_repos:
         d = Path(repo_dir)
         package = d.name.replace("-", "_")
         key = conceptual_key(d.name)
-        for nb in sorted(d.rglob("*.ipynb")):
+        repo_dirs_by_key[key] = d
+        scan_root = d / "nbs" if (d / "nbs").is_dir() else d
+        for nb in sorted(scan_root.rglob("*.ipynb")):
             if ".ipynb_checkpoints" in nb.parts:
                 continue
+            k = (key, nb.relative_to(d).as_posix())
+            seen.add(k)
             try:
-                decomposed.append(decompose_notebook_file(key, str(nb), str(d), package=package))
+                if k in flipped and k in journaled:
+                    decomposed.append(_decompose_notebook_text(
+                        key, str(nb), str(d), package, journaled[k].get("text", "")))
+                else:
+                    decomposed.append(decompose_notebook_file(key, str(nb), str(d), package=package))
             except (ValueError, OSError):
                 continue  # malformed/unreadable notebook — skip (batch ingest stays robust)
+    # A graph-sourced notebook ingests even when its artifact file is absent — the
+    # journal is sufficient (the file is regenerable via `emit-artifact`).
+    for key, rel in sorted(flipped - seen):
+        k = (key, rel)
+        if not rel.endswith(".ipynb") or k not in journaled or key not in repo_dirs_by_key:
+            continue
+        d = repo_dirs_by_key[key]
+        decomposed.append(_decompose_notebook_text(key, str(d / rel), str(d),
+                                                   d.name.replace("-", "_"),
+                                                   journaled[k].get("text", "")))
     return notebook_graph_elements(decomposed)
 
 
@@ -270,7 +317,7 @@ def build_dev_graph_elements(
         nodes += cn
         edges += ce
     if notebook_repos:
-        nn, ne = notebook_elements(notebook_repos)
+        nn, ne = notebook_elements(notebook_repos, source_journal_path=source_journal_path)
         nodes += nn
         edges += ne
     if code_repos or notebook_repos:
