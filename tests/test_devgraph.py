@@ -117,3 +117,34 @@ def test_notebook_elements_decomposes_repo_notebooks(tmp_path):
     syms = [n for n in nodes if n["label"] == DevNodeKinds.CODE_SYMBOL]
     assert any(n["properties"]["qualname"] == "alpha" for n in syms)
     assert any(e["relation_type"] == DevRelations.CONTAINS for e in edges)
+
+
+def test_code_elements_ingests_graph_sourced_modules_from_the_journal(tmp_path):
+    """N+3 Phase 2: a cut-over module's text comes from the SOURCE journal, not the file
+    (the authority flip — the code analogue of skip_memory_paths); a missing artifact
+    file still ingests (the journal is sufficient)."""
+    from cjm_context_graph_projection.devgraph import code_elements
+    from cjm_context_graph_projection.source_state import cutover_module, flip_module
+
+    repo = tmp_path / "cjm-demo-lib"
+    pkg = repo / "cjm_demo_lib"
+    pkg.mkdir(parents=True)
+    (pkg / "a.py").write_text('"""A."""\n\n\ndef fa():\n    return 1\n')
+    (pkg / "b.py").write_text('"""B."""\n\n\ndef fb():\n    return 2\n')
+    j = str(tmp_path / "source.jsonl")
+    key = conceptual_key(repo.name)
+    flip_module(j, str(tmp_path), key, "cjm_demo_lib/a.py")
+    cutover_module(j, str(tmp_path), key, "cjm_demo_lib/a.py")
+
+    # Post-cutover, an out-of-band file edit must NOT reach the graph — journal wins.
+    (pkg / "a.py").write_text('"""A."""\n\n\ndef fa():\n    return 999  # stray\n')
+    nodes, _ = code_elements([str(repo)], source_journal_path=j)
+    fa = next(n for n in nodes if n["label"] == "CodeSymbol" and n["properties"]["name"] == "fa")
+    assert "999" not in fa["properties"]["body"]
+    fb = next(n for n in nodes if n["label"] == "CodeSymbol" and n["properties"]["name"] == "fb")
+    assert "return 2" in fb["properties"]["body"]  # un-flipped modules read from disk
+
+    # The artifact file deleted entirely: the module still ingests from the journal.
+    (pkg / "a.py").unlink()
+    nodes, _ = code_elements([str(repo)], source_journal_path=j)
+    assert any(n["label"] == "CodeSymbol" and n["properties"]["name"] == "fa" for n in nodes)

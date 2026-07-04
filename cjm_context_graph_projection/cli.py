@@ -40,7 +40,8 @@ from .viz import project_viz
 from .rename_ops import rename_symbol
 from .serve import serve_graphs
 from .explorer_page import EXPLORER_HTML
-from .source_state import flip_module, source_check
+from .source_state import (absorb_authored_text, cutover_module, emit_source_artifact,
+                           flip_module, graph_sourced_modules, source_check)
 from .cohesion import cohesion
 from .refactor import refactor_candidates
 from .refactor_ops import move
@@ -105,7 +106,8 @@ async def _dispatch(args) -> int:
             nodes, edges = build_dev_graph_elements(
                 args.memory_dir, None if args.no_repo_map else args.repos_dir,
                 seed=not args.no_seed, note_aliases=note_aliases, code_repos=code_repos,
-                notebook_repos=notebook_repos, skip_memory_paths=skip_memory_paths)
+                notebook_repos=notebook_repos, skip_memory_paths=skip_memory_paths,
+                source_journal_path=args.source_journal_path)
             res = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
             print(f"ingested: {res.nodes_added} nodes added / {res.nodes_verified} verified, "
                   f"{res.edges_added} edges added / {res.edges_existing} existing")
@@ -302,6 +304,20 @@ async def _dispatch(args) -> int:
                 append_write(args.journal_path, "section",
                              {"slug": res.get("note_slug"), "anchor": res.get("anchor"),
                               "raw": res.get("new_text"), "actor": args.actor})
+            # N+3 Phase 2: an author edit of a GRAPH-SOURCED module lands in the source
+            # journal (the authority), canonicalized; the artifact file is kept in sync.
+            if (res.get("artifact") == "module" and args.source_journal_path
+                    and res.get("written") and not res.get("unchanged")
+                    and (res.get("repo_key"), res.get("module_path"))
+                    in graph_sourced_modules(args.source_journal_path)):
+                ab = absorb_authored_text(args.source_journal_path, res["repo_key"],
+                                          res["module_path"], res["artifact_path"],
+                                          res["emitted_text"])
+                if ab.get("error"):
+                    print(f"⚠ source-journal absorb FAILED: {ab['error']}", file=sys.stderr)
+                    return 1
+                print(f"  ↳ graph-sourced: authored state journaled"
+                      f"{' (canonicalized — file rewritten)' if ab.get('canonicalized') else ''}")
             return 1 if res.get("error") else 0
         elif args.command == "reconcile-memory":
             res = await reconcile_memory(gx, note_slug=args.note, absorb_anchors=args.absorb,
@@ -380,7 +396,26 @@ async def _dispatch(args) -> int:
                 return 1
             res = source_check(args.source_journal_path, args.repos_dir)
             print(render("source-check", res, args.format))
-            return 0
+            # Shadow drift is informational (the soak); a GRAPH-SOURCED module failing
+            # the regen gate is an error (the artifact diverged from its source).
+            return 0 if res.get("regen_clean", True) else 1
+        elif args.command == "cutover":
+            if not args.source_journal_path:
+                print("error: cutover needs --source-journal-path", file=sys.stderr)
+                return 1
+            res = cutover_module(args.source_journal_path, args.repos_dir,
+                                 args.repo_key, args.module_path)
+            print(render("cutover", res, args.format))
+            return 1 if res.get("error") else 0
+        elif args.command == "emit-artifact":
+            if not args.source_journal_path:
+                print("error: emit-artifact needs --source-journal-path", file=sys.stderr)
+                return 1
+            res = emit_source_artifact(args.source_journal_path, args.repos_dir,
+                                       args.repo_key, args.module_path,
+                                       write=not args.no_write)
+            print(render("emit-artifact", res, args.format))
+            return 1 if res.get("error") else 0
         elif args.command == "readme":
             res = await project_readme(gx, args.repo_key)
             if res.get("error"):
@@ -739,8 +774,23 @@ def main() -> int:
     p_fl.add_argument("--repos-dir", default=DEFAULT_REPOS)
 
     p_sc = sub.add_parser("source-check",
-                          help="N+3 soak: file-drift (membrane) + round-trip fixpoint for shadow-sourced modules")
+                          help="N+3 soak: file-drift (membrane) + round-trip fixpoint for shadow-sourced modules; "
+                               "exit 1 if a GRAPH-SOURCED module fails the regen gate")
     p_sc.add_argument("--repos-dir", default=DEFAULT_REPOS)
+
+    p_co = sub.add_parser("cutover",
+                          help="N+3 Phase 2: make the journal a module's source of truth "
+                               "(guarded — requires a clean shadow); the file becomes a generated committed artifact")
+    p_co.add_argument("repo_key", help="The repo's durable conceptual slug")
+    p_co.add_argument("module_path", help="Repo-relative module path (e.g. pkg/sub.py)")
+    p_co.add_argument("--repos-dir", default=DEFAULT_REPOS)
+
+    p_ea = sub.add_parser("emit-artifact",
+                          help="(Re)generate a module's file from its journaled source (the journal is authoritative)")
+    p_ea.add_argument("repo_key", help="The repo's durable conceptual slug")
+    p_ea.add_argument("module_path", help="Repo-relative module path (e.g. pkg/sub.py)")
+    p_ea.add_argument("--repos-dir", default=DEFAULT_REPOS)
+    p_ea.add_argument("--no-write", action="store_true", help="Dry run: report drift, don't touch the file")
 
     p_rm = sub.add_parser("readme",
                           help="Project a repo's README from the graph (structural v1; read-only)")

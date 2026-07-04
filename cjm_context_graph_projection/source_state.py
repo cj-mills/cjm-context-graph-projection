@@ -75,9 +75,27 @@ def latest_source_ops(
     semantics: re-flipping a module supersedes its prior text, replay-idempotent)."""
     latest: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for op in read_source_journal(path):
+        if op.get("verb") != "source":
+            continue  # `cutover` ops carry no text — they flag phase, not state
         a = op.get("args", {})
         latest[(a.get("repo_key"), a.get("module_path"))] = a
     return latest
+
+
+def graph_sourced_modules(
+    path: str,  # Source-journal file path (JSONL)
+) -> set:  # {(repo_key, module_path)} of modules PAST the Phase-2 cutover
+    """The modules whose ingest source IS the journal (a `cutover` op exists for them).
+
+    Phase distinction: a module with only `source` ops is in SHADOW (the file is still
+    the ingest input, the journal soaks); a `cutover` op flips it — the journal becomes
+    the source of truth and the file a generated, committed artifact."""
+    flipped = set()
+    for op in read_source_journal(path):
+        if op.get("verb") == "cutover":
+            a = op.get("args", {})
+            flipped.add((a.get("repo_key"), a.get("module_path")))
+    return flipped
 
 
 def append_source(
@@ -138,6 +156,114 @@ def flip_module(
                     "to soak before the Phase 2 cutover"}
 
 
+def cutover_module(
+    source_journal_path: str,  # The source journal (holds the module's shadow state)
+    repos_dir: str,            # The repos root (to verify/write the file artifact)
+    repo_key: str,             # The repo's durable conceptual slug
+    module_path: str,          # Repo-relative module path to cut over
+) -> Dict[str, Any]:  # The cutover result (or the guard that refused it)
+    """Phase 2: make the JOURNAL the module's source of truth (the persistence flip).
+
+    Guarded — refuses unless the shadow is provably clean RIGHT NOW: a journaled source
+    state exists, it is a round-trip fixpoint, and the file byte-equals it (a drifted
+    file means an out-of-band edit the reconcile leg must absorb first via `flip-module`).
+    A MISSING file is not drift: it is (re)written from the journal — post-cutover the
+    file is a generated, committed artifact, and this is its first emit. On success a
+    `cutover` op is appended; `ingest` then reads this module's text from the journal
+    and `source-check` holds the file to the regen gate."""
+    a = latest_source_ops(source_journal_path).get((repo_key, module_path))
+    if a is None:
+        return {"error": f"no journaled source state for {repo_key}/{module_path} — "
+                         "run flip-module (shadow) first", "cut_over": False}
+    if (repo_key, module_path) in graph_sourced_modules(source_journal_path):
+        return {"repo_key": repo_key, "module_path": module_path, "cut_over": False,
+                "already_graph_sourced": True,
+                "note": "already past the cutover — the journal is this module's source"}
+    journaled = a.get("text", "")
+    file_path = _resolve_path(repos_dir, repo_key, module_path)
+    try:
+        if canonical_emit(repo_key, module_path, file_path, journaled, a.get("import_name")) != journaled:
+            return {"error": f"journaled source for {repo_key}/{module_path} is not a "
+                             "round-trip fixpoint — re-flip before cutting over", "cut_over": False}
+    except SyntaxError as e:
+        return {"error": f"journaled source for {repo_key}/{module_path} does not parse: {e}",
+                "cut_over": False}
+    artifact_written = False
+    if Path(file_path).exists():
+        if Path(file_path).read_text() != journaled:
+            return {"error": f"file drifted from the journaled state for {repo_key}/{module_path} "
+                             "— absorb it (flip-module) or regenerate it (emit-artifact) first",
+                    "cut_over": False}
+    else:
+        Path(file_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(file_path).write_text(journaled)
+        artifact_written = True
+    record = {"verb": "cutover", "ts": time.time(),
+              "args": {"repo_key": repo_key, "module_path": module_path}}
+    with Path(source_journal_path).open("a") as f:
+        f.write(json.dumps(record, sort_keys=True) + "\n")
+    return {"repo_key": repo_key, "module_path": module_path,
+            "import_name": a.get("import_name"), "file_path": file_path,
+            "cut_over": True, "artifact_written": artifact_written,
+            "note": "GRAPH-SOURCED: the journal is now this module's source of truth; the file "
+                    "is a generated committed artifact — source-check gates its regen"}
+
+
+def emit_source_artifact(
+    source_journal_path: str,  # The source journal (the authoritative text)
+    repos_dir: str,            # The repos root (where the artifact file lives)
+    repo_key: str,             # The repo's durable conceptual slug
+    module_path: str,          # Repo-relative module path
+    write: bool = True,        # False = report what would change without touching disk
+) -> Dict[str, Any]:  # The regen result
+    """(Re)generate a module's file artifact from its journaled source (the recovery /
+    post-authoring emit). The journal is authoritative — this OVERWRITES the file; to
+    keep an out-of-band file edit instead, absorb it with `flip-module`."""
+    a = latest_source_ops(source_journal_path).get((repo_key, module_path))
+    if a is None:
+        return {"error": f"no journaled source state for {repo_key}/{module_path}", "written": False}
+    journaled = a.get("text", "")
+    file_path = _resolve_path(repos_dir, repo_key, module_path)
+    existing = Path(file_path).read_text() if Path(file_path).exists() else None
+    changed = existing != journaled
+    if write and changed:
+        Path(file_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(file_path).write_text(journaled)
+    return {"repo_key": repo_key, "module_path": module_path, "file_path": file_path,
+            "changed": changed, "written": write and changed,
+            "artifact_bytes": len(journaled.encode("utf-8"))}
+
+
+def absorb_authored_text(
+    source_journal_path: str,  # The source journal (the authoritative stream)
+    repo_key: str,             # The repo's durable conceptual slug
+    module_path: str,          # Repo-relative module path
+    file_path: str,            # The artifact file the author verb just wrote
+    emitted_text: str,         # The text the author verb emitted
+    import_name: Optional[str] = None,  # Override the derived dotted import name
+) -> Dict[str, Any]:  # The absorb result
+    """Absorb an `author` edit of a GRAPH-SOURCED module into the source journal.
+
+    The author verb emits verbatim (its import block is whatever the graph carried);
+    the journaled state is CANONICAL (imports-as-projection). So: canonicalize the
+    emitted text, journal it as the module's new source state, and — if
+    canonicalization changed anything (e.g. a now-dead import pruned) — rewrite the
+    file so artifact == journal and the regen gate stays clean by construction."""
+    try:
+        canonical = canonical_emit(repo_key, module_path, file_path, emitted_text, import_name)
+    except SyntaxError as e:
+        return {"error": f"authored text for {repo_key}/{module_path} does not parse: {e}",
+                "absorbed": False}
+    imp = import_name or (module_path[:-3] if module_path.endswith(".py") else module_path).replace("/", ".")
+    appended = append_source(source_journal_path, repo_key, module_path, imp, canonical)
+    canonicalized = canonical != emitted_text
+    if canonicalized:
+        Path(file_path).write_text(canonical)
+    return {"repo_key": repo_key, "module_path": module_path, "absorbed": appended,
+            "canonicalized": canonicalized,
+            "note": "authored state journaled (the journal is this module's source)"}
+
+
 def source_check(
     source_journal_path: str,  # The shadow source journal
     repos_dir: str,            # The repos root (to read the current files for the membrane diff)
@@ -149,9 +275,16 @@ def source_check(
       never silently overridden (the reconcile leg can absorb it into a new source op).
     - **Round-trip fixpoint:** re-decomposing+emitting the journaled text reproduces it exactly
       (the graph-sourced emit is stable). A clean soak = both true across several sessions, the
-      gate to the Phase 2 cutover."""
+      gate to the Phase 2 cutover.
+
+    Post-cutover (GRAPH-SOURCED) modules are held to the same two checks with inverted
+    meaning: the journal is the source, so a file mismatch is a stale/dirtied ARTIFACT
+    (the regen gate — nbdev-style `emit(graph)==file`), absorbed via `flip-module` or
+    regenerated via `emit-artifact`. `regen_clean` reports that gate alone."""
+    flipped = graph_sourced_modules(source_journal_path)
     modules = []
     drifted = stable = 0
+    regen_clean = True
     for (repo_key, module_path), a in sorted(latest_source_ops(source_journal_path).items()):
         journaled = a.get("text", "")
         file_path = _resolve_path(repos_dir, repo_key, module_path)
@@ -162,11 +295,17 @@ def source_check(
             fixpoint = reemit == journaled
         except SyntaxError:
             fixpoint = False
+        graph_sourced = (repo_key, module_path) in flipped
+        if graph_sourced and not (file_matches and fixpoint):
+            regen_clean = False
         drifted += 0 if file_matches else 1
         stable += 1 if fixpoint else 0
         modules.append({"module": a.get("import_name") or module_path, "repo_key": repo_key,
+                        "graph_sourced": graph_sourced,
                         "file_present": file_text is not None,
                         "file_matches_source": file_matches, "roundtrip_fixpoint": fixpoint})
     return {"modules": modules, "count": len(modules),
+            "graph_sourced_count": sum(1 for m in modules if m["graph_sourced"]),
             "file_drift": drifted, "roundtrip_stable": stable,
+            "regen_clean": regen_clean,
             "clean": drifted == 0 and stable == len(modules) and len(modules) > 0}

@@ -463,21 +463,48 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             f"  _{obj.get('note', '')}_"])
     if kind == "source-check":
         n = obj.get("count", 0)
-        head = (f"**source soak**: {n} shadow module(s) · file-drift {obj.get('file_drift')} · "
+        gs = obj.get("graph_sourced_count", 0)
+        head = (f"**source soak**: {n} module(s) ({gs} graph-sourced / {n - gs} shadow) · "
+                f"file-drift {obj.get('file_drift')} · "
                 f"round-trip-stable {obj.get('roundtrip_stable')}/{n}"
-                + ("  ✓ CLEAN" if obj.get("clean") else ""))
+                + ("  ✓ CLEAN" if obj.get("clean") else "")
+                + ("" if obj.get("regen_clean", True) else "  ✗ REGEN GATE FAILED"))
         lines = [head]
         for m in obj.get("modules", []):
+            sourced = m.get("graph_sourced")
             flags = []
             if not m.get("file_present"):
-                flags.append("file MISSING")
+                flags.append("artifact MISSING (emit-artifact regenerates it)" if sourced
+                             else "file MISSING")
             elif not m.get("file_matches_source"):
-                flags.append("FILE DRIFTED (out-of-band edit)")
+                flags.append("ARTIFACT DIVERGED from the journaled source (absorb via "
+                             "flip-module or regenerate via emit-artifact)" if sourced
+                             else "FILE DRIFTED (out-of-band edit)")
             if not m.get("roundtrip_fixpoint"):
                 flags.append("round-trip NOT a fixpoint")
             status = "ok" if not flags else "⚠ " + "; ".join(flags)
-            lines.append(f"  - `{m.get('module')}` — {status}")
+            phase = "GRAPH-SOURCED" if sourced else "shadow"
+            lines.append(f"  - `{m.get('module')}` [{phase}] — {status}")
         return "\n".join(lines)
+    if kind == "cutover":
+        if obj.get("error"):
+            return f"⚠ {obj['error']}"
+        if obj.get("already_graph_sourced"):
+            return f"**already graph-sourced** `{obj.get('module_path')}` (no-op)"
+        art = " (artifact file regenerated from the journal)" if obj.get("artifact_written") else ""
+        return "\n".join([
+            f"**CUT OVER** `{obj.get('import_name') or obj.get('module_path')}` — "
+            f"the journal is now this module's source of truth{art}",
+            f"  {obj.get('file_path')}",
+            f"  _{obj.get('note', '')}_"])
+    if kind == "emit-artifact":
+        if obj.get("error"):
+            return f"⚠ {obj['error']}"
+        if obj.get("written"):
+            return (f"**regenerated** `{obj.get('module_path')}` from the journaled source "
+                    f"({obj.get('artifact_bytes')} bytes) → {obj.get('file_path')}")
+        state = "would change (drifted)" if obj.get("changed") else "already in sync"
+        return f"**artifact** `{obj.get('module_path')}`: {state} ({obj.get('artifact_bytes')} bytes)"
     if kind == "emit":
         if obj.get("error"):
             return f"⚠ {obj['error']}"

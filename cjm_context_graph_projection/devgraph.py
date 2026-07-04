@@ -18,13 +18,14 @@ from cjm_dev_graph_schema.nodes import EntityNode
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 from cjm_markdown_decompose_core.extract import note_from_file
 from cjm_markdown_decompose_core.ingest import corpus_graph_elements
-from cjm_python_decompose_core.extract import decompose_package
+from cjm_python_decompose_core.extract import decompose_package, decompose_text
 from cjm_python_decompose_core.ingest import corpus_graph_elements as code_corpus_elements
 from cjm_python_decompose_core.ingest import resolve_import
 from cjm_notebook_decompose_core.compose import decompose_notebook_file
 from cjm_notebook_decompose_core.ingest import notebook_graph_elements
 
 from .seeds import aliases_for, conceptual_key, seed_elements
+from .source_state import graph_sourced_modules, latest_source_ops
 
 
 def memory_elements(
@@ -123,6 +124,7 @@ def repo_map_elements(
 
 def code_elements(
     code_repos: List[str],  # Repo dirs whose own package is decomposed as code (the code source-type)
+    source_journal_path: Optional[str] = None,  # Source journal — its GRAPH-SOURCED modules ingest from the journal, not the file
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:  # (CodeModule/CodeSymbol nodes, edges)
     """Decompose each repo's importable package into code nodes + edges.
 
@@ -132,14 +134,40 @@ def code_elements(
     IMPORTS/CALLS resolve (e.g. the decomposer importing the schema lib). The
     importable package dir is `repo/<repo_name_with_underscores>`; a repo without
     that package is skipped. Code is a SOURCE (projected from disk), so it rebuilds
-    on every `rm db && ingest` — it is not journaled."""
+    on every `rm db && ingest` — it is not journaled. EXCEPT: a module past the N+3
+    Phase-2 cutover is GRAPH-SOURCED — its text comes from the SOURCE journal (the
+    authority flip, the code analogue of `skip_memory_paths`); its file is a
+    generated committed artifact this ingest deliberately does not read."""
+    flipped = graph_sourced_modules(source_journal_path) if source_journal_path else set()
+    journaled = latest_source_ops(source_journal_path) if flipped else {}
     decomposed = []
+    seen = set()
+    repo_dirs_by_key = {}
     for repo_dir in code_repos:
         d = Path(repo_dir)
         pkg = d / d.name.replace("-", "_")
         if not pkg.is_dir():
             continue
-        decomposed.extend(decompose_package(conceptual_key(d.name), str(pkg), repo_root=str(d)))
+        repo_key = conceptual_key(d.name)
+        repo_dirs_by_key[repo_key] = d
+        for dm in decompose_package(repo_key, str(pkg), repo_root=str(d)):
+            key = (repo_key, dm.module.module_path)
+            if key in flipped and key in journaled:
+                a = journaled[key]
+                dm = decompose_text(repo_key, dm.module.module_path, dm.module.path,
+                                    a.get("text", ""), import_name=a.get("import_name"))
+            seen.add(key)
+            decomposed.append(dm)
+    # A graph-sourced module ingests even when its artifact file is absent — the
+    # journal is sufficient (the file is regenerable via `emit-artifact`).
+    for key in sorted(flipped - seen):
+        repo_key, module_path = key
+        if key not in journaled or repo_key not in repo_dirs_by_key:
+            continue
+        a = journaled[key]
+        path = str(repo_dirs_by_key[repo_key] / module_path)
+        decomposed.append(decompose_text(repo_key, module_path, path, a.get("text", ""),
+                                         import_name=a.get("import_name")))
     return code_corpus_elements(decomposed)
 
 
@@ -219,6 +247,7 @@ def build_dev_graph_elements(
     code_repos: Optional[List[str]] = None,  # Repo dirs to decompose as code (None = skip code)
     notebook_repos: Optional[List[str]] = None,  # Repo dirs whose nbdev notebooks to decompose (None = skip)
     skip_memory_paths: Optional[List[str]] = None,  # Memory `.md` paths NOT to read (journal-sourced under M3)
+    source_journal_path: Optional[str] = None,  # Source journal — its graph-sourced modules ingest from the journal (N+3 Phase 2)
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:  # (all nodes, all edges)
     """Assemble the full dev graph: memory notes (+ refs), the repo map (+ deps),
     the hand-seeded fine-tier slots (the torch/hf contradiction, the stale version
@@ -237,7 +266,7 @@ def build_dev_graph_elements(
         nodes += sn
         edges += se
     if code_repos:
-        cn, ce = code_elements(code_repos)
+        cn, ce = code_elements(code_repos, source_journal_path=source_journal_path)
         nodes += cn
         edges += ce
     if notebook_repos:

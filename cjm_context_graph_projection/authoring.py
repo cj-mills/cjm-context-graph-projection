@@ -394,6 +394,11 @@ async def author(
         # The durable section identity (slug, anchor) the journal records for M2b's shadow.
         result["note_slug"] = F.prop(container, "slug")
         result["anchor"] = F.prop(node, "anchor")
+    elif artifact == "module":
+        # The durable module identity, so the CLI can absorb an authored edit of a
+        # GRAPH-SOURCED module into the source journal (N+3 Phase 2).
+        result["repo_key"] = F.prop(container, "repo_key")
+        result["module_path"] = F.prop(container, "module_path")
     if write and artifact_path:
         Path(artifact_path).write_text(emitted)
         # Persist the slot change INTO the graph node too, so the graph stays consistent
