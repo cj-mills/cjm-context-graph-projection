@@ -309,6 +309,27 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         if not (obj.get("registers") or obj.get("hubless")):
             lines.append("_(no role assertions — nothing to reconcile)_")
         return "\n".join(lines)
+    if kind == "orphaned-edges":
+        c = obj.get("counts", {})
+        lines = ["## Orphaned code-target edges",
+                 f"_link ops {c.get('link_ops', 0)} · orphaned {c.get('orphaned', 0)} · "
+                 f"with proposal {c.get('with_proposal', 0)}_"
+                 "  (journal vs current graph — propose only)", ""]
+        orphans = obj.get("orphans", [])
+        for o in orphans:
+            ctx = o.get("source_context") or o.get("target_context") or ""
+            lines.append(f"- ✗ _{o.get('relation')}_ edge"
+                         + (f" (resolving side: **{_short(ctx, 70)}**)" if ctx else ""))
+            for m in o.get("missing", []):
+                label = f" — journaled label _{_short(m.get('label') or '', 60)}_" if m.get("label") else " (no journaled label — legacy op)"
+                lines.append(f"    ↳ {m.get('side')} `{m.get('id')}` no longer resolves{label}")
+                if m.get("proposal"):
+                    pr = m["proposal"]
+                    lines.append(f"        → propose remap to **{pr.get('name')}** "
+                                 f"`{pr.get('id')}` (score {pr.get('score')})")
+        if not orphans:
+            lines.append("_(clean — every journaled link endpoint resolves; nothing will drop on replay)_")
+        return "\n".join(lines)
     if kind == "oracle":
         c = obj.get("counts", {})
         lines = ["## Version oracle",

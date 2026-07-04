@@ -292,10 +292,17 @@ async def link(
     if missing:
         return {"error": f"missing node(s): {missing}", "source_id": source_id,
                 "target_id": target_id, "relation": relation, "written": False}
+
+    def _label(node: Any) -> str:
+        p = F.props(node)
+        return str(p.get("display_title") or p.get("title") or p.get("name")
+                   or p.get("statement") or "")[:120]
+
     edge = make_edge(source_id, target_id, relation, properties={"actor": actor})
     res = await extend_graph(gx.queue, gx.graph_id, [], [edge])
     return {"source_id": source_id, "target_id": target_id, "relation": relation,
             "actor": actor, "edge_id": edge["id"], "edges_added": res.edges_added,
+            "source_label": _label(src), "target_label": _label(tgt),
             "written": True}
 
 

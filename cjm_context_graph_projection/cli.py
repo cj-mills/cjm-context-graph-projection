@@ -23,6 +23,7 @@ from .display import set_display_rule
 from .listing import list_graph
 from .readiness import readiness
 from .registers import register_drift
+from .code_edges import orphaned_edges
 from .conventions import conventions
 from .devgraph import build_dev_graph_elements, notes_corpus_elements
 from .factlayer import note_alias_map
@@ -188,6 +189,11 @@ async def _dispatch(args) -> int:
             print(render("readiness", await readiness(gx, args.scope), args.format))
         elif args.command == "register-drift":
             print(render("register-drift", await register_drift(gx), args.format))
+        elif args.command == "orphaned-edges":
+            if not args.journal_path:
+                print("⚠ orphaned-edges needs --journal-path (the link ops to audit)")
+                return 1
+            print(render("orphaned-edges", await orphaned_edges(gx, args.journal_path), args.format))
         elif args.command == "list":
             res = await list_graph(gx, label=args.label, predicate=args.predicate,
                                    relation=args.relation, limit=args.limit,
@@ -252,9 +258,14 @@ async def _dispatch(args) -> int:
             res = await link(gx, args.source_id, args.target_id, args.relation, actor=args.actor)
             print(render("link", res, args.format))
             if args.journal_path and res.get("written"):
+                # Endpoint labels are AUDIT-ONLY (replay ignores them): they are what
+                # lets the orphaned-edge detector propose a remap after a code rename
+                # deletes the deterministic old id.
                 append_write(args.journal_path, "link",
                              {"source_id": args.source_id, "target_id": args.target_id,
-                              "relation": args.relation, "actor": args.actor})
+                              "relation": args.relation, "actor": args.actor,
+                              "source_label": res.get("source_label"),
+                              "target_label": res.get("target_label")})
             return 1 if res.get("error") else 0
         elif args.command == "check":
             res = await add_check(gx, args.item, args.text, actor=args.actor)
@@ -555,6 +566,11 @@ def main() -> int:
     p_rg = sub.add_parser("register-drift",
                           help="Reconcile each <value>-register hub's REFERENCES cache against "
                                "the active role assertions (propose/confirm, never auto-fix)")
+
+    p_oe = sub.add_parser("orphaned-edges",
+                          help="Journaled link ops whose endpoint no longer resolves (the set "
+                               "replay silently drops after a code rename) + fuzzy remap "
+                               "proposals where a label was journaled")
 
     p_ls = sub.add_parser("list",
                           help="Enumerate a class: nodes by --label / assertions by --predicate / edges by --relation")
