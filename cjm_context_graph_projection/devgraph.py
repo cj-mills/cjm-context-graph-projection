@@ -18,11 +18,11 @@ from cjm_dev_graph_schema.nodes import EntityNode
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 from cjm_markdown_decompose_core.extract import note_from_file
 from cjm_markdown_decompose_core.ingest import corpus_graph_elements
-from cjm_python_decompose_core.extract import decompose_package, decompose_text
-from cjm_python_decompose_core.ingest import corpus_graph_elements as code_corpus_elements
-from cjm_python_decompose_core.ingest import resolve_import
 from cjm_notebook_decompose_core.compose import decompose_notebook_file
 from cjm_notebook_decompose_core.ingest import notebook_graph_elements
+from cjm_python_decompose_core.extract import decompose_package, decompose_text
+from cjm_python_decompose_core.ingest import (corpus_graph_elements as code_corpus_elements,
+                                              resolve_import)
 
 from .seeds import aliases_for, conceptual_key, seed_elements
 from .source_state import graph_sourced_modules, latest_source_ops

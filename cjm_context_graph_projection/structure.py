@@ -25,7 +25,6 @@ from typing import Any, Dict, List, Optional
 
 from cjm_context_graph_layer.ops import extend_graph, graph_task
 from cjm_dev_graph_schema.identity import note_node_id
-
 from cjm_markdown_decompose_core.extract import note_from_text
 from cjm_markdown_decompose_core.ingest import corpus_graph_elements
 from cjm_markdown_decompose_core.sections import heading_anchor

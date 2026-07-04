@@ -18,35 +18,35 @@ from pathlib import Path
 from cjm_context_graph_layer.ops import extend_graph
 
 from .authoring import author, emit_artifact, read_node, read_slot
-from .contradictions import contradictions
-from .display import set_display_rule
-from .listing import list_graph
-from .readiness import readiness
-from .registers import register_drift
 from .code_edges import orphaned_edges
+from .cohesion import cohesion
+from .contradictions import contradictions
 from .conventions import conventions
 from .devgraph import build_dev_graph_elements, notes_corpus_elements
-from .factlayer import note_alias_map
-from .journal import (M3_BASELINE_ACTOR, append_write, journal_sourced_note_paths,
-                      m3_baseline_import, replay_journal)
-from .module_ops import delete_module, new_module, regroup, rename_module
-from .oracle import run_version_oracle
-from .reconcile import reconcile_memory
-from .structure import add_section, new_note
-from .projection import explore, get_schema, grep, locate, relevant, show, state
-from .onboarding import project_onboarding
-from .readme import project_readme
-from .viz import project_viz
-from .rename_ops import rename_symbol
-from .serve import serve_graphs
+from .display import set_display_rule
 from .explorer_page import EXPLORER_HTML
-from .source_state import (absorb_authored_text, cutover_module, emit_source_artifact,
-                           flip_module, graph_sourced_modules, source_check)
-from .cohesion import cohesion
+from .factlayer import note_alias_map
+from .journal import (append_write, journal_sourced_note_paths, M3_BASELINE_ACTOR,
+                      m3_baseline_import, replay_journal)
+from .listing import list_graph
+from .module_ops import delete_module, new_module, regroup, rename_module
+from .onboarding import project_onboarding
+from .oracle import run_version_oracle
+from .projection import explore, get_schema, grep, locate, relevant, show, state
+from .readiness import readiness
+from .readme import project_readme
+from .reconcile import reconcile_memory
 from .refactor import refactor_candidates
 from .refactor_ops import move
+from .registers import register_drift
+from .rename_ops import rename_symbol
 from .render import render
 from .runtime import DEFAULT_MANIFESTS, open_graph
+from .serve import serve_graphs
+from .source_state import (absorb_authored_text, cutover_module, emit_source_artifact, flip_module,
+                           graph_sourced_modules, source_check)
+from .structure import add_section, new_note
+from .viz import project_viz
 from .worklist import dangling_reference_sources, worklist
 from .write import add_check, alias, assert_value, decide, link
 
@@ -256,6 +256,10 @@ async def _dispatch(args) -> int:
                              {"for_label": args.for_label, "title_template": args.title,
                               "gloss_template": args.gloss, "actor": args.actor})
             return 1 if res.get("error") else 0
+        elif args.command == "oracle":
+            res = await run_version_oracle(gx, repos_dir=args.repos_dir, only=args.only)
+            print(render("oracle", res, args.format))
+            return 0
         elif args.command == "link":
             res = await link(gx, args.source_id, args.target_id, args.relation, actor=args.actor)
             print(render("link", res, args.format))

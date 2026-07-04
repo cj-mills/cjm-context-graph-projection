@@ -33,7 +33,6 @@ over authored facts + edges.
 
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from cjm_context_graph_layer.ops import graph_task
 from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.vocab import DevRelations
 

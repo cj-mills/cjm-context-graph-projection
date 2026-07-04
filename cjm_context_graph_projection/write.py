@@ -23,8 +23,8 @@ from cjm_context_graph_primitives.provenance import SourceRef
 from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.aliases import resolve_subject_id
 from cjm_dev_graph_schema.identity import note_node_id, section_node_id
-from cjm_dev_graph_schema.nodes import (AssertionNode, CheckNode, DecisionNode,
-                                        EntityNode, FactSlotNode, SessionNode)
+from cjm_dev_graph_schema.nodes import (AssertionNode, CheckNode, DecisionNode, EntityNode,
+                                        FactSlotNode, SessionNode)
 from cjm_dev_graph_schema.vocab import DevRelations
 
 from . import factlayer as F

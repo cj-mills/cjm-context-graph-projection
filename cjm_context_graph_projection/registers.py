@@ -21,7 +21,7 @@ Same family as `worklist` / `contradictions` / `readiness`: a derived view over
 authored facts + edges; there is no write path here.
 """
 
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, Set
 
 from cjm_dev_graph_schema.identity import note_node_id
 from cjm_dev_graph_schema.vocab import DevRelations

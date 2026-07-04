@@ -11,7 +11,7 @@ Depends only on the substrate runtime; carries NO dev/domain dependency.
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator
 
 from cjm_substrate.core.manager import CapabilityManager
 from cjm_substrate.core.queue import JobQueue

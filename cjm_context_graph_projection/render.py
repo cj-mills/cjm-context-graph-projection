@@ -6,7 +6,7 @@ two surfaces — correctness/chainability over token-economy for v1.
 """
 
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 
 def _short(text: Any, limit: int = 160) -> str:

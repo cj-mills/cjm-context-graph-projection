@@ -10,8 +10,6 @@ single-handle resolution stays with `locate`.
 
 from typing import Any, Dict, List, Optional, Set
 
-from cjm_context_graph_layer.ops import graph_task
-
 from . import factlayer as F
 from .display import annotate_display, node_title
 from .runtime import GraphHandle

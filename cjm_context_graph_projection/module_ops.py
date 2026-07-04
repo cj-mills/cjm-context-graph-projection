@@ -22,10 +22,9 @@ let `ingest` re-derive", deviating only where a footgun forces it):
   re-derived by the next `ingest` — `rename_module` reports that.
 """
 
+import ast
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-
-import ast
 
 from cjm_context_graph_layer.ops import graph_task
 from cjm_context_graph_primitives.provenance import SourceRef

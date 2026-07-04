@@ -26,9 +26,9 @@ worklist (propose/confirm) — never guessed.
 
 from typing import Any, Dict, List, Tuple
 
+from cjm_context_graph_layer.grammar import make_edge
 from cjm_dev_graph_schema.identity import note_node_id
 from cjm_dev_graph_schema.nodes import AssertionNode, EntityNode, FactSlotNode
-from cjm_context_graph_layer.grammar import make_edge
 from cjm_dev_graph_schema.vocab import DevRelations
 
 # Known repo renames: conceptual key -> current dir name + prior names (aliases).
