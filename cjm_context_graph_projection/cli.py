@@ -56,6 +56,7 @@ DEFAULT_REPOS = "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills"
 # The born-non-nbdev arc libs decomposed as the code source-type by default (the
 # code-on-graph corpus); plain `.py`, so the python decomposer applies cleanly.
 DEFAULT_CODE_LIBS = ("cjm-dev-graph-schema", "cjm-markdown-decompose-core",
+                     "cjm-notebook-decompose-core",
                      "cjm-context-graph-projection", "cjm-python-decompose-core")
 # The substrate core is nbdev — ingest its NOTEBOOKS (the source), with cross-cell
 # @patch/incremental methods re-attributed to their true classes by the compositor.
