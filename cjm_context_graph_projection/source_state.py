@@ -201,12 +201,17 @@ def flip_module(
         return {"error": f"cannot decompose {module_path}: {e}", "captured": False}
     imp = import_name or _derive_import_name(repo_key, module_path, canonical)
     appended = append_source(source_journal_path, repo_key, module_path, imp, canonical)
+    sourced = (repo_key, module_path) in graph_sourced_modules(source_journal_path)
+    note = ("GRAPH-SOURCED: absorbed into the source journal (this module's source of truth); "
+            "if the file was not already canonical, regenerate it via emit-artifact"
+            if sourced else
+            "SHADOW: the file is still the ingest source; run source-check each session "
+            "to soak before the Phase 2 cutover")
     return {"repo_key": repo_key, "module_path": module_path, "import_name": imp,
-            "file_path": file_path, "captured": appended,
+            "file_path": file_path, "captured": appended, "graph_sourced": sourced,
             "file_already_canonical": canonical == file_text,
             "canonical_bytes": len(canonical.encode("utf-8")),
-            "note": "SHADOW: the file is still the ingest source; run source-check each session "
-                    "to soak before the Phase 2 cutover"}
+            "note": note}
 
 
 def cutover_module(

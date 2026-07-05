@@ -454,7 +454,8 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
     if kind == "flip":
         if obj.get("error"):
             return f"⚠ {obj['error']}"
-        verb = "captured (shadow)" if obj.get("captured") else "already current (no-op)"
+        verb = (("absorbed (graph-sourced)" if obj.get("graph_sourced") else "captured (shadow)")
+                if obj.get("captured") else "already current (no-op)")
         canon = ("file is already canonical" if obj.get("file_already_canonical")
                  else "⚠ flip implies a one-time canonicalization (e.g. import reorder)")
         return "\n".join([
