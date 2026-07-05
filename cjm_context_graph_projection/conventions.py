@@ -67,11 +67,46 @@ def compute_conventions(
     }
 
 
+def compute_untested(
+    symbols: Iterable[Any],       # CodeSymbol nodes (GraphNodes or wire dicts)
+    modules: Iterable[Any],       # CodeModule nodes (to exclude test modules + carry paths)
+    tested_ids: set,              # Symbol ids that have an incoming TESTS edge
+    scope: Optional[str] = None,  # Restrict to one module id (None = whole graph)
+) -> List[Dict[str, str]]:  # Public package symbols with NO incoming TESTS edge
+    """The untested-symbol audit (pure): every public top-level PACKAGE symbol (test
+    modules excluded) that no test symbol / test cell exercises via a TESTS edge.
+    Coverage here is structural linkage by unambiguous name, not an execution trace —
+    read the result as a to-triage list, not ground truth."""
+    mod_path = {F.nid(m): (F.prop(m, "module_path") or "") for m in modules}
+    out: List[Dict[str, str]] = []
+    for s in symbols:
+        sid = F.nid(s)
+        qual = F.prop(s, "qualname", "") or ""
+        module_id = F.prop(s, "module_id")
+        path = mod_path.get(module_id, "")
+        if path.startswith(("tests/", "tests_manual/")):
+            continue                       # test code is the auditor, not the audited
+        if scope is not None and module_id != scope:
+            continue
+        if not _is_public(qual):
+            continue
+        if sid not in tested_ids:
+            out.append({"id": sid, "qualname": qual, "module_id": module_id,
+                        "module_path": path})
+    return sorted(out, key=lambda u: (u["module_path"], u["qualname"]))
+
+
 async def conventions(
     gx,
     scope: Optional[str] = None,  # Restrict to one notebook module id (None = whole graph)
 ) -> Dict[str, Any]:  # The audit result
-    """Audit notebook-sourced symbols for missing prose/docstrings + non-granular cells."""
+    """Audit notebook-sourced symbols for missing prose/docstrings + non-granular cells,
+    and every package symbol for missing test linkage (the untested audit)."""
     symbols = await F.load_label(gx, DevNodeKinds.CODE_SYMBOL)
+    modules = await F.load_label(gx, DevNodeKinds.CODE_MODULE)
     documented = {tgt for _src, tgt in await F.load_edge_pairs(gx, DevRelations.DOCUMENTS)}
-    return compute_conventions(symbols, documented, scope)
+    tested = {tgt for _src, tgt in await F.load_edge_pairs(gx, DevRelations.TESTS)}
+    res = compute_conventions(symbols, documented, scope)
+    res["untested"] = compute_untested(symbols, modules, tested, scope)
+    res["counts"]["untested"] = len(res["untested"])
+    return res

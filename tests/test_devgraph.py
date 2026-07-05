@@ -188,3 +188,50 @@ def test_notebook_elements_ingests_graph_sourced_notebooks_from_the_journal(tmp_
     assert any(n["label"] == DevNodeKinds.CELL for n in nodes)
     mod_id = code_module_node_id(key, "cjm_foo/core.py")
     assert any(n["id"] == mod_id for n in nodes)
+
+
+def test_test_elements_and_tests_edges(tmp_path):
+    """Stage 1 of tests-on-graph: tests/ decomposes with repo-relative module identity,
+    and the corpus TESTS pass links BOTH pytest symbols and notebook test cells to the
+    package symbols they exercise."""
+    from cjm_context_graph_projection.devgraph import resolve_test_edges, test_elements
+
+    d = _make_nbdev_repo(tmp_path, "cjm-foo")
+    # a notebook TEST cell (non-export code cell) calling the exported symbol
+    nb = json.loads((d / "nbs" / "00_core.ipynb").read_text())
+    nb["cells"].append({"cell_type": "code", "id": "t0", "source": "assert alpha(1) == 2\n"})
+    (d / "nbs" / "00_core.ipynb").write_text(json.dumps(nb))
+    # a pytest file outside any package
+    (d / "tests").mkdir()
+    (d / "tests" / "test_core.py").write_text(
+        "from cjm_foo.core import alpha\n\n\ndef test_alpha():\n    assert alpha(1) == 2\n")
+
+    tn, _ = test_elements([str(d)])
+    tmod = next(n for n in tn if n["label"] == DevNodeKinds.CODE_MODULE)
+    assert tmod["properties"]["module_path"] == "tests/test_core.py"
+
+    nn, _ = notebook_elements([str(d)])
+    tests_edges = [e for e in resolve_test_edges(nn + tn) if e["relation_type"] == "TESTS"]
+    alpha_id = next(n["id"] for n in nn if n["label"] == DevNodeKinds.CODE_SYMBOL
+                    and n["properties"]["qualname"] == "alpha")
+    sources = {e["source_id"] for e in tests_edges if e["target_id"] == alpha_id}
+    test_fn_id = next(n["id"] for n in tn if n["label"] == DevNodeKinds.CODE_SYMBOL
+                      and n["properties"]["qualname"] == "test_alpha")
+    cell_id = next(n["id"] for n in nn if n["label"] == DevNodeKinds.CELL
+                   and n["properties"].get("cell_key") == "t0")
+    assert test_fn_id in sources and cell_id in sources
+
+
+def test_compute_untested_flags_unlinked_public_symbols():
+    """The untested audit: public package symbols without an incoming TESTS edge are
+    flagged; private symbols and test-module symbols are not audited."""
+    from cjm_context_graph_projection.conventions import compute_untested
+
+    mods = [{"id": "m1", "properties": {"module_path": "pkg/a.py"}},
+            {"id": "mt", "properties": {"module_path": "tests/test_a.py"}}]
+    syms = [{"id": "s1", "properties": {"qualname": "fa", "module_id": "m1"}},
+            {"id": "s2", "properties": {"qualname": "fb", "module_id": "m1"}},
+            {"id": "s3", "properties": {"qualname": "_private", "module_id": "m1"}},
+            {"id": "st", "properties": {"qualname": "test_fa", "module_id": "mt"}}]
+    out = compute_untested(syms, mods, {"s1"})
+    assert [u["qualname"] for u in out] == ["fb"]

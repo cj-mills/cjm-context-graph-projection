@@ -151,7 +151,8 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         c = obj.get("counts", {})
         lines = ["## Convention audit (notebook code)",
                  f"_undocumented {c.get('undocumented', 0)} · no-docstring {c.get('no_docstring', 0)} · "
-                 f"non-granular cells {c.get('non_granular_cells', 0)}_", ""]
+                 f"non-granular cells {c.get('non_granular_cells', 0)} · "
+                 f"untested {c.get('untested', 0)}_", ""]
         und = obj.get("undocumented", [])
         if und:
             lines.append("**Undocumented (no adjacent prose cell):**")
@@ -164,7 +165,11 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         if ng:
             lines.append("**Non-granular cells (>1 public def):**")
             lines += [f"  - {', '.join('`'+s+'`' for s in g.get('symbols', []))}" for g in ng[:30]]
-        if not (und or nod or ng):
+        unt = obj.get("untested", [])
+        if unt:
+            lines.append(f"**Untested (no incoming TESTS edge; {len(unt)} total, first 40):**")
+            lines += [f"  - `{u.get('qualname')}` _({u.get('module_path')})_" for u in unt[:40]]
+        if not (und or nod or ng or unt):
             lines.append("_(no findings)_")
         return "\n".join(lines)
     if kind == "refactor":

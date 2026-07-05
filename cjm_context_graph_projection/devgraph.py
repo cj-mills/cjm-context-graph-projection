@@ -174,6 +174,82 @@ def code_elements(
     return code_corpus_elements(decomposed)
 
 
+def _is_test_module_path(module_path: str) -> bool:
+    """Whether a module path denotes a TEST source (`tests/` or `tests_manual/`)."""
+    return module_path.startswith(("tests/", "tests_manual/"))
+
+
+def test_elements(
+    code_repos: List[str],  # Repo dirs whose tests/ + tests_manual/ decompose as test modules
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:  # (test CodeModule/CodeSymbol nodes, edges)
+    """Decompose each repo's pytest / manual test files into code nodes + edges.
+
+    Tests live OUTSIDE the importable package (`tests/`, `tests_manual/` — no
+    `__init__.py`), so module identity is the repo-relative path; nothing imports
+    a test module, so the derived import name is inert in the corpus import maps.
+    `.md` scenario files under tests_manual/ are deferred (not code). Test modules
+    are FILE-sourced for now — flipping them to the journal is the tests-on-graph
+    item's stage 2, gated on a fixture-safe canonicalization."""
+    decomposed = []
+    for repo_dir in code_repos:
+        d = Path(repo_dir)
+        repo_key = conceptual_key(d.name)
+        for sub in ("tests", "tests_manual"):
+            t = d / sub
+            if not t.is_dir():
+                continue
+            for f in sorted(t.rglob("*.py")):
+                rel = f.relative_to(d).as_posix()
+                try:
+                    decomposed.append(decompose_text(repo_key, rel, str(f), f.read_text()))
+                except (SyntaxError, OSError):
+                    continue  # unparseable/unreadable test file — skip (ingest stays robust)
+    return code_corpus_elements(decomposed)
+
+
+def resolve_test_edges(
+    nodes: List[Dict[str, Any]],  # All assembled node wire dicts (code + notebook + tests)
+) -> List[Dict[str, Any]]:  # TESTS edges (test symbol / test cell -> exercised package symbol)
+    """Resolve TESTS edges across the corpus (the code<->test link).
+
+    Sources: (a) symbols DEFINED in a test module — their calls + refs; (b) non-export
+    notebook code cells — their harvested `calls` (nbdev's in-notebook test vehicle).
+    Targets: NON-test CodeSymbols, resolved by UNAMBIGUOUS bare name over that
+    restricted set (precision over recall, same rule as the corpus CALLS pass).
+    Known v1 gap: a manual script's MODULE-LEVEL calls live in CodeText regions, not
+    symbols, so they contribute no edges. Additive + idempotent (deterministic ids)."""
+    modules = {n["id"]: n for n in nodes if n.get("label") == DevNodeKinds.CODE_MODULE}
+    test_module_ids = {mid for mid, m in modules.items()
+                       if _is_test_module_path(m["properties"].get("module_path", ""))}
+    symbols = [n for n in nodes if n.get("label") == DevNodeKinds.CODE_SYMBOL]
+    name_to_ids: Dict[str, set] = {}
+    for s in symbols:
+        if s["properties"].get("module_id") in test_module_ids:
+            continue  # targets are package symbols only
+        bare = s["properties"].get("qualname", "").split(".")[-1]
+        if bare:
+            name_to_ids.setdefault(bare, set()).add(s["id"])
+    target_map = {n: next(iter(ids)) for n, ids in name_to_ids.items() if len(ids) == 1}
+
+    edges: List[Dict[str, Any]] = []
+    for s in symbols:
+        if s["properties"].get("module_id") not in test_module_ids:
+            continue
+        names = list(s["properties"].get("calls", [])) + list(s["properties"].get("refs", []))
+        for name in dict.fromkeys(names):
+            t = target_map.get(name)
+            if t and t != s["id"]:
+                edges.append(make_edge(s["id"], t, DevRelations.TESTS))
+    for c in nodes:
+        if c.get("label") != DevNodeKinds.CELL:
+            continue
+        for name in c["properties"].get("calls", []):
+            t = target_map.get(name)
+            if t:
+                edges.append(make_edge(c["id"], t, DevRelations.TESTS))
+    return edges
+
+
 def _decompose_notebook_text(
     repo_key: str,   # The repo's durable conceptual slug
     path: str,       # The notebook's file path (provenance locator)
@@ -321,5 +397,9 @@ def build_dev_graph_elements(
         nodes += nn
         edges += ne
     if code_repos or notebook_repos:
+        tn, te = test_elements((code_repos or []) + (notebook_repos or []))
+        nodes += tn
+        edges += te
         edges += resolve_corpus_code_edges(nodes)  # cross-source CALLS/IMPORTS (additive, idempotent)
+        edges += resolve_test_edges(nodes)         # test symbol/cell -> exercised symbol (TESTS)
     return nodes, edges
