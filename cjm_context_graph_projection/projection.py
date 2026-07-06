@@ -36,7 +36,10 @@ _SUPERSEDED_FACTOR = 0.3  # Down-weight for nodes that are the target of a SUPER
 # region — so memory bodies (M1) and code regions are findable by their CONTENT,
 # not just their heading. Seed scoring counts DISTINCT query terms (capped at the
 # query's term count), so a long field can't dominate beyond a focused match.
-_TEXT_FIELDS = ("title", "name", "slug", "key", "description", "statement", "value", "text")
+# `source` = notebook Cell sources — without it, notebook-sourced code is invisible
+# to the exhaustive literal search while `.py` code (CodeText `text`) is indexed.
+_TEXT_FIELDS = ("title", "name", "slug", "key", "description", "statement", "value", "text",
+                "source")
 # Common words that add noise, not signal, to seed-term matching.
 _STOPWORDS = frozenset((
     "the", "and", "for", "with", "this", "that", "from", "into", "are", "was",

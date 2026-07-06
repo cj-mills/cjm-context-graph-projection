@@ -137,6 +137,39 @@ async def _notebook_cell_wires(
             if F.prop(n, "module_id") == module_id]
 
 
+async def _owning_slot_hint(gx: GraphHandle, node: Any) -> Optional[str]:
+    """For a nested CodeSymbol, name the authorable slot that OWNS its text.
+
+    A method/nested def has no verbatim body of its own — the authoring unit is
+    the notebook Cell (or top-level .py symbol) that defines it. Resolving that
+    here turns the 'no authorable slot' error into a pointer instead of sending
+    the caller on a per-cell scan of the enclosing module (soak 2026-07-05:
+    3x ~60-read manual scans). Plain-substring def/class match — first hit wins;
+    a stale duplicate elsewhere costs a wrong hint, never a wrong write."""
+    if _label_of(node) != DevNodeKinds.CODE_SYMBOL:
+        return None
+    module_id = F.prop(node, "module_id")
+    basename = str(F.prop(node, "name") or "").split(".")[-1]
+    if not module_id or not basename:
+        return None
+    container = await _module_node(gx, module_id)
+    if container is None:
+        return None
+    markers = (f"def {basename}(", f"class {basename}(", f"class {basename}:")
+    if str(F.prop(container, "path") or "").endswith(".ipynb"):
+        for w in await _notebook_cell_wires(gx, module_id):
+            if any(m in str(w["properties"].get("source") or "") for m in markers):
+                return f"its text lives in Cell `{w['id']}` — author that"
+    else:
+        for w in await _module_region_wires(gx, module_id):
+            if w["label"] != DevNodeKinds.CODE_SYMBOL or w["id"] == F.nid(node):
+                continue
+            if any(m in str(w["properties"].get("body") or "") for m in markers):
+                return (f"its text lives in symbol `{w['id']}` "
+                        f"(`{w['properties'].get('name')}`) — author that")
+    return None
+
+
 async def read_slot(
     gx: GraphHandle,
     node_id: str,  # The node whose verbatim slot to read
@@ -147,7 +180,9 @@ async def read_slot(
         return {"error": f"no node `{node_id}`", "node_id": node_id}
     resolved = _slot_for(node)
     if resolved is None:
-        return {"error": "node has no authorable verbatim slot", "node_id": node_id,
+        err = "node has no authorable verbatim slot"
+        hint = await _owning_slot_hint(gx, node)
+        return {"error": err + (f" — {hint}" if hint else ""), "node_id": node_id,
                 "label": _label_of(node)}
     slot, _artifact, label = resolved
     return {"node_id": node_id, "label": label, "slot": slot, "text": str(F.prop(node, slot, ""))}
@@ -342,9 +377,11 @@ async def author(
         return {"error": f"no node `{node_id}`", "node_id": node_id, "written": False}
     resolved = _slot_for(node)
     if resolved is None:
-        return {"error": "node has no authorable verbatim slot (not a top-level CodeSymbol / "
-                         "CodeText / Cell / Section)", "node_id": node_id, "label": _label_of(node),
-                "written": False}
+        err = ("node has no authorable verbatim slot (not a top-level CodeSymbol / "
+               "CodeText / Cell / Section)")
+        hint = await _owning_slot_hint(gx, node)
+        return {"error": err + (f" — {hint}" if hint else ""), "node_id": node_id,
+                "label": _label_of(node), "written": False}
     slot, artifact, label = resolved
     current = str(F.prop(node, slot, ""))
     new_text, err = _apply(current, replace, edit)
