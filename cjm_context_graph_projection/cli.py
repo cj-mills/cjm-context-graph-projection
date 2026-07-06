@@ -315,9 +315,10 @@ async def _dispatch(args) -> int:
             if args.journal_path and res.get("written"):
                 # Endpoint labels are AUDIT-ONLY (replay ignores them): they are what
                 # lets the orphaned-edge detector propose a remap after a code rename
-                # deletes the deterministic old id.
+                # deletes the deterministic old id. Journal the RESOLVED ids (a prefix
+                # resolves against TODAY's db; replay must land on the same nodes).
                 append_write(args.journal_path, "link",
-                             {"source_id": args.source_id, "target_id": args.target_id,
+                             {"source_id": res["source_id"], "target_id": res["target_id"],
                               "relation": args.relation, "actor": args.actor,
                               "source_label": res.get("source_label"),
                               "target_label": res.get("target_label")})

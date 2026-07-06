@@ -71,3 +71,21 @@ def test_decide_state_open_mints_and_asserts_in_one_invocation(tmp_path):
     assert ops[1]["args"]["predicate"] == "task_state"
     assert ops[1]["args"]["value"] == "open"
     assert ops[1]["args"]["subject"]  # the freshly minted decision id
+
+
+def test_link_resolves_id_prefixes_and_journals_resolved_ids(tmp_path):
+    # The 66fffba6 asymmetry fix: link accepts unique id PREFIXES like every read verb,
+    # and the journal records the RESOLVED full ids (replay must not depend on a prefix).
+    db = str(tmp_path / "dev.db")
+    journal = str(tmp_path / "writes.jsonl")
+    base = ("--graph-db-path", db, "--journal-path", journal, "--format", "agent")
+    a = json.loads(_run(*base, "decide", "alpha decision").stdout)["decision_id"]
+    b = json.loads(_run(*base, "decide", "beta decision").stdout)["decision_id"]
+    r = _run(*base, "link", a[:8], "REFERENCES", b[:8])
+    assert r.returncode == 0, f"prefix link failed: {r.stderr or r.stdout}"
+    op = [o for o in read_journal(journal) if o["verb"] == "link"][-1]
+    assert op["args"]["source_id"] == a and op["args"]["target_id"] == b
+    # A prefix matching nothing stays a loud miss (never a guess, never journaled).
+    miss = _run(*base, "link", "deadbeef", "REFERENCES", b)
+    assert miss.returncode != 0
+    assert len([o for o in read_journal(journal) if o["verb"] == "link"]) == 1

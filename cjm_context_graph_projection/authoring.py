@@ -48,8 +48,25 @@ from cjm_python_decompose_core.emit import emit_module_from_nodes
 from cjm_python_decompose_core.parse import parse_module
 
 from . import factlayer as F
+from .projection import ambiguity_error, resolve_node_ref
 from .runtime import GraphHandle
 from .source_state import is_test_module_path
+
+
+async def _resolve_node(
+    gx: GraphHandle,
+    ref: str,  # A full node id, or a unique id prefix (>= 6 hex chars)
+) -> Tuple[Optional[Any], Optional[str]]:  # (node, error) — at most one is set
+    """Resolve an id-taking write verb's node argument like every read verb does.
+
+    Unique prefix ok; ambiguity is a LOUD error naming the candidates, never a
+    guess (the 66fffba6 write-verb asymmetry fix). A miss returns (None, None) —
+    the caller keeps its own 'no node' wording."""
+    res = await resolve_node_ref(gx, ref)
+    if "candidates" in res:
+        return None, ambiguity_error(ref, res["candidates"])
+    return res.get("node"), None
+
 
 # Per node label: the verbatim-text slot property + the artifact kind it composes.
 _SLOTS = {
@@ -180,9 +197,12 @@ async def read_slot(
     node_id: str,  # The node whose verbatim slot to read
 ) -> Dict[str, Any]:  # {slot, label, text} or {error}
     """Read a node's current verbatim-slot text (the `--editor` pop / preview input)."""
-    node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=node_id)
+    node, amb = await _resolve_node(gx, node_id)
+    if amb:
+        return {"error": amb, "node_id": node_id}
     if node is None:
         return {"error": f"no node `{node_id}`", "node_id": node_id}
+    node_id = F.nid(node)
     resolved = _slot_for(node)
     if resolved is None:
         err = "node has no authorable verbatim slot"
@@ -439,9 +459,12 @@ async def author(
     (`.py` / `.ipynb` for a cell / `.md` for a memory section), and writes the file — the
     graph is the editing surface, the file the durable source. Returns the artifact path
     + emitted text (and, on `write=False`, emits without touching disk: a dry-run/preview)."""
-    node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=node_id)
+    node, amb = await _resolve_node(gx, node_id)
+    if amb:
+        return {"error": amb, "node_id": node_id, "written": False}
     if node is None:
         return {"error": f"no node `{node_id}`", "node_id": node_id, "written": False}
+    node_id = F.nid(node)
     resolved = _slot_for(node)
     if resolved is None:
         # A nested CodeSymbol ROUTES through its owning slot (the 3e13d95a hint, executed).
@@ -548,9 +571,12 @@ async def add_symbol(
     against what the module ALREADY imports (module-level + every symbol's); a ref that
     needs a genuinely new import is the author's next edit, surfaced by the test run,
     never guessed."""
-    module = await _module_node(gx, module_id)
+    module, amb = await _resolve_node(gx, module_id)
+    if amb:
+        return {"error": amb, "written": False}
     if module is None:
         return {"error": f"no module `{module_id}`", "written": False}
+    module_id = F.nid(module)
     if _label_of(module) != DevNodeKinds.CODE_MODULE:
         return {"error": f"add-symbol targets a CodeModule (got {_label_of(module)})",
                 "written": False}

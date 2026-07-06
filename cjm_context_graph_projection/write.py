@@ -271,12 +271,12 @@ async def decide(
 
 async def link(
     gx: GraphHandle,
-    source_id: str,    # The source node id (must already exist)
-    target_id: str,    # The target node id (must already exist)
+    source_id: str,    # The source node: full id, or a unique id prefix (must already exist)
+    target_id: str,    # The target node: full id, or a unique id prefix (must already exist)
     relation: str,     # The edge relation (any string; the grammar is open by design)
     *,
     actor: str = "agent:session",  # Who asserted the link (recorded on the edge, not its identity)
-) -> Dict[str, Any]:  # The write result (incl. error when an endpoint is missing)
+) -> Dict[str, Any]:  # The write result (incl. error when an endpoint is missing/ambiguous)
     """Mint a deliberate edge between two EXISTING nodes (heterogeneous interlink).
 
     The general-purpose connector behind the larger context-graph vision: any node
@@ -284,14 +284,23 @@ async def link(
     future debt node -> a code node; a cross-project reference -> another graph's
     symbol). The relation is a free string — the edge grammar is intentionally open,
     with no node-kind-pair validation. Both endpoints MUST exist (a deliberate link
-    is never left dangling — that distinguishes it from a `[[ref]]`); the edge id is
-    deterministic from (source, relation, target), so re-linking is a no-op."""
-    src = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=source_id)
-    tgt = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=target_id)
-    missing = [nid for nid, node in ((source_id, src), (target_id, tgt)) if node is None]
+    is never left dangling — that distinguishes it from a `[[ref]]`) and resolve like
+    every other id-taking verb (unique prefix ok; ambiguity is a loud error, never a
+    guess — the 66fffba6 asymmetry fix). The result carries the RESOLVED ids (what
+    the journal must record); the edge id is deterministic from (source, relation,
+    target), so re-linking is a no-op."""
+    src_res = await resolve_node_ref(gx, source_id)
+    tgt_res = await resolve_node_ref(gx, target_id)
+    for ref, res in ((source_id, src_res), (target_id, tgt_res)):
+        if "candidates" in res:
+            return {"error": ambiguity_error(ref, res["candidates"]), "source_id": source_id,
+                    "target_id": target_id, "relation": relation, "written": False}
+    src, tgt = src_res.get("node"), tgt_res.get("node")
+    missing = [ref for ref, node in ((source_id, src), (target_id, tgt)) if node is None]
     if missing:
         return {"error": f"missing node(s): {missing}", "source_id": source_id,
                 "target_id": target_id, "relation": relation, "written": False}
+    source_id, target_id = F.nid(src), F.nid(tgt)  # the RESOLVED endpoint ids
 
     def _label(node: Any) -> str:
         p = F.props(node)

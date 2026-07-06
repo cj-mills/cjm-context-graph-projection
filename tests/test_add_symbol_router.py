@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import cjm_context_graph_projection.authoring as authoring_mod
 import cjm_context_graph_projection.factlayer as factlayer_mod
+import cjm_context_graph_projection.projection as projection_mod
 from cjm_context_graph_projection.authoring import add_symbol, author
 
 
@@ -43,6 +44,7 @@ _OS_BINDING = {"name": "os", "kind": "import", "module": "os",
 def _wire(fake, monkeypatch):
     monkeypatch.setattr(authoring_mod, "graph_task", fake.task)
     monkeypatch.setattr(factlayer_mod, "graph_task", fake.task)
+    monkeypatch.setattr(projection_mod, "graph_task", fake.task)
 
 
 def _module_node(tmp_path, module_path="cjm_demo/m.py"):
