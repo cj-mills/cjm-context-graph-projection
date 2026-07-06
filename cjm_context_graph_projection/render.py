@@ -541,8 +541,12 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             return f"⚠ {obj['error']}"
         mode, key, rows = obj.get("mode"), obj.get("key"), obj.get("rows", [])
         head = {"label": "Nodes", "predicate": "Assertions", "relation": "Edges"}.get(mode, "List")
-        title = f"## {head} · `{key}` ({obj.get('count', len(rows))}" \
-                + (" — truncated" if obj.get("truncated") else "") + ")"
+        shown, total = obj.get("count", len(rows)), obj.get("total")
+        counter = (f"{shown} of {total}" if total is not None and total != shown else f"{shown}")
+        where = obj.get("where") or []
+        title = f"## {head} · `{key}` ({counter}" \
+                + (" — window; page with --offset" if obj.get("truncated") else "") + ")" \
+                + ("".join(f"  _[{w.get('prop')}={w.get('value')}]_" for w in where))
         if not rows:
             return f"{title}\n\n_(none)_"
         lines = [title, ""]

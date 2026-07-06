@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from cjm_context_graph_layer.edits import resolve_active
 from cjm_context_graph_layer.ops import graph_task
-from cjm_context_graph_primitives.query import EdgeQuery, NodeQuery
+from cjm_context_graph_primitives.query import EdgeQuery, NodeQuery, PropertyPredicate
 from cjm_dev_graph_schema.aliases import build_alias_index
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 
@@ -53,6 +53,40 @@ async def load_label(
     """All nodes of a label (bounded by `limit`)."""
     res = await graph_task(gx.queue, gx.graph_id, "find_nodes_by_label", label=label, limit=limit)
     return list(res or [])
+
+
+async def load_label_where(
+    gx: GraphHandle,
+    label: str,                        # Node label to load
+    where: List[PropertyPredicate],    # Property predicates (AND) — the server-side filter
+    limit: int = _LABEL_LIMIT,
+    offset: int = 0,
+) -> List[Any]:  # GraphNodes matching label + predicates
+    """Nodes of a label filtered by property predicates, SERVER-SIDE (`NodeQuery.where`).
+
+    The read-surface exposure of the query machinery the primitives always had —
+    a property filter runs in the worker, not over a full-label client scan."""
+    q = NodeQuery(label=label, where=list(where), limit=limit, offset=offset)
+    res = await graph_task(gx.queue, gx.graph_id, "query_nodes", query=q.to_dict())
+    return list(getattr(res, "nodes", None)
+                or (res.get("nodes") if isinstance(res, dict) else None) or [])
+
+
+async def count_label(
+    gx: GraphHandle,
+    label: str,                                       # Node label to count
+    where: Optional[List[PropertyPredicate]] = None,  # Optional property predicates (AND)
+) -> int:  # The TRUE total (independent of any page limit)
+    """Count nodes of a label (optionally predicate-filtered) — `NodeQuery(count=True)`.
+
+    The true-total read a windowed list pairs with, so `count == rows returned`
+    can never masquerade as the class size (the 8ac72523 CLI-gap finding)."""
+    q = NodeQuery(label=label, where=list(where or []), count=True)
+    res = await graph_task(gx.queue, gx.graph_id, "query_nodes", query=q.to_dict())
+    c = getattr(res, "count", None)
+    if c is None and isinstance(res, dict):
+        c = res.get("count")
+    return int(c or 0)
 
 
 async def load_nodes(

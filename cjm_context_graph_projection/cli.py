@@ -235,7 +235,8 @@ async def _dispatch(args) -> int:
         elif args.command == "list":
             res = await list_graph(gx, label=args.label, predicate=args.predicate,
                                    relation=args.relation, limit=args.limit,
-                                   offset=args.offset, contains=args.contains)
+                                   offset=args.offset, contains=args.contains,
+                                   where=args.where)
             print(render("list", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "conventions":
@@ -671,6 +672,10 @@ def main() -> int:
                       help="Label mode: window start (page through a big kind)")
     p_ls.add_argument("--contains", default=None,
                       help="Label mode: case-insensitive title substring filter")
+    p_ls.add_argument("--where", action="append", metavar="PROP=VALUE",
+                      help="Label mode: property equality filter, server-side (repeatable, "
+                           "ANDed; dotted PROP paths descend nested JSON — e.g. "
+                           "--where note_type=feedback)")
 
     p_wl = sub.add_parser("worklist", help="Propose/confirm queue (dangling refs, soft conflicts)")
     p_wl.add_argument("--memory-dir", default=DEFAULT_MEMORY,
