@@ -32,16 +32,20 @@ that survives a db rebuild — is the explicit M3 on-ramp, deferred until the ed
 surface is trusted (mirrors the code path's deferral).
 """
 
+import ast
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from cjm_context_graph_layer.grammar import make_edge
 from cjm_context_graph_layer.ops import graph_task
 from cjm_context_graph_primitives.provenance import SourceRef
-from cjm_dev_graph_schema.vocab import DevNodeKinds
+from cjm_dev_graph_schema.nodes import CodeSymbolNode
+from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 from cjm_markdown_decompose_core.extract import note_from_file
 from cjm_markdown_decompose_core.project import note_text_from_graph_nodes
 from cjm_notebook_decompose_core.project import render_notebook
 from cjm_python_decompose_core.emit import emit_module_from_nodes
+from cjm_python_decompose_core.parse import parse_module
 
 from . import factlayer as F
 from .runtime import GraphHandle
@@ -358,6 +362,67 @@ async def emit_artifact(
     return res
 
 
+async def _route_nested_symbol(
+    gx: GraphHandle,
+    node: Any,                             # The nested CodeSymbol the caller tried to author
+    *,
+    replace: Optional[str],                # Replace mode is NOT routable (re-indent trap) — refused loudly
+    edit: Optional[Tuple[str, str]],       # The (old, new) splice to route to the owning slot
+    actor: str,
+    write: bool,
+) -> Optional[Dict[str, Any]]:  # The routed author result, or None when this node doesn't route
+    """Route an author call on a NESTED CodeSymbol through its OWNING verbatim slot.
+
+    A method/nested def has no body of its own — the authoring unit is the top-level
+    `.py` symbol (or notebook Cell) whose text defines it. The 3e13d95a hint NAMED that
+    owner; this executes the edit through it: resolve the owner (qualname's top-level
+    prefix first, def/class marker scan as fallback — the same locator as the hint),
+    then re-enter `author` on the owner with the caller's splice (uniqueness is
+    validated against the owner's whole slot, so an OLD matching a sibling method fails
+    loudly with the add-context error). Replace mode is refused rather than routed: a
+    whole-method replacement would need re-indent logic inside the owner body — pass a
+    unique --edit splice, or author the owning slot directly."""
+    if _label_of(node) != DevNodeKinds.CODE_SYMBOL or F.props(node).get("body"):
+        return None
+    module_id = F.prop(node, "module_id")
+    qualname = str(F.prop(node, "qualname") or F.prop(node, "name") or "")
+    basename = qualname.split(".")[-1]
+    if not module_id or not basename:
+        return None
+    container = await _module_node(gx, module_id)
+    if container is None:
+        return None
+    markers = (f"def {basename}(", f"class {basename}(", f"class {basename}:")
+    owner = None
+    if str(F.prop(container, "path") or "").endswith(".ipynb"):
+        for w in await _notebook_cell_wires(gx, module_id):
+            if any(m in str(w["properties"].get("source") or "") for m in markers):
+                owner = w
+                break
+    else:
+        wires = [w for w in await _module_region_wires(gx, module_id)
+                 if w["label"] == DevNodeKinds.CODE_SYMBOL and w["id"] != F.nid(node)]
+        top = qualname.split(".")[0]
+        owner = next((w for w in wires if w["properties"].get("qualname") == top), None)
+        if owner is None:  # monkey-patch/@patch idioms: the def lives under another region
+            owner = next((w for w in wires
+                          if any(m in str(w["properties"].get("body") or "") for m in markers)),
+                         None)
+    if owner is None:
+        return None
+    if edit is None:
+        return {"error": f"nested symbol `{qualname}` routes --edit splices only (a --replace "
+                         "would need re-indent logic inside the owner body) — pass a unique "
+                         f"OLD/NEW, or author the owning slot `{owner['id']}` directly",
+                "node_id": F.nid(node), "written": False}
+    res = await author(gx, owner["id"], edit=edit, actor=actor, write=write)
+    if not res.get("error"):
+        res["routed_from"] = F.nid(node)
+        res["routed_note"] = (f"nested `{qualname}` routed through owning slot "
+                              f"`{owner['id']}`")
+    return res
+
+
 async def author(
     gx: GraphHandle,
     node_id: str,                          # The node whose verbatim slot to author (CodeSymbol / CodeText / Cell / Section)
@@ -379,6 +444,11 @@ async def author(
         return {"error": f"no node `{node_id}`", "node_id": node_id, "written": False}
     resolved = _slot_for(node)
     if resolved is None:
+        # A nested CodeSymbol ROUTES through its owning slot (the 3e13d95a hint, executed).
+        routed = await _route_nested_symbol(gx, node, replace=replace, edit=edit,
+                                            actor=actor, write=write)
+        if routed is not None:
+            return routed
         err = ("node has no authorable verbatim slot (not a top-level CodeSymbol / "
                "CodeText / Cell / Section)")
         hint = await _owning_slot_hint(gx, node)
@@ -452,5 +522,99 @@ async def author(
             # Mirror the extractor: a section's content_hash is over its `raw` span.
             merge["content_hash"] = SourceRef.compute_hash(new_text.encode("utf-8"))
         await graph_task(gx.queue, gx.graph_id, "update_node", node_id=node_id, properties=merge)
+        result["written"] = True
+    return result
+
+
+async def add_symbol(
+    gx: GraphHandle,
+    module_id: str,             # The CodeModule to mint the symbol into (.py modules, v1)
+    body: str,                  # The symbol's verbatim source: exactly ONE top-level def/class
+    *,
+    actor: str = "agent:session",  # Who authored it (recorded in the result)
+    write: bool = True,         # Add the node + emit the artifact (False = dry-run preview)
+) -> Dict[str, Any]:  # The add result (incl. the emitted artifact path + text), or error
+    """Mint a NEW top-level CodeSymbol into a module, then emit its canonical artifact.
+
+    The CREATE leg of authoring-on-graph (`author` edits an EXISTING slot; this closes
+    the no-add-symbol soak gap). The body must parse standalone as exactly ONE top-level
+    def/class (decorators + leading comments ride along verbatim); the new region
+    APPENDS at the end of the module — placement stays a property in v1, relational
+    placement is the composed-modules item's business. The node lands with the SAME
+    identity ingest derives (`code_symbol_node_id(module, qualname)`) plus its
+    DEFINES/CONTAINS edges, so the next rebuild re-derives it in place rather than
+    conflicting. Derived overlays (USES/CALLS edges, a new class's method children) are
+    left to the next ingest — the same contract as `author`. Import bindings are bound
+    against what the module ALREADY imports (module-level + every symbol's); a ref that
+    needs a genuinely new import is the author's next edit, surfaced by the test run,
+    never guessed."""
+    module = await _module_node(gx, module_id)
+    if module is None:
+        return {"error": f"no module `{module_id}`", "written": False}
+    if _label_of(module) != DevNodeKinds.CODE_MODULE:
+        return {"error": f"add-symbol targets a CodeModule (got {_label_of(module)})",
+                "written": False}
+    if await _notebook_cell_wires(gx, module_id):
+        return {"error": "v1 adds symbols to .py modules only (this module has notebook "
+                         "cells — author a new Cell instead)", "written": False}
+    text = body.rstrip("\n")
+    try:
+        tree = ast.parse(text)
+    except SyntaxError as e:
+        return {"error": f"body does not parse: {e}", "written": False}
+    if len(tree.body) != 1 or not isinstance(
+            tree.body[0], (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return {"error": "body must be exactly ONE top-level def/class (decorators + "
+                         "leading comments ride along; imports/constants are CodeText "
+                         "regions, not symbols)", "written": False}
+    qualname = tree.body[0].name
+    wires = await _module_region_wires(gx, module_id)
+    dup = next((w for w in wires if w["label"] == DevNodeKinds.CODE_SYMBOL
+                and w["properties"].get("qualname") == qualname), None)
+    if dup is not None:
+        return {"error": f"symbol `{qualname}` already exists in this module — author it "
+                         f"(`{dup['id']}`)", "written": False}
+    order = max((w["properties"].get("order_index") if
+                 w["properties"].get("order_index") is not None else -1 for w in wires),
+                default=-1) + 1
+
+    # Bind the new symbol's refs against the imports the module already carries
+    # (module-level + every symbol's frozen bindings) — the imports-as-projection table.
+    ps = parse_module(text).symbols[0]
+    available: Dict[str, Dict[str, Any]] = {
+        b.get("name"): b for b in (F.prop(module, "import_bindings") or [])}
+    for w in wires:
+        for b in (w["properties"].get("import_bindings") or []):
+            available.setdefault(b.get("name"), b)
+    sym = CodeSymbolNode(
+        module_id=module_id, qualname=qualname,
+        symbol_kind="class" if isinstance(tree.body[0], ast.ClassDef) else "function",
+        path=str(F.prop(module, "path") or ""),
+        docstring=ps.docstring, calls=list(ps.calls), refs=list(ps.refs),
+        import_bindings=[available[r] for r in ps.refs if r in available],
+        body=text, body_hash=SourceRef.compute_hash(text.encode("utf-8")),
+        order_index=order,
+        properties={"decorators": list(ps.decorators)} if ps.decorators else {},
+    )
+    gn = sym.to_graph_node()
+    module_path = str(F.prop(module, "module_path") or "")
+    emitted = emit_module_from_nodes(
+        wires + [gn], module_node=module,
+        derive_imports=not is_test_module_path(module_path))
+    artifact_path = F.prop(module, "path")
+    result = {
+        "module_id": module_id, "symbol_id": sym.id, "qualname": qualname,
+        "symbol_kind": sym.symbol_kind, "order_index": order, "actor": actor,
+        "artifact": "module", "artifact_path": artifact_path,
+        "repo_key": F.prop(module, "repo_key"), "module_path": module_path,
+        "emitted_bytes": len(emitted.encode("utf-8")), "emitted_text": emitted,
+        "unchanged": False, "written": False,
+    }
+    if write and artifact_path:
+        await graph_task(gx.queue, gx.graph_id, "add_nodes", nodes=[gn])
+        await graph_task(gx.queue, gx.graph_id, "add_edges", edges=[
+            make_edge(module_id, sym.id, DevRelations.DEFINES),
+            make_edge(module_id, sym.id, DevRelations.CONTAINS)])
+        Path(artifact_path).write_text(emitted)
         result["written"] = True
     return result

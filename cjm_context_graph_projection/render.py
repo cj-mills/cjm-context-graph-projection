@@ -376,8 +376,20 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         lines = [f"**authored** `{obj.get('slot')}` on _{obj.get('label')}_ `{obj.get('node_id')}`",
                  f"{status} `{obj.get('artifact_path')}` ({obj.get('emitted_bytes')} bytes, "
                  f"{obj.get('artifact')})"]
+        if obj.get("routed_note"):
+            lines.insert(1, f"_({obj['routed_note']})_")
         if obj.get("unchanged"):
             lines.append("_(slot text unchanged — no-op edit)_")
+        if not obj.get("written") and obj.get("emitted_text"):
+            lines += ["", "```", obj["emitted_text"].rstrip("\n"), "```"]
+        return "\n".join(lines)
+    if kind == "add-symbol":
+        if obj.get("error"):
+            return f"⚠ {obj['error']}"
+        status = "written to" if obj.get("written") else "would write (dry run) to"
+        lines = [f"**added** `{obj.get('qualname')}` ({obj.get('symbol_kind')}) as _CodeSymbol_ "
+                 f"`{obj.get('symbol_id')}` at order {obj.get('order_index')}",
+                 f"{status} `{obj.get('artifact_path')}` ({obj.get('emitted_bytes')} bytes)"]
         if not obj.get("written") and obj.get("emitted_text"):
             lines += ["", "```", obj["emitted_text"].rstrip("\n"), "```"]
         return "\n".join(lines)

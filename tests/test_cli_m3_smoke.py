@@ -56,3 +56,18 @@ def test_m3_baseline_cli_requires_journal(tmp_path):
     db = str(tmp_path / "dev.db")
     r = _run("--graph-db-path", db, "m3-baseline", "--slug", "x")
     assert r.returncode != 0 and "journal" in (r.stderr + r.stdout).lower()
+
+
+def test_decide_state_open_mints_and_asserts_in_one_invocation(tmp_path):
+    # The frontier-visibility enforcement: a work item minted with --state open journals
+    # BOTH ops (decide + assert task_state=open), so it is never invisible to readiness.
+    db = str(tmp_path / "dev.db")
+    journal = str(tmp_path / "writes.jsonl")
+    r = _run("--graph-db-path", db, "--journal-path", journal,
+             "decide", "WORK ITEM: smoke", "--title", "WORK ITEM: smoke", "--state", "open")
+    assert r.returncode == 0, f"decide --state dispatch failed: {r.stderr or r.stdout}"
+    ops = read_journal(journal)
+    assert [o["verb"] for o in ops] == ["decide", "assert"]
+    assert ops[1]["args"]["predicate"] == "task_state"
+    assert ops[1]["args"]["value"] == "open"
+    assert ops[1]["args"]["subject"]  # the freshly minted decision id

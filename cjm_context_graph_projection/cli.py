@@ -17,7 +17,7 @@ from pathlib import Path
 
 from cjm_context_graph_layer.ops import extend_graph
 
-from .authoring import author, emit_artifact, read_node, read_slot
+from .authoring import add_symbol, author, emit_artifact, read_node, read_slot
 from .code_edges import orphaned_edges
 from .cohesion import cohesion
 from .contradictions import contradictions
@@ -80,6 +80,41 @@ def _editor_pop(
         return Path(tmp).read_text()
     finally:
         os.unlink(tmp)
+
+
+def _absorb_graph_sourced(res, args) -> int:  # 0 = ok (absorbed or not applicable), 1 = loud failure
+    """N+3 Phase 2 absorb gate, shared by the module-emitting write verbs (author,
+    add-symbol): an edit of a GRAPH-SOURCED module lands in the SOURCE journal (the
+    authority), canonicalized, with the artifact file kept in sync. A notebook's
+    journal key is its .ipynb source path (what cutover recorded) — NOT the nbdev
+    export-target `module_path` the result carries — re-derived from `artifact_path`
+    under --repos-dir, loud-fail (the f06ef1a6 lesson: 'written to disk' and
+    'journaled' are separate facts)."""
+    if not (res.get("artifact") in ("module", "notebook") and args.source_journal_path
+            and res.get("written") and not res.get("unchanged")):
+        return 0
+    src_path = res.get("module_path")
+    if res["artifact"] == "notebook":
+        try:
+            src_path = Path(res["artifact_path"]).relative_to(
+                Path(args.repos_dir) / res["repo_key"]).as_posix()
+        except (KeyError, TypeError, ValueError):
+            print(f"⚠ authored notebook NOT absorbed into the source journal: "
+                  f"cannot derive the repo-relative path of "
+                  f"{res.get('artifact_path')!r} under {args.repos_dir!r}",
+                  file=sys.stderr)
+            return 1
+    if ((res.get("repo_key"), src_path)
+            in graph_sourced_modules(args.source_journal_path)):
+        ab = absorb_authored_text(args.source_journal_path, res["repo_key"],
+                                  src_path, res["artifact_path"],
+                                  res["emitted_text"])
+        if ab.get("error"):
+            print(f"⚠ source-journal absorb FAILED: {ab['error']}", file=sys.stderr)
+            return 1
+        print(f"  ↳ graph-sourced: authored state journaled"
+              f"{' (canonicalized — file rewritten)' if ab.get('canonicalized') else ''}")
+    return 0
 
 
 async def _dispatch(args) -> int:
@@ -246,6 +281,18 @@ async def _dispatch(args) -> int:
                              {"statement": args.statement, "actor": args.actor,
                               "supports": args.supports, "supersedes": args.supersedes,
                               "session": args.session, "title": args.title})
+            # --state open: the frontier-visibility enforcement — a freshly minted work
+            # item is INVISIBLE to readiness until task_state is asserted, so mint +
+            # assert land in ONE invocation (explicit flag, not title-pattern magic).
+            if args.state and not res.get("error"):
+                st = await assert_value(gx, res["decision_id"], "task_state", args.state,
+                                        actor=args.actor)
+                print(render("assert", st, args.format))
+                if args.journal_path and not st.get("error"):
+                    append_write(args.journal_path, "assert",
+                                 {"subject": res["decision_id"], "predicate": "task_state",
+                                  "value": args.state, "actor": args.actor,
+                                  "evidence": None, "supersede": False})
         elif args.command == "display-rule":
             res = await set_display_rule(gx, args.for_label, args.title, args.gloss,
                                          actor=args.actor)
@@ -312,31 +359,18 @@ async def _dispatch(args) -> int:
                               "raw": res.get("new_text"), "actor": args.actor})
             # N+3 Phase 2: an author edit of a GRAPH-SOURCED module lands in the source
             # journal (the authority), canonicalized; the artifact file is kept in sync.
-            if (res.get("artifact") in ("module", "notebook") and args.source_journal_path
-                    and res.get("written") and not res.get("unchanged")):
-                src_path = res.get("module_path")
-                if res["artifact"] == "notebook":
-                    # The journal keys a notebook by its .ipynb source path (what
-                    # cutover recorded) — NOT the nbdev export target `module_path`.
-                    try:
-                        src_path = Path(res["artifact_path"]).relative_to(
-                            Path(args.repos_dir) / res["repo_key"]).as_posix()
-                    except (KeyError, TypeError, ValueError):
-                        print(f"⚠ authored notebook NOT absorbed into the source journal: "
-                              f"cannot derive the repo-relative path of "
-                              f"{res.get('artifact_path')!r} under {args.repos_dir!r}",
-                              file=sys.stderr)
-                        return 1
-                if ((res.get("repo_key"), src_path)
-                        in graph_sourced_modules(args.source_journal_path)):
-                    ab = absorb_authored_text(args.source_journal_path, res["repo_key"],
-                                              src_path, res["artifact_path"],
-                                              res["emitted_text"])
-                    if ab.get("error"):
-                        print(f"⚠ source-journal absorb FAILED: {ab['error']}", file=sys.stderr)
-                        return 1
-                    print(f"  ↳ graph-sourced: authored state journaled"
-                          f"{' (canonicalized — file rewritten)' if ab.get('canonicalized') else ''}")
+            if _absorb_graph_sourced(res, args) != 0:
+                return 1
+            return 1 if res.get("error") else 0
+        elif args.command == "add-symbol":
+            body = Path(args.body_file).read_text() if args.body_file else args.body
+            res = await add_symbol(gx, args.module, body, actor=args.actor,
+                                   write=not args.no_write)
+            print(render("add-symbol", res, args.format))
+            # The CREATE leg shares the author verb's absorb gate: a new symbol in a
+            # GRAPH-SOURCED module must land in the source journal, not just on disk.
+            if _absorb_graph_sourced(res, args) != 0:
+                return 1
             return 1 if res.get("error") else 0
         elif args.command == "reconcile-memory":
             res = await reconcile_memory(gx, note_slug=args.note, absorb_anchors=args.absorb,
@@ -669,6 +703,10 @@ def main() -> int:
     p_de.add_argument("--title", default=None,
                       help="Explicit display title (tier-1 override; else the statement's "
                            "first clause is extracted)")
+    p_de.add_argument("--state", default=None, choices=["open"],
+                      help="Assert task_state on the new decision in the same invocation — "
+                           "a work item/finding is invisible to `readiness` until its "
+                           "task_state lands, so mint WORK ITEMs with `--state open`")
 
     p_ck = sub.add_parser("check",
                           help="Attach a definition-of-done check to a work item (Check node + "
@@ -715,6 +753,20 @@ def main() -> int:
     p_au.add_argument("--actor", default="agent:session")
     p_au.add_argument("--repos-dir", default=DEFAULT_REPOS,
                       help="Repos root — derives a notebook's repo-relative source-journal key")
+
+    p_asym = sub.add_parser("add-symbol",
+                            help="Mint a NEW top-level symbol into a .py module (the authoring "
+                                 "CREATE leg; appends at end, emits the artifact, absorbs into "
+                                 "the source journal when graph-sourced)")
+    p_asym.add_argument("module", help="The CodeModule node id to add the symbol to")
+    g_asym = p_asym.add_mutually_exclusive_group(required=True)
+    g_asym.add_argument("--body", help="The symbol's verbatim source (exactly ONE top-level def/class)")
+    g_asym.add_argument("--body-file", help="Read the symbol's verbatim source from a file")
+    p_asym.add_argument("--no-write", action="store_true",
+                        help="Dry run: emit + print the artifact, don't touch graph or disk")
+    p_asym.add_argument("--actor", default="agent:session")
+    p_asym.add_argument("--repos-dir", default=DEFAULT_REPOS,
+                        help="Repos root (parity with author; the absorb gate reads it)")
 
     p_asec = sub.add_parser("add-section",
                             help="M2 gradient: add a section to a note (append, or --after ANCHOR), born on-graph")
