@@ -235,3 +235,56 @@ def test_notebook_walk_flip_emit_cutover_then_regen_gate():
         res = flip_module(j, repos, "cjm-demo", "nbs/00_core.ipynb")
         assert res["captured"] and res["file_already_canonical"]
         assert source_check(j, repos)["regen_clean"]
+
+
+# A pytest module whose conftest import is consumed ONLY as a fixture PARAMETER name
+# (a side-effect fixture: the body never loads the name, so no ref sees it) —
+# pytest wires it by string match, the stage-2 false-prune case.
+FIXTURE_TEST_MODULE = ('"""Fixture-import survival."""\n'
+                       'from conftest import my_fixture\n\n\n'
+                       'def test_uses_fixture(my_fixture):\n'
+                       '    assert True\n')
+
+# A script-shaped manual test: the closure lives inside a `try:` block, so the symbol
+# walk never extracts it and its `uuid4` ref is invisible — the LIVE false-prune case.
+CLOSURE_TEST_MODULE = ('"""Block-nested closure import survival."""\n'
+                       'from uuid import uuid4\n\n\n'
+                       'def main():\n'
+                       '    try:\n'
+                       '        def make_id():\n'
+                       '            return str(uuid4())\n'
+                       '        return make_id()\n'
+                       '    except Exception:\n'
+                       '        return ""\n')
+
+
+def test_test_module_canonical_emit_keeps_fixture_import_verbatim():
+    # Under tests/: the import block is VERBATIM — canonical emit is byte-identity.
+    out = canonical_emit("demo", "tests/test_fx.py", "/tmp/demo/tests/test_fx.py",
+                         FIXTURE_TEST_MODULE)
+    assert out == FIXTURE_TEST_MODULE
+    # The SAME text on a package path derives its imports — the fixture import would
+    # false-prune (pins that the dispatch, not the walk, is what protects tests).
+    pruned = canonical_emit("demo", "demo/fx.py", "/tmp/demo/demo/fx.py", FIXTURE_TEST_MODULE)
+    assert "from conftest import my_fixture" not in pruned
+
+
+def test_test_module_block_nested_closure_import_survives():
+    out = canonical_emit("demo", "tests_manual/drill.py", "/tmp/demo/tests_manual/drill.py",
+                         CLOSURE_TEST_MODULE)
+    assert out == CLOSURE_TEST_MODULE
+    assert "from uuid import uuid4" in out
+
+
+def test_test_module_flip_cutover_roundtrip_is_byte_clean():
+    with tempfile.TemporaryDirectory() as d:
+        repos = Path(d) / "repos"
+        f = repos / "demo" / "tests" / "test_fx.py"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(FIXTURE_TEST_MODULE)
+        j = str(Path(d) / "source.jsonl")
+        res = flip_module(j, str(repos), "demo", "tests/test_fx.py")
+        assert res["captured"] and res["file_already_canonical"]  # verbatim -> zero-diff flip
+        assert cutover_module(j, str(repos), "demo", "tests/test_fx.py")["cut_over"]
+        chk = source_check(j, str(repos))
+        assert chk["clean"] and chk["regen_clean"] and chk["graph_sourced_count"] == 1

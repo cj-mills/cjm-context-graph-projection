@@ -25,6 +25,7 @@ from cjm_python_decompose_core.emit import emit_module_from_nodes, synth_import
 from . import factlayer as F
 from .authoring import _module_node, _module_region_wires
 from .runtime import GraphHandle
+from .source_state import is_test_module_path
 
 
 def rewrite_symbol_import(
@@ -130,9 +131,11 @@ async def _relocate(
         A = await _module_node(gx, src_module_id)
         a_wires = await _module_region_wires(gx, src_module_id)
         a_uses = await _uses_derived_imports(gx, src_module_id, override)
+        a_derive = not is_test_module_path(F.prop(A, "module_path", ""))
         files.append((F.prop(A, "path"),
                       emit_module_from_nodes([w for w in a_wires if w["id"] not in moved_ids],
-                                             module_node=A, derive_imports=True, uses_derived=a_uses)))
+                                             module_node=A, derive_imports=a_derive,
+                                             uses_derived=a_uses)))
 
     # The TARGET module, re-emitted with every moved symbol appended in order.
     b_wires = await _module_region_wires(gx, target_module_id)
@@ -141,9 +144,11 @@ async def _relocate(
                    for i, sid in enumerate(symbol_ids)
                    for node in [await _get(gx, sid)]]
     b_uses = await _uses_derived_imports(gx, target_module_id, override)
+    b_derive = not is_test_module_path(F.prop(B, "module_path", ""))
     files.append((F.prop(B, "path"),
                   emit_module_from_nodes(b_wires + moved_wires,
-                                         module_node=B, derive_imports=True, uses_derived=b_uses)))
+                                         module_node=B, derive_imports=b_derive,
+                                         uses_derived=b_uses)))
 
     # Callers: modules importing a source; rewrite each `from a_import import S` to point at B.
     import_pairs = await F.load_edge_pairs(gx, DevRelations.IMPORTS)

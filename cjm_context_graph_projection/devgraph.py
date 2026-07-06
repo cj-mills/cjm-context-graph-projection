@@ -28,7 +28,7 @@ from cjm_python_decompose_core.ingest import (corpus_graph_elements as code_corp
                                               resolve_import)
 
 from .seeds import aliases_for, conceptual_key, seed_elements
-from .source_state import graph_sourced_modules, latest_source_ops
+from .source_state import graph_sourced_modules, is_test_module_path, latest_source_ops
 
 
 def memory_elements(
@@ -162,10 +162,12 @@ def code_elements(
             seen.add(key)
             decomposed.append(dm)
     # A graph-sourced module ingests even when its artifact file is absent — the
-    # journal is sufficient (the file is regenerable via `emit-artifact`).
+    # journal is sufficient (the file is regenerable via `emit-artifact`). Test
+    # modules also live in the journal but ingest via `test_elements`, not here.
     for key in sorted(flipped - seen):
         repo_key, module_path = key
-        if key not in journaled or repo_key not in repo_dirs_by_key:
+        if (key not in journaled or repo_key not in repo_dirs_by_key
+                or is_test_module_path(module_path) or not module_path.endswith(".py")):
             continue
         a = journaled[key]
         path = str(repo_dirs_by_key[repo_key] / module_path)
@@ -174,36 +176,54 @@ def code_elements(
     return code_corpus_elements(decomposed)
 
 
-def _is_test_module_path(module_path: str) -> bool:
-    """Whether a module path denotes a TEST source (`tests/` or `tests_manual/`)."""
-    return module_path.startswith(("tests/", "tests_manual/"))
-
-
 def test_elements(
     code_repos: List[str],  # Repo dirs whose tests/ + tests_manual/ decompose as test modules
+    source_journal_path: Optional[str] = None,  # Source journal — its GRAPH-SOURCED test modules ingest from the journal, not the file
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:  # (test CodeModule/CodeSymbol nodes, edges)
     """Decompose each repo's pytest / manual test files into code nodes + edges.
 
     Tests live OUTSIDE the importable package (`tests/`, `tests_manual/` — no
     `__init__.py`), so module identity is the repo-relative path; nothing imports
     a test module, so the derived import name is inert in the corpus import maps.
-    `.md` scenario files under tests_manual/ are deferred (not code). Test modules
-    are FILE-sourced for now — flipping them to the journal is the tests-on-graph
-    item's stage 2, gated on a fixture-safe canonicalization."""
+    `.md` scenario files under tests_manual/ are deferred (not code). A test module
+    past the N+3 Phase-2 cutover is GRAPH-SOURCED — its text comes from the SOURCE
+    journal (same authority flip as `code_elements`), under the VERBATIM-import
+    canonicalization (`is_test_module_path`)."""
+    flipped = graph_sourced_modules(source_journal_path) if source_journal_path else set()
+    journaled = latest_source_ops(source_journal_path) if flipped else {}
     decomposed = []
+    seen = set()
+    repo_dirs_by_key = {}
     for repo_dir in code_repos:
         d = Path(repo_dir)
         repo_key = conceptual_key(d.name)
+        repo_dirs_by_key[repo_key] = d
         for sub in ("tests", "tests_manual"):
             t = d / sub
             if not t.is_dir():
                 continue
             for f in sorted(t.rglob("*.py")):
                 rel = f.relative_to(d).as_posix()
+                key = (repo_key, rel)
+                seen.add(key)
                 try:
-                    decomposed.append(decompose_text(repo_key, rel, str(f), f.read_text()))
+                    if key in flipped and key in journaled:
+                        decomposed.append(decompose_text(repo_key, rel, str(f),
+                                                         journaled[key].get("text", "")))
+                    else:
+                        decomposed.append(decompose_text(repo_key, rel, str(f), f.read_text()))
                 except (SyntaxError, OSError):
                     continue  # unparseable/unreadable test file — skip (ingest stays robust)
+    # A graph-sourced test module ingests even when its artifact file is absent —
+    # the journal is sufficient (the file is regenerable via `emit-artifact`).
+    for key in sorted(flipped - seen):
+        repo_key, module_path = key
+        if (key not in journaled or repo_key not in repo_dirs_by_key
+                or not is_test_module_path(module_path)):
+            continue
+        d = repo_dirs_by_key[repo_key]
+        decomposed.append(decompose_text(repo_key, module_path, str(d / module_path),
+                                         journaled[key].get("text", "")))
     return code_corpus_elements(decomposed)
 
 
@@ -220,7 +240,7 @@ def resolve_test_edges(
     symbols, so they contribute no edges. Additive + idempotent (deterministic ids)."""
     modules = {n["id"]: n for n in nodes if n.get("label") == DevNodeKinds.CODE_MODULE}
     test_module_ids = {mid for mid, m in modules.items()
-                       if _is_test_module_path(m["properties"].get("module_path", ""))}
+                       if is_test_module_path(m["properties"].get("module_path", ""))}
     symbols = [n for n in nodes if n.get("label") == DevNodeKinds.CODE_SYMBOL]
     name_to_ids: Dict[str, set] = {}
     for s in symbols:
@@ -397,7 +417,8 @@ def build_dev_graph_elements(
         nodes += nn
         edges += ne
     if code_repos or notebook_repos:
-        tn, te = test_elements((code_repos or []) + (notebook_repos or []))
+        tn, te = test_elements((code_repos or []) + (notebook_repos or []),
+                               source_journal_path=source_journal_path)
         nodes += tn
         edges += te
         edges += resolve_corpus_code_edges(nodes)  # cross-source CALLS/IMPORTS (additive, idempotent)

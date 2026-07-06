@@ -45,6 +45,7 @@ from cjm_python_decompose_core.emit import emit_module_from_nodes
 
 from . import factlayer as F
 from .runtime import GraphHandle
+from .source_state import is_test_module_path
 
 # Per node label: the verbatim-text slot property + the artifact kind it composes.
 _SLOTS = {
@@ -345,8 +346,9 @@ async def emit_artifact(
         if cells:
             artifact, text = "notebook", render_notebook(cells)
         else:
-            text = emit_module_from_nodes(await _module_region_wires(gx, module_id),
-                                          module_node=module, derive_imports=True)
+            text = emit_module_from_nodes(
+                await _module_region_wires(gx, module_id), module_node=module,
+                derive_imports=not is_test_module_path(F.prop(module, "module_path", "")))
             artifact = "module"
     res = {"module_id": module_id, "artifact": artifact, "artifact_path": artifact_path,
            "emitted_bytes": len(text.encode("utf-8")), "text": text, "written": False}

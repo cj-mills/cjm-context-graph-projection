@@ -37,6 +37,7 @@ from . import factlayer as F
 from .authoring import _module_node, _module_region_wires, _notebook_cell_wires
 from .refactor_ops import _get, _relocate
 from .runtime import GraphHandle
+from .source_state import is_test_module_path
 
 
 def _derive_import_name(module_path: str) -> str:  # repo-relative path -> dotted import name
@@ -213,7 +214,7 @@ async def rename_module(
     new_import = new_import_name or _derive_import_name(new_module_path)
 
     text = emit_module_from_nodes(await _module_region_wires(gx, module_id),
-                                  module_node=M, derive_imports=True)
+                                  module_node=M, derive_imports=not is_test_module_path(old_mp))
     files: List[Tuple[str, str]] = [(new_path, text)]
     import_pairs = await F.load_edge_pairs(gx, DevRelations.IMPORTS)
     importers = [s for s, t in import_pairs if t == module_id and s != module_id]

@@ -42,6 +42,18 @@ from cjm_python_decompose_core.extract import decompose_text
 from cjm_python_decompose_core.ingest import corpus_graph_elements
 
 
+def is_test_module_path(module_path: str) -> bool:
+    """Whether a module path denotes TEST source (`tests/` or `tests_manual/`).
+
+    Test modules keep their import block VERBATIM — never derived from ref bindings.
+    pytest wires fixtures by parameter-name / string match (`usefixtures("db")`,
+    `indirect=`, `getfixturevalue`) that no AST ref walk can see, and script-shaped
+    manual tests nest closures inside `try`/`with` blocks the symbol walk doesn't
+    extract — both channels FALSE-PRUNE a needed import under imports-as-projection.
+    Verbatim is the only canonicalization where fixture imports PROVABLY survive."""
+    return module_path.startswith(("tests/", "tests_manual/"))
+
+
 def canonical_emit(
     repo_key: str,                       # The repo's durable conceptual slug
     module_path: str,                    # Repo-relative module path (identity input)
@@ -54,12 +66,14 @@ def canonical_emit(
     Routes through the SAME `decompose_text` + `corpus_graph_elements` ingest builds, then
     `emit_module_from_nodes(derive_imports=True)` (the import block is regenerated from the
     symbols' bindings). So this is a faithful predictor of what the file would become once the
-    module is graph-sourced — the basis for the shadow soak diff."""
+    module is graph-sourced — the basis for the shadow soak diff. TEST modules are the
+    exception: their import block stays verbatim (see `is_test_module_path`)."""
     dm = decompose_text(repo_key, module_path, path, text, import_name=import_name)
     nodes, _edges = corpus_graph_elements([dm])
     module_node = next((n for n in nodes if n["label"] == "CodeModule"), None)
     regions = [n for n in nodes if n["label"] in ("CodeSymbol", "CodeText")]
-    return emit_module_from_nodes(regions, module_node=module_node, derive_imports=True)
+    return emit_module_from_nodes(regions, module_node=module_node,
+                                  derive_imports=not is_test_module_path(module_path))
 
 
 def canonical_emit_notebook(

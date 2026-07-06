@@ -235,3 +235,37 @@ def test_compute_untested_flags_unlinked_public_symbols():
             {"id": "st", "properties": {"qualname": "test_fa", "module_id": "mt"}}]
     out = compute_untested(syms, mods, {"s1"})
     assert [u["qualname"] for u in out] == ["fb"]
+
+
+def test_test_elements_ingests_graph_sourced_test_module_from_journal(tmp_path):
+    """Stage 2 of tests-on-graph: a cut-over test module ingests from the SOURCE journal
+    (verbatim imports), survives artifact deletion, and does NOT leak into
+    `code_elements`' journal-only leg as a package module."""
+    from cjm_context_graph_projection.devgraph import code_elements, test_elements
+    from cjm_context_graph_projection.source_state import cutover_module, flip_module
+
+    d = tmp_path / "cjm-bar"
+    (d / "cjm_bar").mkdir(parents=True)
+    (d / "cjm_bar" / "core.py").write_text("def beta(x):\n    return x\n")
+    (d / "tests").mkdir()
+    test_text = ("from conftest import my_fixture\n\n\n"
+                 "def test_beta(my_fixture):\n    assert my_fixture\n")
+    (d / "tests" / "test_core.py").write_text(test_text)
+    j = str(tmp_path / "source.jsonl")
+
+    assert flip_module(j, str(tmp_path), "cjm-bar", "tests/test_core.py")["file_already_canonical"]
+    assert cutover_module(j, str(tmp_path), "cjm-bar", "tests/test_core.py")["cut_over"]
+
+    # The artifact deleted: the test module still ingests, text from the journal,
+    # fixture import intact.
+    (d / "tests" / "test_core.py").unlink()
+    tn, _ = test_elements([str(d)], source_journal_path=j)
+    tmod = next(n for n in tn if n["label"] == DevNodeKinds.CODE_MODULE)
+    assert tmod["properties"]["module_path"] == "tests/test_core.py"
+    assert any(n["properties"].get("qualname") == "test_beta" for n in tn
+               if n["label"] == DevNodeKinds.CODE_SYMBOL)
+
+    # code_elements must not pick the journaled TEST key up as a package module.
+    cn, _ = code_elements([str(d)], source_journal_path=j)
+    paths = {n["properties"]["module_path"] for n in cn if n["label"] == DevNodeKinds.CODE_MODULE}
+    assert paths == {"cjm_bar/core.py"}
