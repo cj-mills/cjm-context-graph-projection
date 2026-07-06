@@ -394,9 +394,11 @@ async def author(
         # The durable section identity (slug, anchor) the journal records for M2b's shadow.
         result["note_slug"] = F.prop(container, "slug")
         result["anchor"] = F.prop(node, "anchor")
-    elif artifact == "module":
+    elif artifact in ("module", "notebook"):
         # The durable module identity, so the CLI can absorb an authored edit of a
-        # GRAPH-SOURCED module into the source journal (N+3 Phase 2).
+        # GRAPH-SOURCED module into the source journal (N+3 Phase 2). A notebook's
+        # journal key is its .ipynb source path, not the export-target `module_path`
+        # this carries — the CLI re-derives it from `artifact_path` + --repos-dir.
         result["repo_key"] = F.prop(container, "repo_key")
         result["module_path"] = F.prop(container, "module_path")
     if write and artifact_path:

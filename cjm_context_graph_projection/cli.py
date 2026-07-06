@@ -302,8 +302,9 @@ async def _dispatch(args) -> int:
                                actor=args.actor, write=not args.no_write)
             print(render("author", res, args.format))
             # M2b shadow: a memory-section author also journals its raw STATE (the .md stays the
-            # ingest source for now; the journal shadows + soaks). Code/notebook authoring stays
-            # un-journaled (Fork-1(a)). Skip no-op edits; append_write dedups identical states.
+            # ingest source for now; the journal shadows + soaks). NON-cut-over code/notebook
+            # authoring stays un-journaled (Fork-1(a)); GRAPH-SOURCED modules/notebooks land in
+            # the SOURCE journal below. Skip no-op edits; append_write dedups identical states.
             if (res.get("artifact") == "note" and args.journal_path
                     and res.get("written") and not res.get("unchanged")):
                 append_write(args.journal_path, "section",
@@ -311,18 +312,31 @@ async def _dispatch(args) -> int:
                               "raw": res.get("new_text"), "actor": args.actor})
             # N+3 Phase 2: an author edit of a GRAPH-SOURCED module lands in the source
             # journal (the authority), canonicalized; the artifact file is kept in sync.
-            if (res.get("artifact") == "module" and args.source_journal_path
-                    and res.get("written") and not res.get("unchanged")
-                    and (res.get("repo_key"), res.get("module_path"))
-                    in graph_sourced_modules(args.source_journal_path)):
-                ab = absorb_authored_text(args.source_journal_path, res["repo_key"],
-                                          res["module_path"], res["artifact_path"],
-                                          res["emitted_text"])
-                if ab.get("error"):
-                    print(f"⚠ source-journal absorb FAILED: {ab['error']}", file=sys.stderr)
-                    return 1
-                print(f"  ↳ graph-sourced: authored state journaled"
-                      f"{' (canonicalized — file rewritten)' if ab.get('canonicalized') else ''}")
+            if (res.get("artifact") in ("module", "notebook") and args.source_journal_path
+                    and res.get("written") and not res.get("unchanged")):
+                src_path = res.get("module_path")
+                if res["artifact"] == "notebook":
+                    # The journal keys a notebook by its .ipynb source path (what
+                    # cutover recorded) — NOT the nbdev export target `module_path`.
+                    try:
+                        src_path = Path(res["artifact_path"]).relative_to(
+                            Path(args.repos_dir) / res["repo_key"]).as_posix()
+                    except (KeyError, TypeError, ValueError):
+                        print(f"⚠ authored notebook NOT absorbed into the source journal: "
+                              f"cannot derive the repo-relative path of "
+                              f"{res.get('artifact_path')!r} under {args.repos_dir!r}",
+                              file=sys.stderr)
+                        return 1
+                if ((res.get("repo_key"), src_path)
+                        in graph_sourced_modules(args.source_journal_path)):
+                    ab = absorb_authored_text(args.source_journal_path, res["repo_key"],
+                                              src_path, res["artifact_path"],
+                                              res["emitted_text"])
+                    if ab.get("error"):
+                        print(f"⚠ source-journal absorb FAILED: {ab['error']}", file=sys.stderr)
+                        return 1
+                    print(f"  ↳ graph-sourced: authored state journaled"
+                          f"{' (canonicalized — file rewritten)' if ab.get('canonicalized') else ''}")
             return 1 if res.get("error") else 0
         elif args.command == "reconcile-memory":
             res = await reconcile_memory(gx, note_slug=args.note, absorb_anchors=args.absorb,
@@ -699,6 +713,8 @@ def main() -> int:
     p_au.add_argument("--no-write", action="store_true",
                       help="Dry run: emit + print the artifact, don't touch disk")
     p_au.add_argument("--actor", default="agent:session")
+    p_au.add_argument("--repos-dir", default=DEFAULT_REPOS,
+                      help="Repos root — derives a notebook's repo-relative source-journal key")
 
     p_asec = sub.add_parser("add-section",
                             help="M2 gradient: add a section to a note (append, or --after ANCHOR), born on-graph")
