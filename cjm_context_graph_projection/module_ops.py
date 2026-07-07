@@ -284,14 +284,25 @@ async def delete_module(
     return result
 
 
-def _import_bound_names(text: str) -> set:
-    """The top-level names an import block binds (the prune-report universe)."""
-    names = set()
+def _import_clauses(text: str) -> set:
+    """The top-level import CLAUSES a module carries (the prune-report universe).
+
+    Statement-clause granularity, not bound-name granularity: `import urllib.request`
+    and `import urllib.error` both bind the name `urllib`, so a name-keyed universe
+    cannot see one of them being dropped (the flip-time import-dedupe blind spot) —
+    per-clause identity makes every dropped import statement REPORTABLE."""
+    clauses = set()
     for node in ast.parse(text).body:
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
+        if isinstance(node, ast.Import):
             for a in node.names:
-                names.add(a.asname or a.name.split(".")[0])
-    return names
+                clauses.add(f"{a.name} as {a.asname}" if a.asname else a.name)
+        elif isinstance(node, ast.ImportFrom):
+            mod = "." * (node.level or 0) + (node.module or "")
+            for a in node.names:
+                leaf = f"{a.name} as {a.asname}" if a.asname else a.name
+                sep = "" if mod.endswith(".") else "."
+                clauses.add(f"{mod}{sep}{leaf}" if mod else leaf)
+    return clauses
 
 
 def _cell_id_refs(
@@ -386,7 +397,7 @@ async def flip_notebook_to_py(
                                    import_name=import_name)
     except (SyntaxError, ValueError) as e:
         return {"error": f"canonical emit failed for the built module: {e}", "written": False}
-    pruned = sorted(_import_bound_names(built["text"]) - _import_bound_names(canonical))
+    pruned = sorted(_import_clauses(built["text"]) - _import_clauses(canonical))
 
     # Edge continuity: what journaled knowledge points at the Cells about to vanish?
     module_id = code_module_node_id(repo_key, module_path)

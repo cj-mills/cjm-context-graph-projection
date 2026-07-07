@@ -200,7 +200,7 @@ def test_flip_to_py_end_to_end(tmp_path, monkeypatch):
     # loud report: dropped cells enumerated, dead import pruned
     assert [c["cell_key"] for c in res["markdown_cells_dropped"]] == ["c1"]
     assert [c["cell_key"] for c in res["nonexport_code_cells_dropped"]] == ["c4"]
-    assert res["pruned_imports"] == ["Path"]  # imported, referenced nowhere
+    assert res["pruned_imports"] == ["pathlib.Path"]  # imported, referenced nowhere (module-qualified clause)
     # graph swap: Cells out, plain regions in (same module id)
     assert "cell-c3" in fake.deleted and MID in fake.deleted
     assert extended and any(n["label"] == "CodeSymbol" for n in extended[0][0])
@@ -300,3 +300,18 @@ def test_flip_replays_curation_links_severed_by_the_subtree_swap(tmp_path, monke
     assert {"source_id": "note-1", "target_id": SYM_F,
             "relation": "REFERENCES", "actor": "human"} in link_calls
     assert len(read_journal(wj)) == 1  # replay is live-only; the op was already journaled
+
+
+def test_import_clauses_see_same_root_submodule_imports():
+    """The prune-report universe is per-CLAUSE: dropping one of two `import urllib.X`
+    statements is visible even though both bind the name `urllib` (the flip-time
+    import-dedupe blind spot — with bound-name granularity the report said nothing)."""
+    from cjm_context_graph_projection.module_ops import _import_clauses
+    both = "import urllib.request\nimport urllib.error\nimport os\n"
+    one = "import urllib.error\nimport os\n"
+    assert _import_clauses(both) - _import_clauses(one) == {"urllib.request"}
+    # from-imports report module-qualified leaf clauses; aliases stay visible
+    aliased = "from pathlib import Path as P\nimport numpy as np\n"
+    assert _import_clauses(aliased) == {"pathlib.Path as P", "numpy as np"}
+    relative = "from .util import helper\nfrom . import sibling\n"
+    assert _import_clauses(relative) == {".util.helper", ".sibling"}

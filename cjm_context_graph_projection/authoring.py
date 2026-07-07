@@ -607,17 +607,29 @@ async def add_symbol(
     # Bind the new symbol's refs against the imports the module already carries
     # (module-level + every symbol's frozen bindings) — the imports-as-projection table.
     ps = parse_module(text).symbols[0]
-    available: Dict[str, Dict[str, Any]] = {
-        b.get("name"): b for b in (F.prop(module, "import_bindings") or [])}
+    # name -> LIST of descriptors: coexisting plain submodule imports (import a.b +
+    # import a.c) share one bound name — a one-per-name map silently drops all but one.
+    available: Dict[str, List[Dict[str, Any]]] = {}
+    seen_bindings: set = set()
+
+    def _add(b: Dict[str, Any]) -> None:
+        k = (b.get("kind"), b.get("level", 0), b.get("module", ""),
+             b.get("imported", ""), b.get("alias", ""))
+        if k not in seen_bindings:
+            seen_bindings.add(k)
+            available.setdefault(b.get("name"), []).append(b)
+
+    for b in (F.prop(module, "import_bindings") or []):
+        _add(b)
     for w in wires:
         for b in (w["properties"].get("import_bindings") or []):
-            available.setdefault(b.get("name"), b)
+            _add(b)
     sym = CodeSymbolNode(
         module_id=module_id, qualname=qualname,
         symbol_kind="class" if isinstance(tree.body[0], ast.ClassDef) else "function",
         path=str(F.prop(module, "path") or ""),
         docstring=ps.docstring, calls=list(ps.calls), refs=list(ps.refs),
-        import_bindings=[available[r] for r in ps.refs if r in available],
+        import_bindings=[b for r in ps.refs for b in available.get(r, [])],
         body=text, body_hash=SourceRef.compute_hash(text.encode("utf-8")),
         order_index=order,
         properties={"decorators": list(ps.decorators)} if ps.decorators else {},
