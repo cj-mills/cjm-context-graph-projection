@@ -9,7 +9,19 @@ import json
 import subprocess
 import sys
 
+from pathlib import Path
+
+import pytest
+
 from cjm_context_graph_projection.journal import read_journal
+from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS
+
+# Integration smoke: drives the real CLI, which needs the graph-storage worker
+# capability installed. Skip wherever its manifest isn't discoverable (e.g. CI).
+pytestmark = pytest.mark.skipif(
+    not (Path(DEFAULT_MANIFESTS) / f"{DEFAULT_GRAPH_ID}.json").exists(),
+    reason=f"graph capability {DEFAULT_GRAPH_ID!r} not installed at {DEFAULT_MANIFESTS}",
+)
 
 
 def _run(*args):
