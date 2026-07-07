@@ -442,19 +442,6 @@ async def flip_notebook_to_py(
         result["note"] = "dry run — nothing journaled, written, or deleted"
         return result
 
-    # Re-link BEFORE the subtree swap (link resolves both endpoints against the live graph).
-    for rt in retargets:
-        res = await link(gx, rt["source_id"], rt["target_id"], rt["relation"], actor=rt["actor"])
-        if res.get("error"):
-            return {"error": f"re-target link failed ({rt['relation']} -> "
-                             f"{rt['surviving_symbol']}): {res['error']}",
-                    **result}
-        append_write(writes_journal_path, "link",
-                     {"source_id": res["source_id"], "target_id": res["target_id"],
-                      "relation": rt["relation"], "actor": rt["actor"],
-                      "source_label": res.get("source_label"),
-                      "target_label": res.get("target_label")})
-
     append_source(source_journal_path, repo_key, module_path, import_name, canonical)
     Path(file_path).parent.mkdir(parents=True, exist_ok=True)
     Path(file_path).write_text(canonical)
@@ -475,10 +462,44 @@ async def flip_notebook_to_py(
     dm = decompose_text(repo_key, module_path, file_path, canonical, import_name=import_name)
     nodes, edges = corpus_graph_elements([dm])
     res = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
+
+    # Re-link AFTER the swap — the cascade delete just severed every live edge on the
+    # module's nodes, including ones whose endpoints SURVIVE under identical ids (a
+    # note's REFERENCES onto a symbol). Rebuild replay would heal them, but the live
+    # graph must not silently lose curation edges between rebuilds.
+    seen_edges = set()
+    for rt in retargets:
+        rres = await link(gx, rt["source_id"], rt["target_id"], rt["relation"],
+                          actor=rt["actor"])
+        if rres.get("error"):
+            return {"error": f"re-target link failed ({rt['relation']} -> "
+                             f"{rt['surviving_symbol']}): {rres['error']}", **result}
+        seen_edges.add((rres["source_id"], rt["relation"], rres["target_id"]))
+        append_write(writes_journal_path, "link",
+                     {"source_id": rres["source_id"], "target_id": rres["target_id"],
+                      "relation": rt["relation"], "actor": rt["actor"],
+                      "source_label": rres.get("source_label"),
+                      "target_label": rres.get("target_label")})
+    new_ids = {n["id"] for n in nodes}
+    replayed = 0
+    for op in read_journal(writes_journal_path):
+        if op.get("verb") != "link":
+            continue
+        oa = op.get("args", {})
+        key = (oa.get("source_id"), oa.get("relation"), oa.get("target_id"))
+        if key in seen_edges or not (set(key[::2]) & new_ids):
+            continue
+        seen_edges.add(key)
+        rres = await link(gx, oa["source_id"], oa["target_id"], oa["relation"],
+                          actor=oa.get("actor", "agent:session"))
+        if not rres.get("error"):  # a dead endpoint (e.g. a dropped Cell) is already reported
+            replayed += 1
+
     result.update({"written": True, "cut_over": True, "retired": True,
                    "notebook_deleted": notebook_deleted,
                    "graph": {"dropped_nodes": len(old_ids), "added_nodes": res.nodes_added,
-                             "added_edges": res.edges_added},
+                             "added_edges": res.edges_added,
+                             "curation_links_replayed": replayed},
                    "note": "GRAPH-SOURCED as plain .py; the .ipynb key is retired and the "
                            "notebook file deleted; cross-module CALLS/IMPORTS re-derive on "
                            "the next rebuild"})

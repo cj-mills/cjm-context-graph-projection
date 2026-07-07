@@ -13,7 +13,7 @@ from cjm_context_graph_projection.module_ops import flip_notebook_to_py
 from cjm_context_graph_projection.source_state import (append_retire, cutover_module, flip_module,
                                                        graph_sourced_modules, latest_source_ops,
                                                        notebook_to_py_source, source_check)
-from cjm_dev_graph_schema.identity import code_module_node_id
+from cjm_dev_graph_schema.identity import code_module_node_id, code_symbol_node_id
 
 GX = SimpleNamespace(queue=None, graph_id="g")
 
@@ -127,6 +127,9 @@ class FakeGraph:
 
 
 MID = code_module_node_id("cjm-demo", "cjm_demo/m.py")
+# The symbol's REAL deterministic id: pre-flip (notebook-minted) and post-swap
+# (plain decomposition) agree on it — the invariant the edge continuity rides.
+SYM_F = code_symbol_node_id(MID, "f")
 
 
 def _notebook_graph():
@@ -141,7 +144,7 @@ def _notebook_graph():
          "properties": {"module_id": MID, "cell_key": "c3", "cell_type": "code"}},
         {"id": "cell-c4", "label": "Cell",
          "properties": {"module_id": MID, "cell_key": "c4", "cell_type": "code"}},
-        {"id": "sym-f", "label": "CodeSymbol",
+        {"id": SYM_F, "label": "CodeSymbol",
          "properties": {"module_id": MID, "cell_key": "c3", "qualname": "f", "name": "f"}},
     ])
 
@@ -273,7 +276,27 @@ def test_flip_retargets_a_link_onto_the_surviving_symbol(tmp_path, monkeypatch):
     res = _run(flip_notebook_to_py(GX, sj, wj, str(repos), "cjm-demo", "nbs/m.ipynb"))
     assert not res.get("error"), res
     assert res["cell_refs_retargeted"][0]["surviving_symbol"] == "f"
-    assert link_calls == [{"source_id": "dec-1", "target_id": "sym-f",
+    assert link_calls == [{"source_id": "dec-1", "target_id": SYM_F,
                            "relation": "SHAPES", "actor": "human"}]
     ops = read_journal(wj)
-    assert ops[-1]["verb"] == "link" and ops[-1]["args"]["target_id"] == "sym-f"
+    assert ops[-1]["verb"] == "link" and ops[-1]["args"]["target_id"] == SYM_F
+
+
+def test_flip_replays_curation_links_severed_by_the_subtree_swap(tmp_path, monkeypatch):
+    sj, repos, _ = _journal_a_notebook(tmp_path)
+    wj = str(tmp_path / "writes.jsonl")
+    # a note's REFERENCES onto the SYMBOL — the endpoint survives the swap under the
+    # same id, but the cascade delete severs the live edge; the flip must re-apply it
+    Path(wj).write_text(json.dumps(
+        {"verb": "link", "ts": 0,
+         "args": {"source_id": "note-1", "target_id": SYM_F,
+                  "relation": "REFERENCES", "actor": "human"}}) + "\n")
+    fake = _notebook_graph()
+    link_calls = []
+    _wire(fake, monkeypatch, link_calls=link_calls)
+    res = _run(flip_notebook_to_py(GX, sj, wj, str(repos), "cjm-demo", "nbs/m.ipynb"))
+    assert not res.get("error"), res
+    assert res["graph"]["curation_links_replayed"] == 1
+    assert {"source_id": "note-1", "target_id": SYM_F,
+            "relation": "REFERENCES", "actor": "human"} in link_calls
+    assert len(read_journal(wj)) == 1  # replay is live-only; the op was already journaled
