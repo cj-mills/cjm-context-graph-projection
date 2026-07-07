@@ -26,18 +26,24 @@ import ast
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from cjm_context_graph_layer.ops import graph_task
+from cjm_context_graph_layer.ops import extend_graph, graph_task
 from cjm_context_graph_primitives.provenance import SourceRef
 from cjm_dev_graph_schema.identity import code_module_node_id
 from cjm_dev_graph_schema.nodes import CodeModuleNode
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 from cjm_python_decompose_core.emit import emit_module_from_nodes
+from cjm_python_decompose_core.extract import decompose_text
+from cjm_python_decompose_core.ingest import corpus_graph_elements
 
 from . import factlayer as F
 from .authoring import _module_node, _module_region_wires, _notebook_cell_wires
+from .journal import append_write, read_journal
 from .refactor_ops import _get, _relocate
 from .runtime import GraphHandle
-from .source_state import is_test_module_path
+from .source_state import (append_retire, append_source, canonical_emit, cutover_module,
+                           graph_sourced_modules, is_test_module_path, latest_source_ops,
+                           notebook_to_py_source)
+from .write import link
 
 
 def _derive_import_name(module_path: str) -> str:  # repo-relative path -> dotted import name
@@ -275,4 +281,205 @@ async def delete_module(
             Path(path).unlink()
         await graph_task(gx.queue, gx.graph_id, "delete_nodes", node_ids=ids, cascade=True)
         result["written"] = True
+    return result
+
+
+def _import_bound_names(text: str) -> set:
+    """The top-level names an import block binds (the prune-report universe)."""
+    names = set()
+    for node in ast.parse(text).body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for a in node.names:
+                names.add(a.asname or a.name.split(".")[0])
+    return names
+
+
+def _cell_id_refs(
+    ops: List[Dict[str, Any]],  # journaled write ops
+    cell_ids: set,              # the flipping module's Cell node ids
+) -> List[Dict[str, Any]]:  # one entry per (op, path) referencing a Cell id
+    """Deep-scan journaled op args for references to the retiring Cell ids.
+
+    ALL verbs, ALL arg positions (not just link endpoints) — an assert subject or a
+    decide-supports entry pointing at a Cell would orphan just as silently."""
+    hits: List[Dict[str, Any]] = []
+
+    def walk(x: Any, path: str, op_index: int, verb: str):
+        if isinstance(x, str) and x in cell_ids:
+            hits.append({"op_index": op_index, "verb": verb, "arg_path": path, "cell_id": x})
+        elif isinstance(x, dict):
+            for k, v in x.items():
+                walk(v, f"{path}.{k}" if path else k, op_index, verb)
+        elif isinstance(x, list):
+            for i, v in enumerate(x):
+                walk(v, f"{path}[{i}]", op_index, verb)
+
+    for i, op in enumerate(ops):
+        walk(op.get("args", {}), "", i, op.get("verb", ""))
+    return hits
+
+
+async def flip_notebook_to_py(
+    gx: GraphHandle,
+    source_journal_path: str,   # The source journal (both the old .ipynb and new .py keys)
+    writes_journal_path: str,   # The write journal (scanned for Cell-id refs; re-target ops land here)
+    repos_dir: str,             # The repos root
+    repo_key: str,              # The repo's durable conceptual slug
+    notebook_path: str,         # Repo-relative .ipynb path (the retiring source-journal key)
+    *,
+    docstring: Optional[str] = None,       # Module docstring (the prose-triage fold), verbatim
+    force_drop_cell_refs: bool = False,    # Proceed past un-retargetable Cell-id refs (they orphan on rebuild)
+    write: bool = True,                    # Execute (else dry-run preview, nothing touched)
+) -> Dict[str, Any]:  # The flip report (or the guard that refused it)
+    """The golden-reference flip, ONE LOUD VERB (DEC b2c5363d): notebook -> plain `.py`.
+
+    Per-module endpoint pass: build the arc-lib-shaped module from the journaled
+    notebook's EXPORT cells (`notebook_to_py_source` — `#|` directives stripped,
+    `__all__` dropped, non-kept cells reported), canonicalize, then in one pass:
+
+    - journal the `.py` state + cut it over (the new key is GRAPH-SOURCED from birth),
+    - RETIRE the `.ipynb` key (source-check stops holding the deleted file),
+    - write the `.py` artifact, delete the notebook file,
+    - swap the graph subtree (Cell nodes out, plain-module decomposition in — the
+      CodeModule/CodeSymbol ids are IDENTICAL before/after: module identity is the
+      export-target path, so decision SHAPES edges onto symbols survive untouched),
+    - EDGE CONTINUITY for the Cell ids that do vanish: journaled write ops referencing
+      them are deep-scanned; a `link` endpoint whose cell content survives as exactly
+      one CodeSymbol is re-linked to it (live + journaled); anything else REFUSES the
+      flip unless `force_drop_cell_refs` (loud, never silent — the b2c5363d rule).
+
+    Packaged as one verb because the steps that can individually skip are the bug
+    class (the journaling-gap lesson): a flip that journals but doesn't retire leaves
+    source-check red forever; one that retires but doesn't re-link orphans provenance."""
+    latest = latest_source_ops(source_journal_path)
+    sourced = graph_sourced_modules(source_journal_path)
+    a = latest.get((repo_key, notebook_path))
+    if a is None:
+        return {"error": f"no live journaled source state for {repo_key}/{notebook_path} "
+                         "(never flipped into the journal, or already retired)", "written": False}
+    if (repo_key, notebook_path) not in sourced:
+        return {"error": f"{repo_key}/{notebook_path} is not GRAPH-SOURCED — this verb flips "
+                         "post-cutover notebooks; run flip-module + cutover first", "written": False}
+
+    try:
+        built = notebook_to_py_source(a.get("text", ""), docstring=docstring)
+    except (SyntaxError, ValueError) as e:
+        return {"error": f"cannot build .py from {notebook_path}: {e}", "written": False}
+    if not built["default_exp"]:
+        return {"error": f"{notebook_path} exports nothing (`#| default_exp` absent) — "
+                         "a non-exporting notebook is a retirement-time disposition, not a flip",
+                "written": False}
+    if not built["text"].strip():
+        return {"error": f"{notebook_path} has no export-cell content to flip", "written": False}
+
+    module_path = (repo_key.replace("-", "_") + "/"
+                   + built["default_exp"].replace(".", "/") + ".py")
+    if (repo_key, module_path) in sourced:
+        return {"error": f"{repo_key}/{module_path} is already graph-sourced — re-flip the "
+                         "notebook key only after retiring the .py (not a supported walk)",
+                "written": False}
+    import_name = _derive_import_name(module_path)
+    file_path = str(Path(repos_dir) / repo_key / module_path)
+    nb_file = Path(repos_dir) / repo_key / notebook_path
+    try:
+        canonical = canonical_emit(repo_key, module_path, file_path, built["text"],
+                                   import_name=import_name)
+    except (SyntaxError, ValueError) as e:
+        return {"error": f"canonical emit failed for the built module: {e}", "written": False}
+    pruned = sorted(_import_bound_names(built["text"]) - _import_bound_names(canonical))
+
+    # Edge continuity: what journaled knowledge points at the Cells about to vanish?
+    module_id = code_module_node_id(repo_key, module_path)
+    cells = await _notebook_cell_wires(gx, module_id)
+    cell_ids = {w["id"] for w in cells}
+    syms_by_cellkey: Dict[str, List[Dict[str, Any]]] = {}
+    for w in await _module_region_wires(gx, module_id):
+        ck = w["properties"].get("cell_key")
+        if w["label"] == DevNodeKinds.CODE_SYMBOL and ck:
+            syms_by_cellkey.setdefault(str(ck), []).append(w)
+    cellkey_by_id = {w["id"]: str(w["properties"].get("cell_key", "")) for w in cells}
+
+    ops = read_journal(writes_journal_path)
+    refs = _cell_id_refs(ops, cell_ids)
+    retargets: List[Dict[str, Any]] = []
+    blockers: List[Dict[str, Any]] = []
+    for r in refs:
+        op = ops[r["op_index"]]
+        survivors = syms_by_cellkey.get(cellkey_by_id.get(r["cell_id"], ""), [])
+        if (op.get("verb") == "link" and r["arg_path"] in ("source_id", "target_id")
+                and len(survivors) == 1):
+            oa = op.get("args", {})
+            new_id = survivors[0]["id"]
+            retargets.append({"relation": oa.get("relation"),
+                              "source_id": new_id if r["arg_path"] == "source_id"
+                                           else oa.get("source_id"),
+                              "target_id": new_id if r["arg_path"] == "target_id"
+                                           else oa.get("target_id"),
+                              "actor": oa.get("actor", "agent:session"),
+                              "replaces_cell": r["cell_id"],
+                              "surviving_symbol": survivors[0]["properties"].get("qualname")})
+        else:
+            blockers.append({**r, "surviving_symbols":
+                             [s["properties"].get("qualname") for s in survivors]})
+    if blockers and not force_drop_cell_refs:
+        return {"error": f"{len(blockers)} journaled write op(s) reference Cell ids this flip "
+                         "would orphan and no unambiguous symbol re-target exists — re-home "
+                         "them first, or pass force_drop_cell_refs to drop them LOUDLY",
+                "cell_ref_blockers": blockers, "written": False}
+
+    result = {"repo_key": repo_key, "notebook_path": notebook_path,
+              "module_path": module_path, "import_name": import_name,
+              "file_path": file_path, "module_id": module_id,
+              "export_cells": built["export_cells"],
+              "markdown_cells_dropped": built["markdown_cells"],
+              "nonexport_code_cells_dropped": built["nonexport_code_cells"],
+              "dropped_all_dunder": built["dropped_all_dunder"],
+              "pruned_imports": pruned,
+              "canonical_bytes": len(canonical.encode("utf-8")),
+              "cell_refs_retargeted": retargets, "cell_refs_dropped": blockers,
+              "written": False}
+    if not write:
+        result["note"] = "dry run — nothing journaled, written, or deleted"
+        return result
+
+    # Re-link BEFORE the subtree swap (link resolves both endpoints against the live graph).
+    for rt in retargets:
+        res = await link(gx, rt["source_id"], rt["target_id"], rt["relation"], actor=rt["actor"])
+        if res.get("error"):
+            return {"error": f"re-target link failed ({rt['relation']} -> "
+                             f"{rt['surviving_symbol']}): {res['error']}",
+                    **result}
+        append_write(writes_journal_path, "link",
+                     {"source_id": res["source_id"], "target_id": res["target_id"],
+                      "relation": rt["relation"], "actor": rt["actor"],
+                      "source_label": res.get("source_label"),
+                      "target_label": res.get("target_label")})
+
+    append_source(source_journal_path, repo_key, module_path, import_name, canonical)
+    Path(file_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(file_path).write_text(canonical)
+    co = cutover_module(source_journal_path, repos_dir, repo_key, module_path)
+    if not co.get("cut_over"):
+        return {"error": f"cutover refused after journaling the .py state: "
+                         f"{co.get('error', co)} — the flip is INCOMPLETE (shadow state "
+                         "journaled, artifact written; notebook untouched)", **result}
+    append_retire(source_journal_path, repo_key, notebook_path, superseded_by=module_path)
+    notebook_deleted = False
+    if nb_file.exists():
+        nb_file.unlink()
+        notebook_deleted = True
+
+    # Subtree swap: Cells (and the notebook-shaped module node) out, plain decomposition in.
+    old_ids = await _module_subtree_ids(gx, module_id)
+    await graph_task(gx.queue, gx.graph_id, "delete_nodes", node_ids=old_ids, cascade=True)
+    dm = decompose_text(repo_key, module_path, file_path, canonical, import_name=import_name)
+    nodes, edges = corpus_graph_elements([dm])
+    res = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
+    result.update({"written": True, "cut_over": True, "retired": True,
+                   "notebook_deleted": notebook_deleted,
+                   "graph": {"dropped_nodes": len(old_ids), "added_nodes": res.nodes_added,
+                             "added_edges": res.edges_added},
+                   "note": "GRAPH-SOURCED as plain .py; the .ipynb key is retired and the "
+                           "notebook file deleted; cross-module CALLS/IMPORTS re-derive on "
+                           "the next rebuild"})
     return result

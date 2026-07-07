@@ -504,6 +504,50 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             phase = "GRAPH-SOURCED" if sourced else "shadow"
             lines.append(f"  - `{m.get('module')}` [{phase}] — {status}")
         return "\n".join(lines)
+    if kind == "flip-to-py":
+        lines = []
+        if obj.get("error"):
+            lines.append(f"⚠ {obj['error']}")
+            for b in obj.get("cell_ref_blockers", []):
+                lines.append(f"  ✗ journaled `{b.get('verb')}` op #{b.get('op_index')} "
+                             f"({b.get('arg_path')}) -> Cell `{b.get('cell_id')}` "
+                             f"(surviving symbols: {b.get('surviving_symbols') or 'NONE'})")
+            if len(lines) == 1:
+                return lines[0]
+            return "\n".join(lines)
+        head = ("**FLIPPED**" if obj.get("written") else "**flip plan (dry run)**")
+        lines = [f"{head} `{obj.get('notebook_path')}` → `{obj.get('module_path')}` "
+                 f"({obj.get('export_cells')} export cells → "
+                 f"{obj.get('canonical_bytes')} canonical bytes)"]
+        md = obj.get("markdown_cells_dropped", [])
+        lines.append(f"  markdown cells DROPPED ({len(md)}) — prose triage owns their disposition:")
+        lines += [f"    - [{c.get('index')}] {c.get('first_line', '')[:90]}" for c in md]
+        nx = obj.get("nonexport_code_cells_dropped", [])
+        if nx:
+            lines.append(f"  ⚠ NON-EXPORT code cells DROPPED ({len(nx)}) — project their tests FIRST:")
+            lines += [f"    - [{c.get('index')}] {c.get('first_line', '')[:90]}" for c in nx]
+        if obj.get("dropped_all_dunder"):
+            lines.append(f"  __all__ assignment(s) dropped: {obj['dropped_all_dunder']} "
+                         "(nbdev star-import scar-repair; arc-lib shape carries none)")
+        if obj.get("pruned_imports"):
+            lines.append(f"  imports pruned by canonical emit: {', '.join(obj['pruned_imports'])} "
+                         "— VERIFY each is dead (comment/docstring refs don't count)")
+        for rt in obj.get("cell_refs_retargeted", []):
+            lines.append(f"  ↳ re-linked {rt.get('relation')} Cell `{rt.get('replaces_cell')}` "
+                         f"→ symbol `{rt.get('surviving_symbol')}`")
+        for b in obj.get("cell_refs_dropped", []):
+            lines.append(f"  ✗ FORCED DROP: `{b.get('verb')}` op #{b.get('op_index')} "
+                         f"({b.get('arg_path')}) -> Cell `{b.get('cell_id')}` orphans on rebuild")
+        if obj.get("written"):
+            g = obj.get("graph", {})
+            lines.append(f"  journal: source+cutover `{obj.get('module_path')}` · "
+                         f"RETIRED `{obj.get('notebook_path')}` · notebook file "
+                         f"{'deleted' if obj.get('notebook_deleted') else 'ALREADY ABSENT'}")
+            lines.append(f"  graph: {g.get('dropped_nodes')} nodes out → "
+                         f"{g.get('added_nodes')} in / {g.get('added_edges')} edges")
+        if obj.get("note"):
+            lines.append(f"  _{obj['note']}_")
+        return "\n".join(lines)
     if kind == "cutover":
         if obj.get("error"):
             return f"⚠ {obj['error']}"

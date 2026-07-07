@@ -29,7 +29,7 @@ from .factlayer import note_alias_map
 from .journal import (append_write, journal_sourced_note_paths, M3_BASELINE_ACTOR,
                       m3_baseline_import, replay_journal)
 from .listing import list_graph
-from .module_ops import delete_module, new_module, regroup, rename_module
+from .module_ops import delete_module, flip_notebook_to_py, new_module, regroup, rename_module
 from .onboarding import project_onboarding
 from .oracle import run_version_oracle
 from .projection import explore, get_schema, grep, locate, relevant, show, state
@@ -445,6 +445,20 @@ async def _dispatch(args) -> int:
                               args.module_path, import_name=args.import_name)
             print(render("flip", res, args.format))
             return 1 if res.get("error") else 0
+        elif args.command == "flip-to-py":
+            if not (args.source_journal_path and args.journal_path):
+                print("error: flip-to-py needs --source-journal-path AND --journal-path "
+                      "(it re-keys the source stream and re-targets write-journal links)",
+                      file=sys.stderr)
+                return 1
+            doc = Path(args.docstring_file).read_text().strip() if args.docstring_file \
+                else args.docstring
+            res = await flip_notebook_to_py(
+                gx, args.source_journal_path, args.journal_path, args.repos_dir,
+                args.repo_key, args.notebook_path, docstring=doc,
+                force_drop_cell_refs=args.force_drop_cell_refs, write=not args.no_write)
+            print(render("flip-to-py", res, args.format))
+            return 1 if res.get("error") else 0
         elif args.command == "source-check":
             if not args.source_journal_path:
                 print("error: source-check needs --source-journal-path", file=sys.stderr)
@@ -852,6 +866,21 @@ def main() -> int:
                                           "nbs/core/mod.ipynb for a notebook-sourced module)")
     p_fl.add_argument("--import-name", help="Dotted import name (derived from module_path if omitted)")
     p_fl.add_argument("--repos-dir", default=DEFAULT_REPOS)
+
+    p_fp = sub.add_parser("flip-to-py",
+                          help="Golden-reference flip, ONE LOUD VERB: a graph-sourced notebook's "
+                               "export cells -> plain .py source state (arc-lib shape, no __all__); "
+                               "journals source+cutover under the .py key, RETIRES the .ipynb key, "
+                               "re-targets write-journal Cell links, writes the .py, deletes the notebook")
+    p_fp.add_argument("repo_key", help="The repo's durable conceptual slug")
+    p_fp.add_argument("notebook_path", help="Repo-relative .ipynb path (the retiring source-journal key)")
+    p_fp.add_argument("--docstring", help="Module docstring (the prose-triage fold), verbatim")
+    p_fp.add_argument("--docstring-file", help="Read the module docstring from a file instead")
+    p_fp.add_argument("--force-drop-cell-refs", action="store_true",
+                      help="Proceed past un-retargetable Cell-id write ops (they orphan on rebuild — LOUD)")
+    p_fp.add_argument("--no-write", action="store_true",
+                      help="Dry run: report the full flip plan, touch nothing")
+    p_fp.add_argument("--repos-dir", default=DEFAULT_REPOS)
 
     p_sc = sub.add_parser("source-check",
                           help="N+3 soak: file-drift (membrane) + round-trip fixpoint for shadow-sourced modules; "

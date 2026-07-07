@@ -28,9 +28,17 @@ canonical `.ipynb` text (`render_notebook(parse_notebook(text))`: verbatim cell 
 outputs/metadata stripped — outputs are derived, regenerated on demand). The notebook is the
 TRANSITIONAL source shape; the exported `.py` stays nbdev-export's during the window and the
 whole nbdev surface retires at the post-transition transformation.
+
+**Retire ops** (the golden-reference flip, [[substrate-golden-reference]]): a `retire` op
+ends a module key's life in the journal — `latest_source_ops` / `graph_sourced_modules`
+drop the key, so `source-check` stops holding a DELETED file (the flipped-away `.ipynb`)
+to the membrane forever. Ops are processed in append order, so a later `source` op on the
+same key would revive it (generic supersession, not a special case).
 """
 
+import ast
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -93,6 +101,74 @@ def _is_notebook(module_path: str) -> bool:
     return module_path.endswith(".ipynb")
 
 
+# An nbdev directive line (`#| export`, `#| eval: false`, ...) — stripped ANYWHERE in a
+# cell, not just the leading block (nbdev-export drops them all; a mid-cell directive
+# like worker.ipynb's `#| eval: false` is real).
+_DIRECTIVE_LINE = re.compile(r"^\s*#\|")
+
+
+def _first_line(source: str) -> str:
+    """A cell's first non-blank line (the loud-report handle for a dropped cell)."""
+    for line in source.splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+def notebook_to_py_source(
+    nb_text: str,                     # The notebook's journaled `.ipynb` text (JSON)
+    docstring: Optional[str] = None,  # Module docstring (the prose-triage fold), verbatim
+) -> Dict[str, Any]:  # {text, default_exp, export_cells, markdown_cells, nonexport_code_cells, dropped_all_dunder}
+    """Build a plain-`.py` module source from a notebook's EXPORT cells (the flip transform).
+
+    The arc-lib shape, derived from the journaled notebook alone (no nbdev-export
+    dependence): export/exporti cells' verbatim sources joined by blank lines, every
+    `#|` directive line stripped, top-level `__all__` assignments DROPPED (they exist
+    only as nbdev star-import scar-repair; the arc-lib shape carries no `__all__`).
+    Everything not kept is REPORTED, never silently discarded — markdown cells (prose
+    triage disposes of them BEFORE the flip) and non-export code cells (their test
+    content must be projected to `tests/` BEFORE the flip) come back as loud lists.
+    The result is RAW (pre-canonical): the caller runs `canonical_emit` over it.
+    Raises `json.JSONDecodeError` on malformed notebook JSON, `SyntaxError` if the
+    assembled module doesn't parse."""
+    parsed = parse_notebook(nb_text)
+    chunks: List[str] = []
+    markdown_cells: List[Dict[str, Any]] = []
+    nonexport_code: List[Dict[str, Any]] = []
+    for c in parsed.cells:
+        if c.cell_type != "code":
+            markdown_cells.append({"index": c.index, "cell_key": c.cell_key,
+                                   "first_line": _first_line(c.source)})
+            continue
+        body = "\n".join(l for l in c.source.splitlines()
+                         if not _DIRECTIVE_LINE.match(l)).strip("\n")
+        if not body.strip():
+            continue  # directive-only cell (e.g. the `#| default_exp` header)
+        if c.is_export:
+            chunks.append(body)
+        else:
+            nonexport_code.append({"index": c.index, "cell_key": c.cell_key,
+                                   "first_line": _first_line(body)})
+    text = "\n\n".join(chunks) + "\n" if chunks else ""
+    dropped_all = 0
+    if text:
+        lines = text.splitlines(keepends=True)
+        drop: set = set()
+        for node in ast.parse(text).body:
+            if (isinstance(node, ast.Assign)
+                    and any(isinstance(t, ast.Name) and t.id == "__all__"
+                            for t in node.targets)):
+                drop.update(range(node.lineno - 1, node.end_lineno))
+                dropped_all += 1
+        if drop:
+            text = "".join(l for i, l in enumerate(lines) if i not in drop)
+    if docstring:
+        text = f'"""{docstring}"""\n\n' + text
+    return {"text": text, "default_exp": parsed.default_exp,
+            "export_cells": len(chunks), "markdown_cells": markdown_cells,
+            "nonexport_code_cells": nonexport_code, "dropped_all_dunder": dropped_all}
+
+
 def _canonical(
     repo_key: str,                       # The repo's durable conceptual slug
     module_path: str,                    # Repo-relative source path (`.py` or `.ipynb`)
@@ -139,13 +215,17 @@ def latest_source_ops(
     path: str,  # Source-journal file path (JSONL)
 ) -> Dict[Tuple[str, str], Dict[str, Any]]:  # (repo_key, module_path) -> latest op args
     """The LATEST source state per module (last write wins — the 'journal STATE, not diff'
-    semantics: re-flipping a module supersedes its prior text, replay-idempotent)."""
+    semantics: re-flipping a module supersedes its prior text, replay-idempotent).
+    A `retire` op ends the key (dropped from the map) until a later `source` revives it."""
     latest: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for op in read_source_journal(path):
-        if op.get("verb") != "source":
-            continue  # `cutover` ops carry no text — they flag phase, not state
         a = op.get("args", {})
-        latest[(a.get("repo_key"), a.get("module_path"))] = a
+        key = (a.get("repo_key"), a.get("module_path"))
+        if op.get("verb") == "source":
+            latest[key] = a
+        elif op.get("verb") == "retire":
+            latest.pop(key, None)
+        # `cutover` ops carry no text — they flag phase, not state
     return latest
 
 
@@ -156,13 +236,38 @@ def graph_sourced_modules(
 
     Phase distinction: a module with only `source` ops is in SHADOW (the file is still
     the ingest input, the journal soaks); a `cutover` op flips it — the journal becomes
-    the source of truth and the file a generated, committed artifact."""
+    the source of truth and the file a generated, committed artifact. A `retire` op
+    removes the key (its content lives on under a successor key, e.g. `.ipynb` -> `.py`)."""
     flipped = set()
     for op in read_source_journal(path):
+        a = op.get("args", {})
+        key = (a.get("repo_key"), a.get("module_path"))
         if op.get("verb") == "cutover":
-            a = op.get("args", {})
-            flipped.add((a.get("repo_key"), a.get("module_path")))
+            flipped.add(key)
+        elif op.get("verb") == "retire":
+            flipped.discard(key)
     return flipped
+
+
+def append_retire(
+    path: str,                            # Source-journal file path (JSONL)
+    repo_key: str,                        # The repo's durable conceptual slug
+    module_path: str,                     # The module key to END (e.g. the flipped-away .ipynb)
+    superseded_by: Optional[str] = None,  # The successor key carrying the content (audit trail)
+) -> bool:  # True if appended, False if the key is not currently live (no-op)
+    """Append a `retire` op ending a module key's journal life.
+
+    The re-key half of the notebook->py flip: the old `.ipynb` key would otherwise sit in
+    `latest_source_ops` forever, holding source-check to a deleted file. `superseded_by`
+    is audit-only (replay keys off repo_key+module_path)."""
+    if (repo_key, module_path) not in latest_source_ops(path):
+        return False
+    record = {"verb": "retire", "ts": time.time(),
+              "args": {"repo_key": repo_key, "module_path": module_path,
+                       "superseded_by": superseded_by}}
+    with Path(path).open("a") as f:
+        f.write(json.dumps(record, sort_keys=True) + "\n")
+    return True
 
 
 def append_source(

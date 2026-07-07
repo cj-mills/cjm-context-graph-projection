@@ -128,6 +128,7 @@ def repo_map_elements(
 def code_elements(
     code_repos: List[str],  # Repo dirs whose own package is decomposed as code (the code source-type)
     source_journal_path: Optional[str] = None,  # Source journal — its GRAPH-SOURCED modules ingest from the journal, not the file
+    journal_only_repos: Optional[List[str]] = None,  # Repo dirs whose packages are NOT scanned, but whose graph-sourced .py keys still ingest from the journal
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:  # (CodeModule/CodeSymbol nodes, edges)
     """Decompose each repo's importable package into code nodes + edges.
 
@@ -140,12 +141,20 @@ def code_elements(
     on every `rm db && ingest` — it is not journaled. EXCEPT: a module past the N+3
     Phase-2 cutover is GRAPH-SOURCED — its text comes from the SOURCE journal (the
     authority flip, the code analogue of `skip_memory_paths`); its file is a
-    generated committed artifact this ingest deliberately does not read."""
+    generated committed artifact this ingest deliberately does not read.
+
+    `journal_only_repos` (the golden-reference walk's MIXED window): a notebook
+    repo's package dir is nbdev-export residue for its UNflipped notebooks, so it
+    must not be scanned — but each module already flipped notebook->py IS a
+    graph-sourced `.py` key that ingests here, from the journal alone."""
     flipped = graph_sourced_modules(source_journal_path) if source_journal_path else set()
     journaled = latest_source_ops(source_journal_path) if flipped else {}
     decomposed = []
     seen = set()
     repo_dirs_by_key = {}
+    for repo_dir in journal_only_repos or []:
+        d = Path(repo_dir)
+        repo_dirs_by_key[conceptual_key(d.name)] = d
     for repo_dir in code_repos:
         d = Path(repo_dir)
         pkg = d / d.name.replace("-", "_")
@@ -408,8 +417,11 @@ def build_dev_graph_elements(
         sn, se = seed_elements()
         nodes += sn
         edges += se
-    if code_repos:
-        cn, ce = code_elements(code_repos, source_journal_path=source_journal_path)
+    if code_repos or notebook_repos:
+        # Notebook repos ride as journal-only: their flipped (notebook->py, golden-reference
+        # walk) modules ingest from the journal without scanning the nbdev-export residue.
+        cn, ce = code_elements(code_repos or [], source_journal_path=source_journal_path,
+                               journal_only_repos=notebook_repos)
         nodes += cn
         edges += ce
     if notebook_repos:
