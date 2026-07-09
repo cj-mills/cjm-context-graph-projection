@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 from cjm_context_graph_layer.ops import graph_task
 from cjm_context_graph_primitives.query import EdgeQuery, NodeQuery, PropertyPredicate
 
+from . import factlayer as F
 from .display import annotate_display, node_title
 from .runtime import GraphHandle
 
@@ -136,20 +137,21 @@ async def graph_overview(
             if end:
                 degree[end] = degree.get(end, 0) + 1
 
-    node_of: Dict[str, Any] = {}
-    kind_of: Dict[str, str] = {}
-    for label in hub_labels:
-        nodes = await graph_task(gx.queue, gx.graph_id, "find_nodes_by_label",
-                                 label=label, limit=5000)
-        for n in (nodes or []):
-            kind_of[_get(n, "id")] = label
-            node_of[_get(n, "id")] = n
+    # One id+label scan picks the hub-eligible ids; only the WINNING hubs get
+    # their full nodes (was one full find_nodes_by_label round-trip per label —
+    # the e128fac6 latency class).
+    hub_set = set(hub_labels)
+    kind_of: Dict[str, str] = {r["id"]: r["label"]
+                               for r in await _scan_rows(gx, ["label"])
+                               if r.get("label") in hub_set}
     hub_ids = []
     for nid in sorted(degree, key=lambda i: degree[i], reverse=True):
-        if nid in node_of:
+        if nid in kind_of:
             hub_ids.append(nid)
             if len(hub_ids) >= top_hubs:
                 break
+    node_of = await F.load_nodes(gx, hub_ids)
+    hub_ids = [i for i in hub_ids if i in node_of]
     # Annotate ONLY the selected hubs (annotating every loaded node priced the
     # whole-graph overview at its rule-neighbour fan-out — the 20s serve boot).
     await annotate_display(gx, [node_of[i] for i in hub_ids])
@@ -158,15 +160,21 @@ async def graph_overview(
     return {"by_kind": by_kind, "hubs": hubs}
 
 
-async def _all_nodes(gx: GraphHandle, per_label: int = 1000) -> List[Any]:
-    """Every node, gathered label by label (bounded per label)."""
-    schema = await get_schema(gx)
-    nodes: List[Any] = []
-    for label in schema.get("node_labels", []):
-        res = await graph_task(gx.queue, gx.graph_id, "find_nodes_by_label",
-                               label=label, limit=per_label)
-        nodes.extend(res or [])
-    return nodes
+async def _scan_rows(gx: GraphHandle, fields: List[str],
+                     limit: int = 10_000_000) -> List[Dict[str, Any]]:
+    """Every node as a FLAT projected row (`id` + the requested fields), one round-trip.
+
+    The whole-graph scans (seed-finding, grep, prefix resolution, hub picking)
+    need a few fields, not whole nodes. This replaced the old label-by-label
+    full-node gather twice over (the e128fac6 latency class): the label loop was
+    a dozen sequential worker round-trips with a per-label cap that silently
+    missed nodes past it (the 6.5k-Segments grep lesson), and even a single
+    full-node query ships every code body/section text — projection cuts the
+    4.8k-node dev-graph scan 258ms -> 75ms (text fields) / 35ms (id+label).
+    Winners get their full nodes AFTERWARD via one batched `F.load_nodes`."""
+    q = NodeQuery(limit=limit, project=fields)
+    res = await graph_task(gx.queue, gx.graph_id, "query_nodes", query=q.to_dict())
+    return list(_get(res, "rows", None) or [])
 
 
 async def find_seeds(
@@ -182,13 +190,15 @@ async def find_seeds(
     if not terms:
         return []
     scored = []
-    for n in await _all_nodes(gx):
-        hay = _haystack(n)
+    for row in await _scan_rows(gx, list(_TEXT_FIELDS)):
+        hay = " ".join(str(row[f]) for f in _TEXT_FIELDS if row.get(f)).lower()
         hits = sum(1 for t in terms if t in hay)
         if hits:
-            scored.append((hits, n))
+            scored.append((hits, row["id"]))
     scored.sort(key=lambda x: x[0], reverse=True)
-    return [n for _, n in scored[:k]]
+    top = [nid for _, nid in scored[:k]]
+    nodes = await F.load_nodes(gx, top)  # full nodes for the winners only
+    return [nodes[nid] for nid in top if nid in nodes]
 
 
 # A ref shaped like (part of) a node id: hex + dashes, at least 6 chars. Names/terms
@@ -211,14 +221,16 @@ async def resolve_node_ref(
     if not _ID_PREFIX_RE.match(ref):
         return {}
     pref = ref.lower()
-    hits = [n for n in await _all_nodes(gx, per_label=1_000_000)
-            if str(_get(n, "id", "")).lower().startswith(pref)]
-    if len(hits) == 1:
-        return {"node": hits[0]}
-    if hits:
-        return {"candidates": [{"id": _get(n, "id"), "label": _get(n, "label"),
-                                "title": node_title(n)} for n in hits[:10]]}
-    return {}
+    hits = [r["id"] for r in await _scan_rows(gx, ["label"])
+            if str(r.get("id", "")).lower().startswith(pref)]
+    if not hits:
+        return {}
+    nodes = await F.load_nodes(gx, hits[:10])  # full nodes for the matches only
+    if len(hits) == 1 and hits[0] in nodes:
+        return {"node": nodes[hits[0]]}
+    return {"candidates": [{"id": nid, "label": _get(nodes[nid], "label"),
+                            "title": node_title(nodes[nid])}
+                           for nid in hits[:10] if nid in nodes]}
 
 
 def ambiguity_error(ref: str, candidates: List[Dict[str, Any]]) -> str:
@@ -247,8 +259,6 @@ async def subgraph_view(
 
     Read-parity: an unresolvable ref stays visible in `missing`, an ambiguous
     prefix in `ambiguous` — the verb never silently narrows what it was asked for."""
-    from . import factlayer as F
-
     seen: set = set()
     ordered = [r for r in refs if not (r in seen or seen.add(r))]
     exact = [r for r in ordered if len(r) == 36]
@@ -260,23 +270,26 @@ async def subgraph_view(
     ambiguous: List[Dict[str, Any]] = []
 
     if prefixes:
-        # One shared scan resolves every prefix (resolve_node_ref semantics, batched).
-        universe = await _all_nodes(gx, per_label=1_000_000)
+        # One shared id+label scan resolves every prefix (resolve_node_ref
+        # semantics, batched); the winners join ONE full-node batch load.
+        universe = await _scan_rows(gx, ["label"])
         for r in prefixes:
             if not _ID_PREFIX_RE.match(r):
                 missing.append(r)
                 continue
             pref = r.lower()
-            hits = [n for n in universe if str(_get(n, "id", "")).lower().startswith(pref)]
+            hits = [row for row in universe
+                    if str(row.get("id", "")).lower().startswith(pref)]
             if len(hits) == 1:
-                nid = _get(hits[0], "id")
-                resolved[r] = nid
-                nodes_by_id.setdefault(nid, hits[0])
+                resolved[r] = hits[0]["id"]
             elif hits:
                 ambiguous.append({"ref": r, "candidates": [
-                    {"id": _get(n, "id"), "label": _get(n, "label")} for n in hits[:10]]})
+                    {"id": row["id"], "label": row.get("label")} for row in hits[:10]]})
             else:
                 missing.append(r)
+        need = [i for i in resolved.values() if i not in nodes_by_id]
+        if need:
+            nodes_by_id.update(await F.load_nodes(gx, need))
 
     seed_ids: List[str] = []
     for r in ordered:  # ref order, deduped (a prefix + its full id resolve to ONE node)
@@ -628,16 +641,16 @@ async def grep(
     One hit per node (its first matching field), with a whitespace-normalized snippet around
     the hit so the match is judgeable without a `read`. Content search stays `relevant`'s
     business for RANKING; this is for WHEN YOU KNOW THE WORDS — so the scan is EXHAUSTIVE
-    (`_all_nodes`' default per-label cap would silently miss nodes past 1000: found on the
-    capability graph's 6.5k Segments, where grep hits came and went with load order)."""
+    (a bounded scan silently missed nodes past its cap: found on the capability graph's
+    6.5k Segments, where grep hits came and went with load order — `_scan_rows` is
+    uncapped by default and projects just the text fields)."""
     needle = term.lower()
     if not needle:
         return {"term": term, "matches": [], "count": 0, "truncated": False}
     hits: List[tuple] = []
-    for n in await _all_nodes(gx, per_label=1_000_000):
-        p = _props(n)
+    for row in await _scan_rows(gx, list(_TEXT_FIELDS)):
         for f in _TEXT_FIELDS:
-            v = p.get(f)
+            v = row.get(f)
             if not v:
                 continue
             s = str(v)
@@ -647,12 +660,15 @@ async def grep(
             start, end = max(0, i - context), min(len(s), i + len(term) + context)
             snippet = (("…" if start else "") + " ".join(s[start:end].split())
                        + ("…" if end < len(s) else ""))
-            hits.append((n, f, snippet))
+            hits.append((row["id"], f, snippet))
             break  # one hit per node — the match list stays a node list
-    await annotate_display(gx, [n for n, _, _ in hits])
-    rows = [{"id": _get(n, "id"), "label": _get(n, "label"),
-             "title": node_title(n), "field": f, "snippet": snippet}
-            for n, f, snippet in hits]
+    # Full nodes for the MATCHES only (title cascade + display rules).
+    nodes = await F.load_nodes(gx, [nid for nid, _, _ in hits])
+    await annotate_display(gx, list(nodes.values()))
+    rows = [{"id": nid, "label": _get(nodes.get(nid), "label"),
+             "title": node_title(nodes[nid]) if nid in nodes else nid,
+             "field": f, "snippet": snippet}
+            for nid, f, snippet in hits]
     rows.sort(key=lambda r: (r["label"] or "", r["title"] or ""))
     return {"term": term, "matches": rows[:limit], "count": len(rows),
             "truncated": len(rows) > limit}
