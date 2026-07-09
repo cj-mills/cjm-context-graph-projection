@@ -74,6 +74,19 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         if obj.get("error"):
             return f"⚠ {obj['error']}"
         return "\n".join(["## Subgraph"] + _subgraph_lines(obj))
+    if kind == "export":
+        # The human view is the SHAPE summary, never the dump — the full node+edge
+        # payload is a canvas/agent feed (`--format agent`) and runs to megabytes.
+        by_kind: Dict[str, int] = {}
+        for n in obj.get("nodes") or []:
+            k = n.get("label") or "?"
+            by_kind[k] = by_kind.get(k, 0) + 1
+        lines = [f"## Export — {obj.get('node_count', 0)} node(s) · "
+                 f"{obj.get('edge_count', 0)} edge(s)",
+                 "_full payload rides `--format agent` (the canvas feed)_", ""]
+        lines += [f"- **{k}** ×{c}" for k, c in
+                  sorted(by_kind.items(), key=lambda kv: kv[1], reverse=True)]
+        return "\n".join(lines)
     if kind == "lens":
         if obj.get("error"):
             out = f"⚠ {obj['error']}"

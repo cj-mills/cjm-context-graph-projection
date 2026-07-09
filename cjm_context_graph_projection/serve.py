@@ -31,7 +31,8 @@ from .authoring import read_node
 from .journal import journal_window_view
 from .lens import apply_lens, load_lenses
 from .listing import list_graph
-from .projection import get_schema, graph_overview, grep, locate, relevant, show, subgraph_view
+from .projection import (full_graph_view, get_schema, graph_overview, grep, locate, relevant, show,
+                         subgraph_view)
 from .runtime import DEFAULT_MANIFESTS, GraphHandle, open_graph
 
 
@@ -69,6 +70,7 @@ def build_app(
     handles: Dict[str, GraphHandle],   # Live graph handles by short-name (held for app lifetime)
     paths: Dict[str, str],             # Short-name -> db path (the /api/graphs listing)
     index_html: Optional[str] = None,  # The client page served at `/` (opaque to this layer)
+    hybrid_html: Optional[str] = None,  # The hybrid GPU-canvas client at `/hybrid` (same contract)
 ):  # The FastAPI app
     """Build the read-only API app over already-open graph handles.
 
@@ -134,6 +136,10 @@ def build_app(
                             journal_window_view(gx, journals, start=start, end=end,
                                                 session=session))
 
+    @app.get("/api/g/{name}/export")
+    async def api_export(name: str) -> Dict[str, Any]:
+        return await _timed(name, "export", full_graph_view(_gx(name)))
+
     @app.get("/api/g/{name}/subgraph")
     async def api_subgraph(name: str, ids: str, hops: int = 0,
                            cap: int = 500) -> Dict[str, Any]:
@@ -172,6 +178,11 @@ def build_app(
         async def index() -> str:
             return index_html
 
+    if hybrid_html is not None:
+        @app.get("/hybrid", response_class=HTMLResponse)
+        async def hybrid() -> str:
+            return hybrid_html
+
     return app
 
 
@@ -181,6 +192,7 @@ async def serve_graphs(
     port: int = 8766,                        # Bind port
     manifests_dir: str = DEFAULT_MANIFESTS,  # Graph-storage capability manifests (as `open_graph`)
     index_html: Optional[str] = None,        # The client page for `/` (wired by the caller)
+    hybrid_html: Optional[str] = None,       # The hybrid GPU-canvas page for `/hybrid`
 ) -> None:
     """Open every graph once, hold the handles, and serve the API until interrupted.
 
@@ -193,9 +205,11 @@ async def serve_graphs(
         handles: Dict[str, GraphHandle] = {}
         for name, path in names.items():
             handles[name] = await stack.enter_async_context(open_graph(path, manifests_dir))
-        app = build_app(handles, names, index_html)
+        app = build_app(handles, names, index_html, hybrid_html)
         print(f"[graph-serve] read-only explorer on http://{host}:{port} "
-              f"({len(handles)} graph(s))", file=sys.stderr)
+              f"({len(handles)} graph(s))"
+              + (f" · hybrid canvas at http://{host}:{port}/hybrid" if hybrid_html else ""),
+              file=sys.stderr)
         for n, p in names.items():
             print(f"[graph-serve]   {n} <- {p}", file=sys.stderr)
         await uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="warning")).serve()

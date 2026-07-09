@@ -18,7 +18,7 @@ from cjm_context_graph_layer.ops import graph_task
 from cjm_context_graph_primitives.query import EdgeQuery, NodeQuery, PropertyPredicate
 
 from . import factlayer as F
-from .display import annotate_display, node_title
+from .display import annotate_display, first_clause, node_title
 from .runtime import GraphHandle
 
 # Edge-type weights for relevance ranking: trust/reasoning/contradiction edges
@@ -349,6 +349,47 @@ async def subgraph_view(
             "seed_count": len(seed_ids),
             "expanded_count": len(out_nodes) - len(seed_ids),
             "truncated": truncated}
+
+
+# The stored title-cascade fields (display.py's _TITLE_FIELDS minus `display_title`,
+# which only exists as an in-memory annotation stamp — a projected scan never sees it),
+# extended with the generic BODY fields `text`/`source` (the _TEXT_FIELDS precedent):
+# content-bearing graphs (a transcription graph's Segment/Transcript nodes) carry no
+# name-ish property at all, and a clause of the body beats 7k UUID labels on a canvas.
+_EXPORT_TITLE_FIELDS = ("title", "name", "slug", "key", "subject_label",
+                        "statement", "value", "text", "source")
+_EXPORT_CLAUSE_FIELDS = ("statement", "value", "text", "source")
+
+
+async def full_graph_view(gx: GraphHandle) -> Dict[str, Any]:
+    """The WHOLE graph as one canvas payload: every node (cheap-title tier) + every edge.
+
+    The read verb behind the hybrid explorer's full-graph-default grammar: the entire
+    graph stands on the GPU canvas and every operation (lens application, search,
+    selection) highlights INTO it — so the default view IS the read-parity floor
+    ('see everything on-graph to tell what is NOT on-graph'). Two projected scans,
+    zero per-node round-trips: one node scan over the stored title-cascade fields
+    (display-RULE titles deliberately skipped — `annotate_display` over every node
+    is the rule-neighbour fan-out that once priced the overview at a 20s boot; the
+    rule-composed titles arrive per-focus via `show`/`read`), one whole-edge scan.
+    Edge shape matches `subgraph_view` so canvas consumers have ONE ingest path."""
+    nodes: List[Dict[str, Any]] = []
+    for r in await _scan_rows(gx, ["label", *_EXPORT_TITLE_FIELDS]):
+        title = None
+        for f in _EXPORT_TITLE_FIELDS:
+            v = r.get(f)
+            if isinstance(v, str) and v.strip():
+                v = v.strip()
+                title = first_clause(v) if f in _EXPORT_CLAUSE_FIELDS else v
+                break
+        nodes.append({"id": r["id"], "label": r.get("label"), "title": title or r["id"]})
+    res = await graph_task(gx.queue, gx.graph_id, "query_edges",
+                           query=EdgeQuery(project=["source_id", "target_id",
+                                                    "relation_type"],
+                                           limit=10_000_000).to_dict())
+    edges = list(_get(res, "rows", None) or [])
+    return {"nodes": nodes, "edges": edges,
+            "node_count": len(nodes), "edge_count": len(edges)}
 
 
 async def show(

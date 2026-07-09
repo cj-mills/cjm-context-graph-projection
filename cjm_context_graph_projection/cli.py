@@ -29,6 +29,7 @@ from .devgraph import build_dev_graph_elements, notes_corpus_elements
 from .display import set_display_rule
 from .explorer_page import EXPLORER_HTML
 from .factlayer import note_alias_map
+from .hybrid_page import HYBRID_HTML
 from .journal import (append_write, journal_sourced_note_paths, journal_window_view,
                       M3_BASELINE_ACTOR, m3_baseline_import, replay_journal)
 from .lens import apply_lens, set_lens
@@ -36,7 +37,8 @@ from .listing import list_graph
 from .module_ops import delete_module, flip_notebook_to_py, new_module, regroup, rename_module
 from .onboarding import project_onboarding
 from .oracle import run_version_oracle
-from .projection import explore, get_schema, grep, locate, relevant, show, state, subgraph_view
+from .projection import (explore, full_graph_view, get_schema, grep, locate, relevant, show, state,
+                         subgraph_view)
 from .readiness import readiness
 from .readme import project_readme
 from .reconcile import reconcile_memory
@@ -127,7 +129,7 @@ async def _dispatch(args) -> int:
         # so it doesn't ride the single-graph context below.
         await serve_graphs([args.graph_db_path, *(args.also or [])], host=args.host,
                            port=args.port, manifests_dir=args.manifests_dir,
-                           index_html=EXPLORER_HTML)
+                           index_html=EXPLORER_HTML, hybrid_html=HYBRID_HTML)
         return 0
     async with open_graph(args.graph_db_path, args.manifests_dir) as gx:
         if args.command == "ingest":
@@ -249,6 +251,9 @@ async def _dispatch(args) -> int:
             res = await subgraph_view(gx, args.refs, hops=args.hops,
                                       relations=args.relation, cap=args.cap)
             print(render("subgraph", res, args.format))
+        elif args.command == "export":
+            res = await full_graph_view(gx)
+            print(render("export", res, args.format))
         elif args.command == "list":
             res = await list_graph(gx, label=args.label, predicate=args.predicate,
                                    relation=args.relation, limit=args.limit,
@@ -765,6 +770,11 @@ def main() -> int:
                       help="Expansion relation filter (repeatable; default = every relation)")
     p_sg.add_argument("--cap", type=int, default=500,
                       help="Expansion node budget — the given refs are never dropped (default 500)")
+
+    sub.add_parser("export",
+                   help="WHOLE-graph read: every node (cheap-title tier) + every edge — "
+                        "the hybrid canvas feed (human view = shape summary; "
+                        "--format agent = the full payload)")
 
     p_le = sub.add_parser("lens",
                           help="APPLY a graph-carried lens: bind params, union its selection "
