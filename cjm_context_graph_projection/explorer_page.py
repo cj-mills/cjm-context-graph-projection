@@ -122,7 +122,16 @@ EXPLORER_HTML = r"""<!doctype html>
   <div id="side">
     <input id="q" placeholder="search — relevant + locate (Enter)">
     <div id="ov"><h3 id="relsh3" style="display:none">Relations</h3><div id="rels"></div>
-      <h3>Kinds</h3><div id="kinds"></div><h3>Hubs</h3><div id="hubs"></div></div>
+      <h3>Kinds</h3><div id="kinds"></div><h3>Hubs</h3><div id="hubs"></div>
+      <h3>Session window</h3><div id="sess">
+        <select id="sess-pick" style="width:100%;margin:2px 0"><option value="">— pick a session —</option></select>
+        <input id="sess-start" placeholder="start (YYYY-MM-DD[_HH-MM-SS] | unix)" style="width:100%;margin:2px 0">
+        <input id="sess-end" placeholder="end (blank = open/live)" style="width:100%;margin:2px 0">
+        <div style="display:flex;gap:8px;align-items:center;margin:2px 0">
+          <button id="sess-go">window</button>
+          <label style="font-size:12px;color:#555;display:flex;gap:4px;align-items:center">
+            <input type="checkbox" id="sess-live"> live (5s)</label>
+        </div></div></div>
     <div id="results" style="display:none"></div>
   </div>
   <div id="cy"></div>
@@ -420,6 +429,62 @@ EXPLORER_HTML = r"""<!doctype html>
     } catch (e) { out.innerHTML = ''; fail(e); }
   }
 
+  // --- Session lens (journal-window): the journal is the data path, not created_at ---
+  let liveTimer = null;
+  const parseTs = s => {
+    s = (s || '').trim();
+    if (!s) return null;
+    if (/^\d+(\.\d+)?$/.test(s)) return parseFloat(s);
+    const m = s.match(/^(\d{4})-(\d{2})-(\d{2})(?:_(\d{2})-(\d{2})-(\d{2}))?$/);
+    if (!m) throw new Error('bad time: ' + s + ' (want YYYY-MM-DD[_HH-MM-SS] or unix seconds)');
+    return new Date(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0)).getTime() / 1000;
+  };
+  const fmtTs = t => t == null ? '' : new Date(t * 1000).toLocaleString();
+  const verbsStr = x => x.touches + '× · '
+    + Object.entries(x.verbs || {}).map(([v, n]) => v + '×' + n).join(', ')
+    + ' · last ' + fmtTs(x.last_ts);
+
+  async function loadSessions() {
+    try {
+      const res = await api('/api/g/' + graph + '/list?label=Session&limit=100', 'list');
+      const rows = (res.rows || []).slice()
+        .sort((a, b) => String(b.title).localeCompare(String(a.title)));
+      $('sess-pick').innerHTML = '<option value="">— pick a session —</option>'
+        + rows.map(r => '<option>' + esc(r.title) + '</option>').join('');
+    } catch (e) { /* a graph without Session nodes is fine — the picker stays empty */ }
+  }
+
+  async function doWindow() {
+    clearErr();
+    const qs = [];
+    try {
+      const st = parseTs($('sess-start').value), en = parseTs($('sess-end').value);
+      if (st != null) qs.push('start=' + st);
+      if (en != null) qs.push('end=' + en);
+    } catch (e) { fail(e); return; }
+    const key = $('sess-pick').value;
+    if (key) qs.push('session=' + encodeURIComponent(key));
+    if (!qs.length) { fail(new Error('session window: pick a session or give a start time')); return; }
+    $('ov').style.display = 'none';
+    const out = $('results');
+    out.style.display = 'block';
+    try {
+      const res = await api('/api/g/' + graph + '/journal-window?' + qs.join('&'), 'journal-window');
+      const t = res.touched || [];
+      out.innerHTML = '<span class="back">← overview</span>'
+        + '<h3>Window · ' + res.entries + ' op(s) · ' + t.length + ' node(s)'
+        + (res.missing ? ' · ⚠ ' + res.missing + ' missing' : '') + '</h3>'
+        + '<div class="m" style="padding:2px 0 6px">' + esc(fmtTs(res.window.start) || 'journal dawn')
+        + ' → ' + esc(res.window.end != null ? fmtTs(res.window.end) : 'now (open — live)')
+        + (res.window.session ? ' · ' + esc(res.window.session) : '') + '</div>'
+        + t.map(x => x.missing
+            ? '<div class="hub"><span class="t">⚠ missing: ' + esc(x.ref) + '</span>'
+              + '<span class="m">' + esc(verbsStr(x)) + '</span></div>'
+            : resultRow({ id: x.id, title: x.title, label: x.label }, verbsStr(x))).join('');
+      wireResults(out);
+    } catch (e) { out.innerHTML = ''; fail(e); }
+  }
+
   async function loadGraph(name, push = true) {
     graph = name; clearErr();
     $('graphs').value = name;
@@ -430,6 +495,7 @@ EXPLORER_HTML = r"""<!doctype html>
     if (push) history.pushState(null, '', '?g=' + name);
     try { renderOverview(await api('/api/g/' + name + '/overview', 'overview')); }
     catch (e) { fail(e); }
+    loadSessions();
   }
 
   async function boot() {
@@ -480,6 +546,15 @@ EXPLORER_HTML = r"""<!doctype html>
       $('graphs').onchange = () => loadGraph($('graphs').value);
       $('layout').onchange = () => { if (cy.elements().length) runLayout(); };
       $('lcfg').onclick = () => $('lpanel').classList.toggle('open');
+      $('sess-go').onclick = () => doWindow();
+      $('sess-live').onchange = () => {
+        if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+        if ($('sess-live').checked)
+          liveTimer = setInterval(() => {
+            // Re-evaluate only an OPEN window (live mode = declarative re-evaluation)
+            if ($('results').style.display !== 'none' && !$('sess-end').value.trim()) doWindow();
+          }, 5000);
+      };
       for (const k of ['spacing', 'repulsion', 'separation']) {
         const el = $('cfg-' + k), lab = el.nextElementSibling;
         el.value = fcfg[k]; lab.textContent = fcfg[k];

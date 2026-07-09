@@ -17,16 +17,22 @@ re-applying the log collides into verified no-ops.
 """
 
 import json
+import os
+import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from cjm_context_graph_layer.ops import graph_task
+from cjm_dev_graph_schema.identity import (code_module_node_id, note_node_id, section_node_id,
+                                           session_node_id)
+from cjm_dev_graph_schema.nodes import DecisionNode
 from cjm_markdown_decompose_core.extract import note_from_file
 
-from .display import set_display_rule
+from .display import annotate_display, display_rule_node_id, node_title, set_display_rule
 from .runtime import GraphHandle
 from .structure import add_section, reconstruct_note
-from .write import add_check, alias, assert_value, author_section, decide, link
+from .write import add_check, alias, assert_value, author_section, decide, link, register_session
 
 # The provenance actor stamped on the M3 one-time genesis import (a per-note `new-note` op
 # capturing the pre-cutover baseline). The lineage floor every later edit traces back to.
@@ -45,8 +51,11 @@ M3_BASELINE_ACTOR = "import:m3-baseline"
 # `display-rule` = the graph-carried presentation vocabulary (DEC 16bcd96e): a per-kind
 # DisplayRule node authored/updated by deterministic id, so the journal's LAST op per kind
 # wins on replay (upsert semantics — rules are data, not content).
+# `session` = the timestamp-keyed session SPINE (DEC 6124d8bf): a Session node upserted by
+# deterministic per-key id (started_at + optional title; last op wins on replay, like
+# display-rule). Window END is derived at read time, never stored.
 JOURNAL_VERBS = ("decide", "alias", "assert", "link", "section", "new-note", "add-section",
-                 "display-rule", "check")
+                 "display-rule", "check", "session")
 
 
 def read_journal(
@@ -77,6 +86,9 @@ def append_write(
         if existing.get("verb") == verb and existing.get("args") == args:
             return False  # already recorded — keep the log tidy (replay is idempotent anyway)
     record = {"verb": verb, "ts": time.time(), "args": args}
+    session = current_session()
+    if session:
+        record["session"] = session
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     with p.open("a") as f:
@@ -198,6 +210,11 @@ async def _apply_op(gx: GraphHandle, op: Dict[str, Any]) -> str:
         # the append-ordered ops converges on the LAST authored rule per kind.
         await set_display_rule(gx, a["for_label"], a.get("title_template"),
                                a.get("gloss_template"), actor=a.get("actor", "agent:session"))
+    elif verb == "session":
+        # Session spine: upsert the timestamp-keyed Session node (started_at/title are
+        # last-op-wins on replay, like display-rule — sessions are data, not content).
+        await register_session(gx, a["key"], started_at=a.get("started_at"),
+                               title=a.get("title"), actor=a.get("actor", "agent:session"))
     else:
         return ""
     return verb
@@ -239,3 +256,202 @@ async def replay_journal(
         else:
             counts["skipped"] += 1
     return counts
+
+
+def current_session() -> Optional[str]:  # The active session key, or None
+    """The session key stamped on journal appends (provenance, not replay input).
+
+    Read from `CJM_SESSION` — the `cg-write` wrapper exports it from
+    `.cjm/current-session`, one start-time timestamp key generated per session
+    (DEC 6124d8bf: discipline problems become infrastructure — historical
+    per-verb `--session` coverage was 9% for exactly this reason). Stamped
+    TOP-LEVEL on the record so dedup (verb+args) and replay stay session-blind."""
+    return os.environ.get("CJM_SESSION") or None
+
+
+def _id_shaped(ref: str) -> bool:  # True if `ref` looks like a node id / unique id prefix
+    """Heuristic for id-shaped journal args (an `assert` subject may be a NAME).
+
+    Hex + dashes, >=6 chars, with at least one [a-f] — the letter requirement
+    keeps date-shaped values (e.g. "2026-06-25") out of the touched set."""
+    if not ref or len(ref) < 6 or len(ref) > 36:
+        return False
+    return bool(re.fullmatch(r"[0-9a-f-]+", ref)) and bool(re.search(r"[a-f]", ref))
+
+
+def _note_slug(path: Optional[str], content: Optional[str]) -> Optional[str]:
+    """A `new-note` op's note slug: frontmatter `name:` first, else the filename stem
+    (mirrors `note_from_file`'s identity rule without re-parsing the whole note)."""
+    m = re.search(r"^name:\s*(\S+)\s*$", content or "", re.MULTILINE)
+    if m:
+        return m.group(1)
+    return Path(path).stem if path else None
+
+
+def touched_node_ids(
+    op: Dict[str, Any],  # One journaled write op ({verb, args, ...} — writes OR source journal)
+) -> List[str]:  # Node refs the op touched (full ids, or unique id prefixes to resolve db-side)
+    """Best-effort node refs a journaled op touched — the session-lens feed (2f51ff5d).
+
+    TOUCHES, not creations: an `author`/`assert` on an old node is invisible to
+    `created_at` queries but present here. Ids are DERIVED from each verb's natural
+    key exactly as the verb derives them (deterministic ids), so the mapping holds
+    for the WHOLE historical journal, not just post-cutover entries. Source-journal
+    ops (`source`/`cutover`/`retire`) map to their CodeModule. Refs that aren't
+    resolvable journal-side (an `alias`'s drifted term, a name-shaped assert
+    subject) are simply omitted — the lens is best-effort, never wrong-effort."""
+    verb, a = op.get("verb"), op.get("args") or {}
+    out: List[str] = []
+    if verb == "decide":
+        if a.get("statement"):
+            out.append(DecisionNode(statement=a["statement"]).id)
+        out.extend(a.get("supports") or [])
+        out.extend(a.get("supersedes") or [])
+        if a.get("session"):
+            out.append(session_node_id(a["session"]))
+    elif verb == "assert":
+        if a.get("subject") and _id_shaped(a["subject"]):
+            out.append(a["subject"])
+    elif verb == "link":
+        out.extend(r for r in (a.get("source_id"), a.get("target_id")) if r)
+    elif verb == "check":
+        if a.get("item_id"):
+            out.append(a["item_id"])
+    elif verb == "alias":
+        if a.get("canonical"):
+            out.append(note_node_id(a["canonical"]))
+    elif verb == "new-note":
+        slug = _note_slug(a.get("path"), a.get("content"))
+        if slug:
+            out.append(note_node_id(slug))
+    elif verb in ("section", "add-section"):
+        if a.get("slug"):
+            nid = note_node_id(a["slug"])
+            out.append(nid)
+            if verb == "section" and a.get("anchor"):
+                out.append(section_node_id(nid, a["anchor"]))
+    elif verb == "display-rule":
+        if a.get("for_label"):
+            out.append(display_rule_node_id(a["for_label"]))
+    elif verb == "session":
+        if a.get("key"):
+            out.append(session_node_id(a["key"]))
+    elif a.get("repo_key") and a.get("module_path"):
+        out.append(code_module_node_id(a["repo_key"], a["module_path"]))
+    return out
+
+
+def journal_window(
+    paths: List[str],               # Journal files to scan (the writes + source journals together)
+    start: Optional[float] = None,  # Window start (unix ts; None = journal dawn)
+    end: Optional[float] = None,    # Window end (unix ts; None = OPEN — live mode)
+    session: Optional[str] = None,  # Session key filter (stamped, or a decide's args.session)
+) -> Dict[str, Any]:  # {window, entries, touched: [{ref, verbs, touches, first_ts, last_ts}]}
+    """The journal-window projection: which nodes a window/session touched, when, how.
+
+    THE session lens's data path (DEC f1b02b95 invariant 1: declarative and
+    re-evaluatable — an OPEN end is live mode, re-evaluate on append; evaluate the
+    same window at T for time-travel). Session matching prefers the top-level
+    provenance stamp and falls back to a `decide` op's `args.session` (the sparse
+    pre-cutover tagging), so one filter spans both eras."""
+    # DEC 6124d8bf resolution order: post-cutover ops match by TAG; HISTORICAL ops
+    # (no stamp) match by the session's WINDOW [started_at, next session's start).
+    # The windows are journal-derived too — the retrofit/live `session` ops carry
+    # started_at — so a keyed lens stays pure (no graph read, no stored end).
+    win_start: Optional[float] = None
+    win_end: Optional[float] = None
+    if session is not None:
+        starts: Dict[str, float] = {}
+        for path in paths:
+            if not path:
+                continue
+            for op in read_journal(path):
+                a = op.get("args") or {}
+                if op.get("verb") == "session" and a.get("key") and a.get("started_at") is not None:
+                    starts[a["key"]] = float(a["started_at"])  # upsert: last op wins
+        if session in starts:
+            win_start = starts[session]
+            later = [t for t in starts.values() if t > win_start]
+            win_end = min(later) if later else None  # last session = open (in-progress)
+
+    per: Dict[str, Dict[str, Any]] = {}
+    entries = 0
+    for path in paths:
+        if not path:
+            continue
+        for op in read_journal(path):
+            ts = float(op.get("ts") or 0.0)
+            if start is not None and ts < start:
+                continue
+            if end is not None and ts > end:
+                continue
+            if session is not None:
+                tag = op.get("session") or (op.get("args") or {}).get("session")
+                in_window = (win_start is not None and ts >= win_start
+                             and (win_end is None or ts < win_end))
+                if tag != session and not in_window:
+                    continue
+            entries += 1
+            verb = op.get("verb") or "?"
+            for ref in touched_node_ids(op):
+                rec = per.setdefault(ref, {"ref": ref, "verbs": {}, "touches": 0,
+                                           "first_ts": ts, "last_ts": ts})
+                rec["touches"] += 1
+                rec["verbs"][verb] = rec["verbs"].get(verb, 0) + 1
+                rec["first_ts"] = min(rec["first_ts"], ts)
+                rec["last_ts"] = max(rec["last_ts"], ts)
+    touched = sorted(per.values(), key=lambda r: r["last_ts"], reverse=True)
+    out: Dict[str, Any] = {"window": {"start": start, "end": end, "session": session},
+                           "entries": entries, "touched": touched}
+    if win_start is not None:
+        out["session_window"] = {"start": win_start, "end": win_end}
+    return out
+
+
+async def journal_window_view(
+    gx: GraphHandle,
+    journal_paths: List[str],       # The journals to scan (writes + source, together)
+    *,
+    start: Optional[float] = None,  # Window start (unix ts)
+    end: Optional[float] = None,    # Window end (unix ts; None = OPEN — live mode)
+    session: Optional[str] = None,  # Session key filter
+) -> Dict[str, Any]:  # journal_window result, refs joined to live nodes
+    """The SESSION LENS read verb: `journal_window` + graph join (title/label per ref).
+
+    Prefix refs resolve db-side (the id-prefix convention); a ref whose node no
+    longer exists stays listed with `missing: True` — this is an AUDIT surface
+    (read-parity, DEC 60aae839 theme 4): it must not silently drop what the
+    journal says was touched."""
+    # Function-local: `.projection` imports `.journal` via `.write` — a module-level
+    # import here would cycle (write.py -> projection.py is the existing edge).
+    from .projection import resolve_node_ref
+
+    base = journal_window(journal_paths, start=start, end=end, session=session)
+    out: List[Dict[str, Any]] = []
+    display_nodes: List[Any] = []
+    for rec in base["touched"]:
+        ref = rec["ref"]
+        if len(ref) == 36:
+            node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=ref)
+        else:
+            res = await resolve_node_ref(gx, ref)
+            node = res.get("node") if "candidates" not in res else None
+        item = dict(rec)
+        if node is None:
+            item["missing"] = True
+        else:
+            item["id"] = (node.get("id") if isinstance(node, dict)
+                          else getattr(node, "id", ref))
+            item["label"] = (node.get("label") if isinstance(node, dict)
+                             else getattr(node, "label", None))
+            item["_node"] = node
+            display_nodes.append(node)
+        out.append(item)
+    await annotate_display(gx, display_nodes)
+    for item in out:
+        node = item.pop("_node", None)
+        if node is not None:
+            item["title"] = node_title(node)
+    base["touched"] = out
+    base["missing"] = sum(1 for i in out if i.get("missing"))
+    return base

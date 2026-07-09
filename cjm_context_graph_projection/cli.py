@@ -13,7 +13,9 @@ import os
 import subprocess
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 from cjm_context_graph_layer.ops import extend_graph
 
@@ -26,8 +28,8 @@ from .devgraph import build_dev_graph_elements, notes_corpus_elements
 from .display import set_display_rule
 from .explorer_page import EXPLORER_HTML
 from .factlayer import note_alias_map
-from .journal import (append_write, journal_sourced_note_paths, M3_BASELINE_ACTOR,
-                      m3_baseline_import, replay_journal)
+from .journal import (append_write, journal_sourced_note_paths, journal_window_view,
+                      M3_BASELINE_ACTOR, m3_baseline_import, replay_journal)
 from .listing import list_graph
 from .module_ops import delete_module, flip_notebook_to_py, new_module, regroup, rename_module
 from .onboarding import project_onboarding
@@ -48,7 +50,7 @@ from .source_state import (absorb_authored_text, cutover_module, emit_source_art
 from .structure import add_section, new_note
 from .viz import project_viz
 from .worklist import dangling_reference_sources, worklist
-from .write import add_check, alias, assert_value, decide, link
+from .write import add_check, alias, assert_value, decide, link, register_session
 
 DEFAULT_MEMORY = ("/home/innom-dt/.claude/projects/"
                   "-mnt-SN850X-8TB-EXT4-Projects-GitHub-cj-mills-cjm-substrate/memory")
@@ -232,6 +234,15 @@ async def _dispatch(args) -> int:
                 print("⚠ orphaned-edges needs --journal-path (the link ops to audit)")
                 return 1
             print(render("orphaned-edges", await orphaned_edges(gx, args.journal_path), args.format))
+        elif args.command == "journal-window":
+            paths = [p for p in (args.journal_path, args.source_journal_path) if p]
+            if not paths:
+                print("error: journal-window needs --journal-path (and usually "
+                      "--source-journal-path — code touches live there)", file=sys.stderr)
+                return 1
+            res = await journal_window_view(gx, paths, start=_parse_ts(args.start),
+                                            end=_parse_ts(args.end), session=args.session)
+            print(render("journal-window", res, args.format))
         elif args.command == "list":
             res = await list_graph(gx, label=args.label, predicate=args.predicate,
                                    relation=args.relation, limit=args.limit,
@@ -304,6 +315,22 @@ async def _dispatch(args) -> int:
                 append_write(args.journal_path, "display-rule",
                              {"for_label": args.for_label, "title_template": args.title,
                               "gloss_template": args.gloss, "actor": args.actor})
+            return 1 if res.get("error") else 0
+        elif args.command == "session":
+            started = _parse_ts(args.started_at)
+            if started is None:
+                # A timestamp-form key IS its own start time (the scratchpad convention).
+                try:
+                    started = datetime.strptime(args.key, "%Y-%m-%d_%H-%M-%S").timestamp()
+                except ValueError:
+                    started = None
+            res = await register_session(gx, args.key, started_at=started,
+                                         title=args.title, actor=args.actor)
+            print(render("session", res, args.format))
+            if args.journal_path and res.get("written"):
+                append_write(args.journal_path, "session",
+                             {"key": args.key, "started_at": started, "title": args.title,
+                              "actor": args.actor})
             return 1 if res.get("error") else 0
         elif args.command == "oracle":
             res = await run_version_oracle(gx, repos_dir=args.repos_dir, only=args.only)
@@ -676,6 +703,16 @@ def main() -> int:
                                "replay silently drops after a code rename) + fuzzy remap "
                                "proposals where a label was journaled")
 
+    p_jw = sub.add_parser("journal-window",
+                          help="The session lens: touched-node set for a time window or session "
+                               "key (journal-derived — TOUCHES, not creations; open end = live)")
+    p_jw.add_argument("--start", default=None,
+                      help="Window start (unix ts, YYYY-MM-DD_HH-MM-SS, or YYYY-MM-DD)")
+    p_jw.add_argument("--end", default=None,
+                      help="Window end (same forms; omit = OPEN — the in-progress live window)")
+    p_jw.add_argument("--session", default=None,
+                      help="Filter by session key instead of/alongside time bounds")
+
     p_ls = sub.add_parser("list",
                           help="Enumerate a class: nodes by --label / assertions by --predicate / edges by --relation")
     g_ls = p_ls.add_mutually_exclusive_group(required=True)
@@ -747,6 +784,16 @@ def main() -> int:
     p_dr.add_argument("--gloss", default=None,
                       help="Gloss template: one orientation line (what it says/points to/state)")
     p_dr.add_argument("--actor", default="agent:session")
+
+    p_sn = sub.add_parser("session",
+                          help="Register/update a timestamp-keyed Session node (the session spine; "
+                               "journaled upsert — end-of-session naming = re-register with --title)")
+    p_sn.add_argument("key", help="Stable session key (the start-time timestamp, e.g. 2026-07-08_10-58-13)")
+    p_sn.add_argument("--started-at", default=None,
+                      help="Unix start ts (default: parsed from a timestamp-form key)")
+    p_sn.add_argument("--title", default=None,
+                      help="Human-friendly name (typically asserted at session END)")
+    p_sn.add_argument("--actor", default="agent:session")
 
     p_or = sub.add_parser("oracle", help="Run the version oracle (refresh version slots)")
     p_or.add_argument("--repos-dir", default=DEFAULT_REPOS)
@@ -946,3 +993,22 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+def _parse_ts(value: Optional[str]) -> Optional[float]:  # Unix seconds, or None
+    """Parse a window bound: unix seconds, the session-key timestamp form
+    (YYYY-MM-DD_HH-MM-SS, LOCAL time — the scratchpad convention DEC 6124d8bf),
+    or a bare date YYYY-MM-DD (local midnight)."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        pass
+    for fmt in ("%Y-%m-%d_%H-%M-%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(value, fmt).timestamp()
+        except ValueError:
+            continue
+    raise SystemExit(f"error: can't parse time '{value}' "
+                     "(unix seconds, YYYY-MM-DD_HH-MM-SS, or YYYY-MM-DD)")

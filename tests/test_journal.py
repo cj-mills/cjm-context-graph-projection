@@ -2,7 +2,8 @@
 
 import json
 
-from cjm_context_graph_projection.journal import append_write, read_journal
+from cjm_context_graph_projection.journal import (append_write, journal_window, read_journal,
+                                                  touched_node_ids)
 from cjm_context_graph_projection.render import render
 
 
@@ -141,3 +142,88 @@ def test_render_reconcile_memory_human():
         "absorbed": [{"slug": "n", "anchor": "beta", "backup": "/n.md.bak",
                       "prior_bytes": 3, "new_bytes": 3}]}, "human")
     assert "beta" in drifty and "absorbed" in drifty
+
+
+def test_append_write_stamps_session_from_env(tmp_path, monkeypatch):
+    """The cutover mechanic (DEC 6124d8bf): CJM_SESSION stamps every append TOP-LEVEL;
+    absent env = no stamp (pre-cutover shape); dedup stays session-blind."""
+    p = str(tmp_path / "j.jsonl")
+    monkeypatch.delenv("CJM_SESSION", raising=False)
+    assert append_write(p, "link", {"source_id": "a", "target_id": "b", "relation": "R"})
+    monkeypatch.setenv("CJM_SESSION", "2026-07-08_10-58-13")
+    assert append_write(p, "link", {"source_id": "c", "target_id": "d", "relation": "R"})
+    # dedup compares (verb, args) only — the same op in a NEW session is still a duplicate
+    assert not append_write(p, "link", {"source_id": "a", "target_id": "b", "relation": "R"})
+    ops = read_journal(p)
+    assert len(ops) == 2
+    assert "session" not in ops[0]
+    assert ops[1]["session"] == "2026-07-08_10-58-13"
+
+
+def test_touched_node_ids_per_verb():
+    """The session-lens feed derives TOUCHES per verb: id-shaped args collected,
+    natural keys re-derived exactly as the verbs derive them, names omitted."""
+    assert touched_node_ids({"verb": "link", "args": {
+        "source_id": "aaa111", "target_id": "bbb222", "relation": "R"}}) == ["aaa111", "bbb222"]
+    assert touched_node_ids({"verb": "check", "args": {"item_id": "ccc333"}}) == ["ccc333"]
+    # an assert on a NAME-shaped subject contributes nothing; id-shaped does
+    assert touched_node_ids({"verb": "assert", "args": {"subject": "TaskAdapter"}}) == []
+    assert touched_node_ids({"verb": "assert", "args": {"subject": "2026-06-25"}}) == []
+    assert touched_node_ids({"verb": "assert", "args": {"subject": "60aae839"}}) == ["60aae839"]
+    # a decide derives its deterministic Decision id (+ its session node when tagged)
+    got = touched_node_ids({"verb": "decide", "args": {"statement": "S.", "session": "k"}})
+    assert len(got) == 2 and all(len(x) == 36 for x in got)
+    # a source-journal op maps to its CodeModule
+    got = touched_node_ids({"verb": "source", "args": {
+        "repo_key": "r", "module_path": "p/m.py", "import_name": "p.m", "text": "x = 1"}})
+    assert len(got) == 1 and len(got[0]) == 36
+    # a session op maps to its Session node
+    assert len(touched_node_ids({"verb": "session", "args": {"key": "2026-07-08_10-58-13"}})) == 1
+
+
+def test_journal_window_time_and_session_filters(tmp_path, monkeypatch):
+    """The declarative window (lens invariant 1): time bounds, open end = live,
+    session filter spans the stamp AND the pre-cutover decide args fallback."""
+    p = str(tmp_path / "j.jsonl")
+    monkeypatch.delenv("CJM_SESSION", raising=False)
+    append_write(p, "link", {"source_id": "aaa111", "target_id": "bbb222", "relation": "R"})
+    append_write(p, "decide", {"statement": "Old.", "session": "old-key"})  # pre-cutover shape
+    monkeypatch.setenv("CJM_SESSION", "new-key")
+    append_write(p, "check", {"item_id": "ccc333", "text": "t"})
+    ops = read_journal(p)
+
+    win = journal_window([p])  # open both ends = everything
+    assert win["entries"] == 3
+    refs = {t["ref"] for t in win["touched"]}
+    assert {"aaa111", "bbb222", "ccc333"} <= refs
+
+    win = journal_window([p], end=ops[0]["ts"])  # closed end excludes later ops
+    assert win["entries"] == 1
+
+    win = journal_window([p], start=ops[-1]["ts"])  # open end = live tail
+    assert win["entries"] == 1 and win["touched"][0]["ref"] == "ccc333"
+
+    # session filter: the top-level stamp AND a decide's args.session both match
+    assert journal_window([p], session="new-key")["entries"] == 1
+    assert journal_window([p], session="old-key")["entries"] == 1
+    assert journal_window([p], session="nope")["entries"] == 0
+
+    # WINDOW resolution (DEC 6124d8bf leg 2): a registered timestamp-keyed session
+    # matches HISTORICAL (untagged) ops by [started_at, next start) — and the last
+    # registered session's window is open (in progress)
+    monkeypatch.delenv("CJM_SESSION", raising=False)
+    t0, mid = ops[0]["ts"], (ops[1]["ts"] + ops[2]["ts"]) / 2
+    append_write(p, "session", {"key": "w1", "started_at": t0 - 1.0})
+    append_write(p, "session", {"key": "w2", "started_at": mid})
+    w1 = journal_window([p], session="w1")
+    assert w1["entries"] == 2  # ops 0+1 fall in [t0-1, mid), tagged or not
+    assert w1["session_window"] == {"start": t0 - 1.0, "end": mid}
+    w2 = journal_window([p], session="w2")
+    assert w2["session_window"]["end"] is None  # last registered = open, in progress
+    assert w2["entries"] == 3  # op 2 + the two session registrations themselves
+
+    # touch aggregation: repeat touches accumulate per verb, last_ts advances
+    append_write(p, "check", {"item_id": "ccc333", "text": "t2"})
+    rec = next(t for t in journal_window([p])["touched"] if t["ref"] == "ccc333")
+    assert rec["touches"] == 2 and rec["verbs"] == {"check": 2}
+    assert rec["last_ts"] >= rec["first_ts"]

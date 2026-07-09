@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Dict, List, Optional
 
 from .authoring import read_node
+from .journal import journal_window_view
 from .listing import list_graph
 from .projection import get_schema, graph_overview, grep, locate, relevant, show
 from .runtime import DEFAULT_MANIFESTS, GraphHandle, open_graph
@@ -119,6 +120,19 @@ def build_app(
     async def api_grep(name: str, term: str, limit: int = 25) -> Dict[str, Any]:
         return await _timed(name, "grep", grep(_gx(name), term, limit=limit))
 
+    @app.get("/api/g/{name}/journal-window")
+    async def api_journal_window(name: str, start: Optional[float] = None,
+                                 end: Optional[float] = None,
+                                 session: Optional[str] = None) -> Dict[str, Any]:
+        gx = _gx(name)
+        journals = _sibling_journals(paths[name])
+        if not journals:
+            raise HTTPException(404, f"no journals found beside {paths[name]!r} "
+                                     "(the db has no sibling *.writes/*.source .jsonl)")
+        return await _timed(name, "journal-window",
+                            journal_window_view(gx, journals, start=start, end=end,
+                                                session=session))
+
     @app.get("/api/g/{name}/list")
     async def api_list(name: str, label: str, limit: int = 100, offset: int = 0,
                        contains: Optional[str] = None) -> Dict[str, Any]:
@@ -157,3 +171,13 @@ async def serve_graphs(
         for n, p in names.items():
             print(f"[graph-serve]   {n} <- {p}", file=sys.stderr)
         await uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="warning")).serve()
+
+
+def _sibling_journals(db_path: str) -> List[str]:  # Existing journal files beside the db
+    """The db's journal files by the sibling-naming convention (`<stem>.writes.jsonl` +
+    `<stem>.source.jsonl`) — the db is a projection OF these, so they are the honest
+    data path for the journal-window (session lens) endpoint. Existence-checked: a
+    journal-less graph (e.g. a capability graph) simply serves no window."""
+    stem = Path(db_path).with_suffix("")
+    return [str(p) for p in (Path(f"{stem}.writes.jsonl"), Path(f"{stem}.source.jsonl"))
+            if p.exists()]

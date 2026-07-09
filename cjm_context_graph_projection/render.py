@@ -6,6 +6,7 @@ two surfaces — correctness/chainability over token-economy for v1.
 """
 
 import json
+from datetime import datetime
 from typing import Any, Dict
 
 
@@ -39,6 +40,45 @@ def _handle_cmd(handle: Dict[str, Any]) -> str:
 
 def _human(kind: str, obj: Dict[str, Any]) -> str:
     """Render a result dict as markdown, dispatched on the command kind."""
+    if kind == "session":
+        if obj.get("error"):
+            return f"⚠ {obj['error']}"
+        verb = "updated" if obj.get("updated") else "registered"
+        lines = [f"**session {verb}:** `{obj.get('key')}`", f"`{obj.get('session_id')}`"]
+        if obj.get("started_at") is not None:
+            lines.append(f"started {_fmt_ts(obj['started_at'])}")
+        if obj.get("title"):
+            lines.append(f"title: {obj['title']}")
+        return "\n".join(lines)
+    if kind == "journal-window":
+        w = obj.get("window", {})
+        parts = []
+        if w.get("session"):
+            parts.append(f"session `{w['session']}`")
+        if w.get("start") is not None:
+            parts.append(f"from {_fmt_ts(w['start'])}")
+        sw = obj.get("session_window")
+        if sw and w.get("start") is None and w.get("end") is None:
+            parts.append(f"window {_fmt_ts(sw['start'])} -> "
+                         + (_fmt_ts(sw["end"]) if sw.get("end") is not None
+                            else "NOW (in progress)"))
+        else:
+            parts.append(f"to {_fmt_ts(w['end'])}" if w.get("end") is not None
+                         else "to NOW (open — live)")
+        touched = obj.get("touched", [])
+        missing = f" · {obj['missing']} missing from graph" if obj.get("missing") else ""
+        lines = [f"## Journal window — {' · '.join(parts)}",
+                 f"_{obj.get('entries', 0)} journaled op(s) · {len(touched)} node(s) "
+                 f"touched{missing}_", ""]
+        for t in touched:
+            verbs = ", ".join(f"{v}×{n}" for v, n in sorted(t.get("verbs", {}).items()))
+            mark = "⚠ MISSING " if t.get("missing") else ""
+            title = t.get("title") or t.get("ref")
+            label = f" · _{t['label']}_" if t.get("label") else ""
+            lines.append(f"- {mark}**{title}**{label} `{t.get('id', t['ref'])}`")
+            lines.append(f"    ↳ {t.get('touches', 0)} touch(es): {verbs} · "
+                         f"last {_fmt_ts(t.get('last_ts'))}")
+        return "\n".join(lines)
     if kind == "schema":
         labels = obj.get("node_labels", [])
         counts = obj.get("counts", {})
@@ -703,3 +743,12 @@ def render(
     if fmt == "agent":
         return json.dumps(obj, indent=2, default=str)
     return _human(kind, obj)
+
+
+def _fmt_ts(ts: Any) -> str:  # Local wall-clock string, or the raw value
+    """Unix seconds -> human-readable local time (the read-parity floor: raw
+    floats are data, humans read wall-clock)."""
+    try:
+        return datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError, OSError):
+        return str(ts)

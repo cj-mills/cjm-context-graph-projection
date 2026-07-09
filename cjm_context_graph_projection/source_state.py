@@ -38,6 +38,7 @@ same key would revive it (generic supersession, not a special case).
 
 import ast
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -262,9 +263,9 @@ def append_retire(
     is audit-only (replay keys off repo_key+module_path)."""
     if (repo_key, module_path) not in latest_source_ops(path):
         return False
-    record = {"verb": "retire", "ts": time.time(),
-              "args": {"repo_key": repo_key, "module_path": module_path,
-                       "superseded_by": superseded_by}}
+    record = _stamp_session({"verb": "retire", "ts": time.time(),
+                             "args": {"repo_key": repo_key, "module_path": module_path,
+                                      "superseded_by": superseded_by}})
     with Path(path).open("a") as f:
         f.write(json.dumps(record, sort_keys=True) + "\n")
     return True
@@ -281,9 +282,9 @@ def append_source(
     cur = latest_source_ops(path).get((repo_key, module_path))
     if cur is not None and cur.get("text") == text:
         return False
-    record = {"verb": "source", "ts": time.time(),
-              "args": {"repo_key": repo_key, "module_path": module_path,
-                       "import_name": import_name, "text": text}}
+    record = _stamp_session({"verb": "source", "ts": time.time(),
+                             "args": {"repo_key": repo_key, "module_path": module_path,
+                                      "import_name": import_name, "text": text}})
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     with p.open("a") as f:
@@ -375,8 +376,8 @@ def cutover_module(
         Path(file_path).parent.mkdir(parents=True, exist_ok=True)
         Path(file_path).write_text(journaled)
         artifact_written = True
-    record = {"verb": "cutover", "ts": time.time(),
-              "args": {"repo_key": repo_key, "module_path": module_path}}
+    record = _stamp_session({"verb": "cutover", "ts": time.time(),
+                             "args": {"repo_key": repo_key, "module_path": module_path}})
     with Path(source_journal_path).open("a") as f:
         f.write(json.dumps(record, sort_keys=True) + "\n")
     return {"repo_key": repo_key, "module_path": module_path,
@@ -486,3 +487,16 @@ def source_check(
             "file_drift": drifted, "roundtrip_stable": stable,
             "regen_clean": regen_clean,
             "clean": drifted == 0 and stable == len(modules) and len(modules) > 0}
+
+
+def _stamp_session(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Stamp the active session key (`CJM_SESSION`) on a source-journal record.
+
+    The source-journal twin of `journal.current_session` stamping (DEC 6124d8bf) —
+    kept LOCAL because this module is deliberately a LEAF (authoring imports FROM
+    it; a `.journal` import here would cycle). Stamped top-level so source replay
+    and latest-state folding stay session-blind; the session lens reads it."""
+    session = os.environ.get("CJM_SESSION") or None
+    if session:
+        record["session"] = session
+    return record

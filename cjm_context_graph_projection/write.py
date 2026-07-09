@@ -383,3 +383,42 @@ async def author_section(
     await graph_task(gx.queue, gx.graph_id, "update_node", node_id=section_id, properties=merge)
     return {"slug": slug, "anchor": anchor, "section_id": section_id, "actor": actor,
             "unchanged": unchanged, "written": True}
+
+
+async def register_session(
+    gx: GraphHandle,
+    key: str,           # Stable session key (the start-time timestamp, e.g. 2026-07-08_10-58-13)
+    *,
+    started_at: Optional[float] = None,  # Unix start time (the window anchor; end is DERIVED, never stored)
+    title: Optional[str] = None,         # Human-friendly name — asserted at session END, like decision titles
+    actor: str = "agent:session",
+) -> Dict[str, Any]:  # The write result
+    """Register/update a timestamp-keyed Session node — the session SPINE (DEC 6124d8bf).
+
+    Upsert like `set_display_rule` (sessions are data, not content): the journal's last
+    `session` op per key wins on replay, so end-of-session naming is an ordinary
+    re-register with --title. Existing properties are MERGED — a later title write must
+    not clobber `started_at`. The window's END is derived at read time (next session's
+    start / last write), never stored: a stored end would drift from the journal it
+    summarizes. Pre-spine NAMED Sessions stay as phases (PHASE_OF), not competitors."""
+    sess = SessionNode(key=key, title=title or "")
+    node = sess.to_graph_node()
+    props = node["properties"]
+    props["actor"] = actor
+    if started_at is not None:
+        props["started_at"] = float(started_at)
+    if title:
+        props["display_title"] = title
+    existing = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=sess.id)
+    if existing is not None:
+        cur = (existing.get("properties") if isinstance(existing, dict)
+               else getattr(existing, "properties", None)) or {}
+        merged = dict(cur)
+        merged.update(props)
+        await graph_task(gx.queue, gx.graph_id, "update_node", node_id=sess.id,
+                         properties=merged)
+        return {"session_id": sess.id, "key": key, "updated": True, "written": True,
+                "started_at": merged.get("started_at"), "title": merged.get("display_title")}
+    await extend_graph(gx.queue, gx.graph_id, [node], [])
+    return {"session_id": sess.id, "key": key, "updated": False, "written": True,
+            "started_at": props.get("started_at"), "title": title or None}
