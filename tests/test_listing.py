@@ -67,3 +67,36 @@ def test_parse_where_and_true_total_render():
     out = render("list", obj, "human")
     assert "(1 of 40 — window; page with --offset)" in out
     assert "[note_type=feedback]" in out
+
+
+def test_list_label_rows_carry_durable_key(tmp_path):
+    """Label rows expose a node's `key` property — a picker/consumer must bind the
+    DURABLE key, never the display title (titling a Session had silently replaced
+    the explorer session-picker's filter value with a string no journal op carries)."""
+    from pathlib import Path
+
+    import pytest
+
+    from cjm_context_graph_layer.ops import extend_graph
+    from cjm_context_graph_projection.runtime import (DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS,
+                                                      open_graph)
+    if not (Path(DEFAULT_MANIFESTS) / f"{DEFAULT_GRAPH_ID}.json").exists():
+        pytest.skip(f"graph capability {DEFAULT_GRAPH_ID!r} not installed")
+
+    titled = {"id": "aaaaaaaa-0000-5000-8000-00000000000a", "label": "Session",
+              "properties": {"key": "2026-07-08_10-58-13", "started_at": 1.0,
+                             "title": "check-in-1: shipped"}, "sources": []}
+    untitled = {"id": "bbbbbbbb-0000-5000-8000-00000000000b", "label": "Session",
+                "properties": {"key": "2026-07-08_18-30-35", "started_at": 2.0},
+                "sources": []}
+
+    async def go():
+        db = str(tmp_path / "g.db")
+        async with open_graph(db) as gx:
+            await extend_graph(gx.queue, gx.graph_id, [titled, untitled], [])
+            return await list_graph(gx, label="Session")
+
+    rows = {r["id"]: r for r in asyncio.run(go())["rows"]}
+    assert rows[titled["id"]]["key"] == "2026-07-08_10-58-13"       # key survives titling
+    assert rows[titled["id"]]["title"] == "check-in-1: shipped"     # title stays display-only
+    assert rows[untitled["id"]]["key"] == "2026-07-08_18-30-35"

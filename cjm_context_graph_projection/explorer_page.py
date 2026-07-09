@@ -447,10 +447,17 @@ EXPLORER_HTML = r"""<!doctype html>
   async function loadSessions() {
     try {
       const res = await api('/api/g/' + graph + '/list?label=Session&limit=100', 'list');
+      // Bind the option VALUE to the session KEY — journal ops are stamped with the
+      // key, so a titled session's display title must never become the filter value.
+      // Sort by key (timestamps) so titling a session doesn't reshuffle the list.
       const rows = (res.rows || []).slice()
-        .sort((a, b) => String(b.title).localeCompare(String(a.title)));
+        .sort((a, b) => String(b.key || b.title).localeCompare(String(a.key || a.title)));
       $('sess-pick').innerHTML = '<option value="">— pick a session —</option>'
-        + rows.map(r => '<option>' + esc(r.title) + '</option>').join('');
+        + rows.map(r => {
+            const key = r.key || r.title;
+            const label = (r.key && r.title !== r.key) ? r.key + ' · ' + r.title : key;
+            return '<option value="' + esc(key) + '">' + esc(label) + '</option>';
+          }).join('');
     } catch (e) { /* a graph without Session nodes is fine — the picker stays empty */ }
   }
 

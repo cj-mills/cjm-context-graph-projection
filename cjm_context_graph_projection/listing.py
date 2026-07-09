@@ -74,7 +74,11 @@ async def _list_label(gx: GraphHandle, label: str, limit: int, offset: int = 0,
                   if preds else
                   (await F.load_label(gx, label, limit=offset + limit))[offset:offset + limit])
         await annotate_display(gx, window)
+    # `key` rides along where the node carries one (Session keys, Lens slugs):
+    # a picker/consumer must bind the DURABLE key, never the display title —
+    # titles are presentation and may change under it (the session-picker lesson).
     rows = [{"id": F.nid(n), "title": node_title(n), "path": F.prop(n, "path"),
+             **({"key": F.prop(n, "key")} if F.prop(n, "key") is not None else {}),
              **({"gloss": F.prop(n, "display_gloss")} if F.prop(n, "display_gloss") else {})}
             for n in window]
     return {"mode": "label", "key": label, "rows": rows, "count": len(rows),
