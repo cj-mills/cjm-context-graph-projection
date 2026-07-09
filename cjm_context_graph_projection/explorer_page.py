@@ -383,6 +383,7 @@ EXPLORER_HTML = r"""<!doctype html>
 
   async function doSearch(q) {
     clearErr();
+    resultsOwner = 'search';
     $('ov').style.display = 'none';
     const out = $('results');
     out.style.display = 'block';
@@ -405,6 +406,7 @@ EXPLORER_HTML = r"""<!doctype html>
 
   async function doList(label, offset = 0, contains = '') {
     clearErr();
+    resultsOwner = 'list';
     $('ov').style.display = 'none';
     const out = $('results');
     out.style.display = 'block';
@@ -431,6 +433,11 @@ EXPLORER_HTML = r"""<!doctype html>
 
   // --- Session lens (journal-window): the journal is the data path, not created_at ---
   let liveTimer = null;
+  // #results is a SHARED pane (search / list / session window all render into it).
+  // A live loop may only refresh the view that owns the pane RIGHT NOW — a timer
+  // keyed on mere visibility stomps whatever the user navigated to (the lens
+  // lesson: live re-evaluation is scoped to the view instance that requested it).
+  let resultsOwner = null;
   const parseTs = s => {
     s = (s || '').trim();
     if (!s) return null;
@@ -472,6 +479,7 @@ EXPLORER_HTML = r"""<!doctype html>
     const key = $('sess-pick').value;
     if (key) qs.push('session=' + encodeURIComponent(key));
     if (!qs.length) { fail(new Error('session window: pick a session or give a start time')); return; }
+    resultsOwner = 'window';
     $('ov').style.display = 'none';
     const out = $('results');
     out.style.display = 'block';
@@ -498,6 +506,7 @@ EXPLORER_HTML = r"""<!doctype html>
     $('focus').textContent = ''; cy.elements().remove();
     closeDetail();
     $('relsh3').style.display = 'none'; $('rels').innerHTML = '';
+    resultsOwner = null;
     $('results').style.display = 'none'; $('ov').style.display = 'block'; $('q').value = '';
     if (push) history.pushState(null, '', '?g=' + name);
     try { renderOverview(await api('/api/g/' + name + '/overview', 'overview')); }
@@ -559,7 +568,10 @@ EXPLORER_HTML = r"""<!doctype html>
         if ($('sess-live').checked)
           liveTimer = setInterval(() => {
             // Re-evaluate only an OPEN window (live mode = declarative re-evaluation)
-            if ($('results').style.display !== 'none' && !$('sess-end').value.trim()) doWindow();
+            // AND only while the window view still owns the shared results pane —
+            // a search/list the user navigated to must never be stomped by a tick.
+            if (resultsOwner === 'window' && $('results').style.display !== 'none'
+                && !$('sess-end').value.trim()) doWindow();
           }, 5000);
       };
       for (const k of ['spacing', 'repulsion', 'separation']) {
