@@ -9,13 +9,14 @@ vs markdown.
 
 import argparse
 import asyncio
+import json
 import os
 import subprocess
 import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 from cjm_context_graph_layer.ops import extend_graph
 
@@ -30,6 +31,7 @@ from .explorer_page import EXPLORER_HTML
 from .factlayer import note_alias_map
 from .journal import (append_write, journal_sourced_note_paths, journal_window_view,
                       M3_BASELINE_ACTOR, m3_baseline_import, replay_journal)
+from .lens import apply_lens, set_lens
 from .listing import list_graph
 from .module_ops import delete_module, flip_notebook_to_py, new_module, regroup, rename_module
 from .onboarding import project_onboarding
@@ -251,7 +253,7 @@ async def _dispatch(args) -> int:
             res = await list_graph(gx, label=args.label, predicate=args.predicate,
                                    relation=args.relation, limit=args.limit,
                                    offset=args.offset, contains=args.contains,
-                                   where=args.where)
+                                   where=args.where, value=args.value)
             print(render("list", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "conventions":
@@ -319,6 +321,41 @@ async def _dispatch(args) -> int:
                 append_write(args.journal_path, "display-rule",
                              {"for_label": args.for_label, "title_template": args.title,
                               "gloss_template": args.gloss, "actor": args.actor})
+            return 1 if res.get("error") else 0
+        elif args.command == "set-lens":
+            if args.spec_file:
+                spec_text = Path(args.spec_file).read_text()
+            elif args.spec:
+                spec_text = args.spec
+            else:
+                print("error: set-lens needs --spec '<json>' or --spec-file", file=sys.stderr)
+                return 1
+            try:
+                spec = json.loads(spec_text)
+            except json.JSONDecodeError as e:
+                print(f"error: spec is not valid JSON: {e}", file=sys.stderr)
+                return 1
+            res = await set_lens(gx, args.slug, spec, title=args.title,
+                                 description=args.description, actor=args.actor)
+            print(render("set-lens", res, args.format))
+            # Lens vocabulary is journal-sourced like display-rule: the last
+            # set-lens op per slug wins on replay (deterministic-id upsert).
+            if args.journal_path and res.get("written"):
+                append_write(args.journal_path, "set-lens",
+                             {"slug": args.slug, "spec": spec, "title": args.title,
+                              "description": args.description, "actor": args.actor})
+            return 1 if res.get("error") else 0
+        elif args.command == "lens":
+            params: Dict[str, str] = {}
+            for kv in (args.param or []):
+                if "=" not in kv:
+                    print(f"error: --param wants NAME=VALUE (got {kv!r})", file=sys.stderr)
+                    return 1
+                k, v = kv.split("=", 1)
+                params[k] = v
+            paths = [p for p in (args.journal_path, args.source_journal_path) if p]
+            res = await apply_lens(gx, args.slug, params, journal_paths=paths or None)
+            print(render("lens", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "session":
             started = _parse_ts(args.started_at)
@@ -729,6 +766,28 @@ def main() -> int:
     p_sg.add_argument("--cap", type=int, default=500,
                       help="Expansion node budget — the given refs are never dropped (default 500)")
 
+    p_le = sub.add_parser("lens",
+                          help="APPLY a graph-carried lens: bind params, union its selection "
+                               "clauses through the real read verbs, project via the bulk "
+                               "subgraph read (READ verb; author lenses with set-lens)")
+    p_le.add_argument("slug", help="The lens's durable key (list them: list --label Lens)")
+    p_le.add_argument("--param", action="append", metavar="NAME=VALUE",
+                      help="Bind a declared param (repeatable; timestamp params take unix "
+                           "seconds, YYYY-MM-DD_HH-MM-SS, or YYYY-MM-DD)")
+
+    p_sle = sub.add_parser("set-lens",
+                           help="Author/update a graph-carried Lens (journaled upsert-by-slug, "
+                                "parse-validated v1 shape: params/selection/expand/view — a bad "
+                                "spec never lands)")
+    p_sle.add_argument("slug", help="The lens's durable key (consumers bind THIS, never the title)")
+    p_sle.add_argument("--spec", default=None,
+                       help="JSON: {params:[{name,type,required?,default?}], "
+                            "selection:[{verb,args}], expand:{hops,relations?}?, view:{...}?}")
+    p_sle.add_argument("--spec-file", default=None, help="Read the spec JSON from a file")
+    p_sle.add_argument("--title", default=None, help="Display title (presentation only)")
+    p_sle.add_argument("--description", default=None, help="One orientation line for the shelf")
+    p_sle.add_argument("--actor", default="agent:session")
+
     p_ls = sub.add_parser("list",
                           help="Enumerate a class: nodes by --label / assertions by --predicate / edges by --relation")
     g_ls = p_ls.add_mutually_exclusive_group(required=True)
@@ -744,6 +803,9 @@ def main() -> int:
                       help="Label mode: property equality filter, server-side (repeatable, "
                            "ANDed; dotted PROP paths descend nested JSON — e.g. "
                            "--where note_type=feedback)")
+    p_ls.add_argument("--value", default=None,
+                      help="Predicate mode: keep only assertions with this value (the register "
+                           "read — e.g. --predicate role --value north-star)")
 
     p_wl = sub.add_parser("worklist", help="Propose/confirm queue (dangling refs, soft conflicts)")
     p_wl.add_argument("--memory-dir", default=DEFAULT_MEMORY,

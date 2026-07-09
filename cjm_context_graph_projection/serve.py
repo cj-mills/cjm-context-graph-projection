@@ -29,6 +29,7 @@ from typing import Any, Awaitable, Dict, List, Optional
 
 from .authoring import read_node
 from .journal import journal_window_view
+from .lens import apply_lens, load_lenses
 from .listing import list_graph
 from .projection import get_schema, graph_overview, grep, locate, relevant, show, subgraph_view
 from .runtime import DEFAULT_MANIFESTS, GraphHandle, open_graph
@@ -75,7 +76,7 @@ def build_app(
     envelope. `overview` composes `get_schema` (the discovered ontology: labels, relations,
     counts) with `graph_overview` hubs over ALL discovered labels — the generic boot view
     (the curated Note-only hub view stays `onboarding`'s business)."""
-    from fastapi import FastAPI, HTTPException
+    from fastapi import FastAPI, HTTPException, Request
     from fastapi.responses import HTMLResponse
 
     app = FastAPI(title="cjm-context-graph explorer", docs_url=None, redoc_url=None)
@@ -141,6 +142,24 @@ def build_app(
             raise HTTPException(422, "ids: pass a comma-separated node id/prefix list")
         return await _timed(name, "subgraph",
                             subgraph_view(_gx(name), refs, hops=hops, cap=cap))
+
+    @app.get("/api/g/{name}/lenses")
+    async def api_lenses(name: str) -> Dict[str, Any]:
+        gx = _gx(name)
+
+        async def go() -> Dict[str, Any]:
+            return {"lenses": await load_lenses(gx)}
+
+        return await _timed(name, "lenses", go())
+
+    @app.get("/api/g/{name}/lens/{slug}")
+    async def api_lens(name: str, slug: str, request: Request) -> Dict[str, Any]:
+        # Every query param is a lens param binding (the lens declares + validates
+        # its own names, so the endpoint stays schema-free).
+        params = dict(request.query_params)
+        return await _timed(name, "lens",
+                            apply_lens(_gx(name), slug, params,
+                                       journal_paths=_sibling_journals(paths[name]) or None))
 
     @app.get("/api/g/{name}/list")
     async def api_list(name: str, label: str, limit: int = 100, offset: int = 0,

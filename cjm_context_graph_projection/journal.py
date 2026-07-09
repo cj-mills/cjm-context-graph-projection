@@ -29,6 +29,7 @@ from cjm_dev_graph_schema.nodes import DecisionNode
 from cjm_markdown_decompose_core.extract import note_from_file
 
 from .display import display_rule_node_id, set_display_rule
+from .lens import lens_node_id, set_lens
 from .runtime import GraphHandle
 from .structure import add_section, reconstruct_note
 from .write import add_check, alias, assert_value, author_section, decide, link, register_session
@@ -54,7 +55,7 @@ M3_BASELINE_ACTOR = "import:m3-baseline"
 # deterministic per-key id (started_at + optional title; last op wins on replay, like
 # display-rule). Window END is derived at read time, never stored.
 JOURNAL_VERBS = ("decide", "alias", "assert", "link", "section", "new-note", "add-section",
-                 "display-rule", "check", "session")
+                 "display-rule", "set-lens", "check", "session")
 
 
 def read_journal(
@@ -209,6 +210,11 @@ async def _apply_op(gx: GraphHandle, op: Dict[str, Any]) -> str:
         # the append-ordered ops converges on the LAST authored rule per kind.
         await set_display_rule(gx, a["for_label"], a.get("title_template"),
                                a.get("gloss_template"), actor=a.get("actor", "agent:session"))
+    elif verb == "set-lens":
+        # Lens vocabulary (tier 2): upsert by deterministic per-slug id — replay
+        # converges on the LAST authored spec per slug, like display-rule.
+        await set_lens(gx, a["slug"], a["spec"], title=a.get("title"),
+                       description=a.get("description"), actor=a.get("actor", "agent:session"))
     elif verb == "session":
         # Session spine: upsert the timestamp-keyed Session node (started_at/title are
         # last-op-wins on replay, like display-rule — sessions are data, not content).
@@ -332,6 +338,9 @@ def touched_node_ids(
     elif verb == "display-rule":
         if a.get("for_label"):
             out.append(display_rule_node_id(a["for_label"]))
+    elif verb == "set-lens":
+        if a.get("slug"):
+            out.append(lens_node_id(a["slug"]))
     elif verb == "session":
         if a.get("key"):
             out.append(session_node_id(a["key"]))

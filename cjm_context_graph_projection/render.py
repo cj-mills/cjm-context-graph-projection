@@ -7,7 +7,7 @@ two surfaces — correctness/chainability over token-economy for v1.
 
 import json
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 
 def _short(text: Any, limit: int = 160) -> str:
@@ -38,37 +38,69 @@ def _handle_cmd(handle: Dict[str, Any]) -> str:
     return f'explore "{handle.get("task")}" {flags}'.rstrip()
 
 
+def _subgraph_lines(obj: Dict[str, Any]) -> List[str]:
+    """The shared body of a subgraph_view result (subgraph AND lens renders):
+    the count line, loud missing/ambiguous warnings, node rows, edge rows."""
+    nodes, edges = obj.get("nodes", []), obj.get("edges", [])
+    expanded = obj.get("expanded_count", 0)
+    lines = [(f"_{len(nodes)} node(s) ({obj.get('seed_count', 0)} seed"
+              + (f" + {expanded} expanded" if expanded else "") + ")"
+              + f" · {len(edges)} interconnecting edge(s)"
+              + (" · expansion TRUNCATED at --cap" if obj.get("truncated") else "")
+              + "_"), ""]
+    for ref in obj.get("missing", []):
+        lines.append(f"- ⚠ MISSING `{ref}` — no node resolves")
+    for a in obj.get("ambiguous", []):
+        cands = "; ".join(f"{c['id']} ({c.get('label')})" for c in a.get("candidates", []))
+        lines.append(f"- ⚠ AMBIGUOUS `{a['ref']}` — candidates: {cands}")
+    title_of: Dict[str, str] = {}
+    for n in nodes:
+        title_of[n["id"]] = n.get("title") or n["id"]
+        mark = "↳ " if n.get("expanded") else ""
+        lines.append(f"- {mark}**{_short(n.get('title'), 110)}** · _{n.get('label')}_ `{n['id']}`")
+    if edges:
+        lines += ["", "**Edges:**"]
+        for e in edges:
+            src, tgt = e.get("source_id"), e.get("target_id")
+            lines.append(f"- **{_short(title_of.get(src, src), 50)}** "
+                         f"—{e.get('relation_type')}→ "
+                         f"**{_short(title_of.get(tgt, tgt), 50)}**")
+    return lines
+
+
 def _human(kind: str, obj: Dict[str, Any]) -> str:
     """Render a result dict as markdown, dispatched on the command kind."""
     if kind == "subgraph":
         if obj.get("error"):
             return f"⚠ {obj['error']}"
-        nodes, edges = obj.get("nodes", []), obj.get("edges", [])
-        expanded = obj.get("expanded_count", 0)
-        head = (f"_{len(nodes)} node(s) ({obj.get('seed_count', 0)} seed"
-                + (f" + {expanded} expanded" if expanded else "") + ")"
-                + f" · {len(edges)} interconnecting edge(s)"
-                + (" · expansion TRUNCATED at --cap" if obj.get("truncated") else "")
-                + "_")
-        lines = ["## Subgraph", head, ""]
-        for ref in obj.get("missing", []):
-            lines.append(f"- ⚠ MISSING `{ref}` — no node resolves")
-        for a in obj.get("ambiguous", []):
-            cands = "; ".join(f"{c['id']} ({c.get('label')})" for c in a.get("candidates", []))
-            lines.append(f"- ⚠ AMBIGUOUS `{a['ref']}` — candidates: {cands}")
-        title_of: Dict[str, str] = {}
-        for n in nodes:
-            title_of[n["id"]] = n.get("title") or n["id"]
-            mark = "↳ " if n.get("expanded") else ""
-            lines.append(f"- {mark}**{_short(n.get('title'), 110)}** · _{n.get('label')}_ `{n['id']}`")
-        if edges:
-            lines += ["", "**Edges:**"]
-            for e in edges:
-                src, tgt = e.get("source_id"), e.get("target_id")
-                lines.append(f"- **{_short(title_of.get(src, src), 50)}** "
-                             f"—{e.get('relation_type')}→ "
-                             f"**{_short(title_of.get(tgt, tgt), 50)}**")
-        return "\n".join(lines)
+        return "\n".join(["## Subgraph"] + _subgraph_lines(obj))
+    if kind == "lens":
+        if obj.get("error"):
+            out = f"⚠ {obj['error']}"
+            if obj.get("params"):
+                decls = ", ".join(f"{p['name']} ({p.get('type', 'string')}"
+                                  + (", required" if p.get("required") else "") + ")"
+                                  for p in obj["params"])
+                out += f"\n  declares: {decls}"
+            return out
+        head = [f"## Lens `{obj.get('slug')}` — {obj.get('title')}"]
+        if obj.get("description"):
+            head.append(f"_{obj['description']}_")
+        if obj.get("bound"):
+            head.append("params: " + ", ".join(f"{k}={v}" for k, v in obj["bound"].items()))
+        if obj.get("clauses"):
+            head.append("selection: " + " ∪ ".join(f"{c['verb']}×{c['selected']}"
+                                                   for c in obj["clauses"]))
+        view = {k: v for k, v in (obj.get("view") or {}).items() if v}
+        if view:
+            head.append("view: " + ", ".join(f"{k}={v}" for k, v in view.items()))
+        return "\n".join(head + _subgraph_lines(obj))
+    if kind == "set-lens":
+        if obj.get("error"):
+            return f"⚠ {obj['error']}"
+        verb = "updated" if obj.get("updated") else "authored"
+        return (f"**lens {verb}:** `{obj.get('slug')}`\n`{obj.get('lens_id')}`\n"
+                f"_apply it: `lens {obj.get('slug')}`_")
     if kind == "session":
         if obj.get("error"):
             return f"⚠ {obj['error']}"

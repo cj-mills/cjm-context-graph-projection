@@ -87,11 +87,15 @@ async def _list_label(gx: GraphHandle, label: str, limit: int, offset: int = 0,
             "truncated": total > offset + len(rows)}
 
 
-async def _list_predicate(gx: GraphHandle, predicate: str, limit: int) -> Dict[str, Any]:
+async def _list_predicate(gx: GraphHandle, predicate: str, limit: int,
+                          value: Optional[str] = None) -> Dict[str, Any]:
     """Every ACTIVE assertion of `predicate` (subject + value + actor), across all slots.
 
     The readiness-ground-truth read: `list --predicate task_state` shows each work-item's
-    current state. Only non-superseded assertions are reported (the slot's live value)."""
+    current state. Only non-superseded assertions are reported (the slot's live value).
+    `value` narrows to assertions carrying that value — the register read
+    (`list --predicate role --value north-star` = the cohort's subjects), grown as a
+    verb arg per the lens invariant (richer filtering = richer verb args)."""
     assertions = await F.load_assertions(gx)
     supers = await F.load_supersedes(gx)
     hits: List[Dict[str, Any]] = []
@@ -99,6 +103,8 @@ async def _list_predicate(gx: GraphHandle, predicate: str, limit: int) -> Dict[s
         active = F.active_assertions(slot_assertions, supers)
         if active and F.prop(active[0], "predicate") == predicate:
             for a in active:
+                if value is not None and str(F.prop(a, "value")) != value:
+                    continue
                 hits.append({"subject_id": F.prop(a, "subject_id"),
                              "value": F.prop(a, "value"), "actor": F.prop(a, "actor")})
     total = len(hits)
@@ -136,6 +142,7 @@ async def list_graph(
     offset: int = 0,                  # Label mode: window start (page through big kinds)
     contains: Optional[str] = None,   # Label mode: title substring filter (case-insensitive)
     where: Optional[List[str]] = None,  # Label mode: `PROP=VALUE` property filters (repeatable, ANDed, server-side)
+    value: Optional[str] = None,      # Predicate mode: keep only assertions with this value (the register read)
 ) -> Dict[str, Any]:  # {mode, key, rows, count, total, truncated} or {error}
     """Enumerate one CLASS of the graph: nodes by label / assertions by predicate / edges
     by relation. Exactly one of `label`/`predicate`/`relation` selects the mode; `total`
@@ -151,9 +158,11 @@ async def list_graph(
         return {"error": err}
     if preds and mode != "label":
         return {"error": "--where filters node properties — label mode only"}
+    if value is not None and mode != "predicate":
+        return {"error": "--value filters assertion values — predicate mode only"}
     if mode == "label":
         return await _list_label(gx, key, limit, offset=offset, contains=contains,
                                  where=preds)
     if mode == "predicate":
-        return await _list_predicate(gx, key, limit)
+        return await _list_predicate(gx, key, limit, value=value)
     return await _list_relation(gx, key, limit)

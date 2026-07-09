@@ -122,7 +122,7 @@ EXPLORER_HTML = r"""<!doctype html>
   <div id="side">
     <input id="q" placeholder="search — relevant + locate (Enter)">
     <div id="ov"><h3 id="relsh3" style="display:none">Relations</h3><div id="rels"></div>
-      <h3>Kinds</h3><div id="kinds"></div><h3>Hubs</h3><div id="hubs"></div>
+      <h3>Kinds</h3><div id="kinds"></div><h3>Lenses</h3><div id="lenses"></div>
       <h3>Session window</h3><div id="sess">
         <select id="sess-pick" style="width:100%;margin:2px 0"><option value="">— pick a session —</option></select>
         <input id="sess-start" placeholder="start (YYYY-MM-DD[_HH-MM-SS] | unix)" style="width:100%;margin:2px 0">
@@ -177,13 +177,84 @@ EXPLORER_HTML = r"""<!doctype html>
       + '<span class="n">' + n + '</span></div>').join('') || '<div class="kind">none</div>';
     for (const el of $('kinds').children)
       if (el.dataset.k) el.onclick = () => doList(el.dataset.k);
-    const hubs = ov.hubs || [];
-    $('hubs').innerHTML = hubs.map(h =>
-      '<div class="hub" data-id="' + h.id + '"><span class="t">' + short(h.title) + '</span>'
-      + '<span class="m">' + (h.kind || '?') + ' · degree ' + h.degree + '</span></div>').join('')
-      || '<div class="hub">none</div>';
-    for (const el of $('hubs').children)
-      if (el.dataset.id) el.onclick = () => focusNode(el.dataset.id);
+  }
+
+  // --- Lens shelf (DEC f1b02b95): graph-carried views replace the Hubs section.
+  // Built-ins are AUTHORED Lens nodes on each graph, not hardcoded UI; the only
+  // hardcoded floor is raw neighborhood mode (search/focus).
+  async function loadLenses() {
+    try {
+      const res = await api('/api/g/' + graph + '/lenses', 'lenses');
+      const lenses = res.lenses || [];
+      $('lenses').innerHTML = lenses.map((l, i) =>
+        '<div class="hub" style="cursor:default">'
+        + '<span class="t">' + esc(l.title) + '</span>'
+        + (l.description ? '<span class="m">' + esc(l.description) + '</span>' : '')
+        + (l.params || []).map(p =>
+            '<input style="width:100%;box-sizing:border-box;font:inherit;padding:2px 4px;'
+            + 'margin:2px 0" data-lens="' + i + '" data-p="' + esc(p.name) + '" placeholder="'
+            + esc(p.name + (p.type && p.type !== 'string' ? ' (' + p.type + ')' : '')
+                  + (p.required ? ' *' : '')) + '">').join('')
+        + '<div style="display:flex;gap:12px;margin-top:4px">'
+        + '<span style="color:#36c;cursor:pointer" data-apply="' + i + '">apply → results</span>'
+        + '<span style="color:#36c;cursor:pointer" data-canvas="' + i + '">apply → canvas</span></div>'
+        + '</div>').join('') || '<div class="hub">none authored yet (cg-write set-lens)</div>';
+      const paramsOf = i => {
+        const ps = {};
+        for (const inp of $('lenses').querySelectorAll('input[data-lens="' + i + '"]'))
+          if (inp.value.trim()) ps[inp.dataset.p] = inp.value.trim();
+        return ps;
+      };
+      for (const el of $('lenses').querySelectorAll('[data-apply]'))
+        el.onclick = () => doLens(lenses[+el.dataset.apply].slug, paramsOf(+el.dataset.apply), false);
+      for (const el of $('lenses').querySelectorAll('[data-canvas]'))
+        el.onclick = () => doLens(lenses[+el.dataset.canvas].slug, paramsOf(+el.dataset.canvas), true);
+    } catch (e) { $('lenses').innerHTML = ''; }
+  }
+
+  function subgraphElements(res) {
+    // A subgraph_view payload (nodes + interconnecting edges) -> cy elements.
+    const els = (res.nodes || []).map(n => ({ data: {
+      id: n.id, label: short(n.title), full: n.title, kind: n.label || '?',
+      color: kindColor(n.label || '?'), focus: n.expanded ? 0 : 1 } }));
+    for (const e of res.edges || []) {
+      const eid = e.source_id + '|' + e.relation_type + '|' + e.target_id;
+      els.push({ data: { id: eid, source: e.source_id, target: e.target_id,
+                         rel: e.relation_type } });
+    }
+    return els;
+  }
+
+  async function doLens(slug, params, toCanvas) {
+    clearErr();
+    resultsOwner = 'lens';  // each application owns the pane it renders into (a928a0d8)
+    const qs = Object.entries(params || {})
+      .map(([k, v]) => encodeURIComponent(k) + '=' + encodeURIComponent(v)).join('&');
+    try {
+      const res = await api('/api/g/' + graph + '/lens/' + encodeURIComponent(slug)
+                            + (qs ? '?' + qs : ''), 'lens');
+      if (toCanvas) {
+        $('focus').textContent = 'lens: ' + slug;
+        cy.elements().remove();
+        cy.add(subgraphElements(res));
+        runLayout();
+        return;
+      }
+      $('ov').style.display = 'none';
+      const out = $('results');
+      out.style.display = 'block';
+      out.innerHTML = '<span class="back">← overview</span>'
+        + '<h3>Lens · ' + esc(res.title || slug) + ' · ' + (res.nodes || []).length + ' node(s)'
+        + (res.missing && res.missing.length ? ' · ⚠ ' + res.missing.length + ' missing' : '')
+        + '</h3>'
+        + '<div class="m" style="padding:2px 0 6px">'
+        + esc((res.clauses || []).map(c => c.verb + '×' + c.selected).join(' ∪ '))
+        + '</div>'
+        + (res.nodes || []).map(n => resultRow(
+            { id: n.id, title: n.title, label: n.label },
+            n.expanded ? 'expanded' : 'selected')).join('');
+      wireResults(out);
+    } catch (e) { fail(e); }
   }
 
   function neighborhoodElements(res) {
@@ -512,6 +583,7 @@ EXPLORER_HTML = r"""<!doctype html>
     try { renderOverview(await api('/api/g/' + name + '/overview', 'overview')); }
     catch (e) { fail(e); }
     loadSessions();
+    loadLenses();
   }
 
   async function boot() {
