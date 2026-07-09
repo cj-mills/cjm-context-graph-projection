@@ -30,7 +30,7 @@ from typing import Any, Awaitable, Dict, List, Optional
 from .authoring import read_node
 from .journal import journal_window_view
 from .listing import list_graph
-from .projection import get_schema, graph_overview, grep, locate, relevant, show
+from .projection import get_schema, graph_overview, grep, locate, relevant, show, subgraph_view
 from .runtime import DEFAULT_MANIFESTS, GraphHandle, open_graph
 
 
@@ -132,6 +132,15 @@ def build_app(
         return await _timed(name, "journal-window",
                             journal_window_view(gx, journals, start=start, end=end,
                                                 session=session))
+
+    @app.get("/api/g/{name}/subgraph")
+    async def api_subgraph(name: str, ids: str, hops: int = 0,
+                           cap: int = 500) -> Dict[str, Any]:
+        refs = [s.strip() for s in ids.split(",") if s.strip()]
+        if not refs:
+            raise HTTPException(422, "ids: pass a comma-separated node id/prefix list")
+        return await _timed(name, "subgraph",
+                            subgraph_view(_gx(name), refs, hops=hops, cap=cap))
 
     @app.get("/api/g/{name}/list")
     async def api_list(name: str, label: str, limit: int = 100, offset: int = 0,

@@ -40,6 +40,35 @@ def _handle_cmd(handle: Dict[str, Any]) -> str:
 
 def _human(kind: str, obj: Dict[str, Any]) -> str:
     """Render a result dict as markdown, dispatched on the command kind."""
+    if kind == "subgraph":
+        if obj.get("error"):
+            return f"⚠ {obj['error']}"
+        nodes, edges = obj.get("nodes", []), obj.get("edges", [])
+        expanded = obj.get("expanded_count", 0)
+        head = (f"_{len(nodes)} node(s) ({obj.get('seed_count', 0)} seed"
+                + (f" + {expanded} expanded" if expanded else "") + ")"
+                + f" · {len(edges)} interconnecting edge(s)"
+                + (" · expansion TRUNCATED at --cap" if obj.get("truncated") else "")
+                + "_")
+        lines = ["## Subgraph", head, ""]
+        for ref in obj.get("missing", []):
+            lines.append(f"- ⚠ MISSING `{ref}` — no node resolves")
+        for a in obj.get("ambiguous", []):
+            cands = "; ".join(f"{c['id']} ({c.get('label')})" for c in a.get("candidates", []))
+            lines.append(f"- ⚠ AMBIGUOUS `{a['ref']}` — candidates: {cands}")
+        title_of: Dict[str, str] = {}
+        for n in nodes:
+            title_of[n["id"]] = n.get("title") or n["id"]
+            mark = "↳ " if n.get("expanded") else ""
+            lines.append(f"- {mark}**{_short(n.get('title'), 110)}** · _{n.get('label')}_ `{n['id']}`")
+        if edges:
+            lines += ["", "**Edges:**"]
+            for e in edges:
+                src, tgt = e.get("source_id"), e.get("target_id")
+                lines.append(f"- **{_short(title_of.get(src, src), 50)}** "
+                             f"—{e.get('relation_type')}→ "
+                             f"**{_short(title_of.get(tgt, tgt), 50)}**")
+        return "\n".join(lines)
     if kind == "session":
         if obj.get("error"):
             return f"⚠ {obj['error']}"

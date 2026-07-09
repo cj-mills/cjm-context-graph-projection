@@ -227,6 +227,117 @@ def ambiguity_error(ref: str, candidates: List[Dict[str, Any]]) -> str:
     return f"ambiguous id prefix `{ref}` — candidates: {opts}"
 
 
+async def subgraph_view(
+    gx: GraphHandle,
+    refs: List[str],  # Node ids / unique id prefixes — the SET to materialize
+    *,
+    hops: int = 0,                          # Neighbourhood expansion depth (0 = the given set only)
+    relations: Optional[List[str]] = None,  # Expansion relation filter (None = every relation)
+    cap: int = 500,                         # Expansion node budget; the given refs are never dropped
+) -> Dict[str, Any]:  # {nodes, edges, resolved, missing, ambiguous, seed_count, expanded_count, truncated}
+    """The BULK read verb: a node SET -> nodes + interconnecting edges, batched.
+
+    One `query_nodes` for the exact ids, one shared label scan for every prefix,
+    two edge queries per expansion hop, one interconnect edge query, one display
+    pass — so a canvas/lens application costs a HANDFUL of worker round-trips
+    instead of ~N sequential `get_node`s (per-node round-trips serialize through
+    the worker queue at ~7.7ms/op; the same class the display batching collapsed
+    from 25s to 1.6s). Consumers: `journal_window_view`, the future lens apply,
+    the explorer canvas.
+
+    Read-parity: an unresolvable ref stays visible in `missing`, an ambiguous
+    prefix in `ambiguous` — the verb never silently narrows what it was asked for."""
+    from . import factlayer as F
+
+    seen: set = set()
+    ordered = [r for r in refs if not (r in seen or seen.add(r))]
+    exact = [r for r in ordered if len(r) == 36]
+    prefixes = [r for r in ordered if len(r) != 36]
+
+    nodes_by_id: Dict[str, Any] = dict(await F.load_nodes(gx, exact))
+    resolved: Dict[str, str] = {r: r for r in exact if r in nodes_by_id}
+    missing = [r for r in exact if r not in nodes_by_id]
+    ambiguous: List[Dict[str, Any]] = []
+
+    if prefixes:
+        # One shared scan resolves every prefix (resolve_node_ref semantics, batched).
+        universe = await _all_nodes(gx, per_label=1_000_000)
+        for r in prefixes:
+            if not _ID_PREFIX_RE.match(r):
+                missing.append(r)
+                continue
+            pref = r.lower()
+            hits = [n for n in universe if str(_get(n, "id", "")).lower().startswith(pref)]
+            if len(hits) == 1:
+                nid = _get(hits[0], "id")
+                resolved[r] = nid
+                nodes_by_id.setdefault(nid, hits[0])
+            elif hits:
+                ambiguous.append({"ref": r, "candidates": [
+                    {"id": _get(n, "id"), "label": _get(n, "label")} for n in hits[:10]]})
+            else:
+                missing.append(r)
+
+    seed_ids: List[str] = []
+    for r in ordered:  # ref order, deduped (a prefix + its full id resolve to ONE node)
+        i = resolved.get(r)
+        if i is not None and i not in seed_ids:
+            seed_ids.append(i)
+    known = set(seed_ids)
+    frontier = set(seed_ids)
+    truncated = False
+    proj = ["source_id", "target_id", "relation_type"]
+    for _ in range(max(0, hops)):
+        if not frontier or truncated:
+            break
+        fr = sorted(frontier)
+        rows: List[Dict[str, Any]] = []
+        for q in (EdgeQuery(source_ids=fr, project=proj),
+                  EdgeQuery(target_ids=fr, project=proj)):
+            res = await graph_task(gx.queue, gx.graph_id, "query_edges", query=q.to_dict())
+            rows.extend(_get(res, "rows", None) or [])
+        new_ids: List[str] = []
+        for row in rows:
+            if relations and row.get("relation_type") not in relations:
+                continue
+            for end in (row.get("source_id"), row.get("target_id")):
+                if not end or end in known:
+                    continue
+                if len(known) - len(seed_ids) >= cap:
+                    truncated = True
+                    break
+                known.add(end)
+                new_ids.append(end)
+        if new_ids:
+            nodes_by_id.update(await F.load_nodes(gx, new_ids))
+        frontier = set(new_ids)
+
+    edges: List[Dict[str, Any]] = []
+    if nodes_by_id:
+        ids = sorted(nodes_by_id)
+        res = await graph_task(gx.queue, gx.graph_id, "query_edges",
+                               query=EdgeQuery(source_ids=ids, target_ids=ids,
+                                               project=proj).to_dict())
+        edges = list(_get(res, "rows", None) or [])
+
+    node_objs = list(nodes_by_id.values())
+    await annotate_display(gx, node_objs)
+    seed_set = set(seed_ids)
+    out_nodes: List[Dict[str, Any]] = []
+    for nid in seed_ids + [i for i in nodes_by_id if i not in seed_set]:
+        n = nodes_by_id.get(nid)
+        if n is None:
+            continue  # a dangling expansion endpoint (edge outlives its node)
+        out_nodes.append({"id": nid, "label": _get(n, "label"),
+                          "title": node_title(n), "properties": dict(_props(n)),
+                          "expanded": nid not in seed_set})
+    return {"refs": len(ordered), "nodes": out_nodes, "edges": edges,
+            "resolved": resolved, "missing": missing, "ambiguous": ambiguous,
+            "seed_count": len(seed_ids),
+            "expanded_count": len(out_nodes) - len(seed_ids),
+            "truncated": truncated}
+
+
 async def show(
     gx: GraphHandle,
     node_id: str,   # Node to expand (full id, or a unique id prefix)

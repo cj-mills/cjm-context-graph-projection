@@ -23,13 +23,12 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from cjm_context_graph_layer.ops import graph_task
 from cjm_dev_graph_schema.identity import (code_module_node_id, note_node_id, section_node_id,
                                            session_node_id)
 from cjm_dev_graph_schema.nodes import DecisionNode
 from cjm_markdown_decompose_core.extract import note_from_file
 
-from .display import annotate_display, display_rule_node_id, node_title, set_display_rule
+from .display import display_rule_node_id, set_display_rule
 from .runtime import GraphHandle
 from .structure import add_section, reconstruct_note
 from .write import add_check, alias, assert_value, author_section, decide, link, register_session
@@ -418,40 +417,32 @@ async def journal_window_view(
 ) -> Dict[str, Any]:  # journal_window result, refs joined to live nodes
     """The SESSION LENS read verb: `journal_window` + graph join (title/label per ref).
 
-    Prefix refs resolve db-side (the id-prefix convention); a ref whose node no
-    longer exists stays listed with `missing: True` — this is an AUDIT surface
-    (read-parity, DEC 60aae839 theme 4): it must not silently drop what the
-    journal says was touched."""
+    The join is ONE `subgraph_view` bulk read over every touched ref (a window's
+    ~70 refs used to cost ~70 sequential `get_node`s — the dominant share of its
+    latency). Prefix refs resolve there too (the id-prefix convention); a ref
+    whose node no longer exists stays listed with `missing: True` — this is an
+    AUDIT surface (read-parity, DEC 60aae839 theme 4): it must not silently drop
+    what the journal says was touched."""
     # Function-local: `.projection` imports `.journal` via `.write` — a module-level
     # import here would cycle (write.py -> projection.py is the existing edge).
-    from .projection import resolve_node_ref
+    from .projection import subgraph_view
 
     base = journal_window(journal_paths, start=start, end=end, session=session)
+    refs = [rec["ref"] for rec in base["touched"]]
+    sg = (await subgraph_view(gx, refs) if refs
+          else {"resolved": {}, "nodes": []})
+    by_id = {n["id"]: n for n in sg["nodes"]}
     out: List[Dict[str, Any]] = []
-    display_nodes: List[Any] = []
     for rec in base["touched"]:
-        ref = rec["ref"]
-        if len(ref) == 36:
-            node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=ref)
-        else:
-            res = await resolve_node_ref(gx, ref)
-            node = res.get("node") if "candidates" not in res else None
         item = dict(rec)
-        if node is None:
+        node = by_id.get(sg["resolved"].get(rec["ref"], ""))
+        if node is None:  # unresolvable OR ambiguous prefix — both stay visible
             item["missing"] = True
         else:
-            item["id"] = (node.get("id") if isinstance(node, dict)
-                          else getattr(node, "id", ref))
-            item["label"] = (node.get("label") if isinstance(node, dict)
-                             else getattr(node, "label", None))
-            item["_node"] = node
-            display_nodes.append(node)
+            item["id"] = node["id"]
+            item["label"] = node.get("label")
+            item["title"] = node.get("title")
         out.append(item)
-    await annotate_display(gx, display_nodes)
-    for item in out:
-        node = item.pop("_node", None)
-        if node is not None:
-            item["title"] = node_title(node)
     base["touched"] = out
     base["missing"] = sum(1 for i in out if i.get("missing"))
     return base

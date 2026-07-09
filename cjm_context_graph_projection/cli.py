@@ -34,7 +34,7 @@ from .listing import list_graph
 from .module_ops import delete_module, flip_notebook_to_py, new_module, regroup, rename_module
 from .onboarding import project_onboarding
 from .oracle import run_version_oracle
-from .projection import explore, get_schema, grep, locate, relevant, show, state
+from .projection import explore, get_schema, grep, locate, relevant, show, state, subgraph_view
 from .readiness import readiness
 from .readme import project_readme
 from .reconcile import reconcile_memory
@@ -243,6 +243,10 @@ async def _dispatch(args) -> int:
             res = await journal_window_view(gx, paths, start=_parse_ts(args.start),
                                             end=_parse_ts(args.end), session=args.session)
             print(render("journal-window", res, args.format))
+        elif args.command == "subgraph":
+            res = await subgraph_view(gx, args.refs, hops=args.hops,
+                                      relations=args.relation, cap=args.cap)
+            print(render("subgraph", res, args.format))
         elif args.command == "list":
             res = await list_graph(gx, label=args.label, predicate=args.predicate,
                                    relation=args.relation, limit=args.limit,
@@ -712,6 +716,18 @@ def main() -> int:
                       help="Window end (same forms; omit = OPEN — the in-progress live window)")
     p_jw.add_argument("--session", default=None,
                       help="Filter by session key instead of/alongside time bounds")
+
+    p_sg = sub.add_parser("subgraph",
+                          help="BULK read: a node SET (ids/prefixes) -> nodes + interconnecting "
+                               "edges in a handful of batched queries (the lens/canvas primitive; "
+                               "unresolvable refs stay visible)")
+    p_sg.add_argument("refs", nargs="+", help="Node ids or unique id prefixes")
+    p_sg.add_argument("--hops", type=int, default=0,
+                      help="Expand the set N neighbourhood hops (default 0 = exactly the given set)")
+    p_sg.add_argument("--relation", action="append", default=None,
+                      help="Expansion relation filter (repeatable; default = every relation)")
+    p_sg.add_argument("--cap", type=int, default=500,
+                      help="Expansion node budget — the given refs are never dropped (default 500)")
 
     p_ls = sub.add_parser("list",
                           help="Enumerate a class: nodes by --label / assertions by --predicate / edges by --relation")
