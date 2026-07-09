@@ -101,6 +101,9 @@ HYBRID_HTML = r"""<!doctype html>
        background:rgba(24,27,34,.72);padding:0 4px;border-radius:3px;white-space:nowrap;
        max-width:260px;overflow:hidden;text-overflow:ellipsis;pointer-events:none}
   .lbl.focus{color:#fff;background:rgba(40,60,120,.9);font-size:12px}
+  .llbl{position:absolute;font-size:10px;color:#8f9ab5;background:rgba(32,36,44,.8);
+        padding:0 3px;border-radius:2px;white-space:nowrap;pointer-events:none}
+  .llbl.hl{color:#cdd7f0;background:rgba(40,60,120,.85)}
   #lassocv{position:absolute;inset:0;pointer-events:none}
   #marq{position:absolute;border:1px dashed #9db4ff;background:rgba(120,150,255,.12);
         display:none;pointer-events:none}
@@ -139,7 +142,7 @@ HYBRID_HTML = r"""<!doctype html>
   <button id="btn-lasso" title="lasso-select mode: draw a loop around nodes (esc cancels)">lasso</button>
   <button id="btn-cfg" title="physics + readability settings">⚙</button>
   <span id="focus" style="color:#666"></span>
-  <span class="ro">click = focus · shift+drag = marquee · scroll = zoom · drag = pan</span></div>
+  <span class="ro">click = focus · shift+drag = marquee · drag node = move · drag bg = pan</span></div>
 <div id="cfgpanel">
   <h4>Physics</h4>
   <label><span>repulsion</span><input type="range" data-k="repulsion" min="0" max="2" step="0.05"><span class="val"></span></label>
@@ -149,10 +152,16 @@ HYBRID_HTML = r"""<!doctype html>
   <label><span>friction</span><input type="range" data-k="friction" min="0" max="1" step="0.05"><span class="val"></span></label>
   <h4>Readability</h4>
   <label><span>point scale</span><input type="range" data-k="psize" min="0.3" max="4" step="0.1"><span class="val"></span></label>
+  <label><span>link width</span><input type="range" data-k="lwidth" min="0.3" max="4" step="0.1"><span class="val"></span></label>
   <label><span>link opacity</span><input type="range" data-k="lopacity" min="0" max="1" step="0.05"><span class="val"></span></label>
   <label><span>labels</span><input type="range" data-k="labelcap" min="0" max="400" step="10"><span class="val"></span></label>
+  <label><span>link labels</span><input type="range" data-k="linklabelcap" min="0" max="300" step="10"><span class="val"></span></label>
   <label><span>curved links</span><input type="checkbox" data-k="curved"></label>
   <label><span>arrows</span><input type="checkbox" data-k="arrows"></label>
+  <label><span>drag nodes</span><input type="checkbox" data-k="drag"></label>
+  <label><span>zoom scaling</span><input type="checkbox" data-k="zoomscale"></label>
+  <div style="margin-top:8px"><button id="cfg-reset" style="font:12px system-ui;padding:2px 8px;
+    border:1px solid #ccc;border-radius:4px;background:#fff;cursor:pointer">reset to defaults</button></div>
 </div>
 <div id="wrap">
   <div id="side">
@@ -187,8 +196,13 @@ HYBRID_HTML = r"""<!doctype html>
   let nodes = [];          // export payload nodes, array order = cosmos point indices
   let idToIdx = new Map(); // node id -> point index
   let deg = null;          // Uint32Array degree per point (drives size + label ranking)
+  let linkSrc = null;      // Uint32Array link source index per link
+  let linkTgt = null;      // Uint32Array link target index per link
+  let linkRels = null;     // relation_type per link (edge labels)
   let selection = null;    // {indices:[...], source:'marquee'|'kind: X'|'lens: y'|...}
   let focusIdx = null;     // clicked node's index (detail pane subject)
+  let hlLinks = null;      // Set of highlighted link indices (selection interconnect / focus
+                           // neighborhood) — also FILTERS the edge labels to the active set
   let resultsOwner = null; // shared results pane ownership token (the a928a0d8 lesson)
 
   // Derived kind color: stable name-hash -> HSL — the SAME hash as the cytoscape page,
@@ -222,11 +236,17 @@ HYBRID_HTML = r"""<!doctype html>
   // --- Settings: per-graph persisted knobs (localStorage) — the discovery instrument.
   // Anything the user keeps reaching for here is a promotion candidate into
   // graph-carried vocabulary (lens `view` / display rules), not a settled UI surface.
-  const CFG_DEFAULTS = { repulsion: 1.0, spring: 1.0, distance: 4, gravity: 0.25,
-                         friction: 0.85, psize: 1.2, lopacity: 0.35, labelcap: 120,
-                         curved: false, arrows: false };
+  // Defaults follow the quick-start story's tuning (near-inert friction, curved links,
+  // zoom scaling, drag on) with a touch of gravity to bound disconnected components.
+  // `friction` here is INTUITIVE (0 = none, 1 = frozen) — cosmos's simulationFriction
+  // is velocity RETENTION (1 = keeps moving), so the projection inverts it; the storage
+  // namespace is versioned (cfg1) because that semantic flip orphans old stored values.
+  const CFG_DEFAULTS = { repulsion: 0.5, spring: 1.0, distance: 4, gravity: 0.1,
+                         friction: 0.9, psize: 1.2, lwidth: 1.0, lopacity: 0.5,
+                         labelcap: 120, linklabelcap: 60,
+                         curved: true, arrows: false, drag: true, zoomscale: true };
   let cfg = { ...CFG_DEFAULTS };
-  const cfgKey = () => 'hybrid.cfg.' + graph;
+  const cfgKey = () => 'hybrid.cfg1.' + graph;
   function loadCfg() {
     cfg = { ...CFG_DEFAULTS, ...JSON.parse(localStorage.getItem(cfgKey()) || '{}') };
     for (const el of document.querySelectorAll('#cfgpanel [data-k]')) {
@@ -237,9 +257,11 @@ HYBRID_HTML = r"""<!doctype html>
   function cosmosCfg() { // the cfg -> cosmos config projection (live via setConfigPartial)
     return { simulationRepulsion: cfg.repulsion, simulationLinkSpring: cfg.spring,
              simulationLinkDistance: cfg.distance, simulationGravity: cfg.gravity,
-             simulationFriction: cfg.friction, pointSizeScale: cfg.psize,
+             simulationFriction: 1 - cfg.friction,  // intuitive -> cosmos retention
+             pointSizeScale: cfg.psize, linkWidthScale: cfg.lwidth,
              linkOpacity: cfg.lopacity, curvedLinks: cfg.curved,
-             linkDefaultArrows: cfg.arrows };
+             linkDefaultArrows: cfg.arrows, linkArrowsSizeScale: 2.5,
+             enableDrag: cfg.drag, scalePointsOnZoom: cfg.zoomscale };
   }
   function applyCfg(k) {
     localStorage.setItem(cfgKey(), JSON.stringify(cfg));
@@ -247,6 +269,12 @@ HYBRID_HTML = r"""<!doctype html>
     cosmos.setConfigPartial(cosmosCfg());
     if (['repulsion', 'spring', 'distance', 'gravity', 'friction'].includes(k) && paused === false)
       cosmos.start(0.35); // physics knobs re-heat gently so the change is FELT
+    labelsDirty = true;
+  }
+  function resetCfg() {
+    localStorage.removeItem(cfgKey());
+    loadCfg();
+    if (cosmos) { cosmos.setConfigPartial(cosmosCfg()); if (!paused) cosmos.start(0.35); }
     labelsDirty = true;
   }
 
@@ -281,10 +309,15 @@ HYBRID_HTML = r"""<!doctype html>
 
     const n = nodes.length;
     deg = new Uint32Array(n);
+    linkSrc = new Uint32Array(edges.length);
+    linkTgt = new Uint32Array(edges.length);
+    linkRels = new Array(edges.length);
+    hlLinks = null;
     const links = new Float32Array(edges.length * 2);
     edges.forEach((e, i) => {
       const s = idToIdx.get(e.source_id), t = idToIdx.get(e.target_id);
       links[i * 2] = s; links[i * 2 + 1] = t;
+      linkSrc[i] = s; linkTgt[i] = t; linkRels[i] = e.relation_type || '?';
       deg[s]++; deg[t]++;
     });
     const space = (window.Cosmos && Cosmos.defaultConfigValues
@@ -309,7 +342,7 @@ HYBRID_HTML = r"""<!doctype html>
       hoveredPointRingColor: '#8fb4ff',
       focusedPointRingColor: '#ffd166',
       pointGreyoutOpacity: 0.12,
-      linkDefaultColor: '#4a5268',
+      linkDefaultColor: '#6b7694',
       linkGreyoutOpacity: 0.04,
       linkVisibilityDistanceRange: [40, 300], // far zoom: links fade, structure stays
       simulationDecay: 3000,
@@ -317,8 +350,8 @@ HYBRID_HTML = r"""<!doctype html>
       ...cosmosCfg(),
       onPointClick: (idx) => focusNode(idx),
       onBackgroundClick: () => { if (!selection) clearHighlight(); hideTip(); },
-      onPointMouseOver: (idx, pos, ev) => showTip(idx, ev),
-      onPointMouseOut: () => hideTip(),
+      onPointMouseOver: (idx, pos, ev) => { showTip(idx, ev); hoverPreview(idx); },
+      onPointMouseOut: () => { hideTip(); clearHoverPreview(); },
       onZoom: () => { labelsDirty = true; },
       onSimulationTick: () => { labelsDirty = true; },
       onSimulationEnd: () => { labelsDirty = true; },
@@ -351,13 +384,31 @@ HYBRID_HTML = r"""<!doctype html>
   }
 
   // --- Selection: the ONE mechanism every set-producing gesture converges on ----
+  // A selection highlights its nodes AND its interconnecting links (the subgraph_view
+  // semantics on-canvas): everything else greys to near-invisible, so the member set
+  // reads at a glance — the first-drive distinguishability finding.
+  function interconnectLinks(indices) {
+    const inSet = new Uint8Array(nodes.length);
+    for (const i of indices) inSet[i] = 1;
+    const out = [];
+    for (let li = 0; li < linkSrc.length; li++)
+      if (inSet[linkSrc[li]] && inSet[linkTgt[li]]) out.push(li);
+    return out;
+  }
   function setSelection(indices, source, fit = false) {
     if (!cosmos) return;
     if (!indices.length) { fail(new Error(source + ': empty selection')); return; }
+    const links = interconnectLinks(indices);
     selection = { indices, source };
-    cosmos.setConfigPartial({ highlightedPointIndices: indices, focusedPointIndex: undefined });
+    hlLinks = new Set(links);
+    cosmos.setConfigPartial({ highlightedPointIndices: indices,
+                              highlightedLinkIndices: links,
+                              outlinedPointIndices: undefined,
+                              linkGreyoutOpacity: 0.04,
+                              focusedPointIndex: undefined });
     $('selbox').classList.add('open');
-    $('selmeta').textContent = indices.length + ' node(s) · ' + source;
+    $('selmeta').textContent = indices.length + ' node(s) · ' + links.length
+                               + ' link(s) · ' + source;
     if (fit) cosmos.fitViewByPointIndices(indices, 350, 0.2);
     labelsDirty = true;
   }
@@ -368,9 +419,28 @@ HYBRID_HTML = r"""<!doctype html>
   }
   function clearHighlight() {
     if (cosmos) cosmos.setConfigPartial({ highlightedPointIndices: undefined,
+                                          highlightedLinkIndices: undefined,
+                                          outlinedPointIndices: undefined,
                                           focusedPointIndex: undefined });
     focusIdx = null;
+    hlLinks = null;
     labelsDirty = true;
+  }
+
+  // Hover preview (the explore-connections idiom): outline the neighborhood + surface
+  // its links, WITHOUT touching an active selection/focus — a soft look-ahead only.
+  function hoverPreview(idx) {
+    if (!cosmos || selection || focusIdx != null || drag) return;
+    const nb = cosmos.getNeighboringPointIndices(idx) || [];
+    cosmos.setConfigPartial({ outlinedPointIndices: [idx, ...nb],
+                              highlightedLinkIndices: cosmos.getConnectedLinkIndices(idx),
+                              linkGreyoutOpacity: 0.3 });
+  }
+  function clearHoverPreview() {
+    if (!cosmos || selection || focusIdx != null) return;
+    cosmos.setConfigPartial({ outlinedPointIndices: undefined,
+                              highlightedLinkIndices: undefined,
+                              linkGreyoutOpacity: 0.04 });
   }
   function listSelection() {
     if (!selection) return;
@@ -394,7 +464,13 @@ HYBRID_HTML = r"""<!doctype html>
     const id = nodes[idx].id;
     if (!selection) {
       const nb = cosmos.getNeighboringPointIndices(idx) || [];
-      cosmos.setConfigPartial({ highlightedPointIndices: [idx, ...nb],
+      const neighborhood = [idx, ...nb];
+      const links = cosmos.getConnectedLinkIndices(neighborhood) || [];
+      hlLinks = new Set(links);
+      cosmos.setConfigPartial({ highlightedPointIndices: neighborhood,
+                                highlightedLinkIndices: links,
+                                outlinedPointIndices: undefined,
+                                linkGreyoutOpacity: 0.04,
                                 focusedPointIndex: idx });
     } else {
       cosmos.setConfigPartial({ focusedPointIndex: idx });
@@ -413,7 +489,9 @@ HYBRID_HTML = r"""<!doctype html>
   // (zoom/tick/config), so an idle settled canvas costs nothing.
   let labelsDirty = true, lastLabelTs = 0;
   const labelPool = [];
-  function clearLabels() { for (const el of labelPool) el.style.display = 'none'; }
+  const llblPool = [];  // link (relation) labels — same pooling, rotated placement
+  function clearLabels() { for (const el of labelPool) el.style.display = 'none';
+                           for (const el of llblPool) el.style.display = 'none'; }
   function updateLabels(ts) {
     requestAnimationFrame(updateLabels);
     if (!cosmos || !labelsDirty || ts - lastLabelTs < 90) return;
@@ -450,6 +528,40 @@ HYBRID_HTML = r"""<!doctype html>
       li++;
     }
     for (; li < labelPool.length; li++) labelPool[li].style.display = 'none';
+
+    // Link (relation) labels: the sampled VISIBLE links (evenly distributed, one per
+    // screen cell), midpoint-anchored and rotated along the link (never upside down —
+    // the link-sampling story's normalization). An active highlight set FILTERS the
+    // labels to its own links, so a selection/lens/focus names its relations and the
+    // rest of the graph stays quiet.
+    let lj = 0;
+    if (cfg.linklabelcap > 0 && linkRels) {
+      const s = cosmos.getSampledLinks();
+      const idxs = s.indices || [], pos = s.positions || [], angs = s.angles || [];
+      let list = [];
+      for (let j = 0; j < idxs.length; j++)
+        list.push([idxs[j], pos[j * 2], pos[j * 2 + 1], angs[j]]);
+      if (hlLinks) list = list.filter(x => hlLinks.has(x[0]));
+      list = list.slice(0, cfg.linklabelcap);
+      for (const [l, x, y, a] of list) {
+        const [sx, sy] = cosmos.spaceToScreenPosition([x, y]);
+        if (sx < -40 || sy < -20 || sx > box.width + 40 || sy > box.height + 20) continue;
+        let el = llblPool[lj];
+        if (!el) { el = document.createElement('div'); el.className = 'llbl';
+                   $('labels').appendChild(el); llblPool.push(el); }
+        let d = (a || 0) * 180 / Math.PI;
+        while (d > 90) d -= 180;
+        while (d <= -90) d += 180;
+        el.style.display = 'block';
+        el.style.left = sx + 'px';
+        el.style.top = sy + 'px';
+        el.style.transform = 'translate(-50%,-50%) rotate(' + d.toFixed(1) + 'deg)';
+        el.className = hlLinks ? 'llbl hl' : 'llbl';
+        el.textContent = linkRels[l];
+        lj++;
+      }
+    }
+    for (; lj < llblPool.length; lj++) llblPool[lj].style.display = 'none';
   }
   requestAnimationFrame(updateLabels);
 
@@ -747,6 +859,7 @@ HYBRID_HTML = r"""<!doctype html>
         selection ? cosmos.fitViewByPointIndices(selection.indices, 350, 0.2)
                   : cosmos.fitView(350); };
       $('btn-cfg').onclick = () => $('cfgpanel').classList.toggle('open');
+      $('cfg-reset').onclick = resetCfg;
       for (const el of document.querySelectorAll('#cfgpanel [data-k]')) {
         const k = el.dataset.k;
         el.oninput = () => {
