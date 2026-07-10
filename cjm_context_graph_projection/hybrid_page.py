@@ -144,7 +144,7 @@ HYBRID_HTML = r"""<!doctype html>
   <button id="btn-lasso" title="lasso-select mode: draw a loop around nodes (esc cancels)">lasso</button>
   <button id="btn-cfg" title="physics + readability settings">⚙</button>
   <span id="focus" style="color:#666"></span>
-  <span class="ro">click = focus · shift+drag = marquee · drag node = move · drag bg = pan</span></div>
+  <span class="ro">click = focus · shift+drag = marquee · drag node = move · esc = deselect</span></div>
 <div id="cfgpanel">
   <h4>Physics</h4>
   <label><span>repulsion</span><input type="range" data-k="repulsion" min="0" max="2" step="0.05"><span class="val"></span></label>
@@ -153,8 +153,10 @@ HYBRID_HTML = r"""<!doctype html>
   <label><span>gravity</span><input type="range" data-k="gravity" min="0" max="1" step="0.02"><span class="val"></span></label>
   <label><span>friction</span><input type="range" data-k="friction" min="0" max="1" step="0.05"><span class="val"></span></label>
   <label><span>collision</span><input type="range" data-k="collision" min="0" max="1" step="0.05"><span class="val"></span></label>
+  <label><span>sim decay</span><input type="range" data-k="decay" min="1000" max="50000" step="1000"><span class="val"></span></label>
   <h4>Readability</h4>
   <label><span>point scale</span><input type="range" data-k="psize" min="0.3" max="4" step="0.1"><span class="val"></span></label>
+  <label><span>size by degree</span><input type="range" data-k="degsize" min="0" max="1" step="0.05"><span class="val"></span></label>
   <label><span>link width</span><input type="range" data-k="lwidth" min="0.3" max="4" step="0.1"><span class="val"></span></label>
   <label><span>link opacity</span><input type="range" data-k="lopacity" min="0" max="1" step="0.05"><span class="val"></span></label>
   <label><span>labels</span><input type="range" data-k="labelcap" min="0" max="400" step="10"><span class="val"></span></label>
@@ -164,6 +166,7 @@ HYBRID_HTML = r"""<!doctype html>
   <label><span>arrows</span><input type="checkbox" data-k="arrows"></label>
   <label><span>drag nodes</span><input type="checkbox" data-k="drag"></label>
   <label><span>zoom scaling</span><input type="checkbox" data-k="zoomscale"></label>
+  <label><span>hide unselected</span><input type="checkbox" data-k="hideunsel" title="fully hide (not grey) everything outside an active selection/focus"></label>
   <div style="margin-top:8px"><button id="cfg-reset" style="font:12px system-ui;padding:2px 8px;
     border:1px solid #ccc;border-radius:4px;background:#fff;cursor:pointer">reset to defaults</button></div>
 </div>
@@ -208,6 +211,8 @@ HYBRID_HTML = r"""<!doctype html>
   let focusLinkIdx = null; // clicked LINK's index (persistent edge highlight + endpoints)
   let hlLinks = null;      // Set of highlighted link indices (selection interconnect / focus
                            // neighborhood) — also FILTERS the edge labels to the active set
+  let hlPoints = null;     // Set of highlighted point indices (persistent highlights only —
+                           // greyed-out nodes must not keep their labels)
   let resultsOwner = null; // shared results pane ownership token (the a928a0d8 lesson)
 
   // Derived kind color: stable name-hash -> HSL — the SAME hash as the cytoscape page,
@@ -249,10 +254,15 @@ HYBRID_HTML = r"""<!doctype html>
   // Collision (v3.1 GPU spatial-hash force) keeps sized points apart; its tip says
   // keep linkDistance above combined point radii, hence the 6 default alongside it.
   const CFG_DEFAULTS = { repulsion: 0.5, spring: 1.0, distance: 6, gravity: 0.1,
-                         friction: 0.9, collision: 0.4,
-                         psize: 1.2, lwidth: 1.0, lopacity: 0.5,
+                         friction: 0.9, collision: 0.4, decay: 10000,
+                         psize: 1.2, degsize: 0.5, lwidth: 1.0, lopacity: 0.5,
                          labelcap: 120, linklabelcap: 60, linklabelsalways: false,
-                         curved: true, arrows: false, drag: true, zoomscale: true };
+                         curved: true, arrows: false, drag: true, zoomscale: true,
+                         hideunsel: false };
+  // Greyout tiers: hide-unselected flips the greyed remainder fully invisible —
+  // in dense regions the grey haze itself obscures the selected subgraph.
+  const greyPt = () => cfg.hideunsel ? 0 : 0.12;
+  const greyLk = () => cfg.hideunsel ? 0 : 0.04;
   let cfg = { ...CFG_DEFAULTS };
   const cfgKey = () => 'hybrid.cfg1.' + graph;
   function loadCfg() {
@@ -267,15 +277,27 @@ HYBRID_HTML = r"""<!doctype html>
              simulationLinkDistance: cfg.distance, simulationGravity: cfg.gravity,
              simulationFriction: 1 - cfg.friction,  // intuitive -> cosmos retention
              simulationCollision: cfg.collision, simulationCollisionPadding: 2,
+             simulationDecay: cfg.decay,
              pointSizeScale: cfg.psize, linkWidthScale: cfg.lwidth,
              linkOpacity: cfg.lopacity, curvedLinks: cfg.curved,
              linkDefaultArrows: cfg.arrows, linkArrowsSizeScale: 2.5,
-             enableDrag: cfg.drag, scalePointsOnZoom: cfg.zoomscale };
+             enableDrag: cfg.drag, scalePointsOnZoom: cfg.zoomscale,
+             pointGreyoutOpacity: greyPt(), linkGreyoutOpacity: greyLk() };
+  }
+  // Point sizes: base + a WEIGHTED degree term ('size by degree' — 0 = uniform points;
+  // the log keeps hubs readable without letting them dwarf the isolated nodes).
+  function rebuildSizes() {
+    if (!cosmos || !deg) return;
+    const sizes = new Float32Array(deg.length);
+    for (let i = 0; i < deg.length; i++)
+      sizes[i] = Math.min(12, 3 + cfg.degsize * 2.2 * Math.log2(1 + deg[i]));
+    cosmos.setPointSizes(sizes);
   }
   function applyCfg(k) {
     localStorage.setItem(cfgKey(), JSON.stringify(cfg));
     if (!cosmos) return;
     cosmos.setConfigPartial(cosmosCfg());
+    if (k === 'degsize') rebuildSizes();
     if (['repulsion', 'spring', 'distance', 'gravity', 'friction', 'collision'].includes(k)
         && paused === false)
       cosmos.start(0.35); // physics knobs re-heat gently so the change is FELT
@@ -345,13 +367,11 @@ HYBRID_HTML = r"""<!doctype html>
     const positions = new Float32Array(n * 2);
     for (let i = 0; i < n * 2; i++) positions[i] = Math.random() * space;
     const colors = new Float32Array(n * 4);
-    const sizes = new Float32Array(n);
     const rgbaOf = {};
     for (let i = 0; i < n; i++) {
       const k = nodes[i].label || '?';
       const c = rgbaOf[k] || (rgbaOf[k] = kindRgba(k));
       colors.set(c, i * 4);
-      sizes[i] = 2 + 1.6 * Math.log2(1 + deg[i]); // hubs read at a glance
     }
 
     cosmos = new Cosmos.Graph($('cy'), {
@@ -361,12 +381,9 @@ HYBRID_HTML = r"""<!doctype html>
       renderHoveredPointRing: true,
       hoveredPointRingColor: '#8fb4ff',
       focusedPointRingColor: '#ffd166',
-      pointGreyoutOpacity: 0.12,
       linkDefaultColor: '#6b7694',
-      linkGreyoutOpacity: 0.04,
       linkVisibilityDistanceRange: [40, 300], // far zoom: links fade, structure stays
       hoveredLinkColor: '#9db4ff', hoveredLinkWidthIncrease: 2,
-      simulationDecay: 3000,
       fitViewOnInit: true, fitViewDelay: 600,
       ...cosmosCfg(),
       onPointClick: (idx) => focusNode(idx),
@@ -386,7 +403,7 @@ HYBRID_HTML = r"""<!doctype html>
     });
     cosmos.setPointPositions(positions);
     cosmos.setPointColors(colors);
-    cosmos.setPointSizes(sizes);
+    rebuildSizes();
     cosmos.setLinks(links);
     cosmos.render(1);
     setPaused(false);
@@ -429,12 +446,13 @@ HYBRID_HTML = r"""<!doctype html>
     const links = interconnectLinks(indices);
     selection = { indices, source };
     hlLinks = new Set(links);
+    hlPoints = new Set(indices);
     focusLinkIdx = null;
     linkPop(true);
     cosmos.setConfigPartial({ highlightedPointIndices: indices,
                               highlightedLinkIndices: links,
                               outlinedPointIndices: undefined,
-                              linkGreyoutOpacity: 0.04,
+                              linkGreyoutOpacity: greyLk(),
                               focusedPointIndex: undefined,
                               focusedLinkIndex: undefined });
     $('selbox').classList.add('open');
@@ -453,12 +471,13 @@ HYBRID_HTML = r"""<!doctype html>
       cosmos.setConfigPartial({ highlightedPointIndices: undefined,
                                 highlightedLinkIndices: undefined,
                                 outlinedPointIndices: undefined,
-                                linkGreyoutOpacity: 0.04,
+                                linkGreyoutOpacity: greyLk(),
                                 focusedPointIndex: undefined,
                                 focusedLinkIndex: undefined }); }
     focusIdx = null;
     focusLinkIdx = null;
     hlLinks = null;
+    hlPoints = null;
     sampleDirty = true;
   }
 
@@ -494,7 +513,7 @@ HYBRID_HTML = r"""<!doctype html>
     linkPop(false);
     cosmos.setConfigPartial({ outlinedPointIndices: undefined,
                               highlightedLinkIndices: undefined,
-                              linkGreyoutOpacity: 0.04 });
+                              linkGreyoutOpacity: greyLk() });
     sampleDirty = true;
   }
   function listSelection() {
@@ -523,11 +542,12 @@ HYBRID_HTML = r"""<!doctype html>
       const neighborhood = [idx, ...nb];
       const links = cosmos.getConnectedLinkIndices(neighborhood) || [];
       hlLinks = new Set(links);
+      hlPoints = new Set(neighborhood);
       linkPop(true);
       cosmos.setConfigPartial({ highlightedPointIndices: neighborhood,
                                 highlightedLinkIndices: links,
                                 outlinedPointIndices: undefined,
-                                linkGreyoutOpacity: 0.04,
+                                linkGreyoutOpacity: greyLk(),
                                 focusedPointIndex: idx,
                                 focusedLinkIndex: undefined });
     } else {
@@ -551,11 +571,12 @@ HYBRID_HTML = r"""<!doctype html>
     focusIdx = null;
     const s = linkSrc[li], t = linkTgt[li];
     hlLinks = new Set([li]);
+    hlPoints = new Set([s, t]);
     linkPop(true);
     cosmos.setConfigPartial({ highlightedPointIndices: [s, t],
                               highlightedLinkIndices: [li],
                               outlinedPointIndices: undefined,
-                              linkGreyoutOpacity: 0.04,
+                              linkGreyoutOpacity: greyLk(),
                               focusedPointIndex: undefined,
                               focusedLinkIndex: li });
     sampleDirty = true;
@@ -584,12 +605,15 @@ HYBRID_HTML = r"""<!doctype html>
     for (const el of labelPool) el.style.display = 'none';
     for (const el of llblPool) el.style.display = 'none'; }
   function resampleLabels() {
-    const pts = [];
+    let pts = [];
     if (cfg.labelcap > 0) {
       const s = cosmos.getSampledPoints();
       const idxs = s.indices || [], pos = s.positions || [];
-      pts.push(...idxs.map((p, j) => [p, pos[j * 2], pos[j * 2 + 1]])
-                      .sort((a, b) => deg[b[0]] - deg[a[0]]).slice(0, cfg.labelcap));
+      pts = idxs.map((p, j) => [p, pos[j * 2], pos[j * 2 + 1]]);
+      // A persistent highlight owns the label layer too: greyed-out (or hidden)
+      // nodes must not keep their labels floating over the selection.
+      if (hlPoints) pts = pts.filter(x => hlPoints.has(x[0]));
+      pts = pts.sort((a, b) => deg[b[0]] - deg[a[0]]).slice(0, cfg.labelcap);
     }
     if (focusIdx != null && !pts.some(p => p[0] === focusIdx)) {
       const all = cosmos.getPointPositions();
@@ -598,16 +622,26 @@ HYBRID_HTML = r"""<!doctype html>
     }
     // Link labels are HIGHLIGHT-SCOPED by default (hover/focus/selection names its
     // relations, the rest of the graph stays quiet); `always` opts into labeling
-    // the ambient sampled links too.
+    // the ambient sampled links too. A HIGHLIGHTED set gets EXACT labels computed
+    // from its endpoint positions ([li,x1,y1,x2,y2] rows) — the screen-grid sampler
+    // only sees ~one link per cell, so a highlighted link outside the sample would
+    // simply never get its label (the round-3 'label does not always show' finding).
     const lks = [];
-    if (cfg.linklabelcap > 0 && linkRels && (hlLinks || cfg.linklabelsalways)) {
-      const s = cosmos.getSampledLinks();
-      const idxs = s.indices || [], pos = s.positions || [], angs = s.angles || [];
-      let list = [];
-      for (let j = 0; j < idxs.length; j++)
-        list.push([idxs[j], pos[j * 2], pos[j * 2 + 1], angs[j]]);
-      if (hlLinks) list = list.filter(x => hlLinks.has(x[0]));
-      lks.push(...list.slice(0, cfg.linklabelcap));
+    if (cfg.linklabelcap > 0 && linkRels) {
+      if (hlLinks && hlLinks.size) {
+        const all = cosmos.getPointPositions();
+        for (const li of hlLinks) {
+          if (lks.length >= cfg.linklabelcap) break;
+          const s = linkSrc[li] * 2, t = linkTgt[li] * 2;
+          if (all && all.length > Math.max(s, t) + 1)
+            lks.push([li, all[s], all[s + 1], all[t], all[t + 1]]);
+        }
+      } else if (cfg.linklabelsalways) {
+        const s = cosmos.getSampledLinks();
+        const idxs = s.indices || [], pos = s.positions || [], angs = s.angles || [];
+        for (let j = 0; j < idxs.length && lks.length < cfg.linklabelcap; j++)
+          lks.push([idxs[j], pos[j * 2], pos[j * 2 + 1], angs[j]]);
+      }
     }
     lblCache = { pts, lks };
   }
@@ -629,16 +663,29 @@ HYBRID_HTML = r"""<!doctype html>
     }
     for (; li < labelPool.length; li++) labelPool[li].style.display = 'none';
     let lj = 0;
-    for (const [l, x, y, a] of lblCache.lks) {
-      const [sx, sy] = cosmos.spaceToScreenPosition([x, y]);
+    for (const row of lblCache.lks) {
+      // Two row shapes: [li, x1,y1,x2,y2] (exact, highlighted — project both endpoints,
+      // derive midpoint + SCREEN angle) vs [li, mx,my,angle] (ambient sampled).
+      const l = row[0];
+      let sx, sy, d;
+      if (row.length === 5) {
+        const [ax, ay] = cosmos.spaceToScreenPosition([row[1], row[2]]);
+        const [bx, by] = cosmos.spaceToScreenPosition([row[3], row[4]]);
+        sx = (ax + bx) / 2; sy = (ay + by) / 2;
+        d = Math.atan2(by - ay, bx - ax) * 180 / Math.PI;
+      } else {
+        [sx, sy] = cosmos.spaceToScreenPosition([row[1], row[2]]);
+        d = (row[3] || 0) * 180 / Math.PI;
+      }
       if (sx < -40 || sy < -20 || sx > box.width + 40 || sy > box.height + 20) continue;
       let el = llblPool[lj];
       if (!el) { el = document.createElement('div'); el.className = 'llbl';
                  $('labels').appendChild(el); llblPool.push(el); }
       // Rotate along the link, never upside down; when the text flips 180° to stay
       // readable, the direction glyph flips WITH it so the arrow still points
-      // source -> target on screen.
-      let d = (a || 0) * 180 / Math.PI, flipped = false;
+      // source -> target on screen. The arrow renders BIGGER than the text (round-3:
+      // at native pixel density a same-size arrow reads as part of the line).
+      let flipped = false;
       while (d > 90) { d -= 180; flipped = !flipped; }
       while (d <= -90) { d += 180; flipped = !flipped; }
       el.style.display = 'block';
@@ -646,7 +693,10 @@ HYBRID_HTML = r"""<!doctype html>
       el.style.top = sy + 'px';
       el.style.transform = 'translate(-50%,-50%) rotate(' + d.toFixed(1) + 'deg)';
       el.className = hlLinks ? 'llbl hl' : 'llbl';
-      el.textContent = flipped ? ('← ' + linkRels[l] + ' —') : ('— ' + linkRels[l] + ' →');
+      const arrow = '<b style="font-size:14px;font-weight:700;vertical-align:-1px">'
+                    + (flipped ? '←' : '→') + '</b>';
+      el.innerHTML = flipped ? (arrow + ' ' + esc(linkRels[l]))
+                             : (esc(linkRels[l]) + ' ' + arrow);
       lj++;
     }
     for (; lj < llblPool.length; lj++) llblPool[lj].style.display = 'none';
@@ -683,7 +733,13 @@ HYBRID_HTML = r"""<!doctype html>
     $('btn-lasso').classList.toggle('on', on);
     $('main').style.cursor = on ? 'crosshair' : ''; }
   $('btn-lasso').onclick = () => setLasso(!lassoMode);
-  addEventListener('keydown', e => { if (e.key === 'Escape') setLasso(false); });
+  // Escape walks the modes down: lasso -> selection -> any highlight. It is the
+  // reliable deselect when 'hide unselected' leaves no visible background to click
+  // (and clicking 'background' in a dense region usually hits a greyed node anyway).
+  addEventListener('keydown', e => { if (e.key !== 'Escape') return;
+    if (lassoMode) setLasso(false);
+    else if (selection) clearSelection();
+    else clearHighlight(); });
 
   const mainEl = $('main');
   let drag = null; // {mode:'marq'|'lasso', x0,y0, path:[[x,y],...]}
