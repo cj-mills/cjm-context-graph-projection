@@ -21,10 +21,12 @@ sets; 'save selection as lens' is the deliberate next rung once the write path l
 The default (empty) view IS the read-parity floor: everything on-graph, visibly.
 
 LOD ladder: far = GPU points/edges only -> mid = screen-space constant-size labels for a
-degree-ranked sample of VISIBLE points (`getSampledPoints`) -> near = the focused node's
-verbatim content in the detail pane (markdown/code/KaTeX renderer carried over from the
-cytoscape page); full DOM content cards materialized over the canvas are deferred to the
-first user drive. Physics + readability knobs live in a settings drawer, persisted per
+degree-ranked sample of VISIBLE points (`getSampledPoints`) -> near = content CARDS over
+the canvas (v2, DEC 3133ebf7: node-id-keyed STATEFUL OBJECTS in two tiers — emergent
+PREVIEWS and explicitly PINNED work cards that survive pan/zoom and claim their screen
+extents in the collision physics) + the focused node's verbatim content in the detail
+pane (markdown/code/KaTeX renderer carried over from the cytoscape page).
+Physics + readability knobs live in a settings drawer, persisted per
 graph in localStorage — the DISCOVERY instrument that teaches which knobs deserve
 promotion into graph-carried vocabulary (lens `view` / display rules), not a settled
 surface.
@@ -105,17 +107,23 @@ HYBRID_HTML = r"""<!doctype html>
         padding:0 3px;border-radius:2px;white-space:nowrap;pointer-events:none}
   .llbl.hl{color:#cdd7f0;background:rgba(40,60,120,.85)}
   #cards{position:absolute;inset:0;pointer-events:none;overflow:hidden}
-  .card{position:absolute;width:340px;background:#fff;border:1px solid #bbb;border-radius:8px;
+  .card{position:absolute;width:max-content;min-width:230px;max-width:340px;background:#fff;
+        border:1px solid #bbb;border-radius:8px;
         box-shadow:0 6px 20px #0007;transform-origin:top center;pointer-events:auto;
-        font-size:12px;line-height:1.4;cursor:pointer}
+        font-size:12px;line-height:1.4}
+  .card.pinned{max-width:440px;border-color:#8493c9;box-shadow:0 8px 26px #000a}
   .card .chd{display:flex;gap:6px;align-items:center;padding:4px 9px;border-bottom:1px solid #eee;
-             border-top:3px solid var(--kc,#888);border-radius:8px 8px 0 0}
+             border-top:3px solid var(--kc,#888);border-radius:8px 8px 0 0;cursor:grab;
+             user-select:none;touch-action:none}
   .card .chd b{font-size:12px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .card .chd .k{color:#999;font-size:10px;flex:none}
-  .card .chd .cx{font:12px system-ui;border:1px solid #ccc;border-radius:3px;background:#fff;
-                 cursor:pointer;padding:0 4px;flex:none}
-  .card .cbd{padding:6px 10px;position:relative;overflow:hidden;overflow-wrap:break-word}
-  .card .cbd.clamped{max-height:260px}
+  .card .chd button{font:12px system-ui;border:1px solid #ccc;border-radius:3px;background:#fff;
+                    cursor:pointer;padding:0 4px;flex:none}
+  .card .chd button.on{background:#e4ecff;border-color:#88a}
+  .card .cbd{padding:6px 10px;position:relative;overflow:hidden;overflow-wrap:break-word;
+             cursor:text;user-select:text}
+  .card.pinned .cbd{overflow-y:auto;max-height:min(70vh,560px)}
+  .card .cbd.clamped{max-height:260px;overflow:hidden}
   .card .cbd.clamped::after{content:'';position:absolute;bottom:0;left:0;right:0;height:36px;
                             background:linear-gradient(rgba(255,255,255,0),#fff)}
   .card .cbd h1,.card .cbd h2,.card .cbd h3{font-size:13px;margin:8px 0 4px}
@@ -165,6 +173,7 @@ HYBRID_HTML = r"""<!doctype html>
   <button id="btn-heat" title="re-heat the simulation (restart layout energy)">re-heat</button>
   <button id="btn-fit" title="fit the whole graph (or the selection) in view">fit</button>
   <button id="btn-lasso" title="lasso-select mode: draw a loop around nodes (esc cancels)">lasso</button>
+  <button id="btn-unlap" title="one-shot de-overlap of the current cards">de-overlap</button>
   <button id="btn-cfg" title="physics + readability settings">⚙</button>
   <span id="focus" style="color:#666"></span>
   <span class="ro">click = focus · shift+drag = marquee · drag node = move · esc = deselect</span></div>
@@ -183,7 +192,8 @@ HYBRID_HTML = r"""<!doctype html>
   <label><span>link width</span><input type="range" data-k="lwidth" min="0.3" max="4" step="0.1"><span class="val"></span></label>
   <label><span>link opacity</span><input type="range" data-k="lopacity" min="0" max="1" step="0.05"><span class="val"></span></label>
   <label><span>labels</span><input type="range" data-k="labelcap" min="0" max="400" step="10"><span class="val"></span></label>
-  <label><span>cards</span><input type="range" data-k="cardcap" min="0" max="48" step="1" title="card mode engages when this few points are visible (0 = off)"><span class="val"></span></label>
+  <label><span>cards</span><input type="range" data-k="cardcap" min="0" max="48" step="1" title="preview cards engage when this few points are visible (0 = off; pinned cards ignore this)"><span class="val"></span></label>
+  <label><span>card collision</span><input type="checkbox" data-k="cardphys" title="carded points claim their card's footprint in the physics — cards space themselves (arch A)"></label>
   <label><span>link labels</span><input type="range" data-k="linklabelcap" min="0" max="300" step="10"><span class="val"></span></label>
   <label><span>&nbsp;&nbsp;↳ always</span><input type="checkbox" data-k="linklabelsalways" title="label sampled links even without a hover/selection"></label>
   <label><span>curved links</span><input type="checkbox" data-k="curved"></label>
@@ -213,6 +223,7 @@ HYBRID_HTML = r"""<!doctype html>
   <div id="dragbar"></div>
   <div id="detail">
     <div id="dhead"><b id="dtitle"></b><span class="m" id="dmeta"></span>
+      <button id="dcard" title="materialize this node as a pinned card">card</button>
       <button id="draw">raw</button><button id="dclose">✕</button></div>
     <div id="dbody"></div>
     <div id="dnb"></div>
@@ -282,7 +293,7 @@ HYBRID_HTML = r"""<!doctype html>
                          friction: 0.9, collision: 0.4, decay: 10000,
                          psize: 1.2, degsize: 0.5, lwidth: 1.0, lopacity: 0.5,
                          labelcap: 120, linklabelcap: 60, linklabelsalways: false,
-                         cardcap: 16,
+                         cardcap: 16, cardphys: true,
                          curved: true, arrows: false, drag: true, zoomscale: true,
                          hideunsel: false };
   // Greyout tiers: hide-unselected flips the greyed remainder fully invisible —
@@ -317,13 +328,17 @@ HYBRID_HTML = r"""<!doctype html>
     const sizes = new Float32Array(deg.length);
     for (let i = 0; i < deg.length; i++)
       sizes[i] = Math.min(12, 3 + cfg.degsize * 2.2 * Math.log2(1 + deg[i]));
-    cosmos.setPointSizes(sizes);
+    baseSizes = sizes;                 // the pre-card-overlay truth
+    cosmos.setPointSizes(baseSizes);
+    cardOverlayActive = false;
+    applyCardPhysics();                // re-project the card overlay onto the new base
   }
   function applyCfg(k) {
     localStorage.setItem(cfgKey(), JSON.stringify(cfg));
     if (!cosmos) return;
     cosmos.setConfigPartial(cosmosCfg());
     if (k === 'degsize') rebuildSizes();
+    if (k === 'cardphys') applyCardPhysics();
     if (['repulsion', 'spring', 'distance', 'gravity', 'friction', 'collision'].includes(k)
         && paused === false)
       cosmos.start(0.35); // physics knobs re-heat gently so the change is FELT
@@ -359,7 +374,9 @@ HYBRID_HTML = r"""<!doctype html>
     $('results').style.display = 'none'; $('ov').style.display = 'block'; $('q').value = '';
     closeDetail(); clearLabels();
     if (push) history.pushState(null, '', '?g=' + name);
-    cardCache.clear(); cardExpanded.clear();
+    cardCache.clear(); pinned.clear(); cardEngaged = false; cardOverlayActive = false;
+    for (const [cid, cel] of cardEls) { cel.remove(); cardEls.delete(cid); }
+    baseSizes = null; baseColors = null;
     loadCfg();
     if (cosmos) { cosmos.destroy(); cosmos = null; $('cy').innerHTML = ''; }
     $('focus').textContent = 'loading…';
@@ -404,6 +421,10 @@ HYBRID_HTML = r"""<!doctype html>
     cosmos = new Cosmos.Graph($('cy'), {
       backgroundColor: '#20242c',
       enableSimulation: true,
+      // Live setPointPositions/Colors (header drag, de-overlap, the card halo) must
+      // SNAP: any duration > 0 queues a Positions transition that PAUSES the sim
+      // (Transition.start) and blocks drag starts while active.
+      transitionDuration: 0,
       showFPSMonitor: true,           // the foundation eval wants the framerate FELT + read
       renderHoveredPointRing: true,
       hoveredPointRingColor: '#8fb4ff',
@@ -423,7 +444,7 @@ HYBRID_HTML = r"""<!doctype html>
       // Pan/zoom reprojects cached labels EVERY FRAME (the stutter fix) and also
       // marks a resample — zoom changes the visible set, which is what card mode
       // and the screen sampler key on (the 90ms throttle absorbs the churn).
-      onZoom: () => { viewDirty = true; sampleDirty = true; },
+      onZoom: () => { viewDirty = true; sampleDirty = true; zoomPhysAt = performance.now(); },
       onSimulationTick: () => { sampleDirty = true; },
       onSimulationEnd: () => { sampleDirty = true; },
       onDrag: () => { sampleDirty = true; },
@@ -431,6 +452,7 @@ HYBRID_HTML = r"""<!doctype html>
     });
     cosmos.setPointPositions(positions);
     cosmos.setPointColors(colors);
+    baseColors = colors;               // the pre-halo truth
     rebuildSizes();
     cosmos.setLinks(links);
     cosmos.render(1);
@@ -619,29 +641,49 @@ HYBRID_HTML = r"""<!doctype html>
     wireResults($('dnb'));
   }
 
-  // --- Card LOD (the near-zoom rung of the ladder): when the EXACT number of visible
-  // points falls to <= `cards` (findPointsInRect over the viewport — the marquee's own
-  // GPU machinery, density-aware where a zoom threshold is not), the visible nodes
-  // materialize as light PAPER CARDS over the dark canvas, rendering their verbatim
-  // content through the same pipeline as the detail pane. An active highlight narrows
-  // candidacy to its members — so a lasso'd or lens-applied set materializes as cards
-  // once you approach it. Cards are PREVIEWS (clamped, fade-out) by default; the ⤢
-  // toggle expands one to full content, remembered per node. Click = focus (detail
-  // pane); wheel re-dispatches to the canvas so zoom is never trapped. Cards scale
-  // with zoom (clamped) anchored at the zoom where card mode engaged — approach and
-  // the card grows toward full readability. In-card EDITING is the write-path fork's
-  // territory (a card is the natural host for 'edit this node').
-  const cardEls = new Map();      // point idx -> live card element
+  // --- Card LOD v2 (DEC 3133ebf7; the v1 drive findings live in DEC d01ff24a):
+  // cards are STATEFUL OBJECTS keyed by NODE ID, in two tiers. PINNED = the work
+  // tier: created by explicit acts (pin button / expanding a preview / the detail
+  // pane's 'card' button), survives pan/zoom/viewport-exit/count changes until
+  // closed, holds a FIXED readable screen size (no zoom scaling), and caps its
+  // height to the viewport with internal scroll — a tall card never breaks the
+  // interaction loop. PREVIEW = the demoted emergence tier: when the EXACT visible
+  // count (findPointsInRect over a margin-padded viewport) stays within `cards`
+  // (hysteresis: engage <= cap, release only above 1.5x), visible nodes materialize
+  // as previews; an active highlight narrows candidacy to its members; expanding a
+  // preview PROMOTES it to pinned, so nothing the user cares about lives in the
+  // volatile tier. Content renders through the SAME pipeline as the detail pane.
+  // The card HEADER is the node's DELTA drag handle; the BODY is a content surface
+  // (text selection — the write path's prerequisite). In-card EDITING is the
+  // write-path fork's territory; its first client is the correction loop's segment
+  // card (DEC afcbc4c9).
+  const cardEls = new Map();      // node id -> live card element
   const cardCache = new Map();    // node id -> {rd, props} (bounded, oldest-out)
-  const cardExpanded = new Set(); // node ids expanded to FULL content
-  let cardSet = null;             // Set of carded idxs (null = card mode off)
-  let cardBaseZoom = null;        // zoom when card mode engaged -> scale anchor
+  const pinned = new Map();       // node id -> {expanded} — the work tier
+  let previewIdxs = null;         // Set of preview-tier point idxs (null = none)
+  let cardBaseZoom = null;        // zoom when previews engaged -> preview scale anchor
+  let cardEngaged = false;        // preview-trigger hysteresis state
+  let zPrev = 10, zPin = 100000;  // z-order: pointerdown-to-front; pinned above previews
+  let baseSizes = null;           // rebuildSizes output (the pre-card-overlay truth)
+  let baseColors = null;          // load-time kind colors (pre-halo)
+  let cardOverlayActive = false;  // sizes/colors currently carry the card overlay
+  let physTimer = null;           // debounced physics recompute (content loads, toggles)
+  let zoomPhysAt = 0;             // last onZoom timestamp -> zoom-END extent recompute
+  const CARD_MARGIN = 160;        // px of viewport padding for the preview trigger
+
+  const isExpanded = id => { const st = pinned.get(id); return !!(st && st.expanded); };
+  function previewScale() {
+    if (!cosmos) return 1;
+    const z = cosmos.getZoomLevel();
+    return cardBaseZoom ? Math.max(0.55, Math.min(2, 0.75 * z / cardBaseZoom)) : 1;
+  }
 
   function cardContent(el, idx) {
     const id = nodes[idx].id;
     const body = el.querySelector('.cbd');
     const apply = (c) => { renderContentInto(body, c.rd, c.props, false);
-                           body.classList.toggle('clamped', !cardExpanded.has(id)); };
+                           body.classList.toggle('clamped', !isExpanded(id));
+                           schedulePhysics(); };
     if (cardCache.has(id)) { apply(cardCache.get(id)); return; }
     body.innerHTML = '<span style="color:#999">reading…</span>';
     (async () => {
@@ -657,47 +699,213 @@ HYBRID_HTML = r"""<!doctype html>
       const c = { rd, props };
       cardCache.set(id, c);
       if (cardCache.size > 300) cardCache.delete(cardCache.keys().next().value);
-      if (cardEls.get(idx) === el && cardSet && cardSet.has(idx)) apply(c);
+      if (cardEls.get(id) === el) apply(c);
     })();
   }
 
-  function makeCard(idx) {
+  function setPinned(id, on, expand = false) {
+    if (on) {
+      const st = pinned.get(id) || { expanded: false };
+      if (expand) st.expanded = true;
+      pinned.set(id, st);
+    } else pinned.delete(id);
+    syncCards();          // materialize/dissolve now, not a resample-tick later
+    refreshCard(id);
+    sampleDirty = true;   // membership feeds labels + card positions on the next resample
+  }
+
+  function refreshCard(id, el = cardEls.get(id)) {
+    if (!el) return;
+    const isPin = pinned.has(id);
+    el.classList.toggle('pinned', isPin);
+    el.style.zIndex = isPin ? ++zPin : ++zPrev;
+    el.querySelector('.cpin').style.display = isPin ? 'none' : '';
+    el.querySelector('.cclose').style.display = isPin ? '' : 'none';
+    el.querySelector('.cx').classList.toggle('on', isExpanded(id));
+    el.querySelector('.cbd').classList.toggle('clamped', !isExpanded(id));
+    schedulePhysics();
+  }
+
+  // Header = the node's DELTA drag handle: the node moves by the pointer's SPACE
+  // delta (never centers on the pointer — cosmos's own drag shader does, which is
+  // the v1 could-only-drag-up jump), with the sim live so neighbors yield. A <5px
+  // press-release is a click = focus. Deltas are affine-safe with client coords.
+  function wireHeaderDrag(hd, id) {
+    hd.addEventListener('pointerdown', (e) => {
+      if (e.target.tagName === 'BUTTON' || !cosmos) return;
+      e.preventDefault(); e.stopPropagation();
+      const idx = idToIdx.get(id);
+      if (idx === undefined) return;
+      const pos0 = cosmos.getPointPositions();
+      const start = { x: e.clientX, y: e.clientY,
+                      sx: pos0[idx * 2], sy: pos0[idx * 2 + 1] };
+      let movedFar = false, raf = null, last = null;
+      const apply = () => {
+        raf = null;
+        if (!last || !cosmos) return;
+        const a = cosmos.screenToSpacePosition([start.x, start.y]);
+        const b = cosmos.screenToSpacePosition([last.x, last.y]);
+        const pos = Float32Array.from(cosmos.getPointPositions());
+        pos[idx * 2] = start.sx + (b[0] - a[0]);
+        pos[idx * 2 + 1] = start.sy + (b[1] - a[1]);
+        cosmos.setPointPositions(pos, true);  // transitionDuration 0 -> a snap, no sim pause
+        sampleDirty = true;
+      };
+      const move = (ev) => {
+        if (Math.abs(ev.clientX - start.x) + Math.abs(ev.clientY - start.y) > 5) movedFar = true;
+        last = { x: ev.clientX, y: ev.clientY };
+        if (movedFar && !raf) raf = requestAnimationFrame(apply);
+      };
+      const up = () => {
+        hd.removeEventListener('pointermove', move);
+        hd.removeEventListener('pointerup', up);
+        if (!movedFar) focusNode(idx);
+      };
+      hd.setPointerCapture(e.pointerId);
+      hd.addEventListener('pointermove', move);
+      hd.addEventListener('pointerup', up);
+    });
+  }
+
+  function makeCard(id, idx) {
     const nd = nodes[idx];
     const el = document.createElement('div');
     el.className = 'card';
     el.style.setProperty('--kc', kindColor(nd.label || '?'));
     el.innerHTML = '<div class="chd"><b></b><span class="k"></span>'
-      + '<button class="cx" title="expand / collapse to preview">⤢</button></div>'
+      + '<button class="cpin" title="pin: keep this card until closed">📌</button>'
+      + '<button class="cx" title="expand / collapse (expanding a preview pins it)">⤢</button>'
+      + '<button class="cclose" title="close (unpin)">✕</button></div>'
       + '<div class="cbd clamped"></div>';
     el.querySelector('b').textContent = short(nd.title).slice(0, 70);
     el.querySelector('.k').textContent = nd.label || '?';
-    el.onclick = () => focusNode(idx);
+    el.addEventListener('pointerdown', () => {
+      el.style.zIndex = pinned.has(id) ? ++zPin : ++zPrev; });
+    el.querySelector('.cpin').onclick = (e) => { e.stopPropagation(); setPinned(id, true); };
     el.querySelector('.cx').onclick = (e) => {
       e.stopPropagation();
-      cardExpanded.has(nd.id) ? cardExpanded.delete(nd.id) : cardExpanded.add(nd.id);
-      el.querySelector('.cbd').classList.toggle('clamped', !cardExpanded.has(nd.id));
+      if (!pinned.has(id)) setPinned(id, true, true);  // expanding a preview PROMOTES it
+      else { pinned.get(id).expanded = !isExpanded(id); refreshCard(id); }
     };
+    el.querySelector('.cclose').onclick = (e) => { e.stopPropagation(); setPinned(id, false); };
+    wireHeaderDrag(el.querySelector('.chd'), id);
+    el.querySelector('.cbd').addEventListener('click', () => {
+      if (String(getSelection() || '')) return;  // selecting text, not clicking through
+      const i = idToIdx.get(id);
+      if (i !== undefined) focusNode(i);
+    });
     el.addEventListener('wheel', (e) => {
+      // A scrollable pinned body scrolls natively; everything else zooms the canvas.
+      const body = el.querySelector('.cbd');
+      if (pinned.has(id) && body.scrollHeight > body.clientHeight + 2) return;
       e.preventDefault(); e.stopPropagation();
       const cv = $('cy').querySelector('canvas');
       if (cv) cv.dispatchEvent(new WheelEvent('wheel', e));
     }, { passive: false });
     $('cards').appendChild(el);
+    refreshCard(id, el);
     return el;
   }
 
-  function syncCards(set) {
-    if (!set || !set.size) {
-      cardSet = null; cardBaseZoom = null;
-      for (const [i, el] of cardEls) { el.remove(); cardEls.delete(i); }
+  // The live card set = pinned (always) + previews (when the trigger says so).
+  function syncCards(previewSet = previewIdxs) {
+    previewIdxs = previewSet && previewSet.size ? previewSet : null;
+    if (!previewIdxs) cardBaseZoom = null;
+    else if (cardBaseZoom == null) cardBaseZoom = cosmos.getZoomLevel();
+    const want = new Map();  // id -> idx
+    for (const id of pinned.keys()) {
+      const i = idToIdx.get(id);
+      if (i !== undefined) want.set(id, i);
+    }
+    if (previewIdxs) for (const i of previewIdxs) want.set(nodes[i].id, i);
+    for (const [id, el] of cardEls)
+      if (!want.has(id)) { el.remove(); cardEls.delete(id); }
+    for (const [id, i] of want)
+      if (!cardEls.has(id)) { const el = makeCard(id, i); cardEls.set(id, el); cardContent(el, i); }
+    schedulePhysics();
+  }
+
+  // --- Arch-A card physics: carded points claim their card's SCREEN extent as point
+  // SIZE. Cosmos derives per-point collision radius from size ONLY (ForceCollision
+  // reads the size texture; simulationCollisionRadius is global-or-nothing), so the
+  // visual coupling is worn deliberately: the upsized point renders as a translucent
+  // kind-colored halo marking the claimed footprint. Screen is authoritative — the
+  // space-side extent is a derived projection (spaceToScreenRadius(1) = px per space
+  // unit), recomputed on zoom-END and capped so a far-zoom card can't coarsen the
+  // whole collision grid (cellSize derives from the MAX point size). EXPANDED cards
+  // feed only a preview-sized footprint — a full-height collision body would blast
+  // the local layout; overflow is z-order's job.
+  function cardedIds() {
+    const ids = new Set(pinned.keys());
+    if (previewIdxs) for (const i of previewIdxs) ids.add(nodes[i].id);
+    return ids;
+  }
+  function cardExtentSpace(id) {
+    const el = cardEls.get(id);
+    let w = 340, h = 280;
+    if (el) {
+      const sc = pinned.has(id) ? 1 : previewScale();
+      w = (el.offsetWidth || w) * sc;
+      h = (isExpanded(id) ? 300 : (el.offsetHeight || h)) * sc;
+    }
+    const pxPerSpace = cosmos.spaceToScreenRadius(1) || 1;
+    return Math.min(120, Math.max(w, h) / pxPerSpace);
+  }
+  function applyCardPhysics() {
+    if (!cosmos || !baseSizes) return;
+    const ids = cfg.cardphys ? cardedIds() : new Set();
+    if (!ids.size) {
+      if (cardOverlayActive) {
+        cosmos.setPointSizes(baseSizes);
+        if (baseColors) cosmos.setPointColors(baseColors);
+        cardOverlayActive = false;
+      }
       return;
     }
-    if (cardBaseZoom == null) cardBaseZoom = cosmos.getZoomLevel();
-    cardSet = set;
-    for (const [i, el] of cardEls)
-      if (!set.has(i)) { el.remove(); cardEls.delete(i); }
-    for (const i of set)
-      if (!cardEls.has(i)) { const el = makeCard(i); cardEls.set(i, el); cardContent(el, i); }
+    const sizes = baseSizes.slice();
+    const colors = baseColors ? baseColors.slice() : null;
+    for (const id of ids) {
+      const i = idToIdx.get(id);
+      if (i === undefined) continue;
+      sizes[i] = cardExtentSpace(id);
+      if (colors) colors[i * 4 + 3] = 0.16;  // the halo
+    }
+    cosmos.setPointSizes(sizes);
+    if (colors) cosmos.setPointColors(colors);
+    cardOverlayActive = true;
+    if (!paused && cfg.collision > 0) cosmos.start(0.15);  // gentle: the spacing is FELT
+  }
+  function schedulePhysics() {
+    if (physTimer) return;
+    physTimer = setTimeout(() => { physTimer = null; applyCardPhysics(); }, 120);
+  }
+
+  // One-shot de-overlap: resolve circle overlaps among the CURRENT carded points only
+  // (JS-side pairwise relaxation — local and predictable, no whole-graph re-heat).
+  function deoverlapCards() {
+    if (!cosmos) return;
+    const idxs = [...cardedIds()].map(id => idToIdx.get(id)).filter(i => i !== undefined);
+    if (idxs.length < 2) return;
+    const pos = Float32Array.from(cosmos.getPointPositions());
+    const rad = new Map(idxs.map(i => [i, cardExtentSpace(nodes[i].id) / 2]));
+    for (let it = 0; it < 40; it++) {
+      let moved = false;
+      for (let a = 0; a < idxs.length; a++) for (let b = a + 1; b < idxs.length; b++) {
+        const i = idxs[a], j = idxs[b];
+        let dx = pos[j * 2] - pos[i * 2], dy = pos[j * 2 + 1] - pos[i * 2 + 1];
+        let d = Math.hypot(dx, dy);
+        if (d < 0.01) { dx = Math.random() - 0.5; dy = Math.random() - 0.5; d = Math.hypot(dx, dy); }
+        const need = rad.get(i) + rad.get(j) + 2;
+        if (d >= need) continue;
+        const push = (need - d) / 2 / d;
+        pos[i * 2] -= dx * push; pos[i * 2 + 1] -= dy * push;
+        pos[j * 2] += dx * push; pos[j * 2 + 1] += dy * push;
+        moved = true;
+      }
+      if (!moved) break;
+    }
+    cosmos.setPointPositions(pos, true);
+    sampleDirty = true;
   }
 
   // --- Labels overlay, TWO-PHASE (the round-2 pan-stutter fix): RESAMPLE decides
@@ -715,19 +923,31 @@ HYBRID_HTML = r"""<!doctype html>
     for (const el of labelPool) el.style.display = 'none';
     for (const el of llblPool) el.style.display = 'none'; }
   function resampleLabels() {
-    // Card-mode evaluation rides the resample cadence (exact visible count).
+    // Preview-tier evaluation rides the resample cadence: exact visible count over a
+    // MARGIN-padded viewport (mid-pan flicker guard) with hysteresis — engage at
+    // <= cap, release only above 1.5x. Pinned cards ignore the trigger entirely.
     let cardsWanted = null;
     if (cfg.cardcap > 0) {
+      const M = CARD_MARGIN;
       let vis = cosmos.findPointsInRect(
-        [[0, 0], [mainEl.clientWidth, mainEl.clientHeight]]) || [];
+        [[-M, -M], [mainEl.clientWidth + M, mainEl.clientHeight + M]]) || [];
       if (hlPoints) vis = vis.filter(i => hlPoints.has(i));
-      if (vis.length && vis.length <= cfg.cardcap) cardsWanted = new Set(vis);
-    }
+      const cap = cardEngaged ? Math.ceil(cfg.cardcap * 1.5) : cfg.cardcap;
+      cardEngaged = !!(vis.length && vis.length <= cap);
+      if (cardEngaged) cardsWanted = new Set(vis);
+    } else cardEngaged = false;
     syncCards(cardsWanted);
+    // Position rows for EVERY live card — pinned included (position-anchored to the
+    // node; only their SIZE ignores zoom).
     const crds = [];
-    if (cardSet) {
+    const cardIdxs = new Set();
+    for (const cid of cardEls.keys()) {
+      const i = idToIdx.get(cid);
+      if (i !== undefined) cardIdxs.add(i);
+    }
+    if (cardIdxs.size) {
       const all = cosmos.getPointPositions();
-      for (const i of cardSet)
+      for (const i of cardIdxs)
         if (all && all.length > i * 2 + 1) crds.push([i, all[i * 2], all[i * 2 + 1]]);
     }
     let pts = [];
@@ -739,7 +959,7 @@ HYBRID_HTML = r"""<!doctype html>
       // nodes must not keep their labels floating over the selection. Carded
       // nodes drop their overlay labels — the card header replaces them.
       if (hlPoints) pts = pts.filter(x => hlPoints.has(x[0]));
-      if (cardSet) pts = pts.filter(x => !cardSet.has(x[0]));
+      if (cardIdxs.size) pts = pts.filter(x => !cardIdxs.has(x[0]));
       pts = pts.sort((a, b) => deg[b[0]] - deg[a[0]]).slice(0, cfg.labelcap);
     }
     if (focusIdx != null && !pts.some(p => p[0] === focusIdx)) {
@@ -828,18 +1048,19 @@ HYBRID_HTML = r"""<!doctype html>
     }
     for (; lj < llblPool.length; lj++) llblPool[lj].style.display = 'none';
 
-    // Cards reproject every frame too (they inherit the two-phase smoothness), and
-    // scale with zoom anchored at the engage zoom: approach = the card grows.
-    if (cardSet) {
-      const z = cosmos.getZoomLevel();
-      const cs = cardBaseZoom ? Math.max(0.55, Math.min(2, 0.75 * z / cardBaseZoom)) : 1;
+    // Cards reproject every frame too (they inherit the two-phase smoothness).
+    // PINNED cards hold a fixed READABLE screen size (screen is authoritative);
+    // previews keep the zoom-anchored approach-and-it-grows scaling.
+    if (cardEls.size) {
+      const cs = previewScale();
       for (const [i, x, y] of (lblCache.crds || [])) {
-        const el = cardEls.get(i);
+        const el = cardEls.get(nodes[i].id);
         if (!el) continue;
         const [sx, sy] = cosmos.spaceToScreenPosition([x, y]);
         el.style.left = sx + 'px';
         el.style.top = (sy + 10) + 'px';
-        el.style.transform = 'translateX(-50%) scale(' + cs.toFixed(3) + ')';
+        el.style.transform = 'translateX(-50%) scale('
+          + (pinned.has(nodes[i].id) ? 1 : cs).toFixed(3) + ')';
       }
     }
   }
@@ -851,6 +1072,12 @@ HYBRID_HTML = r"""<!doctype html>
       sampleDirty = false; viewDirty = true; lastSampleTs = ts;
     }
     if (viewDirty) { projectLabels(); viewDirty = false; }
+    // Zoom settled -> re-derive card collision extents (a screen-sized card projects
+    // to a DIFFERENT space size per zoom; recompute on zoom-END, never per-frame).
+    if (zoomPhysAt && ts - zoomPhysAt > 250) {
+      zoomPhysAt = 0;
+      if (cardEls.size) applyCardPhysics();
+    }
   }
   requestAnimationFrame(updateLabels);
 
@@ -875,6 +1102,7 @@ HYBRID_HTML = r"""<!doctype html>
     $('btn-lasso').classList.toggle('on', on);
     $('main').style.cursor = on ? 'crosshair' : ''; }
   $('btn-lasso').onclick = () => setLasso(!lassoMode);
+  $('btn-unlap').onclick = () => deoverlapCards();
   // Escape walks the modes down: lasso -> selection -> any highlight. It is the
   // reliable deselect when 'hide unselected' leaves no visible background to click
   // (and clicking 'background' in a dense region usually hits a greyed node anyway).
@@ -1172,6 +1400,7 @@ HYBRID_HTML = r"""<!doctype html>
       $('sel-clear').onclick = clearSelection;
       $('q').onkeydown = e => { if (e.key === 'Enter' && $('q').value.trim()) doSearch($('q').value.trim()); };
       $('dclose').onclick = closeDetail;
+      $('dcard').onclick = () => { if (focusIdx != null) setPinned(nodes[focusIdx].id, true); };
       $('draw').onclick = () => { if (lastRead) { lastRead.raw = !lastRead.raw;
         renderDetail(lastRead.rd, lastRead.props, lastRead.raw); } };
       $('dragbar').onmousedown = e => {
