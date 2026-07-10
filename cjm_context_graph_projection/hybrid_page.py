@@ -104,6 +104,29 @@ HYBRID_HTML = r"""<!doctype html>
   .llbl{position:absolute;font-size:10px;color:#8f9ab5;background:rgba(32,36,44,.8);
         padding:0 3px;border-radius:2px;white-space:nowrap;pointer-events:none}
   .llbl.hl{color:#cdd7f0;background:rgba(40,60,120,.85)}
+  #cards{position:absolute;inset:0;pointer-events:none;overflow:hidden}
+  .card{position:absolute;width:340px;background:#fff;border:1px solid #bbb;border-radius:8px;
+        box-shadow:0 6px 20px #0007;transform-origin:top center;pointer-events:auto;
+        font-size:12px;line-height:1.4;cursor:pointer}
+  .card .chd{display:flex;gap:6px;align-items:center;padding:4px 9px;border-bottom:1px solid #eee;
+             border-top:3px solid var(--kc,#888);border-radius:8px 8px 0 0}
+  .card .chd b{font-size:12px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .card .chd .k{color:#999;font-size:10px;flex:none}
+  .card .chd .cx{font:12px system-ui;border:1px solid #ccc;border-radius:3px;background:#fff;
+                 cursor:pointer;padding:0 4px;flex:none}
+  .card .cbd{padding:6px 10px;position:relative;overflow:hidden;overflow-wrap:break-word}
+  .card .cbd.clamped{max-height:260px}
+  .card .cbd.clamped::after{content:'';position:absolute;bottom:0;left:0;right:0;height:36px;
+                            background:linear-gradient(rgba(255,255,255,0),#fff)}
+  .card .cbd h1,.card .cbd h2,.card .cbd h3{font-size:13px;margin:8px 0 4px}
+  .card .cbd pre{background:#f6f8fa;padding:6px;border-radius:5px;overflow-x:auto}
+  .card .cbd code{font:11px ui-monospace,SFMono-Regular,Menlo,monospace}
+  .card .cbd img{max-width:100%}
+  .card .cbd table{border-collapse:collapse}
+  .card .cbd td,.card .cbd th{border:1px solid #ddd;padding:1px 5px;vertical-align:top}
+  .card .cbd blockquote{border-left:3px solid #ddd;margin:4px 0;padding:2px 8px;color:#555}
+  .card .cbd .props td:first-child{color:#777;white-space:nowrap}
+  .card .cbd .mainprop{white-space:pre-wrap}
   #lassocv{position:absolute;inset:0;pointer-events:none}
   #marq{position:absolute;border:1px dashed #9db4ff;background:rgba(120,150,255,.12);
         display:none;pointer-events:none}
@@ -160,6 +183,7 @@ HYBRID_HTML = r"""<!doctype html>
   <label><span>link width</span><input type="range" data-k="lwidth" min="0.3" max="4" step="0.1"><span class="val"></span></label>
   <label><span>link opacity</span><input type="range" data-k="lopacity" min="0" max="1" step="0.05"><span class="val"></span></label>
   <label><span>labels</span><input type="range" data-k="labelcap" min="0" max="400" step="10"><span class="val"></span></label>
+  <label><span>cards</span><input type="range" data-k="cardcap" min="0" max="48" step="1" title="card mode engages when this few points are visible (0 = off)"><span class="val"></span></label>
   <label><span>link labels</span><input type="range" data-k="linklabelcap" min="0" max="300" step="10"><span class="val"></span></label>
   <label><span>&nbsp;&nbsp;↳ always</span><input type="checkbox" data-k="linklabelsalways" title="label sampled links even without a hover/selection"></label>
   <label><span>curved links</span><input type="checkbox" data-k="curved"></label>
@@ -182,6 +206,7 @@ HYBRID_HTML = r"""<!doctype html>
   <div id="main">
     <div id="cy"></div>
     <div id="labels"></div>
+    <div id="cards"></div>
     <canvas id="lassocv"></canvas>
     <div id="marq"></div>
   </div>
@@ -257,6 +282,7 @@ HYBRID_HTML = r"""<!doctype html>
                          friction: 0.9, collision: 0.4, decay: 10000,
                          psize: 1.2, degsize: 0.5, lwidth: 1.0, lopacity: 0.5,
                          labelcap: 120, linklabelcap: 60, linklabelsalways: false,
+                         cardcap: 16,
                          curved: true, arrows: false, drag: true, zoomscale: true,
                          hideunsel: false };
   // Greyout tiers: hide-unselected flips the greyed remainder fully invisible —
@@ -333,6 +359,7 @@ HYBRID_HTML = r"""<!doctype html>
     $('results').style.display = 'none'; $('ov').style.display = 'block'; $('q').value = '';
     closeDetail(); clearLabels();
     if (push) history.pushState(null, '', '?g=' + name);
+    cardCache.clear(); cardExpanded.clear();
     loadCfg();
     if (cosmos) { cosmos.destroy(); cosmos = null; $('cy').innerHTML = ''; }
     $('focus').textContent = 'loading…';
@@ -393,9 +420,10 @@ HYBRID_HTML = r"""<!doctype html>
       onPointMouseOut: () => { hideTip(); clearHoverPreview(); },
       onLinkMouseOver: (li) => hoverLinkPreview(li),
       onLinkMouseOut: () => clearHoverPreview(),
-      // Pan and zoom only MOVE the view (reproject cached labels, every frame);
-      // sim ticks and node drags MOVE THE POINTS (resample which labels exist).
-      onZoom: () => { viewDirty = true; },
+      // Pan/zoom reprojects cached labels EVERY FRAME (the stutter fix) and also
+      // marks a resample — zoom changes the visible set, which is what card mode
+      // and the screen sampler key on (the 90ms throttle absorbs the churn).
+      onZoom: () => { viewDirty = true; sampleDirty = true; },
       onSimulationTick: () => { sampleDirty = true; },
       onSimulationEnd: () => { sampleDirty = true; },
       onDrag: () => { sampleDirty = true; },
@@ -591,6 +619,87 @@ HYBRID_HTML = r"""<!doctype html>
     wireResults($('dnb'));
   }
 
+  // --- Card LOD (the near-zoom rung of the ladder): when the EXACT number of visible
+  // points falls to <= `cards` (findPointsInRect over the viewport — the marquee's own
+  // GPU machinery, density-aware where a zoom threshold is not), the visible nodes
+  // materialize as light PAPER CARDS over the dark canvas, rendering their verbatim
+  // content through the same pipeline as the detail pane. An active highlight narrows
+  // candidacy to its members — so a lasso'd or lens-applied set materializes as cards
+  // once you approach it. Cards are PREVIEWS (clamped, fade-out) by default; the ⤢
+  // toggle expands one to full content, remembered per node. Click = focus (detail
+  // pane); wheel re-dispatches to the canvas so zoom is never trapped. Cards scale
+  // with zoom (clamped) anchored at the zoom where card mode engaged — approach and
+  // the card grows toward full readability. In-card EDITING is the write-path fork's
+  // territory (a card is the natural host for 'edit this node').
+  const cardEls = new Map();      // point idx -> live card element
+  const cardCache = new Map();    // node id -> {rd, props} (bounded, oldest-out)
+  const cardExpanded = new Set(); // node ids expanded to FULL content
+  let cardSet = null;             // Set of carded idxs (null = card mode off)
+  let cardBaseZoom = null;        // zoom when card mode engaged -> scale anchor
+
+  function cardContent(el, idx) {
+    const id = nodes[idx].id;
+    const body = el.querySelector('.cbd');
+    const apply = (c) => { renderContentInto(body, c.rd, c.props, false);
+                           body.classList.toggle('clamped', !cardExpanded.has(id)); };
+    if (cardCache.has(id)) { apply(cardCache.get(id)); return; }
+    body.innerHTML = '<span style="color:#999">reading…</span>';
+    (async () => {
+      let rd = null, props = null;
+      try {
+        rd = await api('/api/g/' + graph + '/read/' + encodeURIComponent(id), 'read');
+        if (!rd || rd.error || !rd.text) {  // no verbatim body -> properties card
+          const sh = await api('/api/g/' + graph + '/show/'
+                               + encodeURIComponent(id) + '?depth=1', 'show');
+          props = (sh && sh.properties) || {};
+        }
+      } catch (e) { rd = { error: e.message || String(e) }; }
+      const c = { rd, props };
+      cardCache.set(id, c);
+      if (cardCache.size > 300) cardCache.delete(cardCache.keys().next().value);
+      if (cardEls.get(idx) === el && cardSet && cardSet.has(idx)) apply(c);
+    })();
+  }
+
+  function makeCard(idx) {
+    const nd = nodes[idx];
+    const el = document.createElement('div');
+    el.className = 'card';
+    el.style.setProperty('--kc', kindColor(nd.label || '?'));
+    el.innerHTML = '<div class="chd"><b></b><span class="k"></span>'
+      + '<button class="cx" title="expand / collapse to preview">⤢</button></div>'
+      + '<div class="cbd clamped"></div>';
+    el.querySelector('b').textContent = short(nd.title).slice(0, 70);
+    el.querySelector('.k').textContent = nd.label || '?';
+    el.onclick = () => focusNode(idx);
+    el.querySelector('.cx').onclick = (e) => {
+      e.stopPropagation();
+      cardExpanded.has(nd.id) ? cardExpanded.delete(nd.id) : cardExpanded.add(nd.id);
+      el.querySelector('.cbd').classList.toggle('clamped', !cardExpanded.has(nd.id));
+    };
+    el.addEventListener('wheel', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      const cv = $('cy').querySelector('canvas');
+      if (cv) cv.dispatchEvent(new WheelEvent('wheel', e));
+    }, { passive: false });
+    $('cards').appendChild(el);
+    return el;
+  }
+
+  function syncCards(set) {
+    if (!set || !set.size) {
+      cardSet = null; cardBaseZoom = null;
+      for (const [i, el] of cardEls) { el.remove(); cardEls.delete(i); }
+      return;
+    }
+    if (cardBaseZoom == null) cardBaseZoom = cosmos.getZoomLevel();
+    cardSet = set;
+    for (const [i, el] of cardEls)
+      if (!set.has(i)) { el.remove(); cardEls.delete(i); }
+    for (const i of set)
+      if (!cardEls.has(i)) { const el = makeCard(i); cardEls.set(i, el); cardContent(el, i); }
+  }
+
   // --- Labels overlay, TWO-PHASE (the round-2 pan-stutter fix): RESAMPLE decides
   // WHICH points/links get labels (GPU screen sampling — throttled, on position
   // change: sim ticks, drags, highlight/config changes) and caches their SPACE
@@ -600,19 +709,37 @@ HYBRID_HTML = r"""<!doctype html>
   let sampleDirty = true, viewDirty = true, lastSampleTs = 0;
   const labelPool = [];
   const llblPool = [];  // link (relation) labels — same pooling, rotated placement
-  let lblCache = { pts: [], lks: [] };  // [idx, spaceX, spaceY(, angle)] rows
-  function clearLabels() { lblCache = { pts: [], lks: [] };
+  let lblCache = { pts: [], lks: [], crds: [] };  // [idx, spaceX, spaceY(, angle)] rows
+  function clearLabels() { lblCache = { pts: [], lks: [], crds: [] };
+    syncCards(null);
     for (const el of labelPool) el.style.display = 'none';
     for (const el of llblPool) el.style.display = 'none'; }
   function resampleLabels() {
+    // Card-mode evaluation rides the resample cadence (exact visible count).
+    let cardsWanted = null;
+    if (cfg.cardcap > 0) {
+      let vis = cosmos.findPointsInRect(
+        [[0, 0], [mainEl.clientWidth, mainEl.clientHeight]]) || [];
+      if (hlPoints) vis = vis.filter(i => hlPoints.has(i));
+      if (vis.length && vis.length <= cfg.cardcap) cardsWanted = new Set(vis);
+    }
+    syncCards(cardsWanted);
+    const crds = [];
+    if (cardSet) {
+      const all = cosmos.getPointPositions();
+      for (const i of cardSet)
+        if (all && all.length > i * 2 + 1) crds.push([i, all[i * 2], all[i * 2 + 1]]);
+    }
     let pts = [];
     if (cfg.labelcap > 0) {
       const s = cosmos.getSampledPoints();
       const idxs = s.indices || [], pos = s.positions || [];
       pts = idxs.map((p, j) => [p, pos[j * 2], pos[j * 2 + 1]]);
       // A persistent highlight owns the label layer too: greyed-out (or hidden)
-      // nodes must not keep their labels floating over the selection.
+      // nodes must not keep their labels floating over the selection. Carded
+      // nodes drop their overlay labels — the card header replaces them.
       if (hlPoints) pts = pts.filter(x => hlPoints.has(x[0]));
+      if (cardSet) pts = pts.filter(x => !cardSet.has(x[0]));
       pts = pts.sort((a, b) => deg[b[0]] - deg[a[0]]).slice(0, cfg.labelcap);
     }
     if (focusIdx != null && !pts.some(p => p[0] === focusIdx)) {
@@ -643,7 +770,7 @@ HYBRID_HTML = r"""<!doctype html>
           lks.push([idxs[j], pos[j * 2], pos[j * 2 + 1], angs[j]]);
       }
     }
-    lblCache = { pts, lks };
+    lblCache = { pts, lks, crds };
   }
   function projectLabels() {
     const box = $('main').getBoundingClientRect();
@@ -700,6 +827,21 @@ HYBRID_HTML = r"""<!doctype html>
       lj++;
     }
     for (; lj < llblPool.length; lj++) llblPool[lj].style.display = 'none';
+
+    // Cards reproject every frame too (they inherit the two-phase smoothness), and
+    // scale with zoom anchored at the engage zoom: approach = the card grows.
+    if (cardSet) {
+      const z = cosmos.getZoomLevel();
+      const cs = cardBaseZoom ? Math.max(0.55, Math.min(2, 0.75 * z / cardBaseZoom)) : 1;
+      for (const [i, x, y] of (lblCache.crds || [])) {
+        const el = cardEls.get(i);
+        if (!el) continue;
+        const [sx, sy] = cosmos.spaceToScreenPosition([x, y]);
+        el.style.left = sx + 'px';
+        el.style.top = (sy + 10) + 'px';
+        el.style.transform = 'translateX(-50%) scale(' + cs.toFixed(3) + ')';
+      }
+    }
   }
   function updateLabels(ts) {
     requestAnimationFrame(updateLabels);
@@ -926,8 +1068,10 @@ HYBRID_HTML = r"""<!doctype html>
     }).join('') + '</table>';
   }
 
-  function renderDetail(rd, props, raw) {
-    const body = $('dbody');
+  // Shared verbatim-content renderer: the detail pane AND the canvas cards speak
+  // through the same pipeline (markdown/KaTeX for prose, hljs for code kinds,
+  // properties table for the relational kinds) — one rendering dialect everywhere.
+  function renderContentInto(body, rd, props, raw) {
     if (rd && !rd.error && rd.text) {
       if (raw) { body.innerHTML = '<pre class="mainprop"><code></code></pre>';
                  body.querySelector('code').textContent = rd.text; return; }
@@ -971,6 +1115,7 @@ HYBRID_HTML = r"""<!doctype html>
         td.textContent = x ? s.slice(0, 299) + '…' : s; td.dataset.x = x ? '0' : '1'; };
     }
   }
+  const renderDetail = (rd, props, raw) => renderContentInto($('dbody'), rd, props, raw);
 
   async function loadDetail(id) {
     openDetail();
