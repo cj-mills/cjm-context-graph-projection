@@ -129,7 +129,9 @@ HYBRID_HTML = r"""<!doctype html>
   #dbody blockquote{border-left:3px solid #ddd;margin:6px 0;padding:2px 10px;color:#555}
   #dbody .props td:first-child{color:#777;white-space:nowrap}
   .mainprop{white-space:pre-wrap}
-  #dnb h3{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#777;margin:14px 0 4px}
+  #dnb{border-top:2px solid #e2e2e2;margin-top:16px}
+  #dnb:empty{border-top:none;margin-top:0}
+  #dnb h3{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#777;margin:10px 0 4px}
   #perf{position:fixed;right:10px;bottom:8px;background:#fff;border:1px solid #ddd;border-radius:5px;
         padding:3px 8px;color:#555;font-size:12px;box-shadow:0 1px 3px #0001;z-index:8}
   #err{position:fixed;left:320px;bottom:8px;color:#f88;font-size:12px;max-width:50%;z-index:8}
@@ -150,12 +152,14 @@ HYBRID_HTML = r"""<!doctype html>
   <label><span>link distance</span><input type="range" data-k="distance" min="1" max="30" step="1"><span class="val"></span></label>
   <label><span>gravity</span><input type="range" data-k="gravity" min="0" max="1" step="0.02"><span class="val"></span></label>
   <label><span>friction</span><input type="range" data-k="friction" min="0" max="1" step="0.05"><span class="val"></span></label>
+  <label><span>collision</span><input type="range" data-k="collision" min="0" max="1" step="0.05"><span class="val"></span></label>
   <h4>Readability</h4>
   <label><span>point scale</span><input type="range" data-k="psize" min="0.3" max="4" step="0.1"><span class="val"></span></label>
   <label><span>link width</span><input type="range" data-k="lwidth" min="0.3" max="4" step="0.1"><span class="val"></span></label>
   <label><span>link opacity</span><input type="range" data-k="lopacity" min="0" max="1" step="0.05"><span class="val"></span></label>
   <label><span>labels</span><input type="range" data-k="labelcap" min="0" max="400" step="10"><span class="val"></span></label>
   <label><span>link labels</span><input type="range" data-k="linklabelcap" min="0" max="300" step="10"><span class="val"></span></label>
+  <label><span>&nbsp;&nbsp;↳ always</span><input type="checkbox" data-k="linklabelsalways" title="label sampled links even without a hover/selection"></label>
   <label><span>curved links</span><input type="checkbox" data-k="curved"></label>
   <label><span>arrows</span><input type="checkbox" data-k="arrows"></label>
   <label><span>drag nodes</span><input type="checkbox" data-k="drag"></label>
@@ -201,6 +205,7 @@ HYBRID_HTML = r"""<!doctype html>
   let linkRels = null;     // relation_type per link (edge labels)
   let selection = null;    // {indices:[...], source:'marquee'|'kind: X'|'lens: y'|...}
   let focusIdx = null;     // clicked node's index (detail pane subject)
+  let focusLinkIdx = null; // clicked LINK's index (persistent edge highlight + endpoints)
   let hlLinks = null;      // Set of highlighted link indices (selection interconnect / focus
                            // neighborhood) — also FILTERS the edge labels to the active set
   let resultsOwner = null; // shared results pane ownership token (the a928a0d8 lesson)
@@ -241,9 +246,12 @@ HYBRID_HTML = r"""<!doctype html>
   // `friction` here is INTUITIVE (0 = none, 1 = frozen) — cosmos's simulationFriction
   // is velocity RETENTION (1 = keeps moving), so the projection inverts it; the storage
   // namespace is versioned (cfg1) because that semantic flip orphans old stored values.
-  const CFG_DEFAULTS = { repulsion: 0.5, spring: 1.0, distance: 4, gravity: 0.1,
-                         friction: 0.9, psize: 1.2, lwidth: 1.0, lopacity: 0.5,
-                         labelcap: 120, linklabelcap: 60,
+  // Collision (v3.1 GPU spatial-hash force) keeps sized points apart; its tip says
+  // keep linkDistance above combined point radii, hence the 6 default alongside it.
+  const CFG_DEFAULTS = { repulsion: 0.5, spring: 1.0, distance: 6, gravity: 0.1,
+                         friction: 0.9, collision: 0.4,
+                         psize: 1.2, lwidth: 1.0, lopacity: 0.5,
+                         labelcap: 120, linklabelcap: 60, linklabelsalways: false,
                          curved: true, arrows: false, drag: true, zoomscale: true };
   let cfg = { ...CFG_DEFAULTS };
   const cfgKey = () => 'hybrid.cfg1.' + graph;
@@ -258,6 +266,7 @@ HYBRID_HTML = r"""<!doctype html>
     return { simulationRepulsion: cfg.repulsion, simulationLinkSpring: cfg.spring,
              simulationLinkDistance: cfg.distance, simulationGravity: cfg.gravity,
              simulationFriction: 1 - cfg.friction,  // intuitive -> cosmos retention
+             simulationCollision: cfg.collision, simulationCollisionPadding: 2,
              pointSizeScale: cfg.psize, linkWidthScale: cfg.lwidth,
              linkOpacity: cfg.lopacity, curvedLinks: cfg.curved,
              linkDefaultArrows: cfg.arrows, linkArrowsSizeScale: 2.5,
@@ -267,15 +276,26 @@ HYBRID_HTML = r"""<!doctype html>
     localStorage.setItem(cfgKey(), JSON.stringify(cfg));
     if (!cosmos) return;
     cosmos.setConfigPartial(cosmosCfg());
-    if (['repulsion', 'spring', 'distance', 'gravity', 'friction'].includes(k) && paused === false)
+    if (['repulsion', 'spring', 'distance', 'gravity', 'friction', 'collision'].includes(k)
+        && paused === false)
       cosmos.start(0.35); // physics knobs re-heat gently so the change is FELT
-    labelsDirty = true;
+    sampleDirty = true;
   }
   function resetCfg() {
     localStorage.removeItem(cfgKey());
     loadCfg();
     if (cosmos) { cosmos.setConfigPartial(cosmosCfg()); if (!paused) cosmos.start(0.35); }
-    labelsDirty = true;
+    sampleDirty = true;
+  }
+
+  // Highlighted links render at the base width/opacity, which reads FAINT (first-drive
+  // finding) — so any active highlight POPS the link layer (wider + brighter) and a
+  // clear restores the configured base. Greyed links stay near-invisible either way.
+  function linkPop(on) {
+    if (!cosmos) return;
+    cosmos.setConfigPartial(on
+      ? { linkWidthScale: cfg.lwidth * 1.75, linkOpacity: Math.max(cfg.lopacity, 0.85) }
+      : { linkWidthScale: cfg.lwidth, linkOpacity: cfg.lopacity });
   }
 
   // --- Canvas boot / graph load -------------------------------------------------
@@ -286,7 +306,7 @@ HYBRID_HTML = r"""<!doctype html>
   async function loadGraph(name, push = true) {
     graph = name; clearErr();
     $('graphs').value = name;
-    focusIdx = null; selection = null; resultsOwner = null;
+    focusIdx = null; focusLinkIdx = null; selection = null; resultsOwner = null;
     $('selbox').classList.remove('open');
     $('results').style.display = 'none'; $('ov').style.display = 'block'; $('q').value = '';
     closeDetail(); clearLabels();
@@ -345,16 +365,24 @@ HYBRID_HTML = r"""<!doctype html>
       linkDefaultColor: '#6b7694',
       linkGreyoutOpacity: 0.04,
       linkVisibilityDistanceRange: [40, 300], // far zoom: links fade, structure stays
+      hoveredLinkColor: '#9db4ff', hoveredLinkWidthIncrease: 2,
       simulationDecay: 3000,
       fitViewOnInit: true, fitViewDelay: 600,
       ...cosmosCfg(),
       onPointClick: (idx) => focusNode(idx),
+      onLinkClick: (li) => focusLink(li),
       onBackgroundClick: () => { if (!selection) clearHighlight(); hideTip(); },
       onPointMouseOver: (idx, pos, ev) => { showTip(idx, ev); hoverPreview(idx); },
       onPointMouseOut: () => { hideTip(); clearHoverPreview(); },
-      onZoom: () => { labelsDirty = true; },
-      onSimulationTick: () => { labelsDirty = true; },
-      onSimulationEnd: () => { labelsDirty = true; },
+      onLinkMouseOver: (li) => hoverLinkPreview(li),
+      onLinkMouseOut: () => clearHoverPreview(),
+      // Pan and zoom only MOVE the view (reproject cached labels, every frame);
+      // sim ticks and node drags MOVE THE POINTS (resample which labels exist).
+      onZoom: () => { viewDirty = true; },
+      onSimulationTick: () => { sampleDirty = true; },
+      onSimulationEnd: () => { sampleDirty = true; },
+      onDrag: () => { sampleDirty = true; },
+      onDragEnd: () => { sampleDirty = true; },
     });
     cosmos.setPointPositions(positions);
     cosmos.setPointColors(colors);
@@ -366,7 +394,7 @@ HYBRID_HTML = r"""<!doctype html>
                              + Math.round(performance.now() - t0) + ' ms';
     renderKinds(res);
     loadLenses();
-    labelsDirty = true;
+    sampleDirty = true;
   }
 
   function renderKinds(res) {
@@ -401,16 +429,19 @@ HYBRID_HTML = r"""<!doctype html>
     const links = interconnectLinks(indices);
     selection = { indices, source };
     hlLinks = new Set(links);
+    focusLinkIdx = null;
+    linkPop(true);
     cosmos.setConfigPartial({ highlightedPointIndices: indices,
                               highlightedLinkIndices: links,
                               outlinedPointIndices: undefined,
                               linkGreyoutOpacity: 0.04,
-                              focusedPointIndex: undefined });
+                              focusedPointIndex: undefined,
+                              focusedLinkIndex: undefined });
     $('selbox').classList.add('open');
     $('selmeta').textContent = indices.length + ' node(s) · ' + links.length
                                + ' link(s) · ' + source;
     if (fit) cosmos.fitViewByPointIndices(indices, 350, 0.2);
-    labelsDirty = true;
+    sampleDirty = true;
   }
   function clearSelection() {
     selection = null;
@@ -418,29 +449,53 @@ HYBRID_HTML = r"""<!doctype html>
     clearHighlight();
   }
   function clearHighlight() {
-    if (cosmos) cosmos.setConfigPartial({ highlightedPointIndices: undefined,
-                                          highlightedLinkIndices: undefined,
-                                          outlinedPointIndices: undefined,
-                                          focusedPointIndex: undefined });
+    if (cosmos) { linkPop(false);
+      cosmos.setConfigPartial({ highlightedPointIndices: undefined,
+                                highlightedLinkIndices: undefined,
+                                outlinedPointIndices: undefined,
+                                linkGreyoutOpacity: 0.04,
+                                focusedPointIndex: undefined,
+                                focusedLinkIndex: undefined }); }
     focusIdx = null;
+    focusLinkIdx = null;
     hlLinks = null;
-    labelsDirty = true;
+    sampleDirty = true;
   }
 
-  // Hover preview (the explore-connections idiom): outline the neighborhood + surface
-  // its links, WITHOUT touching an active selection/focus — a soft look-ahead only.
+  // Hover previews (the explore-connections idiom): outline + surface links WITHOUT
+  // touching an active selection/focus — a soft look-ahead only. `getConnectedLinkIndices`
+  // is an INTERCONNECT (both endpoints must be in the set), so it always gets the whole
+  // neighborhood — a single index returns [] and an EMPTY highlight array greys out
+  // EVERY link (the round-2 'hover suppresses edges' bug).
+  const previewActive = () => selection || focusIdx != null || focusLinkIdx != null;
   function hoverPreview(idx) {
-    if (!cosmos || selection || focusIdx != null || drag) return;
+    if (!cosmos || previewActive() || drag) return;
     const nb = cosmos.getNeighboringPointIndices(idx) || [];
-    cosmos.setConfigPartial({ outlinedPointIndices: [idx, ...nb],
-                              highlightedLinkIndices: cosmos.getConnectedLinkIndices(idx),
+    const neighborhood = [idx, ...nb];
+    hlLinks = new Set(cosmos.getConnectedLinkIndices(neighborhood) || []);
+    linkPop(true);
+    cosmos.setConfigPartial({ outlinedPointIndices: neighborhood,
+                              highlightedLinkIndices: [...hlLinks],
                               linkGreyoutOpacity: 0.3 });
+    sampleDirty = true;
+  }
+  function hoverLinkPreview(li) {
+    if (!cosmos || previewActive() || drag || !linkSrc) return;
+    hlLinks = new Set([li]);
+    linkPop(true);
+    cosmos.setConfigPartial({ outlinedPointIndices: [linkSrc[li], linkTgt[li]],
+                              highlightedLinkIndices: [li],
+                              linkGreyoutOpacity: 0.3 });
+    sampleDirty = true;
   }
   function clearHoverPreview() {
-    if (!cosmos || selection || focusIdx != null) return;
+    if (!cosmos || previewActive()) return;
+    hlLinks = null;
+    linkPop(false);
     cosmos.setConfigPartial({ outlinedPointIndices: undefined,
                               highlightedLinkIndices: undefined,
                               linkGreyoutOpacity: 0.04 });
+    sampleDirty = true;
   }
   function listSelection() {
     if (!selection) return;
@@ -461,21 +516,24 @@ HYBRID_HTML = r"""<!doctype html>
     if (!cosmos || idx == null || !nodes[idx]) return;
     clearErr();
     focusIdx = idx;
+    focusLinkIdx = null;
     const id = nodes[idx].id;
     if (!selection) {
       const nb = cosmos.getNeighboringPointIndices(idx) || [];
       const neighborhood = [idx, ...nb];
       const links = cosmos.getConnectedLinkIndices(neighborhood) || [];
       hlLinks = new Set(links);
+      linkPop(true);
       cosmos.setConfigPartial({ highlightedPointIndices: neighborhood,
                                 highlightedLinkIndices: links,
                                 outlinedPointIndices: undefined,
                                 linkGreyoutOpacity: 0.04,
-                                focusedPointIndex: idx });
+                                focusedPointIndex: idx,
+                                focusedLinkIndex: undefined });
     } else {
-      cosmos.setConfigPartial({ focusedPointIndex: idx });
+      cosmos.setConfigPartial({ focusedPointIndex: idx, focusedLinkIndex: undefined });
     }
-    labelsDirty = true;
+    sampleDirty = true;
     if (push) history.pushState(null, '', '?g=' + graph + '&focus=' + encodeURIComponent(id));
     await loadDetail(id);
   }
@@ -483,38 +541,80 @@ HYBRID_HTML = r"""<!doctype html>
     if (i === undefined) { fail(new Error('node not on canvas: ' + id)); return; }
     cosmos.zoomToPointByIndex(i, 500, 6); focusNode(i); };
 
-  // --- Labels overlay: constant-size DOM labels for a degree-ranked sample of
-  // VISIBLE points (getSampledPoints = cosmos's evenly-distributed screen sample),
-  // plus the focused point always. Updated via one rAF loop gated on a dirty flag
-  // (zoom/tick/config), so an idle settled canvas costs nothing.
-  let labelsDirty = true, lastLabelTs = 0;
+  // Click a LINK -> persistent edge focus: the link thickens (focusedLinkIndex), its
+  // endpoints highlight, and the detail pane names the relation + both endpoints as
+  // click-through rows — hover a faint edge, click, jump to either end.
+  function focusLink(li) {
+    if (!cosmos || !linkRels || li == null || linkRels[li] === undefined) return;
+    clearErr();
+    focusLinkIdx = li;
+    focusIdx = null;
+    const s = linkSrc[li], t = linkTgt[li];
+    hlLinks = new Set([li]);
+    linkPop(true);
+    cosmos.setConfigPartial({ highlightedPointIndices: [s, t],
+                              highlightedLinkIndices: [li],
+                              outlinedPointIndices: undefined,
+                              linkGreyoutOpacity: 0.04,
+                              focusedPointIndex: undefined,
+                              focusedLinkIndex: li });
+    sampleDirty = true;
+    openDetail();
+    lastRead = null;
+    $('dtitle').textContent = '— ' + linkRels[li] + ' →';
+    $('dmeta').textContent = 'Link';
+    $('dbody').innerHTML = '';
+    $('dnb').innerHTML = '<h3>Endpoints</h3>'
+      + resultRow(nodes[s], 'source —' + linkRels[li] + '→')
+      + resultRow(nodes[t], 'target');
+    wireResults($('dnb'));
+  }
+
+  // --- Labels overlay, TWO-PHASE (the round-2 pan-stutter fix): RESAMPLE decides
+  // WHICH points/links get labels (GPU screen sampling — throttled, on position
+  // change: sim ticks, drags, highlight/config changes) and caches their SPACE
+  // coords; REPROJECT maps that cache space->screen (cheap: <= 2 caps of transforms)
+  // and runs EVERY FRAME the view moves — so pan/zoom keeps labels glued to their
+  // points at frame rate instead of lagging behind the canvas by a throttle tick.
+  let sampleDirty = true, viewDirty = true, lastSampleTs = 0;
   const labelPool = [];
   const llblPool = [];  // link (relation) labels — same pooling, rotated placement
-  function clearLabels() { for (const el of labelPool) el.style.display = 'none';
-                           for (const el of llblPool) el.style.display = 'none'; }
-  function updateLabels(ts) {
-    requestAnimationFrame(updateLabels);
-    if (!cosmos || !labelsDirty || ts - lastLabelTs < 90) return;
-    labelsDirty = false; lastLabelTs = ts;
-    const cap = cfg.labelcap;
-    let picked = [];
-    if (cap > 0) {
+  let lblCache = { pts: [], lks: [] };  // [idx, spaceX, spaceY(, angle)] rows
+  function clearLabels() { lblCache = { pts: [], lks: [] };
+    for (const el of labelPool) el.style.display = 'none';
+    for (const el of llblPool) el.style.display = 'none'; }
+  function resampleLabels() {
+    const pts = [];
+    if (cfg.labelcap > 0) {
       const s = cosmos.getSampledPoints();
-      const idxs = s.indices || [];
-      const pos = s.positions || [];
-      const byDeg = idxs.map((p, j) => [p, pos[j * 2], pos[j * 2 + 1]])
-                        .sort((a, b) => deg[b[0]] - deg[a[0]]).slice(0, cap);
-      picked = byDeg;
+      const idxs = s.indices || [], pos = s.positions || [];
+      pts.push(...idxs.map((p, j) => [p, pos[j * 2], pos[j * 2 + 1]])
+                      .sort((a, b) => deg[b[0]] - deg[a[0]]).slice(0, cfg.labelcap));
     }
-    if (focusIdx != null) {
-      const tracked = cosmos.getPointPositions();
-      if (tracked && tracked.length >= focusIdx * 2 + 2
-          && !picked.some(p => p[0] === focusIdx))
-        picked.push([focusIdx, tracked[focusIdx * 2], tracked[focusIdx * 2 + 1]]);
+    if (focusIdx != null && !pts.some(p => p[0] === focusIdx)) {
+      const all = cosmos.getPointPositions();
+      if (all && all.length >= focusIdx * 2 + 2)
+        pts.push([focusIdx, all[focusIdx * 2], all[focusIdx * 2 + 1]]);
     }
+    // Link labels are HIGHLIGHT-SCOPED by default (hover/focus/selection names its
+    // relations, the rest of the graph stays quiet); `always` opts into labeling
+    // the ambient sampled links too.
+    const lks = [];
+    if (cfg.linklabelcap > 0 && linkRels && (hlLinks || cfg.linklabelsalways)) {
+      const s = cosmos.getSampledLinks();
+      const idxs = s.indices || [], pos = s.positions || [], angs = s.angles || [];
+      let list = [];
+      for (let j = 0; j < idxs.length; j++)
+        list.push([idxs[j], pos[j * 2], pos[j * 2 + 1], angs[j]]);
+      if (hlLinks) list = list.filter(x => hlLinks.has(x[0]));
+      lks.push(...list.slice(0, cfg.linklabelcap));
+    }
+    lblCache = { pts, lks };
+  }
+  function projectLabels() {
     const box = $('main').getBoundingClientRect();
     let li = 0;
-    for (const [p, x, y] of picked) {
+    for (const [p, x, y] of lblCache.pts) {
       const [sx, sy] = cosmos.spaceToScreenPosition([x, y]);
       if (sx < -40 || sy < -20 || sx > box.width + 40 || sy > box.height + 20) continue;
       let el = labelPool[li];
@@ -528,40 +628,37 @@ HYBRID_HTML = r"""<!doctype html>
       li++;
     }
     for (; li < labelPool.length; li++) labelPool[li].style.display = 'none';
-
-    // Link (relation) labels: the sampled VISIBLE links (evenly distributed, one per
-    // screen cell), midpoint-anchored and rotated along the link (never upside down —
-    // the link-sampling story's normalization). An active highlight set FILTERS the
-    // labels to its own links, so a selection/lens/focus names its relations and the
-    // rest of the graph stays quiet.
     let lj = 0;
-    if (cfg.linklabelcap > 0 && linkRels) {
-      const s = cosmos.getSampledLinks();
-      const idxs = s.indices || [], pos = s.positions || [], angs = s.angles || [];
-      let list = [];
-      for (let j = 0; j < idxs.length; j++)
-        list.push([idxs[j], pos[j * 2], pos[j * 2 + 1], angs[j]]);
-      if (hlLinks) list = list.filter(x => hlLinks.has(x[0]));
-      list = list.slice(0, cfg.linklabelcap);
-      for (const [l, x, y, a] of list) {
-        const [sx, sy] = cosmos.spaceToScreenPosition([x, y]);
-        if (sx < -40 || sy < -20 || sx > box.width + 40 || sy > box.height + 20) continue;
-        let el = llblPool[lj];
-        if (!el) { el = document.createElement('div'); el.className = 'llbl';
-                   $('labels').appendChild(el); llblPool.push(el); }
-        let d = (a || 0) * 180 / Math.PI;
-        while (d > 90) d -= 180;
-        while (d <= -90) d += 180;
-        el.style.display = 'block';
-        el.style.left = sx + 'px';
-        el.style.top = sy + 'px';
-        el.style.transform = 'translate(-50%,-50%) rotate(' + d.toFixed(1) + 'deg)';
-        el.className = hlLinks ? 'llbl hl' : 'llbl';
-        el.textContent = linkRels[l];
-        lj++;
-      }
+    for (const [l, x, y, a] of lblCache.lks) {
+      const [sx, sy] = cosmos.spaceToScreenPosition([x, y]);
+      if (sx < -40 || sy < -20 || sx > box.width + 40 || sy > box.height + 20) continue;
+      let el = llblPool[lj];
+      if (!el) { el = document.createElement('div'); el.className = 'llbl';
+                 $('labels').appendChild(el); llblPool.push(el); }
+      // Rotate along the link, never upside down; when the text flips 180° to stay
+      // readable, the direction glyph flips WITH it so the arrow still points
+      // source -> target on screen.
+      let d = (a || 0) * 180 / Math.PI, flipped = false;
+      while (d > 90) { d -= 180; flipped = !flipped; }
+      while (d <= -90) { d += 180; flipped = !flipped; }
+      el.style.display = 'block';
+      el.style.left = sx + 'px';
+      el.style.top = sy + 'px';
+      el.style.transform = 'translate(-50%,-50%) rotate(' + d.toFixed(1) + 'deg)';
+      el.className = hlLinks ? 'llbl hl' : 'llbl';
+      el.textContent = flipped ? ('← ' + linkRels[l] + ' —') : ('— ' + linkRels[l] + ' →');
+      lj++;
     }
     for (; lj < llblPool.length; lj++) llblPool[lj].style.display = 'none';
+  }
+  function updateLabels(ts) {
+    requestAnimationFrame(updateLabels);
+    if (!cosmos) return;
+    if (sampleDirty && ts - lastSampleTs >= 90) {
+      resampleLabels();
+      sampleDirty = false; viewDirty = true; lastSampleTs = ts;
+    }
+    if (viewDirty) { projectLabels(); viewDirty = false; }
   }
   requestAnimationFrame(updateLabels);
 
