@@ -507,6 +507,19 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         if not obj.get("written") and obj.get("emitted_text"):
             lines += ["", "```", obj["emitted_text"].rstrip("\n"), "```"]
         return "\n".join(lines)
+    if kind == "add-text":
+        if obj.get("error"):
+            return f"⚠ {obj['error']}"
+        status = "written to" if obj.get("written") else "would write (dry run) to"
+        head = (f"**added** `{obj.get('kind')}` region as _CodeText_ "
+                f"`{obj.get('text_id')}` at order {obj.get('order_index')}")
+        if obj.get("new_import_bindings"):
+            head += f" (+{obj.get('new_import_bindings')} import bindings on the module)"
+        lines = [head,
+                 f"{status} `{obj.get('artifact_path')}` ({obj.get('emitted_bytes')} bytes)"]
+        if not obj.get("written") and obj.get("emitted_text"):
+            lines += ["", "```", obj["emitted_text"].rstrip("\n"), "```"]
+        return "\n".join(lines)
     if kind == "move":
         if obj.get("error"):
             return f"⚠ {obj['error']}"

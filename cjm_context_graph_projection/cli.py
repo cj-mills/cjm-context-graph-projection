@@ -63,7 +63,8 @@ DEFAULT_REPOS = "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills"
 # code-on-graph corpus); plain `.py`, so the python decomposer applies cleanly.
 DEFAULT_CODE_LIBS = ("cjm-dev-graph-schema", "cjm-markdown-decompose-core",
                      "cjm-notebook-decompose-core",
-                     "cjm-context-graph-projection", "cjm-python-decompose-core")
+                     "cjm-context-graph-projection", "cjm-python-decompose-core",
+                     "cjm-transcript-correction-tui")
 # The substrate core is nbdev — ingest its NOTEBOOKS (the source), with cross-cell
 # @patch/incremental methods re-attributed to their true classes by the compositor.
 DEFAULT_NOTEBOOK_LIBS = ("cjm-substrate",)
@@ -447,6 +448,19 @@ async def _dispatch(args) -> int:
             if _absorb_graph_sourced(res, args) != 0:
                 return 1
             return 1 if res.get("error") else 0
+        elif args.command == "add-text":
+            # Local import: adding a name to this module's import line is the open
+            # binding-table gap (47b256de) — stay self-contained until it closes.
+            from .authoring import add_text
+            body = Path(args.body_file).read_text() if args.body_file else args.body
+            res = await add_text(gx, args.module, body, actor=args.actor,
+                                 write=not args.no_write)
+            print(render("add-text", res, args.format))
+            # Same absorb gate: a new region in a GRAPH-SOURCED module must land in
+            # the source journal, not just on disk.
+            if _absorb_graph_sourced(res, args) != 0:
+                return 1
+            return 1 if res.get("error") else 0
         elif args.command == "reconcile-memory":
             res = await reconcile_memory(gx, note_slug=args.note, absorb_anchors=args.absorb,
                                          absorb_all=args.absorb_all, journal_path=args.journal_path,
@@ -489,7 +503,8 @@ async def _dispatch(args) -> int:
             return 1 if res.get("error") else 0
         elif args.command == "new-module":
             res = await new_module(gx, args.repo_key, args.module_path,
-                                   import_name=args.import_name, write=not args.no_write)
+                                   import_name=args.import_name, repo_root=args.repo_root,
+                                   write=not args.no_write)
             print(render("module", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "regroup":
@@ -923,6 +938,22 @@ def main() -> int:
     p_asym.add_argument("--repos-dir", default=DEFAULT_REPOS,
                         help="Repos root (parity with author; the absorb gate reads it)")
 
+    p_atxt = sub.add_parser("add-text",
+                            help="Mint a NEW CodeText region (imports/constants/docstring) "
+                                 "into a .py module (the non-symbol CREATE leg; appends at "
+                                 "end, emits the artifact, absorbs into the source journal "
+                                 "when graph-sourced; import lines also merge their bindings "
+                                 "into the module node — the fresh-module bootstrap)")
+    p_atxt.add_argument("module", help="The CodeModule node id to add the region to")
+    g_atxt = p_atxt.add_mutually_exclusive_group(required=True)
+    g_atxt.add_argument("--body", help="The region's verbatim source (NO top-level def/class)")
+    g_atxt.add_argument("--body-file", help="Read the region's verbatim source from a file")
+    p_atxt.add_argument("--no-write", action="store_true",
+                        help="Dry run: emit + print the artifact, don't touch graph or disk")
+    p_atxt.add_argument("--actor", default="agent:session")
+    p_atxt.add_argument("--repos-dir", default=DEFAULT_REPOS,
+                        help="Repos root (parity with author; the absorb gate reads it)")
+
     p_asec = sub.add_parser("add-section",
                             help="M2 gradient: add a section to a note (append, or --after ANCHOR), born on-graph")
     p_asec.add_argument("slug", help="The note to add to (by slug)")
@@ -966,6 +997,9 @@ def main() -> int:
     p_nm.add_argument("repo_key", help="The repo's durable conceptual slug")
     p_nm.add_argument("module_path", help="Repo-relative path of the new module (e.g. pkg/sub.py)")
     p_nm.add_argument("--import-name", help="Dotted import name (derived from module_path if omitted)")
+    p_nm.add_argument("--repo-root", default=None,
+                      help="Absolute repo root — anchors the FIRST module of a fresh repo "
+                           "(otherwise derived from an existing sibling module)")
     p_nm.add_argument("--no-write", action="store_true", help="Dry run: report the plan, don't add the node")
 
     p_rg = sub.add_parser("regroup",

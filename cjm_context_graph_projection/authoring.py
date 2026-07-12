@@ -656,3 +656,126 @@ async def add_symbol(
         Path(artifact_path).write_text(emitted)
         result["written"] = True
     return result
+
+
+async def add_text(
+    gx: GraphHandle,
+    module_id: str,             # The CodeModule to mint the region into (.py modules, v1)
+    body: str,                  # The region's verbatim source: top-level NON-def statements only
+    *,
+    actor: str = "agent:session",  # Who authored it (recorded in the result)
+    write: bool = True,         # Add the node + emit the artifact (False = dry-run preview)
+) -> Dict[str, Any]:  # The add result (incl. the emitted artifact path + text), or error
+    """Mint a NEW CodeText region (imports/constants/docstring/`__all__`) into a module, then emit.
+
+    The CodeText dual of `add_symbol` — the CREATE leg for the regions that are NOT
+    symbols, closing the born-on-graph seeding gap (a `new-module` module could never
+    acquire imports or constants through the CLI). The body must parse standalone and
+    contain NO top-level def/class (those are `add-symbol`'s); the region lands
+    VERBATIM with the SAME identity ingest derives (`code_text_node_id(module,
+    first-non-blank-line)`) and appends at the end of the module's region order.
+    Top-level import statements ALSO merge their parsed bindings into the module
+    node's `import_bindings`, so the canonical emit renders them and later
+    `add_symbol` calls bind refs against them — the fresh-module import bootstrap
+    (without it, a born-on-graph module's derived import block stays empty no matter
+    what the region says). Canonical emit repositions the derived import block at the
+    top regardless of the region's order slot."""
+    # Local imports: adding an import line to THIS module's imports region is the open
+    # binding-table gap (47b256de) — stay self-contained until it closes.
+    from cjm_python_decompose_core.parse import parse_regions
+    from cjm_dev_graph_schema.nodes import CodeTextNode
+
+    module, amb = await _resolve_node(gx, module_id)
+    if amb:
+        return {"error": amb, "written": False}
+    if module is None:
+        return {"error": f"no module `{module_id}`", "written": False}
+    module_id = F.nid(module)
+    if _label_of(module) != DevNodeKinds.CODE_MODULE:
+        return {"error": f"add-text targets a CodeModule (got {_label_of(module)})",
+                "written": False}
+    if await _notebook_cell_wires(gx, module_id):
+        return {"error": "v1 adds text regions to .py modules only (this module has "
+                         "notebook cells — author a Cell instead)", "written": False}
+    text = body.rstrip("\n")
+    if not text.strip():
+        return {"error": "empty body", "written": False}
+    try:
+        tree = ast.parse(text)
+    except SyntaxError as e:
+        return {"error": f"body does not parse: {e}", "written": False}
+    if any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+           for n in tree.body):
+        return {"error": "body must contain NO top-level def/class — mint those with "
+                         "add-symbol (a CodeText holds the substrate BETWEEN symbols)",
+                "written": False}
+    regions = parse_regions(text)
+    if len(regions) != 1:  # defensive: with no defs, parse_regions yields one whole region
+        return {"error": f"body decomposed into {len(regions)} regions — add ONE "
+                         "contiguous region per call", "written": False}
+    region = regions[0]
+    stripped = text.lstrip()
+    # Mirrors ingest's region-kind classification (extract._text_region_kind).
+    kind = ("imports" if stripped.startswith(("import ", "from "))
+            else "docstring" if stripped.startswith(('"""', "'''", '"', "'"))
+            else "code")
+    wires = await _module_region_wires(gx, module_id)
+    dup = next((w for w in wires if w["label"] == DevNodeKinds.CODE_TEXT
+                and w["properties"].get("region_key") == region.region_key), None)
+    if dup is not None:
+        return {"error": f"a region leading with the same line already exists — author "
+                         f"it (`{dup['id']}`)", "written": False}
+    order = max((w["properties"].get("order_index") if
+                 w["properties"].get("order_index") is not None else -1 for w in wires),
+                default=-1) + 1
+    ct = CodeTextNode(
+        module_id=module_id, region_key=region.region_key, text=region.text,
+        content_hash=SourceRef.compute_hash(region.text.encode("utf-8")),
+        order_index=order, path=str(F.prop(module, "path") or ""), kind=kind)
+    gn = ct.to_graph_node()
+
+    # Fresh-module import bootstrap: merge the body's top-level import bindings into
+    # the module node so canonical emit + later add_symbol calls see them.
+    new_bindings: List[Dict[str, Any]] = []
+    merged = list(F.prop(module, "import_bindings") or [])
+    if any(isinstance(n, (ast.Import, ast.ImportFrom)) for n in tree.body):
+        def _bkey(b: Dict[str, Any]) -> Tuple:
+            return (b.get("name"), b.get("kind"), b.get("level", 0),
+                    b.get("module", ""), b.get("imported", ""), b.get("alias", ""))
+        have = {_bkey(b) for b in merged}
+        for descs in parse_module(text).import_bindings.values():
+            for b in descs:
+                if _bkey(b) not in have:
+                    have.add(_bkey(b))
+                    merged.append(b)
+                    new_bindings.append(b)
+    module_wire = _as_wire(module, DevNodeKinds.CODE_MODULE)
+    if new_bindings:
+        module_wire["properties"]["import_bindings"] = merged
+
+    module_path = str(F.prop(module, "module_path") or "")
+    emitted = emit_module_from_nodes(
+        wires + [gn], module_node=module_wire,
+        derive_imports=not is_test_module_path(module_path))
+    artifact_path = F.prop(module, "path")
+    result = {
+        "module_id": module_id, "text_id": ct.id, "region_key": region.region_key,
+        "kind": kind, "order_index": order, "actor": actor,
+        "new_import_bindings": len(new_bindings),
+        "artifact": "module", "artifact_path": artifact_path,
+        "repo_key": F.prop(module, "repo_key"), "module_path": module_path,
+        "emitted_bytes": len(emitted.encode("utf-8")), "emitted_text": emitted,
+        "unchanged": False, "written": False,
+    }
+    if write and artifact_path:
+        await graph_task(gx.queue, gx.graph_id, "add_nodes", nodes=[gn])
+        await graph_task(gx.queue, gx.graph_id, "add_edges", edges=[
+            make_edge(module_id, ct.id, DevRelations.CONTAINS)])
+        if new_bindings:
+            await graph_task(gx.queue, gx.graph_id, "update_node", node_id=module_id,
+                             properties={"import_bindings": merged})
+        # A born-on-graph package's FIRST region precedes its directory on disk.
+        Path(artifact_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(artifact_path).write_text(emitted)
+        result["written"] = True
+    return result

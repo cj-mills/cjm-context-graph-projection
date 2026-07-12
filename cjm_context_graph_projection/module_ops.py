@@ -117,6 +117,7 @@ async def new_module(
     module_path: str,         # Repo-relative path of the new module (e.g. "pkg/sub.py")
     *,
     import_name: Optional[str] = None,  # Dotted import name (derived from module_path if omitted)
+    repo_root: Optional[str] = None,    # Absolute repo root — anchors the FIRST module of a fresh repo (no sibling to derive from)
     write: bool = True,       # Add the node to the graph (else dry run)
 ) -> Dict[str, Any]:  # The new-module result (or error)
     """Mint an empty CodeModule node (the target a `regroup`/`move` populates).
@@ -124,14 +125,19 @@ async def new_module(
     Node-only: no `.py` is written until the first symbol lands (a module is EMITTED from
     its regions, and an empty module has none). The node is added so a same-session
     relocation can target it by id; the next `ingest` re-derives it from whatever file the
-    relocation writes (or drops it harmlessly if it stays empty)."""
+    relocation writes (or drops it harmlessly if it stays empty). A repo with no modules
+    yet (born-on-graph greenfield) has no sibling to derive the on-disk root from — pass
+    `repo_root` explicitly there; an existing sibling-derived root always wins."""
     mid = code_module_node_id(repo_key, module_path)
     if await _get(gx, mid) is not None:
         return {"error": f"module `{module_path}` already exists in {repo_key}",
                 "module_id": mid, "written": False}
     root = await _repo_root(gx, repo_key)
+    if root is None and repo_root:
+        root = repo_root if repo_root.endswith("/") else repo_root + "/"
     if root is None:
-        return {"error": f"no existing module in repo `{repo_key}` to anchor the path",
+        return {"error": f"no existing module in repo `{repo_key}` to anchor the path "
+                         "— pass --repo-root for a fresh repo's first module",
                 "written": False}
     imp = import_name or _derive_import_name(module_path)
     node = CodeModuleNode(repo_key=repo_key, module_path=module_path, path=root + module_path,
