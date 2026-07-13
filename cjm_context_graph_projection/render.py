@@ -242,6 +242,13 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         return (f"**linked** `{obj.get('source_id')}` —_{obj.get('relation')}_→ "
                 f"`{obj.get('target_id')}` (actor {obj.get('actor')})\n"
                 f"`edge {obj.get('edge_id')}`")
+    if kind == "unlink":
+        if obj.get("error"):
+            return f"⚠ {obj['error']}"
+        outcome = "retracted" if obj.get("deleted") else "already absent (no-op)"
+        return (f"**unlinked** `{obj.get('source_id')}` —_{obj.get('relation')}_→ "
+                f"`{obj.get('target_id')}` — edge {outcome}\n"
+                f"`edge {obj.get('edge_id')}` (retraction journaled; replay converges without it)")
     if kind == "check":
         if obj.get("error"):
             return f"⚠ {obj['error']}"

@@ -32,7 +32,8 @@ from .display import display_rule_node_id, set_display_rule
 from .lens import lens_node_id, set_lens
 from .runtime import GraphHandle
 from .structure import add_section, reconstruct_note
-from .write import add_check, alias, assert_value, author_section, decide, link, register_session
+from .write import (add_check, alias, assert_value, author_section, decide, link, register_session,
+                    unlink)
 
 # The provenance actor stamped on the M3 one-time genesis import (a per-note `new-note` op
 # capturing the pre-cutover baseline). The lineage floor every later edit traces back to.
@@ -54,8 +55,11 @@ M3_BASELINE_ACTOR = "import:m3-baseline"
 # `session` = the timestamp-keyed session SPINE (DEC 6124d8bf): a Session node upserted by
 # deterministic per-key id (started_at + optional title; last op wins on replay, like
 # display-rule). Window END is derived at read time, never stored.
-JOURNAL_VERBS = ("decide", "alias", "assert", "link", "section", "new-note", "add-section",
-                 "display-rule", "set-lens", "check", "session")
+# `unlink` = edge RETRACTION (finding 2f1d9382): the journal is append-only, so a mis-minted
+# link is undone by a compensating op, not an erasure — replay applies it in append order
+# after the link it retracts, and a rebuild converges with the edge absent.
+JOURNAL_VERBS = ("decide", "alias", "assert", "link", "unlink", "section", "new-note",
+                 "add-section", "display-rule", "set-lens", "check", "session")
 
 
 def read_journal(
@@ -187,6 +191,12 @@ async def _apply_op(gx: GraphHandle, op: Dict[str, Any]) -> str:
     elif verb == "link":
         await link(gx, a["source_id"], a["target_id"], a["relation"],
                    actor=a.get("actor", "agent:session"))
+    elif verb == "unlink":
+        # Edge retraction (2f1d9382): replayed in append order AFTER the link it
+        # retracts, so a rebuild converges with the edge absent. A missing edge
+        # is a tolerated no-op (deterministic edge id; idempotent re-application).
+        await unlink(gx, a["source_id"], a["target_id"], a["relation"],
+                     actor=a.get("actor", "agent:session"))
     elif verb == "check":
         # DoD gradient: re-attach a check (deterministic (item, text) id -> verified
         # no-op on rebuild). Replaying its `task_state=open` after a later journaled
@@ -317,7 +327,7 @@ def touched_node_ids(
     elif verb == "assert":
         if a.get("subject") and _id_shaped(a["subject"]):
             out.append(a["subject"])
-    elif verb == "link":
+    elif verb in ("link", "unlink"):
         out.extend(r for r in (a.get("source_id"), a.get("target_id")) if r)
     elif verb == "check":
         if a.get("item_id"):

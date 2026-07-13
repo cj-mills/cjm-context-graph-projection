@@ -422,3 +422,42 @@ async def register_session(
     await extend_graph(gx.queue, gx.graph_id, [node], [])
     return {"session_id": sess.id, "key": key, "updated": False, "written": True,
             "started_at": props.get("started_at"), "title": title or None}
+
+
+async def unlink(
+    gx: GraphHandle,
+    source_id: str,    # The source node: full id, or a unique id prefix (must resolve)
+    target_id: str,    # The target node: full id, or a unique id prefix (must resolve)
+    relation: str,     # The edge relation to retract
+    *,
+    actor: str = "agent:session",  # Who retracted it (journal provenance; the edge itself is gone)
+) -> Dict[str, Any]:  # The write result (incl. error when an endpoint is missing/ambiguous)
+    """RETRACT a deliberate edge — the write dual of `link` (finding 2f1d9382).
+
+    A mis-minted link was journal-permanent: the journal is append-only by design,
+    so retraction must be an OP, not an erasure — replay applies the unlink in
+    append order AFTER the link it retracts, and a rebuild converges with the
+    edge absent. The edge id is deterministic from (source, relation, target),
+    so the retraction derives it rather than looking it up; a missing edge is a
+    tolerated no-op (`deleted: 0`) — that is what makes replay idempotent.
+    Endpoints resolve like `link` (unique prefix ok, ambiguity loud). When an
+    endpoint no longer resolves the edge id cannot be derived and the call
+    errors — but a vanished endpoint means the edge is already gone (cascade),
+    so there is nothing to retract."""
+    src_res = await resolve_node_ref(gx, source_id)
+    tgt_res = await resolve_node_ref(gx, target_id)
+    for ref, res in ((source_id, src_res), (target_id, tgt_res)):
+        if "candidates" in res:
+            return {"error": ambiguity_error(ref, res["candidates"]), "source_id": source_id,
+                    "target_id": target_id, "relation": relation, "written": False}
+    src, tgt = src_res.get("node"), tgt_res.get("node")
+    missing = [ref for ref, node in ((source_id, src), (target_id, tgt)) if node is None]
+    if missing:
+        return {"error": f"missing node(s): {missing}", "source_id": source_id,
+                "target_id": target_id, "relation": relation, "written": False}
+    source_id, target_id = F.nid(src), F.nid(tgt)  # the RESOLVED endpoint ids
+    edge_id = make_edge(source_id, target_id, relation)["id"]
+    deleted = await graph_task(gx.queue, gx.graph_id, "delete_edges", edge_ids=[edge_id])
+    return {"source_id": source_id, "target_id": target_id, "relation": relation,
+            "actor": actor, "edge_id": edge_id, "deleted": int(deleted or 0),
+            "written": True}

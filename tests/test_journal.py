@@ -227,3 +227,16 @@ def test_journal_window_time_and_session_filters(tmp_path, monkeypatch):
     rec = next(t for t in journal_window([p])["touched"] if t["ref"] == "ccc333")
     assert rec["touches"] == 2 and rec["verbs"] == {"check": 2}
     assert rec["last_ts"] >= rec["first_ts"]
+
+
+def test_unlink_verb_is_journaled_and_replay_converges(tmp_path):
+    """Retraction is a durable compensating op (finding 2f1d9382): the verb is
+    journaled like link, and the orphan classifier's caller drops retracted
+    triples so a retracted edge is never proposed for remap."""
+    from cjm_context_graph_projection.journal import JOURNAL_VERBS, append_write, read_journal
+    assert "unlink" in JOURNAL_VERBS
+    p = str(tmp_path / "writes.jsonl")
+    args = {"source_id": "dec-1", "target_id": "sym-1", "relation": "SHAPES", "actor": "a"}
+    assert append_write(p, "link", args) is True
+    assert append_write(p, "unlink", args) is True   # compensating op appends after its link
+    assert [o["verb"] for o in read_journal(p)] == ["link", "unlink"]

@@ -31,7 +31,7 @@ from .explorer_page import EXPLORER_HTML
 from .factlayer import note_alias_map
 from .hybrid_page import HYBRID_HTML
 from .journal import (append_write, journal_sourced_note_paths, journal_window_view,
-                      M3_BASELINE_ACTOR, m3_baseline_import, replay_journal)
+                      M3_BASELINE_ACTOR, m3_baseline_import, read_journal, replay_journal)
 from .lens import apply_lens, set_lens
 from .listing import list_graph
 from .module_ops import delete_module, flip_notebook_to_py, new_module, regroup, rename_module
@@ -54,7 +54,7 @@ from .source_state import (absorb_authored_text, cutover_module, emit_source_art
 from .structure import add_section, new_note
 from .viz import project_viz
 from .worklist import dangling_reference_sources, worklist
-from .write import add_check, alias, assert_value, decide, link, register_session
+from .write import add_check, alias, assert_value, decide, link, register_session, unlink
 
 DEFAULT_MEMORY = ("/home/innom-dt/.claude/projects/"
                   "-mnt-SN850X-8TB-EXT4-Projects-GitHub-cj-mills-cjm-substrate/memory")
@@ -412,6 +412,34 @@ async def _dispatch(args) -> int:
                               "relation": args.relation, "actor": args.actor,
                               "source_label": res.get("source_label"),
                               "target_label": res.get("target_label")})
+            return 1 if res.get("error") else 0
+        elif args.command == "unlink":
+            if args.journal_path and not args.force:
+                # PRE-FLIGHT (before anything is deleted): retraction is scoped to
+                # DELIBERATE links — an ingest-derived edge (CONTAINS/CALLS/...) has
+                # no journaled link op, and retracting one would make the unlink
+                # replay a standing structural override. Journaled ops carry FULL
+                # resolved ids, so a caller's unique prefix matches by startswith;
+                # --force acknowledges the structural-override intent.
+                journaled = any(
+                    o.get("verb") == "link"
+                    and str((o.get("args") or {}).get("source_id", "")).startswith(args.source_id)
+                    and str((o.get("args") or {}).get("target_id", "")).startswith(args.target_id)
+                    and (o.get("args") or {}).get("relation") == args.relation
+                    for o in read_journal(args.journal_path))
+                if not journaled:
+                    print(f"⚠ no journaled link op matches "
+                          f"`{args.source_id}` —{args.relation}→ `{args.target_id}` — "
+                          f"this looks like an ingest-derived (structural) edge; "
+                          f"pass --force to retract it anyway (nothing deleted)")
+                    return 1
+            res = await unlink(gx, args.source_id, args.target_id, args.relation,
+                               actor=args.actor)
+            print(render("unlink", res, args.format))
+            if args.journal_path and res.get("written"):
+                append_write(args.journal_path, "unlink",
+                             {"source_id": res["source_id"], "target_id": res["target_id"],
+                              "relation": res["relation"], "actor": args.actor})
             return 1 if res.get("error") else 0
         elif args.command == "check":
             res = await add_check(gx, args.item, args.text, actor=args.actor)
@@ -923,6 +951,15 @@ def main() -> int:
     p_ln.add_argument("relation", help="Edge relation (free string; e.g. IMPLEMENTED_BY)")
     p_ln.add_argument("target_id", help="Target node id (must exist)")
     p_ln.add_argument("--actor", default="agent:session")
+
+    p_ul = sub.add_parser("unlink",
+                          help="RETRACT a deliberate edge (journaled compensating op — the write dual of link)")
+    p_ul.add_argument("source_id", help="Source node id / unique prefix")
+    p_ul.add_argument("relation", help="Edge relation of the edge to retract")
+    p_ul.add_argument("target_id", help="Target node id / unique prefix")
+    p_ul.add_argument("--force", action="store_true",
+                      help="Retract even without a matching journaled link op (structural override)")
+    p_ul.add_argument("--actor", default="agent:session")
 
     p_au = sub.add_parser("author",
                           help="Author a node's verbatim slot (CodeSymbol body / CodeText / Cell / memory Section), emit the .py/.ipynb/.md")

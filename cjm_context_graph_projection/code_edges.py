@@ -82,8 +82,16 @@ async def orphaned_edges(
     against the current graph, builds the current code-name universe (CodeSymbol +
     CodeModule) for proposals, classifies, then decorates each orphan's RESOLVING
     side with a display label (the trail back to what the edge meant)."""
-    ops = [op.get("args", {}) for op in read_journal(journal_path)
-           if op.get("verb") == "link"]
+    all_ops = read_journal(journal_path)
+    # A retracted link is not an orphan — its edge is GONE by intent (unlink,
+    # 2f1d9382), so proposing a remap for it would resurrect retracted noise.
+    retracted = {((o.get("args") or {}).get("source_id"), (o.get("args") or {}).get("relation"),
+                  (o.get("args") or {}).get("target_id"))
+                 for o in all_ops if o.get("verb") == "unlink"}
+    ops = [op.get("args", {}) for op in all_ops
+           if op.get("verb") == "link"
+           and ((op.get("args") or {}).get("source_id"), (op.get("args") or {}).get("relation"),
+                (op.get("args") or {}).get("target_id")) not in retracted]
 
     ids: Set[str] = set()
     for op in ops:
