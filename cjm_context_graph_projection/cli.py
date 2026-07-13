@@ -67,7 +67,23 @@ DEFAULT_CODE_LIBS = ("cjm-dev-graph-schema", "cjm-markdown-decompose-core",
                      "cjm-transcript-correction-tui")
 # The substrate core is nbdev — ingest its NOTEBOOKS (the source), with cross-cell
 # @patch/incremental methods re-attributed to their true classes by the compositor.
-DEFAULT_NOTEBOOK_LIBS = ("cjm-substrate",)
+DEFAULT_NOTEBOOK_LIBS = ("cjm-substrate", "cjm-transcription-core",
+                         "cjm-transcript-decomp-core",
+                         "cjm-transcript-correction-core",
+                         # c25780e8 bulk sweep (DEC 5a7c2af7): the in-scope
+                         # still-nbdev ecosystem deps, transitioning.
+                         "cjm-capability-demucs", "cjm-capability-ffmpeg",
+                         "cjm-capability-graph-sqlite",
+                         "cjm-capability-monitor-nvidia",
+                         "cjm-capability-primitives",
+                         "cjm-capability-qwen3-forced-aligner",
+                         "cjm-capability-silero-vad",
+                         "cjm-capability-voxtral-hf", "cjm-capability-whisper",
+                         "cjm-context-graph-layer",
+                         "cjm-context-graph-primitives",
+                         "cjm-substrate-hf-utils", "cjm-substrate-torch-utils",
+                         "cjm-transcript-graph-schema",
+                         "cjm-transcription-adapter-interface")
 
 
 def _editor_pop(
