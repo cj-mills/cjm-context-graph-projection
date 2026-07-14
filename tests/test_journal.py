@@ -240,3 +240,32 @@ def test_unlink_verb_is_journaled_and_replay_converges(tmp_path):
     assert append_write(p, "link", args) is True
     assert append_write(p, "unlink", args) is True   # compensating op appends after its link
     assert [o["verb"] for o in read_journal(p)] == ["link", "unlink"]
+
+
+def test_unlink_full_id_triple_retracts_despite_missing_endpoints(monkeypatch):
+    """Orphan retraction (finding 78cff95f): a FULL-id triple may retract even when
+    an endpoint no longer resolves — the stale link op would otherwise poison the
+    orphan audit forever (and resurrect the edge on re-resolution). Prefix refs
+    still refuse loudly: a prefix cannot derive the deterministic edge id."""
+    import asyncio
+    from cjm_context_graph_projection import write as write_mod
+
+    async def fake_resolve(gx, ref):
+        return {}  # neither endpoint resolves — both vanished from the graph
+
+    calls = []
+
+    async def fake_graph_task(queue, graph_id, op, **kw):
+        calls.append(op)
+        return 0  # nothing deleted — the db edge is already gone
+
+    monkeypatch.setattr(write_mod, "resolve_node_ref", fake_resolve)
+    monkeypatch.setattr(write_mod, "graph_task", fake_graph_task)
+    gx = type("GX", (), {"queue": None, "graph_id": "g"})()
+    full_src = "d899e643-fab2-5863-a1e9-c00eff077389"
+    full_tgt = "8d7d91d4-9011-5517-81a8-6938a126f23a"
+    res = asyncio.run(write_mod.unlink(gx, full_src, full_tgt, "SHAPES"))
+    assert res["written"] is True and res["deleted"] == 0
+    assert calls == ["delete_edges"]
+    res2 = asyncio.run(write_mod.unlink(gx, "d899e643", full_tgt, "SHAPES"))
+    assert res2["written"] is False and "missing node" in res2["error"]

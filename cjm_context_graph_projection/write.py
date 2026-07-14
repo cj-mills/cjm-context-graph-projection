@@ -440,10 +440,12 @@ async def unlink(
     edge absent. The edge id is deterministic from (source, relation, target),
     so the retraction derives it rather than looking it up; a missing edge is a
     tolerated no-op (`deleted: 0`) — that is what makes replay idempotent.
-    Endpoints resolve like `link` (unique prefix ok, ambiguity loud). When an
-    endpoint no longer resolves the edge id cannot be derived and the call
-    errors — but a vanished endpoint means the edge is already gone (cascade),
-    so there is nothing to retract."""
+    Endpoints resolve like `link` (unique prefix ok, ambiguity loud). A missing
+    endpoint is fatal only for PREFIX refs (the edge id cannot be derived) — a
+    FULL-id triple retracts anyway (finding 78cff95f): the db edge is already
+    gone (cascade), but the JOURNALED link op would poison the orphan audit
+    forever and resurrect the edge if the endpoint id ever re-resolved, so the
+    compensating op must stay recordable."""
     src_res = await resolve_node_ref(gx, source_id)
     tgt_res = await resolve_node_ref(gx, target_id)
     for ref, res in ((source_id, src_res), (target_id, tgt_res)):
@@ -452,10 +454,13 @@ async def unlink(
                     "target_id": target_id, "relation": relation, "written": False}
     src, tgt = src_res.get("node"), tgt_res.get("node")
     missing = [ref for ref, node in ((source_id, src), (target_id, tgt)) if node is None]
-    if missing:
-        return {"error": f"missing node(s): {missing}", "source_id": source_id,
-                "target_id": target_id, "relation": relation, "written": False}
-    source_id, target_id = F.nid(src), F.nid(tgt)  # the RESOLVED endpoint ids
+    if missing and not (_FULL_UUID_RE.match(source_id) and _FULL_UUID_RE.match(target_id)):
+        return {"error": f"missing node(s): {missing} — retracting an orphaned edge needs "
+                         f"the FULL id triple (a prefix cannot derive the edge id)",
+                "source_id": source_id, "target_id": target_id, "relation": relation,
+                "written": False}
+    source_id = F.nid(src) if src is not None else source_id
+    target_id = F.nid(tgt) if tgt is not None else target_id
     edge_id = make_edge(source_id, target_id, relation)["id"]
     deleted = await graph_task(gx.queue, gx.graph_id, "delete_edges", edge_ids=[edge_id])
     return {"source_id": source_id, "target_id": target_id, "relation": relation,
