@@ -15,7 +15,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from cjm_context_graph_layer.ops import graph_task
-from cjm_context_graph_primitives.query import EdgeQuery, NodeQuery, PropertyPredicate
+from cjm_context_graph_primitives.query import EdgeQuery, NodeQuery
 
 from . import factlayer as F
 from .display import annotate_display, first_clause, node_title
@@ -39,8 +39,11 @@ _SUPERSEDED_FACTOR = 0.3  # Down-weight for nodes that are the target of a SUPER
 # query's term count), so a long field can't dominate beyond a focused match.
 # `source` = notebook Cell sources — without it, notebook-sourced code is invisible
 # to the exhaustive literal search while `.py` code (CodeText `text`) is indexed.
+# `body` = CodeSymbol bodies — the same gap one layer up: without it, top-level
+# `.py` symbol content is invisible to the exhaustive literal search (soak
+# finding 0c03fb01; the Cell.source fix's shape, applied to symbols).
 _TEXT_FIELDS = ("title", "name", "slug", "key", "description", "statement", "value", "text",
-                "source")
+                "source", "body")
 # Common words that add noise, not signal, to seed-term matching.
 _STOPWORDS = frozenset((
     "the", "and", "for", "with", "this", "that", "from", "into", "are", "was",
@@ -650,19 +653,19 @@ async def locate(
         rows = [{"id": c["id"], "label": c["label"], "title": c["title"], "path": None}
                 for c in res["candidates"]]
         return {"term": term, "matches": rows, "count": len(rows), "truncated": False}
-    # Union of per-property `contains` matches (NodeQuery `where` is AND-only, so OR
-    # across properties = one query per property, deduped by id).
-    seen: Dict[str, Any] = {}
-    for prop in _LOCATE_PROPS:
-        q = NodeQuery(where=[PropertyPredicate(prop=prop, op="contains", value=term)],
-                      limit=limit + 1)
-        res = await graph_task(gx.queue, gx.graph_id, "query_nodes", query=q.to_dict())
-        for n in (res.nodes or []):
-            nid = _get(n, "id")
-            if nid is not None:
-                seen.setdefault(nid, n)
-    await annotate_display(gx, list(seen.values()))
-    rows = sorted((_locate_row(n) for n in seen.values()),
+    # EXHAUSTIVE scan over the identifying properties (the `grep` shape). The old
+    # per-property capped queries returned an ARBITRARY subset for a widely-shared
+    # handle ('graph.py' as a bare filename across repos) and reported that subset
+    # as the count — under-reporting without saying so (soak finding 41e071f6).
+    # `count` is now the TRUE total; only the match LIST is capped (`truncated`).
+    needle = term.lower()
+    hit_ids: List[str] = []
+    for row in await _scan_rows(gx, list(_LOCATE_PROPS)):
+        if any(row.get(p) and needle in str(row[p]).lower() for p in _LOCATE_PROPS):
+            hit_ids.append(row["id"])
+    nodes = await F.load_nodes(gx, hit_ids)
+    await annotate_display(gx, list(nodes.values()))
+    rows = sorted((_locate_row(n) for n in nodes.values()),
                   key=lambda r: (r["label"] or "", r["title"] or ""))
     return {"term": term, "matches": rows[:limit], "count": len(rows),
             "truncated": len(rows) > limit}

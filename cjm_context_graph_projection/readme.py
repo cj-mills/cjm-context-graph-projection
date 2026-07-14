@@ -18,7 +18,9 @@ that shaped the code, with provenance) is a deliberate FAST-FOLLOW gated on the 
 [[graph-visibility-model]] — it would otherwise leak private planning into a public README.
 """
 
+import tomllib
 from collections import defaultdict
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from cjm_dev_graph_schema.identity import entity_node_id
@@ -84,12 +86,29 @@ async def project_readme(
         syms_by_mod[mid].append(s)
         symbol_count += 1
 
-    # Cross-repo dependency summary from IMPORTS edges.
+    # Dependency summary. "Depends on" is read from the repo's OWN pyproject
+    # ([project].dependencies — derive-don't-hand-write applied to the projector
+    # itself): graph IMPORTS edges omitted direct deps, listed transitives, and
+    # even reversed direction across the corpus (soak finding 582c2405). "Used by"
+    # stays graph-derived — a consumer's pyproject is not this repo's file.
     depends_on, used_by = set(), set()
+    root = None
+    for m in repo_modules:
+        p = F.prop(m, "path", "") or ""
+        rel = F.prop(m, "module_path", "") or ""
+        if p and rel and p.endswith(rel):
+            root = p[: -len(rel)]
+            break
+    if root and (Path(root) / "pyproject.toml").exists():
+        proj = tomllib.loads((Path(root) / "pyproject.toml").read_text())
+        for spec in (proj.get("project") or {}).get("dependencies", []):
+            name = spec
+            for sep in "<>=!~[;( ":
+                name = name.split(sep, 1)[0]
+            if name:
+                depends_on.add(name.replace("_", "-"))
     for src, tgt in await F.load_edge_pairs(gx, DevRelations.IMPORTS):
         sr, tr = repo_of.get(src), repo_of.get(tgt)
-        if sr == repo_key and tr and tr != repo_key:
-            depends_on.add(tr)
         if tr == repo_key and sr and sr != repo_key:
             used_by.add(sr)
 

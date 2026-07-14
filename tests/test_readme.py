@@ -37,6 +37,12 @@ async def _build(root, db):
         f = Path(root) / rel
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text(src)
+    # The lib repo's pyproject: "Depends on" derives from THIS file, not from
+    # graph IMPORTS edges (soak finding 582c2405) — names normalized to hyphens,
+    # version specs / markers / extras stripped.
+    (Path(root) / "lib_repo" / "pyproject.toml").write_text(
+        "[project]\nname = 'lib'\n"
+        "dependencies = ['cjm_substrate>=0.0.51', \"tomli>=2 ; python_version < '3.11'\"]\n")
     # Decompose BOTH repos into ONE corpus so the cross-repo IMPORTS map spans them
     # (exactly what `ingest` does across DEFAULT_CODE_LIBS — separate calls wouldn't resolve
     # `from lib.api import run` to lib's module).
@@ -64,7 +70,10 @@ def test_readme_projection_structural():
                 assert "`Engine` _class_ — The engine." in md
                 assert "`tidy` _function_ — Tidy a string." in md
                 assert "_helper" not in md  # private symbol excluded
-                # dependency summary: app depends on lib -> lib is "used by app"
+                # dependency summary: "Depends on" comes from lib_repo's pyproject
+                # (names hyphen-normalized, specs/markers stripped — 582c2405);
+                # "Used by" stays graph-derived: app imports lib.
+                assert "**Depends on:** `cjm-substrate`, `tomli`" in md
                 assert "**Used by:** `app`" in md
                 # purpose absent -> placeholder hint
                 assert not res["has_purpose"] and "No purpose recorded on-graph" in md

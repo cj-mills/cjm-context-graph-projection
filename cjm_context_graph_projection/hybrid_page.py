@@ -1296,6 +1296,17 @@ HYBRID_HTML = r"""<!doctype html>
     }).join('') + '</table>';
   }
 
+  // Raw HTML in node text renders as ESCAPED literal text: node content is DATA to
+  // display verbatim, not markup to execute — a decision statement mentioning
+  // <audio> must not become a live element that swallows the rest of the pane
+  // (finding 1182bac5; DOMPurify allows media tags, so sanitize alone can't save
+  // an audit instrument). Markdown-GENERATED tags still render; only raw HTML
+  // passthrough tokens are escaped.
+  marked.use({ renderer: { html(h) {
+    const s = typeof h === 'string' ? h : ((h && (h.text || h.raw)) || '');
+    return esc(s);
+  } } });
+
   // Shared verbatim-content renderer: the detail pane AND the canvas cards speak
   // through the same pipeline (markdown/KaTeX for prose, hljs for code kinds,
   // properties table for the relational kinds) — one rendering dialect everywhere.

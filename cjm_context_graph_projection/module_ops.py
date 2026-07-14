@@ -36,7 +36,8 @@ from cjm_python_decompose_core.extract import decompose_text
 from cjm_python_decompose_core.ingest import corpus_graph_elements
 
 from . import factlayer as F
-from .authoring import _module_node, _module_region_wires, _notebook_cell_wires
+from .authoring import (_label_of, _module_node, _module_region_wires, _notebook_cell_wires,
+                        _resolve_node)
 from .journal import append_write, read_journal
 from .refactor_ops import _get, _relocate
 from .runtime import GraphHandle
@@ -267,9 +268,15 @@ async def delete_module(
     it still DEFINES top-level symbols (move them out first), unless `force` (a confirmed-dead
     module). Cleans the graph (vs. deferring to re-ingest) precisely so a later `emit` can't
     resurrect the just-deleted file from a lingering node."""
-    M = await _module_node(gx, module_id)
+    M, amb = await _resolve_node(gx, module_id)
+    if amb:
+        return {"error": amb, "written": False}
     if M is None:
         return {"error": f"no module `{module_id}`", "written": False}
+    if _label_of(M) != DevNodeKinds.CODE_MODULE:
+        return {"error": f"delete-module targets a CodeModule (got {_label_of(M)})",
+                "written": False}
+    module_id = F.nid(M)
     region_wires = await _module_region_wires(gx, module_id)
     top_syms = [w for w in region_wires
                 if w["label"] == DevNodeKinds.CODE_SYMBOL and w["properties"].get("body")]

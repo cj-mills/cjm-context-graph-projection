@@ -336,6 +336,17 @@ EXPLORER_HTML = r"""<!doctype html>
     }).join('') + '</table>';
   }
 
+  // Raw HTML in node text renders as ESCAPED literal text: node content is DATA to
+  // display verbatim, not markup to execute — a decision statement mentioning
+  // <audio> must not become a live element that swallows the rest of the pane
+  // (finding 1182bac5; DOMPurify allows media tags, so sanitize alone can't save
+  // an audit instrument). Markdown-GENERATED tags still render; only raw HTML
+  // passthrough tokens are escaped.
+  marked.use({ renderer: { html(h) {
+    const s = typeof h === 'string' ? h : ((h && (h.text || h.raw)) || '');
+    return esc(s);
+  } } });
+
   function renderDetail(rd, props, raw) {
     const body = $('dbody');
     if (rd && !rd.error && rd.text) {
