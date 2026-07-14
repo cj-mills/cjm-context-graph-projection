@@ -48,8 +48,18 @@ async def repo_purpose(
     read-only: the resolver's `created_node` is never written here."""
     rid = entity_node_id("repo", repo_key)
     subject_id = (await resolve_subject(gx, rid))["subject_id"]
+    # The purpose may live on a RENAME-STABLE conceptual entity ('torch-utils')
+    # whose name/aliases carry this repo's directory name, not on the repo-name-
+    # keyed entity this projector derives (soak finding d81ecdf2 — the split
+    # previously forced asserting purpose on BOTH ids). Union the subjects: the
+    # derived repo entity plus every entity that ANSWERS TO repo_key by key,
+    # current name, or alias — the same identity channels the alias index uses.
+    _, ents = await F.alias_index(gx)
+    subjects = {subject_id} | {
+        eid for eid, e in ents.items()
+        if repo_key in {F.prop(e, "key"), F.prop(e, "name"), *(F.prop(e, "aliases") or [])}}
     slot = [a for a in await F.load_assertions(gx)
-            if F.prop(a, "predicate") == "purpose" and F.prop(a, "subject_id") == subject_id]
+            if F.prop(a, "predicate") == "purpose" and F.prop(a, "subject_id") in subjects]
     if not slot:
         return None
     active = F.active_assertions(slot, await F.load_supersedes(gx))

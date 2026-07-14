@@ -6,6 +6,7 @@ from pathlib import Path
 
 from cjm_context_graph_layer.ops import extend_graph
 from cjm_dev_graph_schema.identity import entity_node_id
+from cjm_dev_graph_schema.nodes import EntityNode
 
 import pytest
 
@@ -94,5 +95,24 @@ def test_readme_uses_on_graph_purpose():
                 assert res["has_purpose"]
                 assert "A tiny library that runs things." in res["markdown"]
                 assert "No purpose recorded" not in res["markdown"]
+        return True
+    assert asyncio.run(run())
+
+
+def test_readme_purpose_via_rename_stable_entity():
+    """d81ecdf2: a purpose asserted ONLY on a rename-stable conceptual entity
+    (slug key, repo dir name carried as its `name`) projects into the README —
+    no duplicated assertion on the repo-name-keyed entity required."""
+    async def run():
+        with tempfile.TemporaryDirectory() as root:
+            db = str(Path(root) / "g.db")
+            await _build(root, db)
+            async with open_graph(db) as gx:
+                ent = EntityNode(kind="repo", key="lib-core", name="lib")
+                await extend_graph(gx.queue, gx.graph_id, [ent.to_graph_node()], [])
+                await assert_value(gx, ent.id, "purpose", "Runs things, conceptually.")
+                res = await project_readme(gx, "lib")
+                assert res["has_purpose"]
+                assert "Runs things, conceptually." in res["markdown"]
         return True
     assert asyncio.run(run())
