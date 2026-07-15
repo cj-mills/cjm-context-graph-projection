@@ -65,7 +65,7 @@ DEFAULT_REPOS = "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills"
 DEFAULT_CODE_LIBS = ("cjm-dev-graph-schema", "cjm-markdown-decompose-core",
                      "cjm-notebook-decompose-core",
                      "cjm-context-graph-projection", "cjm-python-decompose-core",
-                     "cjm-transcript-correction-tui")
+                     "cjm-transcript-correction-tui", "cjm-transcription-tui")
 # The substrate core is nbdev — ingest its NOTEBOOKS (the source), with cross-cell
 # @patch/incremental methods re-attributed to their true classes by the compositor.
 DEFAULT_NOTEBOOK_LIBS = ("cjm-substrate", "cjm-transcription-core",
