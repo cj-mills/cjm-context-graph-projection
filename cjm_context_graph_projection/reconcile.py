@@ -22,11 +22,11 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from cjm_context_graph_primitives.journal import append_write
 from cjm_dev_graph_schema.vocab import DevNodeKinds
 
 from . import factlayer as F
 from .authoring import file_section_raws, graph_section_raws, section_divergence
-from .journal import append_write
 from .runtime import GraphHandle
 from .write import author_section
 

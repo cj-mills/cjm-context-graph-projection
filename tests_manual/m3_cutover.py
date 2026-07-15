@@ -40,8 +40,8 @@ from cjm_context_graph_projection import factlayer as F
 from cjm_context_graph_projection.authoring import emit_artifact
 from cjm_context_graph_projection.devgraph import build_dev_graph_elements
 from cjm_context_graph_projection.factlayer import note_alias_map
-from cjm_context_graph_projection.journal import (m3_baseline_import, journal_sourced_note_paths,
-                                                  append_write, replay_journal)
+from cjm_context_graph_projection.journal import m3_baseline_import, journal_sourced_note_paths, replay_journal
+from cjm_context_graph_primitives.journal import append_write
 from cjm_context_graph_projection.onboarding import project_onboarding
 from cjm_context_graph_projection.reconcile import reconcile_memory
 from cjm_context_graph_projection.runtime import open_graph

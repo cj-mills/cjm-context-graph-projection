@@ -27,7 +27,8 @@ from cjm_context_graph_layer.ops import extend_graph
 from cjm_dev_graph_schema.identity import note_node_id, section_node_id
 
 from cjm_context_graph_projection.authoring import author, read_slot, section_divergence
-from cjm_context_graph_projection.journal import append_write, read_journal, replay_journal
+from cjm_context_graph_projection.journal import replay_journal
+from cjm_context_graph_primitives.journal import append_write, read_journal
 from cjm_context_graph_projection.reconcile import reconcile_memory
 from cjm_context_graph_projection.runtime import open_graph
 from cjm_context_graph_projection.write import author_section

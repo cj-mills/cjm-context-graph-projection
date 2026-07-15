@@ -2,8 +2,8 @@
 
 import json
 
-from cjm_context_graph_projection.journal import (append_write, journal_window, read_journal,
-                                                  touched_node_ids)
+from cjm_context_graph_projection.journal import journal_window, touched_node_ids
+from cjm_context_graph_primitives.journal import append_write, read_journal
 from cjm_context_graph_projection.render import render
 
 

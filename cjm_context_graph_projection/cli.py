@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from cjm_context_graph_layer.ops import extend_graph
+from cjm_context_graph_primitives.journal import append_write, read_journal
 
 from .authoring import add_symbol, author, emit_artifact, read_node, read_slot
 from .code_edges import orphaned_edges
@@ -30,8 +31,8 @@ from .display import set_display_rule
 from .explorer_page import EXPLORER_HTML
 from .factlayer import note_alias_map
 from .hybrid_page import HYBRID_HTML
-from .journal import (append_write, journal_sourced_note_paths, journal_window_view,
-                      M3_BASELINE_ACTOR, m3_baseline_import, read_journal, replay_journal)
+from .journal import (journal_sourced_note_paths, journal_window_view, M3_BASELINE_ACTOR,
+                      m3_baseline_import, replay_journal)
 from .lens import apply_lens, set_lens
 from .listing import list_graph
 from .module_ops import delete_module, flip_notebook_to_py, new_module, regroup, rename_module

@@ -8,10 +8,14 @@ graph tells us exactly what to move and who imports it (vs. hunting through file
 next `ingest` re-derives the graph (S's new id under B, CALLS re-resolved by name).
 
 The PURE edge-update (no text surgery — imports REGENERATED from the graph because the
-graph IS the source) is the true-B form. v1 scope: a TOP-LEVEL symbol, SAME repo, and the
-`from X import` caller form. B's internal import needs (what S calls cross-module) and A's
-now-dead imports are COMPUTED from the graph and REPORTED as a diagnostic, not auto-edited —
-honest about the residual the true-B regenerate-from-graph step subsumes.
+graph IS the source) is the true-B form. v1 scope: a TOP-LEVEL symbol and the
+`from X import` caller form. v2 (journal-core extraction demand, DEC ccbab9f5): CROSS-REPO
+moves — the (source repo, target repo) pairs are REPORTED in the result, not refused
+(dependency discipline stays human-owned), and RELATIVE-import callers (`from .journal
+import S`) are resolved against their package and rewritten to the absolute target. B's
+internal import needs (what S calls cross-module) and A's now-dead imports are COMPUTED
+from the graph and REPORTED as a diagnostic, not auto-edited — honest about the residual
+the true-B regenerate-from-graph step subsumes.
 """
 
 import ast
@@ -33,12 +37,16 @@ def rewrite_symbol_import(
     old_module: str,  # Dotted import name the symbol is currently imported FROM
     new_module: str,  # Dotted import name it should be imported from now
     symbol: str,      # The (top-level) symbol name being moved
+    caller_package: str = "",  # The caller's own package — resolves RELATIVE imports ("" = skip them)
 ) -> Tuple[str, bool]:  # (rewritten text, changed?)
     """Rewrite `from old_module import ... S ...` -> import S from new_module instead.
 
     AST-located (handles single-line and parenthesized multi-line imports), preserving any
-    `as` alias and the other names on the line. Only the `from`-import form is handled;
-    qualified `import old_module; old_module.S` use is left for the diagnostic."""
+    `as` alias and the other names on the line. Handles the absolute `from`-import form and,
+    when `caller_package` is given, the RELATIVE form (`from .journal import S`) resolved
+    against the caller's package — a cross-repo move rewrites those to the absolute target
+    (the remaining names keep their original relative form). Qualified
+    `import old_module; old_module.S` use is left for the diagnostic."""
     try:
         tree = ast.parse(text)
     except SyntaxError:
@@ -46,8 +54,16 @@ def rewrite_symbol_import(
     lines = text.splitlines(keepends=True)
     edits: List[Tuple[int, int, List[str]]] = []
     for node in tree.body:
-        if not (isinstance(node, ast.ImportFrom) and node.module == old_module and node.level == 0):
+        if not isinstance(node, ast.ImportFrom):
             continue
+        if node.level == 0:
+            if node.module != old_module:
+                continue
+            keep_from = old_module
+        else:
+            if _resolve_relative(caller_package, node.module, node.level) != old_module:
+                continue
+            keep_from = "." * node.level + (node.module or "")
         names = [(a.name, a.asname) for a in node.names]
         if symbol not in [n for n, _ in names]:
             continue
@@ -57,7 +73,7 @@ def rewrite_symbol_import(
         repl: List[str] = []
         if remaining:
             rem = ", ".join(f"{n} as {a}" if a else n for n, a in remaining)
-            repl.append(f"from {old_module} import {rem}\n")
+            repl.append(f"from {keep_from} import {rem}\n")
         repl.append(f"from {new_module} import {s_clause}\n")
         edits.append((node.lineno - 1, node.end_lineno, repl))
     if not edits:
@@ -79,7 +95,7 @@ def _symbol_wire(node: Any, module_id: str, order_index: int) -> Dict[str, Any]:
 async def _relocate(
     gx: GraphHandle,
     symbol_ids: List[str],   # The top-level CodeSymbols to relocate (possibly from several modules)
-    target_module_id: str,   # The CodeModule to move them into (same repo, v1)
+    target_module_id: str,   # The CodeModule to move them into (cross-repo OK, v2)
     *,
     write: bool = True,      # Write the affected files to disk (Fork-1(a)); False = dry run
     target_node: Any = None,  # Pre-fetched/synthesized target CodeModule node (regroup dry-run into a not-yet-persisted module)
@@ -101,6 +117,7 @@ async def _relocate(
 
     # Resolve + validate every symbol; group by source module (qualname carried for callers).
     by_src: Dict[str, List[Tuple[str, Any, str]]] = {}
+    cross_repo: set = set()  # (source repo, target repo) pairs — reported, not refused (v2)
     for sid in symbol_ids:
         node = await _get(gx, sid)
         if node is None:
@@ -115,7 +132,7 @@ async def _relocate(
                     "written": False}
         A = await _module_node(gx, src_module_id)
         if F.prop(A, "repo_key") != b_repo:
-            return {"error": "v1 moves are within ONE repo", "written": False}
+            cross_repo.add((F.prop(A, "repo_key", ""), b_repo))
         by_src.setdefault(src_module_id, []).append((sid, node, p.get("qualname", "")))
 
     moved_ids = set(symbol_ids)
@@ -162,9 +179,11 @@ async def _relocate(
                 continue  # the target's own imports are handled by its re-derived block
             m = await _module_node(gx, mid)
             text = emit_module_from_nodes(await _module_region_wires(gx, mid))
+            caller_pkg = ".".join(F.prop(m, "import_name", "").split(".")[:-1])
             changed_any = False
             for _sid, _node, qual in items:
-                text, changed = rewrite_symbol_import(text, a_import, b_import, qual)
+                text, changed = rewrite_symbol_import(text, a_import, b_import, qual,
+                                                      caller_package=caller_pkg)
                 changed_any = changed_any or changed
             if changed_any:
                 files.append((F.prop(m, "path"), text))
@@ -175,6 +194,7 @@ async def _relocate(
         "from_modules": sorted({F.prop(await _module_node(gx, s), "import_name", "") for s in by_src}),
         "to_module": b_import,
         "caller_imports_rewritten": sorted(dict.fromkeys(caller_hits)),
+        "cross_repo": sorted(f"{a} -> {b}" for a, b in cross_repo),
         "diagnostic": {"zero_residual": True,
                        "target_imports_synthesized": sorted({b["module"] for b in b_uses}),
                        "source_imports_synthesized": sorted({b["module"] for b in a_uses})},
@@ -191,7 +211,7 @@ async def _relocate(
 async def move(
     gx: GraphHandle,
     symbol_id: str,         # The top-level CodeSymbol to relocate
-    target_module_id: str,  # The CodeModule to move it into (same repo, v1)
+    target_module_id: str,  # The CodeModule to move it into (cross-repo OK, v2)
     *,
     write: bool = True,     # Write the affected files to disk (Fork-1(a)); False = dry run
 ) -> Dict[str, Any]:  # The move result (files, caller rewrites, diagnostic, or error)
@@ -269,3 +289,18 @@ async def _moved_subtree(gx: GraphHandle, symbol_id: str) -> set:
         subtree.add(x)
         stack.extend(children.get(x, []))
     return subtree
+
+
+def _resolve_relative(
+    caller_package: str,    # Dotted package containing the caller module ("" = unknown)
+    module: Optional[str],  # The ImportFrom's module part (None for `from . import X`)
+    level: int,             # The ImportFrom's relative level (1 = the caller's own package)
+) -> str:  # The absolute dotted module the relative import resolves to ("" = unresolvable)
+    """Resolve a relative `from`-import against the caller's package (PEP 328)."""
+    if not caller_package or level < 1:
+        return ""
+    parts = caller_package.split(".")
+    if level - 1 >= len(parts):
+        return ""
+    base = parts[:len(parts) - (level - 1)]
+    return ".".join(base + ([module] if module else []))

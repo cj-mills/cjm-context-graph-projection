@@ -28,6 +28,7 @@ from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 
 from . import factlayer as F
 from .runtime import GraphHandle
+from .source_state import is_test_module_path
 from .write import resolve_subject
 
 _GENERATED_MARKER = ("<!-- generated from the context graph by `cjm-context-graph readme` — "
@@ -76,7 +77,9 @@ async def project_readme(
     a module TOC + a per-module public API surface + a cross-repo dependency summary, under a
     generated-artifact marker. Pure read — never writes."""
     all_modules = await F.load_label(gx, DevNodeKinds.CODE_MODULE)
-    repo_modules = [m for m in all_modules if F.prop(m, "repo_key") == repo_key]
+    repo_modules = [m for m in all_modules if F.prop(m, "repo_key") == repo_key
+                    # tests are on-graph modules too — never part of the public README surface
+                    and not is_test_module_path(F.prop(m, "module_path", "") or "")]
     if not repo_modules:
         return {"error": f"no modules for repo `{repo_key}` in the graph (ingest it first?)"}
     mod_ids = {F.nid(m) for m in repo_modules}

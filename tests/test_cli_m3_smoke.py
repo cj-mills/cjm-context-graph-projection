@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from cjm_context_graph_projection.journal import read_journal
+from cjm_context_graph_primitives.journal import read_journal
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS
 
 # Integration smoke: drives the real CLI, which needs the graph-storage worker

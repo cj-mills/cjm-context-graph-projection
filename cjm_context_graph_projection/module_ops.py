@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from cjm_context_graph_layer.ops import extend_graph, graph_task
+from cjm_context_graph_primitives.journal import append_write, read_journal
 from cjm_context_graph_primitives.provenance import SourceRef
 from cjm_dev_graph_schema.identity import code_module_node_id
 from cjm_dev_graph_schema.nodes import CodeModuleNode
@@ -38,7 +39,6 @@ from cjm_python_decompose_core.ingest import corpus_graph_elements
 from . import factlayer as F
 from .authoring import (_label_of, _module_node, _module_region_wires, _notebook_cell_wires,
                         _resolve_node)
-from .journal import append_write, read_journal
 from .refactor_ops import _get, _relocate
 from .runtime import GraphHandle
 from .source_state import (append_retire, append_source, canonical_emit, cutover_module,

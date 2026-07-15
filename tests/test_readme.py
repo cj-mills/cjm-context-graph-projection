@@ -116,3 +116,26 @@ def test_readme_purpose_via_rename_stable_entity():
                 assert "Runs things, conceptually." in res["markdown"]
         return True
     assert asyncio.run(run())
+
+
+def test_readme_excludes_test_modules():
+    """Tests are on-graph modules too — they must never enter the README surface."""
+    async def run():
+        with tempfile.TemporaryDirectory() as root:
+            for rel, src in {"lib_repo/lib/api.py": LIB["lib/api.py"],
+                             "lib_repo/tests/test_api.py":
+                                 '"""Tests for lib.api."""\n\n\ndef test_run():\n    assert True\n'}.items():
+                f = Path(root) / rel
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_text(src)
+            decs = decompose_paths("lib", [str(p) for p in (Path(root) / "lib_repo").rglob("*.py")],
+                                   str(Path(root) / "lib_repo"))
+            nodes, edges = corpus_graph_elements(decs)
+            db = str(Path(root) / "g.db")
+            async with open_graph(db) as gx:
+                await extend_graph(gx.queue, gx.graph_id, nodes, edges)
+                res = await project_readme(gx, "lib")
+            assert res["module_count"] == 1
+            assert "tests.test_api" not in res["markdown"] and "test_run" not in res["markdown"]
+            assert "lib.api" in res["markdown"]
+    asyncio.run(run())

@@ -24,11 +24,11 @@ transition.
 import difflib
 from typing import Any, Dict, List, Optional, Set
 
+from cjm_context_graph_primitives.journal import read_journal
 from cjm_dev_graph_schema.vocab import DevNodeKinds
 
 from . import factlayer as F
 from .display import annotate_display, node_title
-from .journal import read_journal
 from .runtime import GraphHandle
 
 

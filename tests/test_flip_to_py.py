@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import cjm_context_graph_projection.factlayer as factlayer_mod
 import cjm_context_graph_projection.module_ops as module_ops_mod
-from cjm_context_graph_projection.journal import read_journal
+from cjm_context_graph_primitives.journal import read_journal
 from cjm_context_graph_projection.module_ops import flip_notebook_to_py
 from cjm_context_graph_projection.source_state import (append_retire, cutover_module, flip_module,
                                                        graph_sourced_modules, latest_source_ops,
