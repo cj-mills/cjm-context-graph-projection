@@ -147,8 +147,7 @@ def code_elements(
     repo's package dir is nbdev-export residue for its UNflipped notebooks, so it
     must not be scanned — but each module already flipped notebook->py IS a
     graph-sourced `.py` key that ingests here, from the journal alone."""
-    flipped = graph_sourced_modules(source_journal_path) if source_journal_path else set()
-    journaled = latest_source_ops(source_journal_path) if flipped else {}
+    flipped, journaled = _sourcing_state(source_journal_path)
     decomposed = []
     seen = set()
     repo_dirs_by_key = {}
@@ -198,8 +197,7 @@ def test_elements(
     past the N+3 Phase-2 cutover is GRAPH-SOURCED — its text comes from the SOURCE
     journal (same authority flip as `code_elements`), under the VERBATIM-import
     canonicalization (`is_test_module_path`)."""
-    flipped = graph_sourced_modules(source_journal_path) if source_journal_path else set()
-    journaled = latest_source_ops(source_journal_path) if flipped else {}
+    flipped, journaled = _sourcing_state(source_journal_path)
     decomposed = []
     seen = set()
     repo_dirs_by_key = {}
@@ -311,8 +309,7 @@ def notebook_elements(
     rebuilt on every `ingest` — EXCEPT one past the N+3 Phase-2 cutover, whose text
     comes from the SOURCE journal keyed by its repo-relative `.ipynb` path (the same
     authority flip as `code_elements`; its file is a generated committed artifact)."""
-    flipped = graph_sourced_modules(source_journal_path) if source_journal_path else set()
-    journaled = latest_source_ops(source_journal_path) if flipped else {}
+    flipped, journaled = _sourcing_state(source_journal_path)
     decomposed = []
     seen = set()
     repo_dirs_by_key = {}
@@ -436,3 +433,23 @@ def build_dev_graph_elements(
         edges += resolve_corpus_code_edges(nodes)  # cross-source CALLS/IMPORTS (additive, idempotent)
         edges += resolve_test_edges(nodes)         # test symbol/cell -> exercised symbol (TESTS)
     return nodes, edges
+
+
+def _sourcing_state(
+    source_journal_path: Optional[str],  # Source-journal path (None = nothing is graph-sourced)
+) -> Tuple[set, Dict[Tuple[str, str], Dict[str, Any]]]:  # (flipped keys, latest ops), CONCEPTUAL-key space
+    """Load the journal's graph-sourced state with repo keys NORMALIZED to conceptual keys.
+
+    The source journal records repo_key as the repo DIR name (source_state resolves
+    files and journal keys as repos_dir/<repo_key>/...), while ingest keys every node
+    by `conceptual_key`. For a RENAMED repo (RENAME_ALIASES) the two diverge, and an
+    unnormalized comparison silently drops its graph-sourced modules from the
+    projection while its tests fall back to file text (finding c89519cd: torch-utils
+    device/memory/oom + hf-utils cache_config/download/loading vanished on rebuild)."""
+    if not source_journal_path:
+        return set(), {}
+    flipped = {(conceptual_key(rk), mp)
+               for rk, mp in graph_sourced_modules(source_journal_path)}
+    journaled = {(conceptual_key(rk), mp): a
+                 for (rk, mp), a in latest_source_ops(source_journal_path).items()}
+    return flipped, journaled

@@ -49,6 +49,7 @@ from .registers import register_drift
 from .rename_ops import rename_symbol
 from .render import render
 from .runtime import DEFAULT_MANIFESTS, open_graph
+from .seeds import repo_dir_name
 from .serve import serve_graphs
 from .source_state import (absorb_authored_text, cutover_module, emit_source_artifact, flip_module,
                            graph_sourced_modules, source_check)
@@ -128,9 +129,14 @@ def _absorb_graph_sourced(res, args) -> int:  # 0 = ok (absorbed or not applicab
                   f"{res.get('artifact_path')!r} under {args.repos_dir!r}",
                   file=sys.stderr)
             return 1
-    if ((res.get("repo_key"), src_path)
+    # The node's repo_key is the rename-stable CONCEPTUAL key; the source journal
+    # keys by repo DIR name (source_state's space) — denormalize so a renamed
+    # repo's authored state still absorbs (finding c89519cd: an unmapped key
+    # skipped this gate silently, emitting the file WITHOUT journaling).
+    dir_key = repo_dir_name(res.get("repo_key"))
+    if ((dir_key, src_path)
             in graph_sourced_modules(args.source_journal_path)):
-        ab = absorb_authored_text(args.source_journal_path, res["repo_key"],
+        ab = absorb_authored_text(args.source_journal_path, dir_key,
                                   src_path, res["artifact_path"],
                                   res["emitted_text"])
         if ab.get("error"):

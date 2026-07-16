@@ -139,3 +139,13 @@ def seed_elements() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         nodes += n
         edges += e
     return nodes, edges
+
+
+def repo_dir_name(key: str) -> str:
+    """The CURRENT repo dir name for a conceptual key (identity unless renamed).
+
+    The inverse of `conceptual_key` — the seam for code that holds a node's
+    rename-stable conceptual key but must address the repo ON DISK or in the
+    DIR-NAME-keyed source journal (source_state resolves files and journal keys
+    as repos_dir/<repo_key>/..., so a renamed repo's conceptual key would miss)."""
+    return RENAME_ALIASES.get(key, {}).get("current", key)
