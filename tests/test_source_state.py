@@ -288,3 +288,18 @@ def test_test_module_flip_cutover_roundtrip_is_byte_clean():
         assert cutover_module(j, str(repos), "demo", "tests/test_fx.py")["cut_over"]
         chk = source_check(j, str(repos))
         assert chk["clean"] and chk["regen_clean"] and chk["graph_sourced_count"] == 1
+
+
+def test_no_write_previews_journal_nothing():
+    with tempfile.TemporaryDirectory() as d:
+        j, repos, f = _shadowed_module(d)
+        before = Path(j).read_text()
+        res = cutover_module(j, repos, "demo", "demo/m.py", write=False)
+        assert res["previewed"] and not res["cut_over"]
+        assert graph_sourced_modules(j) == set()
+        assert Path(j).read_text() == before
+        res = flip_module(j, repos, "demo", "demo/m.py", write=False)
+        assert res["previewed"] and not res["captured"]
+        assert Path(j).read_text() == before
+        # The preview costs nothing: the real cutover still lands after it.
+        assert cutover_module(j, repos, "demo", "demo/m.py")["cut_over"]

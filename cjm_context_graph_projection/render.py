@@ -605,8 +605,13 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
     if kind == "flip":
         if obj.get("error"):
             return f"⚠ {obj['error']}"
-        verb = (("absorbed (graph-sourced)" if obj.get("graph_sourced") else "captured (shadow)")
-                if obj.get("captured") else "already current (no-op)")
+        if obj.get("previewed"):
+            verb = "PREVIEW — would " + ("absorb (graph-sourced)" if obj.get("graph_sourced")
+                                         else "capture (shadow)")
+        else:
+            verb = (("absorbed (graph-sourced)" if obj.get("graph_sourced")
+                     else "captured (shadow)")
+                    if obj.get("captured") else "already current (no-op)")
         canon = ("file is already canonical" if obj.get("file_already_canonical")
                  else "⚠ flip implies a one-time canonicalization (e.g. import reorder)")
         return "\n".join([
@@ -687,6 +692,11 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             return f"⚠ {obj['error']}"
         if obj.get("already_graph_sourced"):
             return f"**already graph-sourced** `{obj.get('module_path')}` (no-op)"
+        if obj.get("previewed"):
+            return "\n".join([
+                f"**PREVIEW — would cut over** `{obj.get('import_name') or obj.get('module_path')}`",
+                f"  {obj.get('file_path')}",
+                f"  _{obj.get('note', '')}_"])
         art = " (artifact file regenerated from the journal)" if obj.get("artifact_written") else ""
         return "\n".join([
             f"**CUT OVER** `{obj.get('import_name') or obj.get('module_path')}` — "
@@ -713,6 +723,9 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             return f"⚠ {obj['error']}"
         if obj.get("kind") == "nested":
             return f"⚠ {obj.get('hint')} (enclosing module `{obj.get('module_id')}`)"
+        if obj.get("kind") == "slice":
+            return (f"_sliced from owning slot `{obj.get('owner_id')}` — author edits "
+                    f"route there_\n\n{obj.get('text', '')}")
         return obj.get("text", "")
     if kind == "list":
         if obj.get("error"):

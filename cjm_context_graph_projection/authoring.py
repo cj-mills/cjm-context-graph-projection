@@ -164,32 +164,16 @@ async def _owning_slot_hint(gx: GraphHandle, node: Any) -> Optional[str]:
 
     A method/nested def has no verbatim body of its own — the authoring unit is
     the notebook Cell (or top-level .py symbol) that defines it. Resolving that
-    here turns the 'no authorable slot' error into a pointer instead of sending
-    the caller on a per-cell scan of the enclosing module (soak 2026-07-05:
-    3x ~60-read manual scans). Plain-substring def/class match — first hit wins;
-    a stale duplicate elsewhere costs a wrong hint, never a wrong write."""
-    if _label_of(node) != DevNodeKinds.CODE_SYMBOL:
+    here (via `_owning_slot_wire`, the shared locator) turns the 'no authorable
+    slot' error into a pointer instead of sending the caller on a per-cell scan
+    of the enclosing module (soak 2026-07-05: 3x ~60-read manual scans)."""
+    owner = await _owning_slot_wire(gx, node)
+    if owner is None:
         return None
-    module_id = F.prop(node, "module_id")
-    basename = str(F.prop(node, "name") or "").split(".")[-1]
-    if not module_id or not basename:
-        return None
-    container = await _module_node(gx, module_id)
-    if container is None:
-        return None
-    markers = (f"def {basename}(", f"class {basename}(", f"class {basename}:")
-    if str(F.prop(container, "path") or "").endswith(".ipynb"):
-        for w in await _notebook_cell_wires(gx, module_id):
-            if any(m in str(w["properties"].get("source") or "") for m in markers):
-                return f"its text lives in Cell `{w['id']}` — author that"
-    else:
-        for w in await _module_region_wires(gx, module_id):
-            if w["label"] != DevNodeKinds.CODE_SYMBOL or w["id"] == F.nid(node):
-                continue
-            if any(m in str(w["properties"].get("body") or "") for m in markers):
-                return (f"its text lives in symbol `{w['id']}` "
-                        f"(`{w['properties'].get('name')}`) — author that")
-    return None
+    if owner["label"] == DevNodeKinds.CELL:
+        return f"its text lives in Cell `{owner['id']}` — author that"
+    return (f"its text lives in symbol `{owner['id']}` "
+            f"(`{owner['properties'].get('name')}`) — author that")
 
 
 async def read_slot(
@@ -240,7 +224,8 @@ async def read_node(
       - CodeSymbol body / CodeText / Cell -> that authorable verbatim slot.
 
     A nested symbol (a method) carries no own body — its text lives in the enclosing
-    class block, so we point there rather than returning empty."""
+    class block / notebook Cell, so we deliver a server-side SLICE of the owning slot
+    (via `_slice_block`) rather than a pointer the reader must chase."""
     from .projection import ambiguity_error, resolve_node_ref
     res = await resolve_node_ref(gx, node_id)
     if "candidates" in res:
@@ -280,6 +265,15 @@ async def read_node(
         return {"node_id": node_id, "label": lab, "kind": "slot", "slot": slot,
                 "text": str(F.prop(node, slot, ""))}
     if label == DevNodeKinds.CODE_SYMBOL:
+        owner = await _owning_slot_wire(gx, node)
+        if owner is not None:
+            src_slot = "source" if owner["label"] == DevNodeKinds.CELL else "body"
+            basename = str(p.get("qualname") or p.get("name") or "").split(".")[-1]
+            block = _slice_block(str(owner["properties"].get(src_slot) or ""), basename)
+            if block is not None:
+                return {"node_id": node_id, "label": label, "kind": "slice",
+                        "owner_id": owner["id"], "slot": src_slot,
+                        "module_id": p.get("module_id"), "text": block}
         return {"node_id": node_id, "label": label, "kind": "nested", "text": "",
                 "module_id": p.get("module_id"),
                 "hint": "nested symbol (no own body) — read its enclosing class or module"}
@@ -395,8 +389,8 @@ async def _route_nested_symbol(
 
     A method/nested def has no body of its own — the authoring unit is the top-level
     `.py` symbol (or notebook Cell) whose text defines it. The 3e13d95a hint NAMED that
-    owner; this executes the edit through it: resolve the owner (qualname's top-level
-    prefix first, def/class marker scan as fallback — the same locator as the hint),
+    owner; this executes the edit through it: resolve the owner via `_owning_slot_wire`
+    (the shared locator behind the hint and the read-slice, so the surfaces never drift),
     then re-enter `author` on the owner with the caller's splice (uniqueness is
     validated against the owner's whole slot, so an OLD matching a sibling method fails
     loudly with the add-context error). Replace mode is refused rather than routed: a
@@ -404,30 +398,8 @@ async def _route_nested_symbol(
     unique --edit splice, or author the owning slot directly."""
     if _label_of(node) != DevNodeKinds.CODE_SYMBOL or F.props(node).get("body"):
         return None
-    module_id = F.prop(node, "module_id")
     qualname = str(F.prop(node, "qualname") or F.prop(node, "name") or "")
-    basename = qualname.split(".")[-1]
-    if not module_id or not basename:
-        return None
-    container = await _module_node(gx, module_id)
-    if container is None:
-        return None
-    markers = (f"def {basename}(", f"class {basename}(", f"class {basename}:")
-    owner = None
-    if str(F.prop(container, "path") or "").endswith(".ipynb"):
-        for w in await _notebook_cell_wires(gx, module_id):
-            if any(m in str(w["properties"].get("source") or "") for m in markers):
-                owner = w
-                break
-    else:
-        wires = [w for w in await _module_region_wires(gx, module_id)
-                 if w["label"] == DevNodeKinds.CODE_SYMBOL and w["id"] != F.nid(node)]
-        top = qualname.split(".")[0]
-        owner = next((w for w in wires if w["properties"].get("qualname") == top), None)
-        if owner is None:  # monkey-patch/@patch idioms: the def lives under another region
-            owner = next((w for w in wires
-                          if any(m in str(w["properties"].get("body") or "") for m in markers)),
-                         None)
+    owner = await _owning_slot_wire(gx, node)
     if owner is None:
         return None
     if edit is None:
@@ -779,3 +751,75 @@ async def add_text(
         Path(artifact_path).write_text(emitted)
         result["written"] = True
     return result
+
+
+def _slice_block(text: str, basename: str) -> Optional[str]:
+    """Slice one def/class block (decorators included) out of an enclosing body, by name.
+
+    The server-side read-slice for NESTED symbols (de9d7696 (a)): a method's text lives
+    in its owning top-level symbol / notebook Cell, and 'read the encloser, then find
+    your method in it' was exactly the routing rule weaker readers could not hold. Plain
+    line-scan, not ast: the input is ONE verbatim slot (a Cell may hold several
+    statements), and the block ends at the first subsequent non-blank line at <= the
+    header's indent. Contiguous decorator lines directly above the header (same indent)
+    ride along. First name-match wins; None when the name opens no block here."""
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        stripped = line.lstrip()
+        for kw in ("async def ", "def ", "class "):
+            if not stripped.startswith(kw + basename):
+                continue
+            tail = stripped[len(kw) + len(basename):]
+            if tail and tail[0] not in "(:" and not tail[0].isspace():
+                continue  # name-prefix false positive (`foo2` is not `foo`)
+            indent = len(line) - len(stripped)
+            start = i
+            while (start > 0 and lines[start - 1].lstrip().startswith("@")
+                   and len(lines[start - 1]) - len(lines[start - 1].lstrip()) == indent):
+                start -= 1
+            end = len(lines)
+            for j in range(i + 1, len(lines)):
+                s = lines[j].strip()
+                if s and len(lines[j]) - len(lines[j].lstrip()) <= indent:
+                    end = j
+                    break
+            return "\n".join(lines[start:end]).rstrip()
+    return None
+
+
+async def _owning_slot_wire(
+    gx: GraphHandle, node: Any,
+) -> Optional[Dict[str, Any]]:  # The owning slot's wire dict, or None when nothing owns it
+    """Locate the verbatim slot that OWNS a nested CodeSymbol's text — the ONE locator.
+
+    A method/nested def has no body of its own; its text lives in a top-level `.py`
+    symbol or a notebook Cell. This is the shared resolver behind the author routing
+    (`_route_nested_symbol`), the error-path pointer (`_owning_slot_hint`), and the
+    nested read-slice (`read_node`), so the three surfaces can never drift apart:
+    qualname's top-level prefix first, def/class marker scan as fallback (the
+    monkey-patch/@patch idiom, where the def lives under another region)."""
+    if _label_of(node) != DevNodeKinds.CODE_SYMBOL or F.props(node).get("body"):
+        return None
+    module_id = F.prop(node, "module_id")
+    qualname = str(F.prop(node, "qualname") or F.prop(node, "name") or "")
+    basename = qualname.split(".")[-1]
+    if not module_id or not basename:
+        return None
+    container = await _module_node(gx, module_id)
+    if container is None:
+        return None
+    markers = (f"def {basename}(", f"class {basename}(", f"class {basename}:")
+    if str(F.prop(container, "path") or "").endswith(".ipynb"):
+        for w in await _notebook_cell_wires(gx, module_id):
+            if any(m in str(w["properties"].get("source") or "") for m in markers):
+                return w
+        return None
+    wires = [w for w in await _module_region_wires(gx, module_id)
+             if w["label"] == DevNodeKinds.CODE_SYMBOL and w["id"] != F.nid(node)]
+    top = qualname.split(".")[0]
+    owner = next((w for w in wires if w["properties"].get("qualname") == top), None)
+    if owner is None:
+        owner = next((w for w in wires
+                      if any(m in str(w["properties"].get("body") or "") for m in markers)),
+                     None)
+    return owner

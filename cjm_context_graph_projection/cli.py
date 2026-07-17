@@ -582,7 +582,8 @@ async def _dispatch(args) -> int:
                 print("error: flip-module needs --source-journal-path", file=sys.stderr)
                 return 1
             res = flip_module(args.source_journal_path, args.repos_dir, args.repo_key,
-                              args.module_path, import_name=args.import_name)
+                              args.module_path, import_name=args.import_name,
+                              write=not args.no_write)
             print(render("flip", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "flip-to-py":
@@ -613,7 +614,8 @@ async def _dispatch(args) -> int:
                 print("error: cutover needs --source-journal-path", file=sys.stderr)
                 return 1
             res = cutover_module(args.source_journal_path, args.repos_dir,
-                                 args.repo_key, args.module_path)
+                                 args.repo_key, args.module_path,
+                                 write=not args.no_write)
             print(render("cutover", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "emit-artifact":
@@ -1095,6 +1097,8 @@ def main() -> int:
     p_fl.add_argument("module_path", help="Repo-relative source path (e.g. pkg/sub.py, or "
                                           "nbs/core/mod.ipynb for a notebook-sourced module)")
     p_fl.add_argument("--import-name", help="Dotted import name (derived from module_path if omitted)")
+    p_fl.add_argument("--no-write", action="store_true",
+                      help="Dry run: report what a flip would capture, journal nothing")
     p_fl.add_argument("--repos-dir", default=DEFAULT_REPOS)
 
     p_fp = sub.add_parser("flip-to-py",
@@ -1122,6 +1126,8 @@ def main() -> int:
                                "(guarded — requires a clean shadow); the file becomes a generated committed artifact")
     p_co.add_argument("repo_key", help="The repo's durable conceptual slug")
     p_co.add_argument("module_path", help="Repo-relative source path (.py or nbs/*.ipynb)")
+    p_co.add_argument("--no-write", action="store_true",
+                      help="Dry run: run every cutover guard, flip nothing")
     p_co.add_argument("--repos-dir", default=DEFAULT_REPOS)
 
     p_ea = sub.add_parser("emit-artifact",

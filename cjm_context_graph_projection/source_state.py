@@ -303,6 +303,7 @@ def flip_module(
     repo_key: str,                       # The repo's durable conceptual slug
     module_path: str,                    # Repo-relative module path to flip into shadow source
     import_name: Optional[str] = None,   # Override the derived dotted import name
+    write: bool = True,                  # False = preview the capture, journal nothing
 ) -> Dict[str, Any]:  # The flip result (captured?, whether the file is already canonical, or error)
     """Capture a module's CANONICAL source into the shadow source journal (Phase 1).
 
@@ -320,15 +321,19 @@ def flip_module(
     except (SyntaxError, ValueError) as e:
         return {"error": f"cannot decompose {module_path}: {e}", "captured": False}
     imp = import_name or _derive_import_name(repo_key, module_path, canonical)
-    appended = append_source(source_journal_path, repo_key, module_path, imp, canonical)
+    appended = (append_source(source_journal_path, repo_key, module_path, imp, canonical)
+                if write else False)
     sourced = (repo_key, module_path) in graph_sourced_modules(source_journal_path)
     note = ("GRAPH-SOURCED: absorbed into the source journal (this module's source of truth); "
             "if the file was not already canonical, regenerate it via emit-artifact"
             if sourced else
             "SHADOW: the file is still the ingest source; run source-check each session "
             "to soak before the Phase 2 cutover")
+    if not write:
+        note = "PREVIEW (--no-write): nothing journaled — a real flip would capture this state"
     return {"repo_key": repo_key, "module_path": module_path, "import_name": imp,
-            "file_path": file_path, "captured": appended, "graph_sourced": sourced,
+            "file_path": file_path, "captured": appended, "previewed": not write,
+            "graph_sourced": sourced,
             "file_already_canonical": canonical == file_text,
             "canonical_bytes": len(canonical.encode("utf-8")),
             "note": note}
@@ -339,6 +344,7 @@ def cutover_module(
     repos_dir: str,            # The repos root (to verify/write the file artifact)
     repo_key: str,             # The repo's durable conceptual slug
     module_path: str,          # Repo-relative module path to cut over
+    write: bool = True,        # False = run every guard, flip nothing (the preview)
 ) -> Dict[str, Any]:  # The cutover result (or the guard that refused it)
     """Phase 2: make the JOURNAL the module's source of truth (the persistence flip).
 
@@ -372,10 +378,18 @@ def cutover_module(
             return {"error": f"file drifted from the journaled state for {repo_key}/{module_path} "
                              "— absorb it (flip-module) or regenerate it (emit-artifact) first",
                     "cut_over": False}
-    else:
+    elif write:
         Path(file_path).parent.mkdir(parents=True, exist_ok=True)
         Path(file_path).write_text(journaled)
         artifact_written = True
+    if not write:
+        return {"repo_key": repo_key, "module_path": module_path,
+                "import_name": a.get("import_name"), "file_path": file_path,
+                "cut_over": False, "previewed": True, "artifact_written": False,
+                "note": "PREVIEW (--no-write): every guard passes — a real cutover would make "
+                        "the journal this module's source of truth"
+                        + ("" if Path(file_path).exists()
+                           else " and write its first artifact")}
     record = _stamp_session({"verb": "cutover", "ts": time.time(),
                              "args": {"repo_key": repo_key, "module_path": module_path}})
     with Path(source_journal_path).open("a") as f:

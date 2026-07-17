@@ -1,6 +1,6 @@
 """Pure authoring helpers — slot routing + the apply split (no graph needed)."""
 
-from cjm_context_graph_projection.authoring import _apply, _slot_for
+from cjm_context_graph_projection.authoring import _apply, _slice_block, _slot_for
 
 
 def _node(label, **props):
@@ -33,3 +33,32 @@ def test_apply_replace_and_targeted_edit_on_a_section_span():
     assert _apply(raw, "## Alpha\n\nNew.\n\n", None) == ("## Alpha\n\nNew.\n\n", None)
     assert _apply(raw, None, ("Alpha body.", "Edited."))[0] == "## Alpha\n\nEdited.\n\n"
     assert _apply(raw, None, ("nope", "x"))[1] and "not found" in _apply(raw, None, ("nope", "x"))[1]
+
+
+def test_slice_block_extracts_nested_defs_verbatim():
+    body = (
+        "class Widget:\n"
+        "    x = 1\n"
+        "\n"
+        "    @staticmethod\n"
+        "    def render(self):\n"
+        "        if self.x:\n"
+        "            return 'on'\n"
+        "        return 'off'\n"
+        "\n"
+        "    def render_all(self):\n"
+        "        return [self.render()]\n"
+    )
+    # Decorators ride along; the block ends before the next same-indent line.
+    assert _slice_block(body, "render") == (
+        "    @staticmethod\n"
+        "    def render(self):\n"
+        "        if self.x:\n"
+        "            return 'on'\n"
+        "        return 'off'")
+    # `render` must not prefix-match `render_all`; async headers match too.
+    assert _slice_block(body, "render_all") == (
+        "    def render_all(self):\n"
+        "        return [self.render()]")
+    assert _slice_block("async def go():\n    pass\n", "go") == "async def go():\n    pass"
+    assert _slice_block(body, "missing") is None
