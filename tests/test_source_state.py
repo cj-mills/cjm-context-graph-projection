@@ -7,8 +7,9 @@ from pathlib import Path
 from cjm_context_graph_projection.source_state import (absorb_authored_text, append_source,
                                                        canonical_emit, cutover_module,
                                                        emit_source_artifact, flip_module,
-                                                       graph_sourced_modules,
-                                                       latest_source_ops, source_check)
+                                                       graph_sourced_modules, journaled_emit,
+                                                       latest_source_ops, read_source_journal,
+                                                       source_check)
 
 MODULE = ('"""A tiny module."""\nimport os\n\n\n'
           'def helper(x):\n    return os.path.join(x, "y")\n\n\n'
@@ -303,3 +304,96 @@ def test_no_write_previews_journal_nothing():
         assert Path(j).read_text() == before
         # The preview costs nothing: the real cutover still lands after it.
         assert cutover_module(j, repos, "demo", "demo/m.py")["cut_over"]
+
+
+def test_journaled_emit_events_before_files_and_canonical_landing():
+    with tempfile.TemporaryDirectory() as d:
+        j, repos, f = _shadowed_module(d)
+        cutover_module(j, repos, "demo", "demo/m.py")
+        # Author a new state through the seam: non-canonical input (unsorted imports
+        # would canonicalize; here just a body change) must land canonically BOTH places.
+        new_text = f.read_text().replace("os.path.join(x, \"y\")", "os.path.join(x, \"z\")")
+        rec = journaled_emit(j, emissions=[{"repo_key": "demo", "module_path": "demo/m.py",
+                                            "import_name": "demo.m", "text": new_text,
+                                            "path": str(f)}],
+                             op={"op": "author", "node_id": "sym1"})
+        assert not rec.get("error") and rec["written"]
+        assert [e["verb"] for e in rec["events"]] == ["source"] and rec["events"][0]["appended"]
+        assert rec["files_written"] == [str(f)] and not rec["unjournaled_files"]
+        # The journal leads: latest state == file bytes (the regen gate green by construction).
+        latest = latest_source_ops(j)[("demo", "demo/m.py")]["text"]
+        assert latest == f.read_text()
+        # The op provenance + generation ride the record, replay-ignored.
+        last = read_source_journal(j)[-1]
+        assert last["op"]["op"] == "author" and last["generation"] == 1
+
+
+def test_journaled_emit_refuses_without_journal_and_previews_clean():
+    with tempfile.TemporaryDirectory() as d:
+        j, repos, f = _shadowed_module(d)
+        before_journal, before_file = Path(j).read_text(), f.read_text()
+        emission = {"repo_key": "demo", "module_path": "demo/m.py",
+                    "import_name": "demo.m", "text": before_file + "\n\nX = 1\n",
+                    "path": str(f)}
+        # No journal path + write=True -> outright refusal, nothing touched.
+        rec = journaled_emit(None, emissions=[emission])
+        assert "no source-journal path" in rec["error"] and f.read_text() == before_file
+        # Preview -> zero side effects, events listed with appended=False.
+        rec = journaled_emit(j, emissions=[emission], write=False)
+        assert not rec.get("error") and not rec["written"]
+        assert rec["events"][0]["verb"] == "source" and not rec["events"][0]["appended"]
+        assert Path(j).read_text() == before_journal and f.read_text() == before_file
+
+
+def test_journaled_emit_unjournaled_module_is_loud_and_retire_delete_order():
+    with tempfile.TemporaryDirectory() as d:
+        j, repos, f = _shadowed_module(d)
+        stray = Path(repos) / "demo" / "demo" / "stray.py"
+        rec = journaled_emit(j, emissions=[{"repo_key": "demo", "module_path": "demo/stray.py",
+                                            "import_name": "demo.stray", "text": "Y = 2\n",
+                                            "path": str(stray)}])
+        # No live key -> plain write, loudly reported; no source event minted.
+        assert rec["unjournaled_files"] == [str(stray)] and stray.read_text() == "Y = 2\n"
+        assert not rec["events"]
+        # Retire + delete: the retire event lands and the file goes.
+        rec = journaled_emit(j, retires=[{"repo_key": "demo", "module_path": "demo/m.py"}],
+                             deletes=[str(f)], op={"op": "delete-module"})
+        assert rec["events"][0]["verb"] == "retire" and rec["events"][0]["appended"]
+        assert not f.exists() and ("demo", "demo/m.py") not in latest_source_ops(j)
+
+
+def test_journaled_emit_cutover_births_a_sourced_module_and_registers():
+    with tempfile.TemporaryDirectory() as d:
+        repos = Path(d) / "repos"
+        f = repos / "demo" / "demo" / "born.py"
+        j = str(Path(d) / "source.jsonl")
+        rec = journaled_emit(j, emissions=[{"repo_key": "demo", "module_path": "demo/born.py",
+                                            "import_name": "demo.born",
+                                            "text": "def g():\n    return 1\n",
+                                            "path": str(f), "cutover": True}],
+                             registers=[{"repo_key": "demo", "repo_root": str(repos / "demo")}],
+                             op={"op": "flip-to-py"})
+        assert [e["verb"] for e in rec["events"]] == ["register", "source", "cutover"]
+        assert ("demo", "demo/born.py") in graph_sourced_modules(j) and f.exists()
+        # Idempotent retry: identical batch re-appends nothing.
+        again = journaled_emit(j, emissions=[{"repo_key": "demo", "module_path": "demo/born.py",
+                                              "import_name": "demo.born",
+                                              "text": "def g():\n    return 1\n",
+                                              "path": str(f), "cutover": True}],
+                               registers=[{"repo_key": "demo", "repo_root": str(repos / "demo")}])
+        assert not any(e["appended"] for e in again["events"])
+
+
+def test_journaled_emit_refuses_whole_batch_on_one_bad_emission():
+    with tempfile.TemporaryDirectory() as d:
+        j, repos, f = _shadowed_module(d)
+        cutover_module(j, repos, "demo", "demo/m.py")
+        before_journal, before_file = Path(j).read_text(), f.read_text()
+        good = {"repo_key": "demo", "module_path": "demo/m.py", "import_name": "demo.m",
+                "text": before_file + "\n\nZ = 3\n", "path": str(f)}
+        bad = {"repo_key": "demo", "module_path": "demo/m.py", "import_name": "demo.m",
+               "text": "def broken(:\n", "path": str(f)}
+        rec = journaled_emit(j, emissions=[good, bad], op={"op": "author"})
+        assert "canonical emit failed" in rec["error"]
+        # All-or-nothing: the GOOD emission journaled/wrote nothing either.
+        assert Path(j).read_text() == before_journal and f.read_text() == before_file

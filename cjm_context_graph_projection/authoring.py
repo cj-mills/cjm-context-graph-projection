@@ -50,7 +50,8 @@ from cjm_python_decompose_core.parse import parse_module
 from . import factlayer as F
 from .projection import ambiguity_error, resolve_node_ref
 from .runtime import GraphHandle
-from .source_state import is_test_module_path
+from .seeds import repo_dir_name
+from .source_state import is_test_module_path, journaled_emit
 
 
 async def _resolve_node(
@@ -343,6 +344,8 @@ async def emit_artifact(
     module_id: str,        # The CodeModule id (a .py module / notebook) or a Note id to emit
     *,
     write: bool = False,   # Write to the container's path on disk (else just return the text)
+    source_journal_path: Optional[str] = None,  # The source journal (a code write routes journal-first)
+    repos_dir: Optional[str] = None,  # The repos root (notebook journal keys derive under it)
 ) -> Dict[str, Any]:  # {artifact, artifact_path, text, written} or {error}
     """Emit a container's canonical artifact FROM THE GRAPH (graph -> .py / .ipynb / .md).
 
@@ -370,7 +373,23 @@ async def emit_artifact(
             artifact = "module"
     res = {"module_id": module_id, "artifact": artifact, "artifact_path": artifact_path,
            "emitted_bytes": len(text.encode("utf-8")), "text": text, "written": False}
-    if write and artifact_path:
+    if write and artifact_path and artifact != "note" and source_journal_path is not None:
+        emission = _source_emission(F.prop(module, "repo_key"),
+                                    str(F.prop(module, "module_path") or ""),
+                                    artifact_path, text, repos_dir,
+                                    import_name=F.prop(module, "import_name"))
+        if emission is None:
+            return {**res, "error": "cannot derive the source-journal key for "
+                    f"{artifact_path!r} under repos_dir={repos_dir!r} — refusing to "
+                    "write unjournaled"}
+        rec = journaled_emit(source_journal_path, emissions=[emission],
+                             op={"op": "emit", "module_id": module_id})
+        if rec.get("error"):
+            return {**res, "error": rec["error"]}
+        res["journal"] = rec
+        res["written"] = True
+    elif write and artifact_path:
+        # Notes ride the writes-journal domain; bare path is TRANSITIONAL (seam rollout).
         Path(artifact_path).write_text(text)
         res["written"] = True
     return res
@@ -384,6 +403,8 @@ async def _route_nested_symbol(
     edit: Optional[Tuple[str, str]],       # The (old, new) splice to route to the owning slot
     actor: str,
     write: bool,
+    source_journal_path: Optional[str] = None,  # Forwarded to the owning author call (journal-first)
+    repos_dir: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:  # The routed author result, or None when this node doesn't route
     """Route an author call on a NESTED CodeSymbol through its OWNING verbatim slot.
 
@@ -407,7 +428,8 @@ async def _route_nested_symbol(
                          "would need re-indent logic inside the owner body) — pass a unique "
                          f"OLD/NEW, or author the owning slot `{owner['id']}` directly",
                 "node_id": F.nid(node), "written": False}
-    res = await author(gx, owner["id"], edit=edit, actor=actor, write=write)
+    res = await author(gx, owner["id"], edit=edit, actor=actor, write=write,
+                       source_journal_path=source_journal_path, repos_dir=repos_dir)
     if not res.get("error"):
         res["routed_from"] = F.nid(node)
         res["routed_note"] = (f"nested `{qualname}` routed through owning slot "
@@ -423,6 +445,8 @@ async def author(
     edit: Optional[Tuple[str, str]] = None,  # (old, new) unique-match splice (edit mode)
     actor: str = "agent:session",          # Who authored it (recorded in the result; provenance lands via decide/link)
     write: bool = True,                    # Emit the canonical artifact to disk (Fork-1(a)); False = dry run
+    source_journal_path: Optional[str] = None,  # The source journal (code artifacts route journal-first)
+    repos_dir: Optional[str] = None,       # The repos root (a notebook's journal key derives under it)
 ) -> Dict[str, Any]:  # The write result (incl. error, the emitted artifact path + text)
     """Author a node's verbatim-text slot, then emit its canonical artifact to disk.
 
@@ -441,7 +465,9 @@ async def author(
     if resolved is None:
         # A nested CodeSymbol ROUTES through its owning slot (the 3e13d95a hint, executed).
         routed = await _route_nested_symbol(gx, node, replace=replace, edit=edit,
-                                            actor=actor, write=write)
+                                            actor=actor, write=write,
+                                            source_journal_path=source_journal_path,
+                                            repos_dir=repos_dir)
         if routed is not None:
             return routed
         err = ("node has no authorable verbatim slot (not a top-level CodeSymbol / "
@@ -505,8 +531,28 @@ async def author(
         # this carries — the CLI re-derives it from `artifact_path` + --repos-dir.
         result["repo_key"] = F.prop(container, "repo_key")
         result["module_path"] = F.prop(container, "module_path")
+    if artifact_path and artifact != "note" and source_journal_path is not None:
+        # Journal-first routing (the seam) — runs on --no-write too, so the dry run
+        # carries the same uniform PREVIEW receipt (zero side effects).
+        emission = _source_emission(result.get("repo_key"), result.get("module_path"),
+                                    artifact_path, emitted, repos_dir,
+                                    import_name=F.prop(container, "import_name"))
+        if emission is None:
+            return {**result, "error": "cannot derive the source-journal key for "
+                    f"{artifact_path!r} under repos_dir={repos_dir!r} — refusing to "
+                    "write unjournaled"}
+        rec = journaled_emit(source_journal_path, emissions=[emission],
+                             op={"op": "author", "node_id": node_id, "slot": slot,
+                                 "actor": actor}, write=write)
+        if rec.get("error"):
+            return {**result, "error": rec["error"]}
+        result["journal"] = rec
     if write and artifact_path:
-        Path(artifact_path).write_text(emitted)
+        if artifact == "note" or source_journal_path is None:
+            # Notes ride the WRITES-journal domain (M2b section states at the CLI seam;
+            # pillar-3 unification owns merging the domains). The bare-path branch is
+            # TRANSITIONAL scaffolding until every caller threads the journal.
+            Path(artifact_path).write_text(emitted)
         # Persist the slot change INTO the graph node too, so the graph stays consistent
         # with the file and sequential authors compose (emit reads the graph). The file is
         # still the durable source under Fork-1(a); the next `ingest` re-derives either way.
@@ -528,6 +574,8 @@ async def add_symbol(
     *,
     actor: str = "agent:session",  # Who authored it (recorded in the result)
     write: bool = True,         # Add the node + emit the artifact (False = dry-run preview)
+    source_journal_path: Optional[str] = None,  # The source journal (journal-first routing)
+    repos_dir: Optional[str] = None,  # The repos root (notebook journal keys derive under it)
 ) -> Dict[str, Any]:  # The add result (incl. the emitted artifact path + text), or error
     """Mint a NEW top-level CodeSymbol into a module, then emit its canonical artifact.
 
@@ -620,12 +668,27 @@ async def add_symbol(
         "emitted_bytes": len(emitted.encode("utf-8")), "emitted_text": emitted,
         "unchanged": False, "written": False,
     }
+    if artifact_path and source_journal_path is not None:
+        emission = _source_emission(F.prop(module, "repo_key"), module_path,
+                                    artifact_path, emitted, repos_dir,
+                                    import_name=F.prop(module, "import_name"))
+        if emission is None:
+            return {**result, "error": "cannot derive the source-journal key for "
+                    f"{artifact_path!r} under repos_dir={repos_dir!r} — refusing to "
+                    "write unjournaled"}
+        rec = journaled_emit(source_journal_path, emissions=[emission],
+                             op={"op": "add-symbol", "qualname": qualname,
+                                 "actor": actor}, write=write)
+        if rec.get("error"):
+            return {**result, "error": rec["error"]}
+        result["journal"] = rec
     if write and artifact_path:
+        if source_journal_path is None:
+            Path(artifact_path).write_text(emitted)  # TRANSITIONAL bare path (seam rollout)
         await graph_task(gx.queue, gx.graph_id, "add_nodes", nodes=[gn])
         await graph_task(gx.queue, gx.graph_id, "add_edges", edges=[
             make_edge(module_id, sym.id, DevRelations.DEFINES),
             make_edge(module_id, sym.id, DevRelations.CONTAINS)])
-        Path(artifact_path).write_text(emitted)
         result["written"] = True
     return result
 
@@ -637,6 +700,8 @@ async def add_text(
     *,
     actor: str = "agent:session",  # Who authored it (recorded in the result)
     write: bool = True,         # Add the node + emit the artifact (False = dry-run preview)
+    source_journal_path: Optional[str] = None,  # The source journal (journal-first routing)
+    repos_dir: Optional[str] = None,  # The repos root (notebook journal keys derive under it)
 ) -> Dict[str, Any]:  # The add result (incl. the emitted artifact path + text), or error
     """Mint a NEW CodeText region (imports/constants/docstring/`__all__`) into a module, then emit.
 
@@ -739,16 +804,32 @@ async def add_text(
         "emitted_bytes": len(emitted.encode("utf-8")), "emitted_text": emitted,
         "unchanged": False, "written": False,
     }
+    if artifact_path and source_journal_path is not None:
+        emission = _source_emission(F.prop(module, "repo_key"), module_path,
+                                    artifact_path, emitted, repos_dir,
+                                    import_name=F.prop(module, "import_name"))
+        if emission is None:
+            return {**result, "error": "cannot derive the source-journal key for "
+                    f"{artifact_path!r} under repos_dir={repos_dir!r} — refusing to "
+                    "write unjournaled"}
+        rec = journaled_emit(source_journal_path, emissions=[emission],
+                             op={"op": "add-text", "region_key": region.region_key,
+                                 "actor": actor}, write=write)
+        if rec.get("error"):
+            return {**result, "error": rec["error"]}
+        result["journal"] = rec
     if write and artifact_path:
+        if source_journal_path is None:
+            # TRANSITIONAL bare path (seam rollout). A born-on-graph package's FIRST
+            # region precedes its directory on disk.
+            Path(artifact_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(artifact_path).write_text(emitted)
         await graph_task(gx.queue, gx.graph_id, "add_nodes", nodes=[gn])
         await graph_task(gx.queue, gx.graph_id, "add_edges", edges=[
             make_edge(module_id, ct.id, DevRelations.CONTAINS)])
         if new_bindings:
             await graph_task(gx.queue, gx.graph_id, "update_node", node_id=module_id,
                              properties={"import_bindings": merged})
-        # A born-on-graph package's FIRST region precedes its directory on disk.
-        Path(artifact_path).parent.mkdir(parents=True, exist_ok=True)
-        Path(artifact_path).write_text(emitted)
         result["written"] = True
     return result
 
@@ -823,3 +904,32 @@ async def _owning_slot_wire(
                       if any(m in str(w["properties"].get("body") or "") for m in markers)),
                      None)
     return owner
+
+
+def _source_emission(
+    repo_key: str,             # The node's rename-stable CONCEPTUAL repo key
+    module_path: str,          # The node's module_path (a notebook's EXPORT-TARGET .py path)
+    artifact_path: str,        # The absolute artifact path the emit targets
+    text: str,                 # The emitted artifact text
+    repos_dir: Optional[str],  # The repos root (a notebook's journal path derives under it)
+    import_name: Optional[str] = None,  # Dotted import name (rides the source event)
+) -> Optional[Dict[str, Any]]:  # A journaled_emit emission dict, or None (key underivable)
+    """Map an authoring emit into the SOURCE JOURNAL's key space.
+
+    The node carries the rename-stable conceptual repo key and (for notebooks) the nbdev
+    EXPORT-TARGET module_path; the source journal keys by repo DIR name and the .ipynb
+    SOURCE path (what cutover recorded) — the c89519cd/f06ef1a6 lessons: an unmapped key
+    once skipped journaling SILENTLY while the file still wrote. A notebook's journal path
+    re-derives from artifact_path under repos_dir/<dir_key>; None (underivable) tells the
+    caller to go LOUD — never write unjournaled."""
+    dir_key = repo_dir_name(repo_key)
+    src_path = module_path
+    if str(artifact_path).endswith(".ipynb"):
+        if not repos_dir:
+            return None
+        try:
+            src_path = Path(artifact_path).relative_to(Path(repos_dir) / dir_key).as_posix()
+        except ValueError:
+            return None
+    return {"repo_key": dir_key, "module_path": src_path, "import_name": import_name,
+            "text": text, "path": str(artifact_path)}

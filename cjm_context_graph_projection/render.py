@@ -846,10 +846,17 @@ def render(
     obj: Dict[str, Any],  # The projection result
     fmt: str = "human",   # "agent" (JSON) or "human" (markdown)
 ) -> str:  # Rendered string
-    """Render a projection result in the requested format."""
+    """Render a projection result in the requested format.
+
+    A mutating verb's `journal` receipt (the journaled_emit seam) renders as ONE uniform
+    trailing line for every verb — the receipt is part of the pit-of-success contract
+    (DEC 6ee4b4f2): what was journaled is always visible, never inferred."""
     if fmt == "agent":
         return json.dumps(obj, indent=2, default=str)
-    return _human(kind, obj)
+    out = _human(kind, obj)
+    if isinstance(obj, dict) and isinstance(obj.get("journal"), dict) and not obj.get("error"):
+        out += "\n" + _journal_receipt_line(obj["journal"])
+    return out
 
 
 def _fmt_ts(ts: Any) -> str:  # Local wall-clock string, or the raw value
@@ -859,3 +866,28 @@ def _fmt_ts(ts: Any) -> str:  # Local wall-clock string, or the raw value
         return datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d %H:%M:%S")
     except (TypeError, ValueError, OSError):
         return str(ts)
+
+
+def _journal_receipt_line(rec: Dict[str, Any]) -> str:
+    """The ONE-LINE uniform journal receipt every mutating verb prints (seam contract).
+
+    Shape: `↳ journal-first [<op>]: source×2 retire×1 · 3 file(s)` — appended events by
+    verb, then files touched; a dry run says PREVIEW; an unjournaled plain write is the
+    LOUD part, never elided."""
+    counts: Dict[str, int] = {}
+    for e in rec.get("events", []):
+        if e.get("appended") or not rec.get("written"):
+            counts[e["verb"]] = counts.get(e["verb"], 0) + 1
+    events = " ".join(f"{v}×{n}" for v, n in counts.items()) or "no new events (idempotent)"
+    bits = [events]
+    if rec.get("files_written"):
+        bits.append(f"{len(rec['files_written'])} file(s)")
+    if rec.get("files_deleted"):
+        bits.append(f"{len(rec['files_deleted'])} deleted")
+    if rec.get("canonicalized"):
+        bits.append(f"canonicalized: {', '.join(rec['canonicalized'])}")
+    if rec.get("unjournaled_files"):
+        bits.append(f"⚠ UNJOURNALED plain write(s): {', '.join(rec['unjournaled_files'])}")
+    head = "PREVIEW — would journal" if not rec.get("written") else "journal-first"
+    op = f" [{rec['op']}]" if rec.get("op") else ""
+    return f"  ↳ {head}{op}: " + " · ".join(bits)

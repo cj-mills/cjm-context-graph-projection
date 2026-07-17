@@ -88,6 +88,31 @@ DEFAULT_NOTEBOOK_LIBS = ("cjm-substrate", "cjm-transcription-core",
                          "cjm-transcript-graph-schema",
                          "cjm-transcription-adapter-interface")
 
+# Pillar-1 seam registry (DEC 6ee4b4f2): every CLI verb that can MUTATE source files on
+# disk, mapped to whether its implementation routes through `journaled_emit` (events
+# BEFORE files). `_dispatch` REFUSES an unrouted verb at dispatch time — a mutating verb
+# is never 'available but dangerous', and verb N+1 lands here or the conformance test
+# fails the build. `readme`/`onboarding`/`viz` are PROJECTORS (their --write targets
+# generated surfaces, not journaled source); note-file writes (author on a Section,
+# add-section, new-note, reconcile-memory) ride the WRITES-journal domain until the
+# pillar-3 content-type unification.
+MUTATES_SOURCE: Dict[str, bool] = {
+    "author": True, "add-symbol": True, "add-text": True, "emit": True,
+    "flip-module": True, "flip-to-py": True, "cutover": True, "emit-artifact": True,
+    "move": True, "regroup": True, "new-module": True, "rename-module": True,
+    "delete-module": True, "rename-symbol": True,
+}
+
+
+def _will_write(args) -> bool:
+    """Whether this invocation would MUTATE source files (the seam-gate predicate).
+
+    `emit` is read-only unless --write; every other MUTATES_SOURCE verb writes unless
+    --no-write. Previews pass the gate — they touch nothing, so they need no journal."""
+    if args.command == "emit":
+        return bool(getattr(args, "write", False))
+    return not getattr(args, "no_write", False)
+
 
 def _editor_pop(
     initial: str,         # The current slot text to seed the buffer with
@@ -109,7 +134,12 @@ def _editor_pop(
 
 
 def _absorb_graph_sourced(res, args) -> int:  # 0 = ok (absorbed or not applicable), 1 = loud failure
-    """N+3 Phase 2 absorb gate, shared by the module-emitting write verbs (author,
+    """RETIRED IN PLACE (pillar-1 seam, DEC 6ee4b4f2): no call sites — journaling now
+    happens INSIDE the authoring verbs via `journaled_emit` (events BEFORE files), so
+    this after-the-fact absorb wrapper is dead; it awaits the delete-symbol verb
+    (0d8adfac) for physical removal.
+
+    Was: N+3 Phase 2 absorb gate, shared by the module-emitting write verbs (author,
     add-symbol): an edit of a GRAPH-SOURCED module lands in the SOURCE journal (the
     authority), canonicalized, with the artifact file kept in sync. A notebook's
     journal key is its .ipynb source path (what cutover recorded) — NOT the nbdev
@@ -149,6 +179,22 @@ def _absorb_graph_sourced(res, args) -> int:  # 0 = ok (absorbed or not applicab
 
 
 async def _dispatch(args) -> int:
+    # The pillar-1 seam gate (DEC 6ee4b4f2): a source-mutating invocation is refused
+    # OUTRIGHT when its verb isn't routed through journaled_emit, or when no source
+    # journal is given for events to land in BEFORE files. Dispatch-time, not deep in
+    # the op — never 'available but dangerous'.
+    if args.command in MUTATES_SOURCE and _will_write(args):
+        if not MUTATES_SOURCE[args.command]:
+            print(f"error: `{args.command}` mutates source files but is NOT yet routed "
+                  "through the journaled_emit seam (journal-first) — refusing; preview "
+                  "with --no-write, or wire the verb through the seam first",
+                  file=sys.stderr)
+            return 1
+        if not args.source_journal_path:
+            print(f"error: `{args.command}` mutates source state — pass "
+                  "--source-journal-path so events land in the journal BEFORE files "
+                  "(cg-write bakes it)", file=sys.stderr)
+            return 1
     if args.command == "serve":
         # The long-lived read-only explorer: opens N graphs itself (primary + --also),
         # so it doesn't ride the single-graph context below.
@@ -474,7 +520,9 @@ async def _dispatch(args) -> int:
             elif args.edit:
                 edit = (args.edit[0], args.edit[1])
             res = await author(gx, args.node_id, replace=replace, edit=edit,
-                               actor=args.actor, write=not args.no_write)
+                               actor=args.actor, write=not args.no_write,
+                               source_journal_path=args.source_journal_path,
+                               repos_dir=args.repos_dir)
             print(render("author", res, args.format))
             # M2b shadow: a memory-section author also journals its raw STATE (the .md stays the
             # ingest source for now; the journal shadows + soaks). NON-cut-over code/notebook
@@ -485,20 +533,14 @@ async def _dispatch(args) -> int:
                 append_write(args.journal_path, "section",
                              {"slug": res.get("note_slug"), "anchor": res.get("anchor"),
                               "raw": res.get("new_text"), "actor": args.actor})
-            # N+3 Phase 2: an author edit of a GRAPH-SOURCED module lands in the source
-            # journal (the authority), canonicalized; the artifact file is kept in sync.
-            if _absorb_graph_sourced(res, args) != 0:
-                return 1
             return 1 if res.get("error") else 0
         elif args.command == "add-symbol":
             body = Path(args.body_file).read_text() if args.body_file else args.body
             res = await add_symbol(gx, args.module, body, actor=args.actor,
-                                   write=not args.no_write)
+                                   write=not args.no_write,
+                                   source_journal_path=args.source_journal_path,
+                                   repos_dir=args.repos_dir)
             print(render("add-symbol", res, args.format))
-            # The CREATE leg shares the author verb's absorb gate: a new symbol in a
-            # GRAPH-SOURCED module must land in the source journal, not just on disk.
-            if _absorb_graph_sourced(res, args) != 0:
-                return 1
             return 1 if res.get("error") else 0
         elif args.command == "add-text":
             # Local import: adding a name to this module's import line is the open
@@ -506,12 +548,10 @@ async def _dispatch(args) -> int:
             from .authoring import add_text
             body = Path(args.body_file).read_text() if args.body_file else args.body
             res = await add_text(gx, args.module, body, actor=args.actor,
-                                 write=not args.no_write)
+                                 write=not args.no_write,
+                                 source_journal_path=args.source_journal_path,
+                                 repos_dir=args.repos_dir)
             print(render("add-text", res, args.format))
-            # Same absorb gate: a new region in a GRAPH-SOURCED module must land in
-            # the source journal, not just on disk.
-            if _absorb_graph_sourced(res, args) != 0:
-                return 1
             return 1 if res.get("error") else 0
         elif args.command == "reconcile-memory":
             res = await reconcile_memory(gx, note_slug=args.note, absorb_anchors=args.absorb,
@@ -550,31 +590,39 @@ async def _dispatch(args) -> int:
                               "actor": "agent:session"})
             return 1 if res.get("error") else 0
         elif args.command == "move":
-            res = await move(gx, args.symbol_id, args.target_module_id, write=not args.no_write)
+            res = await move(gx, args.symbol_id, args.target_module_id, write=not args.no_write,
+                             source_journal_path=args.source_journal_path)
             print(render("move", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "new-module":
             res = await new_module(gx, args.repo_key, args.module_path,
                                    import_name=args.import_name, repo_root=args.repo_root,
-                                   write=not args.no_write)
+                                   write=not args.no_write,
+                                   source_journal_path=args.source_journal_path)
             print(render("module", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "regroup":
             res = await regroup(gx, args.repo_key, args.target_module_path, args.symbol_ids,
-                                import_name=args.import_name, write=not args.no_write)
+                                import_name=args.import_name, write=not args.no_write,
+                                source_journal_path=args.source_journal_path)
             print(render("move", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "rename-module":
             res = await rename_module(gx, args.module_id, args.new_module_path,
-                                      new_import_name=args.import_name, write=not args.no_write)
+                                      new_import_name=args.import_name, write=not args.no_write,
+                                      source_journal_path=args.source_journal_path)
             print(render("module", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "delete-module":
-            res = await delete_module(gx, args.module_id, force=args.force, write=not args.no_write)
+            res = await delete_module(gx, args.module_id, force=args.force,
+                                      write=not args.no_write,
+                                      source_journal_path=args.source_journal_path)
             print(render("module", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "rename-symbol":
-            res = await rename_symbol(gx, args.symbol_id, args.new_name, write=not args.no_write)
+            res = await rename_symbol(gx, args.symbol_id, args.new_name,
+                                      write=not args.no_write,
+                                      source_journal_path=args.source_journal_path)
             print(render("rename", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "flip-module":
@@ -651,7 +699,9 @@ async def _dispatch(args) -> int:
                 print(render("readme", res, args.format))
             return 0
         elif args.command == "emit":
-            res = await emit_artifact(gx, args.module_id, write=args.write)
+            res = await emit_artifact(gx, args.module_id, write=args.write,
+                                      source_journal_path=args.source_journal_path,
+                                      repos_dir=args.repos_dir)
             out = render("emit", res, args.format)
             # The stdout viewer prints the artifact text verbatim (it already ends with a
             # newline) so `emit > file` is byte-faithful; status/JSON lines get a newline.
@@ -1049,6 +1099,8 @@ def main() -> int:
     p_em.add_argument("module_id", help="The CodeModule id (a .py module / notebook) or a Note id")
     p_em.add_argument("--write", action="store_true",
                       help="Write to the container's path (else print to stdout — the round-trip viewer)")
+    p_em.add_argument("--repos-dir", default=DEFAULT_REPOS,
+                      help="Repos root (a notebook emission's journal key derives under it)")
 
     p_mv = sub.add_parser("move",
                           help="Relocate a top-level symbol to another module (re-emit both + rewrite caller imports)")

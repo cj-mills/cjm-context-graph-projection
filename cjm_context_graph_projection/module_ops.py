@@ -39,11 +39,11 @@ from cjm_python_decompose_core.ingest import corpus_graph_elements
 from . import factlayer as F
 from .authoring import (_label_of, _module_node, _module_region_wires, _notebook_cell_wires,
                         _resolve_node)
-from .refactor_ops import _get, _relocate
+from .refactor_ops import _emission_for, _get, _relocate
 from .runtime import GraphHandle
-from .source_state import (append_retire, append_source, canonical_emit, cutover_module,
-                           graph_sourced_modules, is_test_module_path, latest_source_ops,
-                           notebook_to_py_source)
+from .seeds import repo_dir_name
+from .source_state import (canonical_emit, graph_sourced_modules, is_test_module_path,
+                           journaled_emit, latest_source_ops, notebook_to_py_source)
 from .write import link
 
 
@@ -120,6 +120,7 @@ async def new_module(
     import_name: Optional[str] = None,  # Dotted import name (derived from module_path if omitted)
     repo_root: Optional[str] = None,    # Absolute repo root — anchors the FIRST module of a fresh repo (no sibling to derive from)
     write: bool = True,       # Add the node to the graph (else dry run)
+    source_journal_path: Optional[str] = None,  # The source journal (the repo REGISTER event lands here)
 ) -> Dict[str, Any]:  # The new-module result (or error)
     """Mint an empty CodeModule node (the target a `regroup`/`move` populates).
 
@@ -146,6 +147,17 @@ async def new_module(
     result = {"module_id": mid, "repo_key": repo_key, "module_path": module_path,
               "import_name": imp, "path": root + module_path, "written": False,
               "note": "node only — the .py file is emitted when the first symbol is moved in"}
+    # The repo REGISTER event (DEC c47912f6, forward-compat for 640bc713): the inventory
+    # fact exists in the journal from the repo's first on-graph write, so a rebuild can
+    # stop depending on the hardcoded DEFAULT_*_LIBS tuples (finding a7bc1424).
+    rec = journaled_emit(source_journal_path,
+                         registers=[{"repo_key": repo_dir_name(repo_key),
+                                     "repo_root": root.rstrip("/"),
+                                     "source_kind": "code"}],
+                         op={"op": "new-module", "module_path": module_path}, write=write)
+    if rec.get("error"):
+        return {**result, "error": rec["error"]}
+    result["journal"] = rec
     if write:
         await graph_task(gx.queue, gx.graph_id, "add_nodes", nodes=[node.to_graph_node()])
         await graph_task(gx.queue, gx.graph_id, "add_edges", edges=[node.about_edge()])
@@ -161,6 +173,7 @@ async def regroup(
     *,
     import_name: Optional[str] = None,  # Target's dotted import name (derived if omitted)
     write: bool = True,             # Execute (else dry-run preview)
+    source_journal_path: Optional[str] = None,  # The source journal (events land BEFORE files)
 ) -> Dict[str, Any]:  # The regroup result (created_target + the relocation outcome, or error)
     """Gather symbols into a module — the EXECUTE verb for an `under_split` (extract a
     grab-bag into a cohesive module) or `over_split` (consolidate a scattered helper)
@@ -187,7 +200,8 @@ async def regroup(
         if write:
             await graph_task(gx.queue, gx.graph_id, "add_nodes", nodes=[target_node])
             await graph_task(gx.queue, gx.graph_id, "add_edges", edges=[node.about_edge()])
-    res = await _relocate(gx, symbol_ids, target_id, write=write, target_node=target_node)
+    res = await _relocate(gx, symbol_ids, target_id, write=write, target_node=target_node,
+                          source_journal_path=source_journal_path, op_name="regroup")
     res["created_target"] = created
     res["target_module"] = import_name or _derive_import_name(target_module_path)
     return res
@@ -200,6 +214,7 @@ async def rename_module(
     *,
     new_import_name: Optional[str] = None,  # New dotted import name (derived if omitted)
     write: bool = True,             # Execute (else dry-run preview)
+    source_journal_path: Optional[str] = None,  # The source journal (events land BEFORE files)
 ) -> Dict[str, Any]:  # The rename result (importer rewrites, files, or error)
     """Rename a `.py` module — re-emit its content at the new path, drop the old file, and
     rewrite every importer's `from old import …` / `import old` to the new name. Purely
@@ -229,6 +244,15 @@ async def rename_module(
     text = emit_module_from_nodes(await _module_region_wires(gx, module_id),
                                   module_node=M, derive_imports=not is_test_module_path(old_mp))
     files: List[Tuple[str, str]] = [(new_path, text)]
+    dir_key = repo_dir_name(repo_key)
+    renamed_emission: Dict[str, Any] = {"repo_key": dir_key, "module_path": new_module_path,
+                                        "import_name": new_import, "text": text,
+                                        "path": new_path}
+    if source_journal_path and (dir_key, old_mp) in graph_sourced_modules(source_journal_path):
+        # The renamed key inherits its predecessor's phase: born graph-sourced (the
+        # re-key pattern — retire the old key, source+cutover the new one).
+        renamed_emission["cutover"] = True
+    emissions: List[Optional[Dict[str, Any]]] = [renamed_emission]
     import_pairs = await F.load_edge_pairs(gx, DevRelations.IMPORTS)
     importers = [s for s, t in import_pairs if t == module_id and s != module_id]
     caller_hits: List[str] = []
@@ -238,6 +262,7 @@ async def rename_module(
         new_itext, changed = rewrite_module_import(itext, old_import, new_import)
         if changed:
             files.append((F.prop(m, "path"), new_itext))
+            emissions.append(_emission_for(m, new_itext))
             caller_hits.append(F.prop(m, "import_name", mid))
 
     result = {"from_module": old_import, "to_module": new_import,
@@ -245,12 +270,20 @@ async def rename_module(
               "caller_imports_rewritten": sorted(dict.fromkeys(caller_hits)),
               "files": [f for f, _ in files], "written": False,
               "note": "graph subtree dropped; re-ingest to re-derive the renamed module"}
+    if any(e is None for e in emissions):
+        return {**result, "error": "cannot derive a source-journal key for an affected "
+                "module (notebook-backed caller?) — refusing to write unjournaled"}
+    rec = journaled_emit(source_journal_path, emissions=emissions,
+                         retires=[{"repo_key": dir_key, "module_path": old_mp,
+                                   "superseded_by": new_module_path}],
+                         deletes=[old_path] if (old_path and Path(old_path) != Path(new_path))
+                                 else [],
+                         op={"op": "rename-module", "from": old_mp, "to": new_module_path},
+                         write=write)
+    if rec.get("error"):
+        return {**result, "error": rec["error"]}
+    result["journal"] = rec
     if write:
-        for path, content in files:
-            if path:
-                Path(path).write_text(content)
-        if old_path and Path(old_path) != Path(new_path) and Path(old_path).exists():
-            Path(old_path).unlink()
         ids = await _module_subtree_ids(gx, module_id)
         await graph_task(gx.queue, gx.graph_id, "delete_nodes", node_ids=ids, cascade=True)
         result["written"] = True
@@ -263,6 +296,7 @@ async def delete_module(
     *,
     force: bool = False,   # Delete even if it still defines top-level symbols (a confirmed-dead module)
     write: bool = True,    # Execute (else dry-run preview)
+    source_journal_path: Optional[str] = None,  # The source journal (the retire event leads)
 ) -> Dict[str, Any]:  # The delete result (or error/guard)
     """Delete a module — drop its file and its whole graph subtree. Guarded: refuses while
     it still DEFINES top-level symbols (move them out first), unless `force` (a confirmed-dead
@@ -286,12 +320,25 @@ async def delete_module(
                 "symbols": [w["properties"].get("qualname", "") for w in top_syms],
                 "written": False}
     path = F.prop(M, "path")
+    if str(path or "").endswith(".ipynb"):
+        return {"error": "delete-module v1 handles .py modules — retire a notebook via "
+                         "flip-to-py (or an explicit retire) so its journal key ends too",
+                "written": False}
     ids = await _module_subtree_ids(gx, module_id)
     result = {"module_id": module_id, "import_name": F.prop(M, "import_name", ""),
               "path": path, "node_count": len(ids), "forced": force, "written": False}
+    # The retire event leads; the unlink follows (journal-first — a deleted file whose
+    # key stayed live would hold source-check red forever, finding ff8522fa's cousin).
+    rec = journaled_emit(source_journal_path,
+                         retires=[{"repo_key": repo_dir_name(F.prop(M, "repo_key", "")),
+                                   "module_path": str(F.prop(M, "module_path") or "")}],
+                         deletes=[path] if path else [],
+                         op={"op": "delete-module", "import_name": F.prop(M, "import_name", "")},
+                         write=write)
+    if rec.get("error"):
+        return {**result, "error": rec["error"]}
+    result["journal"] = rec
     if write:
-        if path and Path(path).exists():
-            Path(path).unlink()
         await graph_task(gx.queue, gx.graph_id, "delete_nodes", node_ids=ids, cascade=True)
         result["written"] = True
     return result
@@ -466,19 +513,22 @@ async def flip_notebook_to_py(
         result["note"] = "dry run — nothing journaled, written, or deleted"
         return result
 
-    append_source(source_journal_path, repo_key, module_path, import_name, canonical)
-    Path(file_path).parent.mkdir(parents=True, exist_ok=True)
-    Path(file_path).write_text(canonical)
-    co = cutover_module(source_journal_path, repos_dir, repo_key, module_path)
-    if not co.get("cut_over"):
-        return {"error": f"cutover refused after journaling the .py state: "
-                         f"{co.get('error', co)} — the flip is INCOMPLETE (shadow state "
-                         "journaled, artifact written; notebook untouched)", **result}
-    append_retire(source_journal_path, repo_key, notebook_path, superseded_by=module_path)
-    notebook_deleted = False
-    if nb_file.exists():
-        nb_file.unlink()
-        notebook_deleted = True
+    # ONE seam call (journal-first): source + cutover + retire land BEFORE the .py write
+    # and the notebook unlink — the partial-flip states the old inline sequence could
+    # leave (journaled-but-not-retired, written-but-not-cut-over) are gone structurally.
+    nb_existed = nb_file.exists()
+    rec = journaled_emit(source_journal_path,
+                         emissions=[{"repo_key": repo_key, "module_path": module_path,
+                                     "import_name": import_name, "text": canonical,
+                                     "path": file_path, "cutover": True}],
+                         retires=[{"repo_key": repo_key, "module_path": notebook_path,
+                                   "superseded_by": module_path}],
+                         deletes=[str(nb_file)],
+                         op={"op": "flip-to-py", "from": notebook_path, "to": module_path})
+    if rec.get("error"):
+        return {"error": f"flip refused at the seam: {rec['error']}", **result}
+    result["journal"] = rec
+    notebook_deleted = nb_existed and not nb_file.exists()
 
     # Subtree swap: Cells (and the notebook-shaped module node) out, plain decomposition in.
     old_ids = await _module_subtree_ids(gx, module_id)

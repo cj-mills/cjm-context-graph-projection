@@ -19,7 +19,6 @@ the true-B regenerate-from-graph step subsumes.
 """
 
 import ast
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from cjm_dev_graph_schema.identity import code_symbol_node_id
@@ -27,9 +26,9 @@ from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 from cjm_python_decompose_core.emit import emit_module_from_nodes, synth_import
 
 from . import factlayer as F
-from .authoring import _module_node, _module_region_wires
+from .authoring import _module_node, _module_region_wires, _source_emission
 from .runtime import GraphHandle
-from .source_state import is_test_module_path
+from .source_state import is_test_module_path, journaled_emit, latest_source_ops
 
 
 def rewrite_symbol_import(
@@ -99,6 +98,8 @@ async def _relocate(
     *,
     write: bool = True,      # Write the affected files to disk (Fork-1(a)); False = dry run
     target_node: Any = None,  # Pre-fetched/synthesized target CodeModule node (regroup dry-run into a not-yet-persisted module)
+    source_journal_path: Optional[str] = None,  # The source journal (events land BEFORE files)
+    op_name: str = "move",   # The mutating verb name riding the events as op provenance
 ) -> Dict[str, Any]:  # The relocation result (symbols, caller rewrites, diagnostic, or error)
     """Relocate one OR MANY top-level symbols into a target module, graph-driven.
 
@@ -143,16 +144,18 @@ async def _relocate(
         override.update({x: target_module_id for x in await _moved_subtree(gx, sid)})
 
     files: List[Tuple[str, str]] = []
+    emissions: List[Optional[Dict[str, Any]]] = []
     # Each affected SOURCE module, re-emitted without its moved symbols (imports re-derived).
     for src_module_id, items in by_src.items():
         A = await _module_node(gx, src_module_id)
         a_wires = await _module_region_wires(gx, src_module_id)
         a_uses = await _uses_derived_imports(gx, src_module_id, override)
         a_derive = not is_test_module_path(F.prop(A, "module_path", ""))
-        files.append((F.prop(A, "path"),
-                      emit_module_from_nodes([w for w in a_wires if w["id"] not in moved_ids],
-                                             module_node=A, derive_imports=a_derive,
-                                             uses_derived=a_uses)))
+        a_text = emit_module_from_nodes([w for w in a_wires if w["id"] not in moved_ids],
+                                        module_node=A, derive_imports=a_derive,
+                                        uses_derived=a_uses)
+        files.append((F.prop(A, "path"), a_text))
+        emissions.append(_emission_for(A, a_text))
 
     # The TARGET module, re-emitted with every moved symbol appended in order.
     b_wires = await _module_region_wires(gx, target_module_id)
@@ -162,10 +165,22 @@ async def _relocate(
                    for node in [await _get(gx, sid)]]
     b_uses = await _uses_derived_imports(gx, target_module_id, override)
     b_derive = not is_test_module_path(F.prop(B, "module_path", ""))
-    files.append((F.prop(B, "path"),
-                  emit_module_from_nodes(b_wires + moved_wires,
-                                         module_node=B, derive_imports=b_derive,
-                                         uses_derived=b_uses)))
+    b_text = emit_module_from_nodes(b_wires + moved_wires,
+                                    module_node=B, derive_imports=b_derive,
+                                    uses_derived=b_uses)
+    files.append((F.prop(B, "path"), b_text))
+    b_emission = _emission_for(B, b_text)
+    if b_emission is not None and source_journal_path:
+        # A target with no live journal key in a move whose SOURCES are journaled is a
+        # module being BORN by the relocation (regroup's created target) — it enters the
+        # journal graph-sourced from birth rather than dropping to an unjournaled write
+        # a rebuild would silently revert.
+        latest = latest_source_ops(source_journal_path)
+        if ((b_emission["repo_key"], b_emission["module_path"]) not in latest
+                and any(e and (e["repo_key"], e["module_path"]) in latest
+                        for e in emissions)):
+            b_emission["cutover"] = True
+    emissions.append(b_emission)
 
     # Callers: modules importing a source; rewrite each `from a_import import S` to point at B.
     import_pairs = await F.load_edge_pairs(gx, DevRelations.IMPORTS)
@@ -187,6 +202,7 @@ async def _relocate(
                 changed_any = changed_any or changed
             if changed_any:
                 files.append((F.prop(m, "path"), text))
+                emissions.append(_emission_for(m, text))
                 caller_hits.append(F.prop(m, "import_name", mid))
 
     result = {
@@ -200,11 +216,19 @@ async def _relocate(
                        "source_imports_synthesized": sorted({b["module"] for b in a_uses})},
         "files": [f for f, _ in files], "written": False,
     }
-    if write:
-        for path, content in files:
-            if path:
-                Path(path).write_text(content)
-        result["written"] = True
+    if any(e is None for e in emissions):
+        bad = [f for f, e in zip((p for p, _ in files), emissions) if e is None]
+        return {**result, "error": "cannot derive a source-journal key for "
+                f"{bad} (notebook-backed caller?) — refusing to write unjournaled"}
+    # The seam (journal-first): events for every affected module land BEFORE any file
+    # write; write=False is the uniform full preview.
+    rec = journaled_emit(source_journal_path, emissions=emissions,
+                         op={"op": op_name, "symbols": result["symbols"],
+                             "to_module": b_import}, write=write)
+    if rec.get("error"):
+        return {**result, "error": rec["error"]}
+    result["journal"] = rec
+    result["written"] = bool(write)
     return result
 
 
@@ -214,6 +238,7 @@ async def move(
     target_module_id: str,  # The CodeModule to move it into (cross-repo OK, v2)
     *,
     write: bool = True,     # Write the affected files to disk (Fork-1(a)); False = dry run
+    source_journal_path: Optional[str] = None,  # The source journal (events land BEFORE files)
 ) -> Dict[str, Any]:  # The move result (files, caller rewrites, diagnostic, or error)
     """Relocate a single top-level symbol from its module to another, graph-driven.
 
@@ -221,7 +246,8 @@ async def move(
     source module (without S) + the target (with S appended), and rewrites each importing
     module's `from A import S` to point at B. The USES-derived synthetics make it
     zero-residual; the next `ingest` re-derives (S's new id under B, CALLS re-resolved)."""
-    res = await _relocate(gx, [symbol_id], target_module_id, write=write)
+    res = await _relocate(gx, [symbol_id], target_module_id, write=write,
+                          source_journal_path=source_journal_path, op_name="move")
     if res.get("error"):
         return res
     # Shape the single-symbol result keys (back-compat with the published move surface).
@@ -304,3 +330,15 @@ def _resolve_relative(
         return ""
     base = parts[:len(parts) - (level - 1)]
     return ".".join(base + ([module] if module else []))
+
+
+def _emission_for(node: Any, text: str) -> Optional[Dict[str, Any]]:
+    """A `journaled_emit` emission for one affected module node's re-emitted text.
+
+    Node-space -> journal-space via `_source_emission` (conceptual repo key -> dir key;
+    repos_dir=None is fine for the `.py` modules these ops touch — only a notebook's
+    journal key needs re-deriving, and a notebook-backed caller returns None so the op
+    goes LOUD instead of writing it unjournaled)."""
+    return _source_emission(F.prop(node, "repo_key"), str(F.prop(node, "module_path") or ""),
+                            F.prop(node, "path"), text, None,
+                            import_name=F.prop(node, "import_name"))

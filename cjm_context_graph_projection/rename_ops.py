@@ -20,7 +20,6 @@ re-derives on the next `ingest`); v1 scope = a top-level FREE function or class,
 
 import ast
 import re
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from cjm_dev_graph_schema.vocab import DevRelations
@@ -28,8 +27,9 @@ from cjm_python_decompose_core.emit import emit_module_from_nodes
 
 from . import factlayer as F
 from .authoring import _module_node, _module_region_wires
-from .refactor_ops import _get
+from .refactor_ops import _emission_for, _get
 from .runtime import GraphHandle
+from .source_state import journaled_emit
 
 _COMP = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
 
@@ -293,6 +293,7 @@ async def rename_symbol(
     new_name: str,     # Its new bare name
     *,
     write: bool = True,  # Write the affected files (Fork-1(a)); False = dry run
+    source_journal_path: Optional[str] = None,  # The source journal (events land BEFORE files)
 ) -> Dict[str, Any]:  # The rename result (modules updated, diagnostics, or error)
     """Rename a top-level free function/class everywhere it is referenced, graph-driven.
 
@@ -326,6 +327,7 @@ async def rename_symbol(
     d_text = emit_module_from_nodes(await _module_region_wires(gx, def_module_id))
     d_new, n_def = scoped_rename(d_text, old, new_name)
     files: List[Tuple[str, str]] = [(F.prop(D, "path"), d_new)]
+    emissions: List[Optional[Dict[str, Any]]] = [_emission_for(D, d_new)]
     modules_updated: List[str] = []
     diagnostics: List[str] = []
 
@@ -339,6 +341,7 @@ async def rename_symbol(
             new_text, _ = scoped_rename(new_text, old, new_name)
         if new_text != m_text:
             files.append((F.prop(M, "path"), new_text))
+            emissions.append(_emission_for(M, new_text))
             modules_updated.append(F.prop(M, "import_name", mid))
         if has_qualified:
             diagnostics.append(f"{F.prop(M, 'import_name', mid)}: qualified "
@@ -355,9 +358,14 @@ async def rename_symbol(
               "def_site_edits": n_def, "modules_updated": sorted(dict.fromkeys(modules_updated)),
               "diagnostics": diagnostics, "files": [f for f, _ in files], "written": False,
               "note": "the symbol id changes with its name — re-ingest to re-derive the graph"}
-    if write:
-        for path, content in files:
-            if path:
-                Path(path).write_text(content)
-        result["written"] = True
+    if any(e is None for e in emissions):
+        return {**result, "error": "cannot derive a source-journal key for an affected "
+                "module (notebook-backed importer?) — refusing to write unjournaled"}
+    rec = journaled_emit(source_journal_path, emissions=emissions,
+                         op={"op": "rename-symbol", "from": old, "to": new_name},
+                         write=write)
+    if rec.get("error"):
+        return {**result, "error": rec["error"]}
+    result["journal"] = rec
+    result["written"] = bool(write)
     return result

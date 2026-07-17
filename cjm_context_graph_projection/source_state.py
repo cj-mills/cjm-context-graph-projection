@@ -255,17 +255,21 @@ def append_retire(
     repo_key: str,                        # The repo's durable conceptual slug
     module_path: str,                     # The module key to END (e.g. the flipped-away .ipynb)
     superseded_by: Optional[str] = None,  # The successor key carrying the content (audit trail)
+    op_meta: Optional[Dict[str, Any]] = None,  # Replay-ignored op provenance ({'op': 'delete-module', ...})
 ) -> bool:  # True if appended, False if the key is not currently live (no-op)
     """Append a `retire` op ending a module key's journal life.
 
-    The re-key half of the notebook->py flip: the old `.ipynb` key would otherwise sit in
-    `latest_source_ops` forever, holding source-check to a deleted file. `superseded_by`
-    is audit-only (replay keys off repo_key+module_path)."""
+    The re-key half of the notebook->py flip AND the delete/rename verbs' event: the old
+    key would otherwise sit in `latest_source_ops` forever, holding source-check to a
+    deleted file. `superseded_by` is audit-only (replay keys off repo_key+module_path);
+    `generation`/`op` ride the record as replay-ignored envelope (see `append_source`)."""
     if (repo_key, module_path) not in latest_source_ops(path):
         return False
-    record = _stamp_session({"verb": "retire", "ts": time.time(),
+    record = _stamp_session({"verb": "retire", "ts": time.time(), "generation": 1,
                              "args": {"repo_key": repo_key, "module_path": module_path,
                                       "superseded_by": superseded_by}})
+    if op_meta:
+        record["op"] = op_meta
     with Path(path).open("a") as f:
         f.write(json.dumps(record, sort_keys=True) + "\n")
     return True
@@ -277,14 +281,23 @@ def append_source(
     module_path: str,      # Repo-relative module path
     import_name: str,      # Dotted import name
     text: str,             # The module's canonical source text (the journaled STATE)
+    op_meta: Optional[Dict[str, Any]] = None,  # Replay-ignored op provenance ({'op': 'move', ...})
 ) -> bool:  # True if appended, False if identical to the current latest state (no-op)
-    """Append a `source` op, skipping a write identical to the module's current latest state."""
+    """Append a `source` op, skipping a write identical to the module's current latest state.
+
+    New records carry `generation` (1 = module-snapshot grain; replay will UPCAST older
+    generations when the symbol-granular endpoint lands — DEC 6ee4b4f2 pillar 2) and,
+    when given, an `op` envelope naming the mutating verb that produced the state — pure
+    provenance for the session lens / orphaned-edges remap, NEVER replay input (replay is
+    STATE-based, verb+args only; intent replay would bake verb bugs into history)."""
     cur = latest_source_ops(path).get((repo_key, module_path))
     if cur is not None and cur.get("text") == text:
         return False
-    record = _stamp_session({"verb": "source", "ts": time.time(),
+    record = _stamp_session({"verb": "source", "ts": time.time(), "generation": 1,
                              "args": {"repo_key": repo_key, "module_path": module_path,
                                       "import_name": import_name, "text": text}})
+    if op_meta:
+        record["op"] = op_meta
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     with p.open("a") as f:
@@ -372,28 +385,27 @@ def cutover_module(
     except (SyntaxError, ValueError) as e:
         return {"error": f"journaled source for {repo_key}/{module_path} does not parse: {e}",
                 "cut_over": False}
-    artifact_written = False
-    if Path(file_path).exists():
-        if Path(file_path).read_text() != journaled:
-            return {"error": f"file drifted from the journaled state for {repo_key}/{module_path} "
-                             "— absorb it (flip-module) or regenerate it (emit-artifact) first",
-                    "cut_over": False}
-    elif write:
-        Path(file_path).parent.mkdir(parents=True, exist_ok=True)
-        Path(file_path).write_text(journaled)
-        artifact_written = True
+    artifact_missing = not Path(file_path).exists()
+    if not artifact_missing and Path(file_path).read_text() != journaled:
+        return {"error": f"file drifted from the journaled state for {repo_key}/{module_path} "
+                         "— absorb it (flip-module) or regenerate it (emit-artifact) first",
+                "cut_over": False}
     if not write:
         return {"repo_key": repo_key, "module_path": module_path,
                 "import_name": a.get("import_name"), "file_path": file_path,
                 "cut_over": False, "previewed": True, "artifact_written": False,
                 "note": "PREVIEW (--no-write): every guard passes — a real cutover would make "
                         "the journal this module's source of truth"
-                        + ("" if Path(file_path).exists()
-                           else " and write its first artifact")}
-    record = _stamp_session({"verb": "cutover", "ts": time.time(),
-                             "args": {"repo_key": repo_key, "module_path": module_path}})
-    with Path(source_journal_path).open("a") as f:
-        f.write(json.dumps(record, sort_keys=True) + "\n")
+                        + (" and write its first artifact" if artifact_missing else "")}
+    # Journal-first (the seam discipline): the cutover event lands BEFORE the missing
+    # artifact is regenerated — a crash between the two leaves the journal ahead of the
+    # files, the recoverable direction (emit-artifact regenerates).
+    _append_cutover(source_journal_path, repo_key, module_path)
+    artifact_written = False
+    if artifact_missing:
+        Path(file_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(file_path).write_text(journaled)
+        artifact_written = True
     return {"repo_key": repo_key, "module_path": module_path,
             "import_name": a.get("import_name"), "file_path": file_path,
             "cut_over": True, "artifact_written": artifact_written,
@@ -514,3 +526,154 @@ def _stamp_session(record: Dict[str, Any]) -> Dict[str, Any]:
     if session:
         record["session"] = session
     return record
+
+
+def _append_cutover(
+    path: str,         # Source-journal file path (JSONL)
+    repo_key: str,     # The repo's durable conceptual slug
+    module_path: str,  # The module key crossing the Phase-2 boundary
+    op_meta: Optional[Dict[str, Any]] = None,  # Replay-ignored op provenance
+) -> None:
+    """Append the raw `cutover` record (generation-tagged) — ONE grammar site per event.
+
+    The GUARDED path is `cutover_module` (shadow-clean checks); this is the shared
+    append it and `journaled_emit` route through when the caller has already validated
+    (e.g. flip-to-py births a `.py` graph-sourced from a state it just canonicalized)."""
+    record = _stamp_session({"verb": "cutover", "ts": time.time(), "generation": 1,
+                             "args": {"repo_key": repo_key, "module_path": module_path}})
+    if op_meta:
+        record["op"] = op_meta
+    with Path(path).open("a") as f:
+        f.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+def append_register(
+    path: str,                        # Source-journal file path (JSONL)
+    repo_key: str,                    # The repo's durable conceptual slug
+    repo_root: Optional[str] = None,  # Absolute repo root on disk (the rebuild ingest anchor)
+    source_kind: str = "code",        # Ingest substrate: "code" (.py) or "notebook"
+) -> bool:  # True if appended, False if the repo's latest register is identical (no-op)
+    """Append a `register` event — repo inventory as JOURNAL DATA (DEC c47912f6).
+
+    The forward-compat half of retiring the hardcoded DEFAULT_CODE_LIBS/NOTEBOOK_LIBS
+    tuples (finding a7bc1424: a repo outside them silently drops out of rebuilds):
+    `new-module` auto-registers its repo so the inventory event exists from the repo's
+    FIRST on-graph write. Rebuild CONSUMPTION + the m3-baseline backfill ride 640bc713,
+    not this seam. Latest-wins per repo_key; an identical re-register is skipped
+    (idempotent retries as contract)."""
+    latest: Optional[Dict[str, Any]] = None
+    for rec in read_source_journal(path):
+        if rec.get("verb") == "register" and rec.get("args", {}).get("repo_key") == repo_key:
+            latest = rec.get("args")
+    args = {"repo_key": repo_key, "repo_root": repo_root, "source_kind": source_kind}
+    if latest == args:
+        return False
+    record = _stamp_session({"verb": "register", "ts": time.time(), "generation": 1,
+                             "args": args})
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("a") as f:
+        f.write(json.dumps(record, sort_keys=True) + "\n")
+    return True
+
+
+def journaled_emit(
+    source_journal_path: Optional[str],  # The source journal — REQUIRED for any real write
+    *,
+    emissions: Optional[List[Dict[str, Any]]] = None,  # [{repo_key, module_path, import_name, text, path, cutover?}] — JOURNAL-space keys
+    retires: Optional[List[Dict[str, Any]]] = None,    # [{repo_key, module_path, superseded_by?}]
+    deletes: Optional[List[str]] = None,               # File paths to unlink AFTER events land
+    registers: Optional[List[Dict[str, Any]]] = None,  # [{repo_key, repo_root?, source_kind?}]
+    op: Optional[Dict[str, Any]] = None,               # Op provenance ({'op': 'move', ...}); replay-ignored
+    write: bool = True,                                # False = full preview, ZERO side effects
+) -> Dict[str, Any]:  # The uniform receipt every mutating verb carries (or {'error': ...})
+    """The ops seam (pillar 1 of DEC 6ee4b4f2): events BEFORE files — THE file-write path.
+
+    Three strict phases: (1) validate + canonicalize the WHOLE batch (zero side effects —
+    one canonicalization failure refuses everything); (2) append ALL journal events
+    (source / cutover / retire / register, generation-tagged, `op` provenance riding
+    replay-ignored); (3) only then touch disk. A crash between (2) and (3) leaves the
+    journal AHEAD of the files — the recoverable direction (`emit-artifact` regenerates);
+    files ahead of the journal is the rebuild-revert class (finding ff8522fa) this seam
+    makes impossible by construction. An emission whose (repo_key, module_path) has NO
+    live journal key is written as a plain file and reported LOUDLY in
+    `unjournaled_files` (auto-capturing would flip phase discipline silently —
+    `flip-module` is the deliberate capture verb); write=True with events to land and no
+    journal path REFUSES outright. Journaled emissions land their CANONICAL text on disk,
+    so file == journal by construction (the absorb-rewrite folded in)."""
+    emissions, retires = emissions or [], retires or []
+    deletes, registers = deletes or [], registers or []
+    receipt: Dict[str, Any] = {"op": (op or {}).get("op"), "journal_first": True,
+                               "written": False, "events": [], "files_written": [],
+                               "files_deleted": [], "unjournaled_files": [],
+                               "canonicalized": []}
+    if write and not source_journal_path and (emissions or retires or registers):
+        return {"error": "journaled_emit refuses: no source-journal path — journal-first "
+                         "means events land before files (pass source_journal_path; "
+                         "cg-write bakes it)", **receipt}
+    latest = latest_source_ops(source_journal_path) if source_journal_path else {}
+    sourced = graph_sourced_modules(source_journal_path) if source_journal_path else set()
+    # Phase 1: validate/canonicalize everything — no side effects yet.
+    plans: List[Dict[str, Any]] = []
+    for e in emissions:
+        key = (e["repo_key"], e["module_path"])
+        journaled = key in latest or bool(e.get("cutover"))
+        canonical = e["text"]
+        if journaled:
+            try:
+                canonical = _canonical(e["repo_key"], e["module_path"],
+                                       e.get("path") or "", e["text"], e.get("import_name"))
+            except (SyntaxError, ValueError) as err:
+                return {"error": f"canonical emit failed for {e['repo_key']}/"
+                                 f"{e['module_path']}: {err} — NOTHING journaled or written",
+                        **receipt}
+        plans.append({**e, "_journaled": journaled, "_canonical": canonical})
+    # Phase 2: events (journal leads).
+    for r in registers:
+        appended = write and append_register(source_journal_path, r["repo_key"],
+                                             repo_root=r.get("repo_root"),
+                                             source_kind=r.get("source_kind", "code"))
+        receipt["events"].append({"verb": "register", "repo_key": r["repo_key"],
+                                  "appended": bool(appended)})
+    for p in plans:
+        if not p["_journaled"]:
+            continue
+        appended = write and append_source(source_journal_path, p["repo_key"],
+                                           p["module_path"], p.get("import_name") or "",
+                                           p["_canonical"], op_meta=op)
+        receipt["events"].append({"verb": "source", "repo_key": p["repo_key"],
+                                  "module_path": p["module_path"], "appended": bool(appended)})
+        if p.get("cutover") and (p["repo_key"], p["module_path"]) not in sourced:
+            if write:
+                _append_cutover(source_journal_path, p["repo_key"], p["module_path"],
+                                op_meta=op)
+            receipt["events"].append({"verb": "cutover", "repo_key": p["repo_key"],
+                                      "module_path": p["module_path"], "appended": write})
+    for r in retires:
+        appended = write and append_retire(source_journal_path, r["repo_key"],
+                                           r["module_path"],
+                                           superseded_by=r.get("superseded_by"), op_meta=op)
+        receipt["events"].append({"verb": "retire", "repo_key": r["repo_key"],
+                                  "module_path": r["module_path"], "appended": bool(appended)})
+    # Phase 3: files (only now — the journal can never trail the disk).
+    for p in plans:
+        path = p.get("path")
+        if not path:
+            continue
+        out_text = p["_canonical"] if p["_journaled"] else p["text"]
+        if p["_journaled"] and out_text != p["text"]:
+            receipt["canonicalized"].append(p["module_path"])
+        if not p["_journaled"]:
+            receipt["unjournaled_files"].append(path)
+        if write:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_text(out_text)
+        receipt["files_written"].append(path)
+    for d in deletes:
+        if not d:
+            continue
+        if write and Path(d).exists():
+            Path(d).unlink()
+        receipt["files_deleted"].append(d)
+    receipt["written"] = write
+    return receipt
