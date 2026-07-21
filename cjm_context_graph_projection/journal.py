@@ -197,7 +197,8 @@ async def _apply_op(gx: GraphHandle, op: Dict[str, Any]) -> str:
 
 async def replay_journal(
     gx: GraphHandle,
-    path: str,  # Journal file path (JSONL)
+    path: str,       # Journal file path (JSONL)
+    offset: int = 0,  # Skip the first N ops — the swap-rebuild DELTA lane (DEC 638782c9)
 ) -> Dict[str, int]:  # Per-verb replay counts
     """Re-apply every journaled write through its core verb (idempotent).
 
@@ -221,7 +222,10 @@ async def replay_journal(
     `.md` an ingest still read."""
     counts = {v: 0 for v in JOURNAL_VERBS}
     counts["skipped"] = 0
-    ops = read_journal(path)
+    # offset = the swap-rebuild delta lane: ops[:offset] are already in the target
+    # projection; idempotent re-application makes a generous (over-inclusive) offset
+    # safe, so callers may pass a PRE-build count and let the overlap verify-collide.
+    ops = read_journal(path)[offset:]
     genesis = [op for op in ops if op.get("verb") == "new-note"]
     rest = [op for op in ops if op.get("verb") != "new-note"]
     for op in genesis + rest:

@@ -256,7 +256,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `journaled_emit` _function_ — The ops seam (pillar 1 of DEC 6ee4b4f2): events BEFORE files — THE file-write path.
 - `latest_source_ops` _function_ — The LATEST source state per module (last write wins — the 'journal STATE, not diff'
 - `notebook_to_py_source` _function_ — Build a plain-`.py` module source from a notebook's EXPORT cells (the flip transform).
-- `read_source_journal` _function_ — Read every `source` op (one JSON object per line; missing file = []).
+- `read_source_journal` _function_ — Read every `source` op across the rotated SEGMENT FAMILY (one JSON object per
 - `source_check` _function_ — The soak instrument: for each shadow-sourced module, check two things.
 
 ### `cjm_context_graph_projection.structure`

@@ -261,7 +261,7 @@ async def _dispatch(args) -> int:
             if not args.journal_path:
                 print("error: replay needs --journal-path", file=sys.stderr)
                 return 1
-            rc = await replay_journal(gx, args.journal_path)
+            rc = await replay_journal(gx, args.journal_path, offset=args.offset)
             print(f"replayed journal: {rc}")
             return 0
         if args.command == "schema":
@@ -790,7 +790,9 @@ def main() -> int:
     p_inn.add_argument("--profile", default="quarto_post",
                        help="Relationship-harvest profile (default quarto_post; see the markdown core's PROFILES).")
 
-    sub.add_parser("replay", help="Replay the write journal onto the db (needs --journal-path)")
+    p_rp = sub.add_parser("replay", help="Replay the write journal onto the db (needs --journal-path)")
+    p_rp.add_argument("--offset", type=int, default=0,
+                      help="Skip the first N ops — the swap-rebuild delta lane (over-inclusion is safe; replay is idempotent)")
 
     p_m3 = sub.add_parser("m3-baseline",
                           help="M3 genesis import: journal a per-note baseline `new-note` op "

@@ -269,3 +269,22 @@ def test_unlink_full_id_triple_retracts_despite_missing_endpoints(monkeypatch):
     assert calls == ["delete_edges"]
     res2 = asyncio.run(write_mod.unlink(gx, "d899e643", full_tgt, "SHAPES"))
     assert res2["written"] is False and "missing node" in res2["error"]
+
+
+def test_replay_offset_skips_applied_prefix(tmp_path, monkeypatch):
+    """`--offset` is the swap-rebuild delta lane (DEC 638782c9): ops[:offset] never
+    re-dispatch; append order (and genesis hoisting) applies WITHIN the tail only."""
+    import asyncio
+    import cjm_context_graph_projection.journal as journal_mod
+    p = str(tmp_path / "writes.jsonl")
+    for i in range(4):
+        journal_mod.append_write(p, "link", {"n": i})
+    applied = []
+
+    async def fake_apply(gx, op):
+        applied.append(op["args"]["n"])
+        return "link"
+
+    monkeypatch.setattr(journal_mod, "_apply_op", fake_apply)
+    rc = asyncio.run(journal_mod.replay_journal(None, p, offset=2))
+    assert applied == [2, 3] and rc["link"] == 2
