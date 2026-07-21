@@ -44,6 +44,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from cjm_context_graph_primitives.journal import journal_segments, maybe_rotate
 from cjm_notebook_decompose_core.project import render_notebook
 from cjm_notebook_decompose_core.read import parse_notebook
 from cjm_python_decompose_core.emit import emit_module_from_nodes
@@ -200,15 +201,14 @@ def _derive_import_name(
 def read_source_journal(
     path: str,  # Source-journal file path (JSONL)
 ) -> List[Dict[str, Any]]:  # The recorded source ops, in append order
-    """Read every `source` op (one JSON object per line; missing file = [])."""
-    p = Path(path)
-    if not p.exists():
-        return []
+    """Read every `source` op across the rotated SEGMENT FAMILY (one JSON object per
+    line; missing files = []) — cold segments first, live tail last: append order."""
     ops: List[Dict[str, Any]] = []
-    for line in p.read_text().splitlines():
-        line = line.strip()
-        if line:
-            ops.append(json.loads(line))
+    for seg in journal_segments(path):
+        for line in Path(seg).read_text().splitlines():
+            line = line.strip()
+            if line:
+                ops.append(json.loads(line))
     return ops
 
 
@@ -272,6 +272,7 @@ def append_retire(
         record["op"] = op_meta
     with Path(path).open("a") as f:
         f.write(json.dumps(record, sort_keys=True) + "\n")
+    maybe_rotate(path)
     return True
 
 
@@ -302,6 +303,7 @@ def append_source(
     p.parent.mkdir(parents=True, exist_ok=True)
     with p.open("a") as f:
         f.write(json.dumps(record, sort_keys=True) + "\n")
+    maybe_rotate(path)
     return True
 
 
@@ -545,6 +547,7 @@ def _append_cutover(
         record["op"] = op_meta
     with Path(path).open("a") as f:
         f.write(json.dumps(record, sort_keys=True) + "\n")
+    maybe_rotate(path)
 
 
 def append_register(
@@ -574,6 +577,7 @@ def append_register(
     p.parent.mkdir(parents=True, exist_ok=True)
     with p.open("a") as f:
         f.write(json.dumps(record, sort_keys=True) + "\n")
+    maybe_rotate(path)
     return True
 
 
