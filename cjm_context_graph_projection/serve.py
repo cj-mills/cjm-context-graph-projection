@@ -27,6 +27,8 @@ from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any, Awaitable, Dict, List, Optional
 
+from cjm_context_graph_primitives.journal import journal_segments
+
 from .authoring import read_node
 from .journal import journal_window_view
 from .lens import apply_lens, load_lenses
@@ -217,9 +219,10 @@ async def serve_graphs(
 
 def _sibling_journals(db_path: str) -> List[str]:  # Existing journal files beside the db
     """The db's journal files by the sibling-naming convention (`<stem>.writes.jsonl` +
-    `<stem>.source.jsonl`) — the db is a projection OF these, so they are the honest
-    data path for the journal-window (session lens) endpoint. Existence-checked: a
-    journal-less graph (e.g. a capability graph) simply serves no window."""
+    `<stem>.source.jsonl`), each expanded to its rotated SEGMENT FAMILY (DEC bb1b9995)
+    — the db is a projection OF these, so they are the honest data path for the
+    journal-window (session lens) endpoint. Existence-checked: `journal_segments`
+    returns existing files only, so a journal-less graph simply serves no window."""
     stem = Path(db_path).with_suffix("")
-    return [str(p) for p in (Path(f"{stem}.writes.jsonl"), Path(f"{stem}.source.jsonl"))
-            if p.exists()]
+    return [seg for kind in ("writes", "source")
+            for seg in journal_segments(f"{stem}.{kind}.jsonl")]

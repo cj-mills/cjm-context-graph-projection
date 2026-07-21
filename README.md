@@ -230,6 +230,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `class_subject_elements` _function_ — Class-subject entities + PART_OF-style membership edges (ABOUT member->class).
 - `conceptual_key` _function_ — The durable conceptual key for a repo (rename-aware; defaults to the name).
 - `rename_contradiction_elements` _function_ — The torch/hf-utils `rename-disposition` slots with BOTH claims active.
+- `repo_dir_name` _function_ — The CURRENT repo dir name for a conceptual key (identity unless renamed).
 - `seed_elements` _function_ — All hand-seeded elements (rename contradiction + stale version + class subjects).
 - `stale_version_seed_elements` _function_ — A `cjm-substrate` version slot seeded BEHIND the real version (oracle bumps it).
 
@@ -242,6 +243,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 ### `cjm_context_graph_projection.source_state`
 
 - `absorb_authored_text` _function_ — Absorb an `author` edit of a GRAPH-SOURCED module into the source journal.
+- `append_register` _function_ — Append a `register` event — repo inventory as JOURNAL DATA (DEC c47912f6).
 - `append_retire` _function_ — Append a `retire` op ending a module key's journal life.
 - `append_source` _function_ — Append a `source` op, skipping a write identical to the module's current latest state.
 - `canonical_emit` _function_ — Decompose source text and re-emit it canonically — the exact graph→`.py` Phase 2 yields.
@@ -251,6 +253,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `flip_module` _function_ — Capture a module's CANONICAL source into the shadow source journal (Phase 1).
 - `graph_sourced_modules` _function_ — The modules whose ingest source IS the journal (a `cutover` op exists for them).
 - `is_test_module_path` _function_ — Whether a module path denotes TEST source (`tests/` or `tests_manual/`).
+- `journaled_emit` _function_ — The ops seam (pillar 1 of DEC 6ee4b4f2): events BEFORE files — THE file-write path.
 - `latest_source_ops` _function_ — The LATEST source state per module (last write wins — the 'journal STATE, not diff'
 - `notebook_to_py_source` _function_ — Build a plain-`.py` module source from a notebook's EXPORT cells (the flip transform).
 - `read_source_journal` _function_ — Read every `source` op (one JSON object per line; missing file = []).
