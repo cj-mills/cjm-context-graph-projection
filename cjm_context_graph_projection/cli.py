@@ -68,7 +68,7 @@ DEFAULT_CODE_LIBS = ("cjm-dev-graph-schema", "cjm-markdown-decompose-core",
                      "cjm-context-graph-projection", "cjm-python-decompose-core",
                      "cjm-substrate-tui-kit",
                      "cjm-transcript-correction-tui", "cjm-transcription-tui",
-                     "cjm-transcript-decomp-tui")
+                     "cjm-transcript-decomp-tui", "cjm-workflow-hub-tui")
 # The substrate core is nbdev — ingest its NOTEBOOKS (the source), with cross-cell
 # @patch/incremental methods re-attributed to their true classes by the compositor.
 DEFAULT_NOTEBOOK_LIBS = ("cjm-substrate", "cjm-transcription-core",
