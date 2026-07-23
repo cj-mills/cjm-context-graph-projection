@@ -514,12 +514,51 @@ async def author(
     else:
         emitted = emit_module_from_nodes(wires)
 
+    # Re-derive the edited slot's bindings (2b6090dc): the author edit is the moment
+    # a code slot's references change, so the frozen import_bindings refresh HERE —
+    # the next canonical emit (add-symbol / move) derives from live bindings instead
+    # of the last ingest's. A CodeText import edit mints module-level bindings the
+    # way add_text does. Nested/method edits inherit this via the owner routing.
+    rebind: Dict[str, Any] = {}
+    module_bindings_merged: Optional[List[Dict[str, Any]]] = None
+    minted = 0
+    if artifact == "module" and label == DevNodeKinds.CODE_SYMBOL:
+        try:
+            ps = parse_module(new_text).symbols[0]
+            available = _available_bindings(container, wires)
+            rebind["import_bindings"] = [b for r in _flat_refs(ps)
+                                         for b in available.get(r, [])]
+        except (SyntaxError, IndexError):
+            rebind = {}
+    elif artifact == "module" and label == DevNodeKinds.CODE_TEXT:
+        try:
+            parsed_bindings = parse_module(new_text).import_bindings
+        except SyntaxError:
+            parsed_bindings = {}
+        if parsed_bindings:
+            def _bkey(b: Dict[str, Any]) -> Tuple:
+                return (b.get("name"), b.get("kind"), b.get("level", 0),
+                        b.get("module", ""), b.get("imported", ""), b.get("alias", ""))
+            merged = list(F.prop(container, "import_bindings") or [])
+            have = {_bkey(b) for b in merged}
+            for descs in parsed_bindings.values():
+                for b in descs:
+                    if _bkey(b) not in have:
+                        have.add(_bkey(b))
+                        merged.append(b)
+                        minted += 1
+            if minted:
+                module_bindings_merged = merged
     result = {
         "node_id": node_id, "label": label, "slot": slot, "actor": actor,
         "artifact": artifact, "artifact_path": artifact_path,
         "unchanged": new_text == current, "emitted_bytes": len(emitted.encode("utf-8")),
         "written": False, "emitted_text": emitted, "new_text": new_text,
     }
+    if rebind.get("import_bindings") is not None:
+        result["rebound_bindings"] = len(rebind["import_bindings"])
+    if minted:
+        result["new_import_bindings"] = minted
     if artifact == "note":
         # The durable section identity (slug, anchor) the journal records for M2b's shadow.
         result["note_slug"] = F.prop(container, "slug")
@@ -557,12 +596,16 @@ async def author(
         # with the file and sequential authors compose (emit reads the graph). The file is
         # still the durable source under Fork-1(a); the next `ingest` re-derives either way.
         merge: Dict[str, Any] = {slot: new_text}
+        merge.update(rebind)
         if label == DevNodeKinds.CODE_SYMBOL:
             merge["body_hash"] = SourceRef.compute_hash(new_text.encode("utf-8"))
         elif label == DevNodeKinds.SECTION:
             # Mirror the extractor: a section's content_hash is over its `raw` span.
             merge["content_hash"] = SourceRef.compute_hash(new_text.encode("utf-8"))
         await graph_task(gx.queue, gx.graph_id, "update_node", node_id=node_id, properties=merge)
+        if module_bindings_merged is not None:
+            await graph_task(gx.queue, gx.graph_id, "update_node", node_id=container_id,
+                             properties={"import_bindings": module_bindings_merged})
         result["written"] = True
     return result
 
@@ -624,32 +667,17 @@ async def add_symbol(
                  w["properties"].get("order_index") is not None else -1 for w in wires),
                 default=-1) + 1
 
-    # Bind the new symbol's refs against the imports the module already carries
-    # (module-level + every symbol's frozen bindings) — the imports-as-projection table.
+    # Bind the new symbol's refs — nested defs INCLUDED (a minted class binds what
+    # its methods reference, 2b6090dc) — against everything the module carries,
+    # region-text import lines included (_available_bindings).
     ps = parse_module(text).symbols[0]
-    # name -> LIST of descriptors: coexisting plain submodule imports (import a.b +
-    # import a.c) share one bound name — a one-per-name map silently drops all but one.
-    available: Dict[str, List[Dict[str, Any]]] = {}
-    seen_bindings: set = set()
-
-    def _add(b: Dict[str, Any]) -> None:
-        k = (b.get("kind"), b.get("level", 0), b.get("module", ""),
-             b.get("imported", ""), b.get("alias", ""))
-        if k not in seen_bindings:
-            seen_bindings.add(k)
-            available.setdefault(b.get("name"), []).append(b)
-
-    for b in (F.prop(module, "import_bindings") or []):
-        _add(b)
-    for w in wires:
-        for b in (w["properties"].get("import_bindings") or []):
-            _add(b)
+    available = _available_bindings(module, wires)
     sym = CodeSymbolNode(
         module_id=module_id, qualname=qualname,
         symbol_kind="class" if isinstance(tree.body[0], ast.ClassDef) else "function",
         path=str(F.prop(module, "path") or ""),
         docstring=ps.docstring, calls=list(ps.calls), refs=list(ps.refs),
-        import_bindings=[b for r in ps.refs for b in available.get(r, [])],
+        import_bindings=[b for r in _flat_refs(ps) for b in available.get(r, [])],
         body=text, body_hash=SourceRef.compute_hash(text.encode("utf-8")),
         order_index=order,
         properties={"decorators": list(ps.decorators)} if ps.decorators else {},
@@ -933,3 +961,70 @@ def _source_emission(
             return None
     return {"repo_key": dir_key, "module_path": src_path, "import_name": import_name,
             "text": text, "path": str(artifact_path)}
+
+
+def _flat_refs(
+    ps: Any,  # A ParsedSymbol (with nested children)
+) -> List[str]:  # Its refs + every descendant's refs (dedup, order-preserved)
+    """A symbol's referenced names INCLUDING its nested defs' (the class-body reach).
+
+    `ParsedSymbol.refs` excludes nested def bodies by design (methods carry their
+    own refs), but a binding walk over ONE authored/minted symbol must see the whole
+    region: a name referenced only inside a method body binds imports too — without
+    this, a class-heavy symbol's import_bindings miss everything its methods use
+    and the next canonical emit prunes those imports (finding 2b6090dc)."""
+    names: "dict[str, None]" = {}
+
+    def walk(s: Any) -> None:
+        for r in s.refs:
+            names.setdefault(r, None)
+        for c in s.children:
+            walk(c)
+
+    walk(ps)
+    return list(names)
+
+
+def _available_bindings(
+    module: Any,                   # The CodeModule node (or wire dict)
+    wires: List[Dict[str, Any]],   # The module's region wires (CodeSymbol + CodeText)
+) -> Dict[str, List[Dict[str, Any]]]:  # name -> coexisting binding descriptors
+    """Every import binding the module carries, keyed by bound local name.
+
+    Unions three sources: the module node's bindings, every region wire's frozen
+    per-symbol bindings, and the import statements parsed out of the CodeText
+    regions' VERBATIM text. The parse leg is the 47b256de/2b6090dc closer: an
+    author-edited import line lives only in a region's text (CodeText carries no
+    binding table), so parsing it here makes region edits mint bindings the way
+    `add_text` does — a later symbol's refs can bind against it. A name maps to a
+    LIST of descriptors: coexisting plain submodule imports (`import a.b` +
+    `import a.c`) share one bound name — a one-per-name map silently drops all
+    but one."""
+    available: Dict[str, List[Dict[str, Any]]] = {}
+    seen: set = set()
+
+    def _add(b: Dict[str, Any]) -> None:
+        k = (b.get("kind"), b.get("level", 0), b.get("module", ""),
+             b.get("imported", ""), b.get("alias", ""))
+        if k not in seen:
+            seen.add(k)
+            available.setdefault(b.get("name"), []).append(b)
+
+    for b in (F.prop(module, "import_bindings") or []):
+        _add(b)
+    for w in wires:
+        for b in (w["properties"].get("import_bindings") or []):
+            _add(b)
+    for w in wires:
+        if w["label"] != DevNodeKinds.CODE_TEXT:
+            continue
+        t = str(w["properties"].get("text") or "")
+        if "import" not in t:
+            continue
+        try:
+            for descs in parse_module(t).import_bindings.values():
+                for b in descs:
+                    _add(b)
+        except SyntaxError:
+            continue
+    return available

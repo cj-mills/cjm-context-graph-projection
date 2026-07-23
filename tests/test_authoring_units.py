@@ -1,6 +1,9 @@
 """Pure authoring helpers — slot routing + the apply split (no graph needed)."""
 
-from cjm_context_graph_projection.authoring import _apply, _slice_block, _slot_for
+from cjm_python_decompose_core.parse import parse_module
+
+from cjm_context_graph_projection.authoring import (_apply, _available_bindings, _flat_refs,
+                                                    _slice_block, _slot_for)
 
 
 def _node(label, **props):
@@ -62,3 +65,45 @@ def test_slice_block_extracts_nested_defs_verbatim():
         "        return [self.render()]")
     assert _slice_block("async def go():\n    pass\n", "go") == "async def go():\n    pass"
     assert _slice_block(body, "missing") is None
+
+
+def test_flat_refs_reach_class_method_bodies():
+    # 2b6090dc: a name referenced ONLY inside a method body must reach the class
+    # symbol's binding walk (ParsedSymbol.refs alone excludes nested def bodies).
+    src = (
+        "class Panel:\n"
+        "    limit = MAX_ROWS\n"
+        "\n"
+        "    def render(self):\n"
+        "        return shutil.get_terminal_size()\n"
+        "\n"
+        "    def dump(self):\n"
+        "        return json.dumps({})\n"
+    )
+    ps = parse_module(src).symbols[0]
+    flat = _flat_refs(ps)
+    assert "shutil" in flat and "json" in flat      # method-body refs surface
+    assert "MAX_ROWS" in flat                        # class-surface refs kept
+    assert "shutil" not in ps.refs                   # the narrow refs stay narrow
+
+
+def test_available_bindings_parses_code_text_import_lines():
+    # 47b256de/2b6090dc: an import line living only in a CodeText region's verbatim
+    # text (author-edited — no binding table of its own) must still be bindable.
+    module = {"id": "m1", "label": "CodeModule", "properties": {}}
+    wires = [
+        {"id": "t1", "label": "CodeText",
+         "properties": {"text": "import json\nfrom pathlib import Path\n",
+                        "kind": "imports"}},
+        {"id": "s1", "label": "CodeSymbol",
+         "properties": {"import_bindings": [
+             {"name": "os", "kind": "module", "module": "os",
+              "imported": "", "alias": "", "level": 0}]}},
+    ]
+    av = _available_bindings(module, wires)
+    assert "json" in av and "Path" in av    # parsed out of the region text
+    assert "os" in av                        # frozen per-symbol bindings kept
+    # A broken region must not sink the walk (SyntaxError skipped).
+    wires.append({"id": "t2", "label": "CodeText",
+                  "properties": {"text": "import (broken\n", "kind": "imports"}})
+    assert "json" in _available_bindings(module, wires)

@@ -44,6 +44,14 @@ def classify_orphaned_links(
     the current code names (no auto-guess — confirming means re-linking to the
     proposed id and retiring the stale op's edge). Absence of a label downgrades
     to detection-only, never to a guess."""
+    # The HEALED set: triples a later journaled link op re-created with BOTH
+    # endpoints live. An orphan whose proposal is already applied is history, not
+    # noise — without this, the append-only journal resurfaces every healed op in
+    # every future audit (36374422, the current_session re-proposal).
+    live: Set[tuple] = {(op.get("source_id"), op.get("relation"), op.get("target_id"))
+                        for op in link_ops
+                        if op.get("source_id") in resolved_ids
+                        and op.get("target_id") in resolved_ids}
     orphans: List[Dict[str, Any]] = []
     seen: Set[tuple] = set()
     for op in link_ops:
@@ -66,9 +74,18 @@ def classify_orphaned_links(
                         "name": match[0], "id": code_names[match[0]],
                         "score": round(difflib.SequenceMatcher(None, label, match[0]).ratio(), 3)}
             missing.append(entry)
-        if missing:
-            orphans.append({"source_id": op.get("source_id"), "target_id": op.get("target_id"),
-                            "relation": op.get("relation"), "missing": missing})
+        if not missing:
+            continue
+        healed = all(
+            "proposal" in m
+            and ((op.get("source_id"), op.get("relation"), m["proposal"]["id"]) in live
+                 if m["side"] == "target"
+                 else (m["proposal"]["id"], op.get("relation"), op.get("target_id")) in live)
+            for m in missing)
+        if healed:
+            continue  # the proposed remap edge already exists live — suppressed
+        orphans.append({"source_id": op.get("source_id"), "target_id": op.get("target_id"),
+                        "relation": op.get("relation"), "missing": missing})
     return orphans
 
 

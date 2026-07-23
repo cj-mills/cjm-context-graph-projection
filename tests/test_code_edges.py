@@ -64,3 +64,22 @@ def test_render_orphaned_edges_clean():
     out = render("orphaned-edges", {"orphans": [], "counts": {"link_ops": 5, "orphaned": 0,
                                                               "with_proposal": 0}}, "human")
     assert "clean" in out and "nothing will drop on replay" in out
+
+
+def test_classify_suppresses_healed_orphans():
+    # 36374422: a heal (re-link at the proposed target) must retire the orphan —
+    # the append-only journal would otherwise re-propose it in every audit.
+    ops = [
+        {"source_id": "dec", "target_id": "old-id", "relation": "SHAPES",
+         "target_label": "current_session"},
+        # the heal: a later journaled link op, both endpoints live
+        {"source_id": "dec", "target_id": "new-id", "relation": "SHAPES"},
+    ]
+    out = classify_orphaned_links(ops, resolved_ids={"dec", "new-id"},
+                                  code_names={"current_session": "new-id"})
+    assert out == []  # healed: suppressed, not re-proposed
+    # A heal to a DIFFERENT target than the proposal does NOT suppress (the
+    # audit still surfaces the orphan for an explicit unlink/confirm).
+    out = classify_orphaned_links(ops, resolved_ids={"dec", "new-id"},
+                                  code_names={"current_session_v2": "other-id"})
+    assert len(out) == 1

@@ -198,3 +198,40 @@ def test_add_symbol_dry_run_touches_nothing(tmp_path, monkeypatch):
     assert "def g():" in res["emitted_text"]
     assert res["symbol_id"] not in fake.nodes and not fake.edges
     assert not (tmp_path / "cjm_demo/m.py").exists()
+
+
+def test_class_method_refs_survive_add_symbol_emit(tmp_path, monkeypatch):
+    # 2b6090dc regression (3rd bite of the 47b256de class): an import author-added
+    # to a region and referenced ONLY inside class-method bodies must survive the
+    # next add-symbol's canonical emit (which derives the import block from the
+    # graph's binding tables, not the file).
+    mod = _module_node(tmp_path)
+    text = {"id": "txt1", "label": "CodeText",
+            "properties": {"module_id": "mod1", "region_key": "import os",
+                           "text": "import os", "order_index": 0, "kind": "imports"}}
+    cls = {"id": "cls1", "label": "CodeSymbol",
+           "properties": {"module_id": "mod1", "qualname": "Panel", "name": "Panel",
+                          "symbol_kind": "class", "order_index": 1,
+                          "body": ("class Panel:\n"
+                                   "    def dump(self):\n"
+                                   "        return os.getcwd()"),
+                          "import_bindings": [dict(_OS_BINDING)]}}
+    fake = FakeGraph([mod, text, cls])
+    _wire(fake, monkeypatch)
+    # Leg 1: the import line lands in the region's verbatim text — and mints a
+    # module-level binding (the add-text pattern, now on author too).
+    res = asyncio.run(author(GX, "txt1", edit=("import os", "import os\nimport json")))
+    assert not res.get("error") and res.get("new_import_bindings") == 2  # os + json (module node started bare)
+    assert "json" in [b["name"] for b in fake.nodes["mod1"]["properties"]["import_bindings"]]
+    # Leg 2: a METHOD body starts referencing it — the rebind reaches class bodies
+    # (frozen bindings + a narrow _direct_refs walk would both miss it).
+    res = asyncio.run(author(GX, "cls1", edit=("return os.getcwd()",
+                                               "return json.dumps(os.getcwd())")))
+    assert not res.get("error")
+    names = [b["name"] for b in fake.nodes["cls1"]["properties"]["import_bindings"]]
+    assert "json" in names and "os" in names
+    # The bite itself: the NEXT add-symbol triggers a derive-imports canonical emit.
+    res = asyncio.run(add_symbol(GX, "mod1", "def g():\n    return Panel()\n"))
+    assert not res.get("error")
+    emitted = (tmp_path / "cjm_demo/m.py").read_text()
+    assert "import json" in emitted and "import os" in emitted
