@@ -307,7 +307,9 @@ async def _dispatch(args) -> int:
         elif args.command == "contradictions":
             print(render("contradictions", await contradictions(gx, args.scope), args.format))
         elif args.command == "readiness":
-            print(render("readiness", await readiness(gx, args.scope), args.format))
+            res = await readiness(gx, args.scope or args.contains, state=args.state,
+                                  limit=args.limit, offset=args.offset)
+            print(render("readiness", res, args.format))
         elif args.command == "register-drift":
             print(render("register-drift", await register_drift(gx), args.format))
         elif args.command == "orphaned-edges":
@@ -866,6 +868,13 @@ def main() -> int:
     p_rd = sub.add_parser("readiness",
                           help="Derived ready/blocked/done work-item frontier (task_state + GATED_BY)")
     p_rd.add_argument("scope", nargs="?", default=None, help="Restrict to work-items whose label matches")
+    p_rd.add_argument("--state", choices=("ready", "blocked", "done", "all"), default=None,
+                      help="One bucket, paged (`all` = the full legacy dump); default = bounded "
+                           "summary (blocked + ready top-K by last touch, Done as a count)")
+    p_rd.add_argument("--contains", default=None,
+                      help="Substring filter on item labels (alias of the scope positional)")
+    p_rd.add_argument("--limit", type=int, default=15, help="Page size (default 15)")
+    p_rd.add_argument("--offset", type=int, default=0, help="Page start within the selected bucket")
 
     p_rg = sub.add_parser("register-drift",
                           help="Reconcile each <value>-register hub's REFERENCES cache against "

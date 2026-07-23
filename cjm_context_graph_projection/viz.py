@@ -150,7 +150,7 @@ async def project_viz(
 
     Read-only and derived: calls `readiness`, converts to Cytoscape elements, renders the page.
     The same {ready, blocked, done} truth `cg-read readiness` prints, drawn as a dependency DAG."""
-    frontier = await readiness(gx, scope)
+    frontier = await readiness(gx, scope, state="all")  # the DAG needs every bucket
     elements = viz_elements(frontier)
     node_count = sum(1 for e in elements if "source" not in e["data"])
     edge_count = len(elements) - node_count

@@ -152,3 +152,28 @@ def test_render_readiness_without_checks_is_unchanged_shape():
            "counts": {"ready": 1, "blocked": 0, "done": 0, "closable": 0, "drift": 0}}
     out = render("readiness", obj, "human")
     assert "DoD" not in out and "closable" not in out
+
+
+def test_render_readiness_bounded_default_view():
+    # 707327ea: the default view caps ready to a top-K, never enumerates Done
+    # (counts stay TRUE totals), and points at the descend facets.
+    obj = {
+        "ready": [{"id": "r1", "label": "Item one", "gates": []},
+                  {"id": "r2", "label": "Item two", "gates": []}],
+        "blocked": [], "done": [], "closable": [], "drift": [],
+        "counts": {"ready": 30, "blocked": 0, "done": 110, "closable": 0, "drift": 0},
+        "view": {"state": "default", "limit": 2, "offset": 0, "shown_ready": 2},
+    }
+    out = render("readiness", obj, "human")
+    assert "top 2 of 30 by last touch" in out
+    assert "Done (110) not enumerated" in out and "--state" in out
+    assert "Item one" in out and "Item two" in out
+    # A paged --state done view labels the window against the true total.
+    obj_done = {
+        "ready": [], "blocked": [], "closable": [], "drift": [],
+        "done": [{"id": "d1", "label": "Closed thing"}],
+        "counts": {"ready": 30, "blocked": 0, "done": 110, "closable": 0, "drift": 0},
+        "view": {"state": "done", "limit": 1, "offset": 5},
+    }
+    out = render("readiness", obj_done, "human")
+    assert "Done (6–6 of 110" in out and "Closed thing" in out

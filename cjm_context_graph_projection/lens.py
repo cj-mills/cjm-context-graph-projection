@@ -279,7 +279,7 @@ async def _clause_refs(
         res = await grep(gx, args.get("term", ""), limit=args.get("limit", 25))
         return [m["id"] for m in res.get("matches", []) if m.get("id")], None
     if verb == "readiness":
-        res = await readiness(gx, scope=args.get("scope"))
+        res = await readiness(gx, scope=args.get("scope"), state="all")  # selections need every bucket
         states = args.get("states", ["ready", "blocked"])
         if not (isinstance(states, list) and set(states) <= {"ready", "blocked", "done"}):
             return [], "readiness clause: states must be a subset of ready/blocked/done"

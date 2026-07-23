@@ -384,9 +384,18 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                 return f"  🏁 _DoD {ck['done']}/{ck['total']} met — closable_"
             return f"  _[DoD {ck['done']}/{ck['total']}]_"
 
+        view = obj.get("view") or {}
         ready = obj.get("ready", [])
         if ready:
-            lines.append("**Ready (all prerequisites done):**")
+            total_ready = c.get("ready", len(ready))
+            if view.get("state") == "default" and total_ready > len(ready):
+                lines.append(f"**Ready (top {len(ready)} of {total_ready} by last touch — "
+                             "`--state ready` pages all):**")
+            elif view.get("state") == "ready" and total_ready > len(ready):
+                start = view.get("offset", 0)
+                lines.append(f"**Ready ({start + 1}–{start + len(ready)} of {total_ready}):**")
+            else:
+                lines.append("**Ready (all prerequisites done):**")
             for r in ready:
                 gates = r.get("gates", [])
                 suffix = f"  _(gated by {len(gates)}, all done)_" if gates else ""
@@ -407,11 +416,22 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                     lines.append(f"      ↳ open check _{_short(ck.get('label', ''), 80)}_ `{ck.get('id')}`")
         done = obj.get("done", [])
         if done:
-            lines.append("**Done:**")
+            total_done = c.get("done", len(done))
+            if view.get("state") == "done" and total_done > len(done):
+                start = view.get("offset", 0)
+                lines.append(f"**Done ({start + 1}–{start + len(done)} of {total_done}, "
+                             "newest touch first):**")
+            else:
+                lines.append("**Done:**")
             for d in done:
                 lines.append(f"  - ◾ {_short(d.get('label', ''), 100)} `{d.get('id')}`{_dod(d)}")
         if not (ready or blocked or done):
             lines.append("_(no work-items — author `task_state` to populate)_")
+        if view.get("state") == "default" and c.get("done", 0):
+            lines.append("")
+            lines.append(f"_Done ({c['done']}) not enumerated — descend: "
+                         "`--state ready|blocked|done [--limit N --offset N]`; "
+                         "a positional term still scope-filters_")
         return "\n".join(lines)
     if kind == "register-drift":
         c = obj.get("counts", {})

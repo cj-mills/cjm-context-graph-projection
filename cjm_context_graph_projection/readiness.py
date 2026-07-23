@@ -115,7 +115,10 @@ async def _resolve_labels(
 async def readiness(
     gx: GraphHandle,
     scope: Optional[str] = None,  # Restrict to work-items whose label matches this term (substring)
-) -> Dict[str, Any]:  # {ready, blocked, done, counts}
+    state: Optional[str] = None,  # None = bounded default · ready|blocked|done = one bucket, paged · all = the full dump (viz/lens feed)
+    limit: int = 15,              # Page size (and the bounded default's ready top-K)
+    offset: int = 0,              # Page start within the selected bucket (paged states only)
+) -> Dict[str, Any]:  # {ready, blocked, done, closable, drift, counts, view}
     """The derived ready/blocked/done frontier over authored `task_state` + `GATED_BY` edges.
 
     Pure read: loads the active task states and the gate edges (`GATED_BY` plus its
@@ -183,7 +186,45 @@ async def readiness(
               "open_checks": [{"id": c, "label": _label(c)} for c in open_checks]}
              for i, open_checks in drift_pairs if _keep(i)]
 
+    # Bounded view (707327ea, fixes 4258da35): counts stay TRUE totals; the default
+    # never enumerates Done and caps ready to a recency top-K; a --state pick pages
+    # one bucket; "all" is the legacy full dump (the viz/lens machine feed).
+    counts = {"ready": len(ready), "blocked": len(blocked), "done": len(done),
+              "closable": len(closable), "drift": len(drift)}
+    touch = _last_touch(assertions)
+    ready = sorted(ready, key=lambda e: touch.get(e["id"], 0.0), reverse=True)
+    done = sorted(done, key=lambda e: touch.get(e["id"], 0.0), reverse=True)
+    view: Dict[str, Any] = {"state": state or "default", "limit": limit, "offset": offset}
+    if state is None:
+        ready = ready[:limit]
+        done = []
+        view["shown_ready"] = len(ready)
+    elif state == "ready":
+        ready, blocked, done, closable, drift = ready[offset:offset + limit], [], [], [], []
+    elif state == "blocked":
+        ready, blocked, done, closable, drift = [], blocked[offset:offset + limit], [], [], []
+    elif state == "done":
+        ready, blocked, done, closable, drift = [], [], done[offset:offset + limit], [], []
     return {"ready": ready, "blocked": blocked, "done": done,
-            "closable": closable, "drift": drift,
-            "counts": {"ready": len(ready), "blocked": len(blocked), "done": len(done),
-                       "closable": len(closable), "drift": len(drift)}}
+            "closable": closable, "drift": drift, "counts": counts, "view": view}
+
+
+def _last_touch(
+    assertions: List[Any],  # All Assertion nodes
+) -> Dict[str, float]:  # subject_id -> newest task_state asserted_at (0.0 when unstamped)
+    """Each subject's LAST-TOUCH time: the newest `task_state` assertion on it,
+    supersession history included (even a superseded re-assert is a touch).
+
+    The bounded frontier's recency key (707327ea): the ready top-K and the done
+    page both sort newest-touch first."""
+    out: Dict[str, float] = {}
+    for a in assertions:
+        if F.prop(a, "predicate") != P.TASK_STATE:
+            continue
+        subject = F.prop(a, "subject_id")
+        if not subject:
+            continue
+        ts = float(F.prop(a, "asserted_at") or 0.0)
+        if ts >= out.get(subject, -1.0):
+            out[subject] = ts
+    return out
