@@ -177,3 +177,32 @@ def test_render_readiness_bounded_default_view():
     }
     out = render("readiness", obj_done, "human")
     assert "Done (6–6 of 110" in out and "Closed thing" in out
+
+
+def test_render_readiness_groups_by_program_and_counts_unfiled():
+    # f9ce3f22 mechanism 1: the shown ready page groups by PART_OF anchor with
+    # an explicit unfiled group; counts carry a true `unfiled` when anchors exist.
+    obj = {
+        "ready": [
+            {"id": "r1", "label": "filed item", "gates": [],
+             "program": {"id": "prog-1", "label": "Transcript Vertical"}},
+            {"id": "r2", "label": "loose item", "gates": []},
+            {"id": "r3", "label": "second loose", "gates": []}],
+        "blocked": [{"id": "b1", "label": "blocked item", "blocked_by": [],
+                     "program": {"id": "prog-1", "label": "Transcript Vertical"}}],
+        "done": [], "closable": [], "drift": [],
+        "counts": {"ready": 3, "blocked": 1, "done": 0, "closable": 0,
+                   "drift": 0, "unfiled": 2},
+        "view": {"state": "default", "limit": 15, "offset": 0, "shown_ready": 3},
+    }
+    out = render("readiness", obj, "human")
+    assert "unfiled 2" in out
+    assert "▸ _Transcript Vertical_" in out
+    assert "unfiled (2 shown" in out
+    # No program annotations -> the flat legacy view, no group headers.
+    for r in obj["ready"]:
+        r.pop("program", None)
+    obj["blocked"][0].pop("program")
+    obj["counts"].pop("unfiled")
+    out2 = render("readiness", obj, "human")
+    assert "▸" not in out2 and "unfiled" not in out2

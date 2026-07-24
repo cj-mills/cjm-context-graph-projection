@@ -145,6 +145,17 @@ async def readiness(
     parts = classify_readiness(task_state, gates, hidden=check_ids)
     dod = summarize_checks(task_state, checks_of)
 
+    # PART_OF program grouping (f9ce3f22): the nudge lives in the VIEW — open
+    # items carry their anchor when filed, counts show a true `unfiled`. Lazy
+    # import: filing.py imports this module's helpers at module level.
+    from .filing import PART_OF, derive_anchors
+    anchors, _roles = derive_anchors(assertions, supers)
+    filed: Dict[str, str] = {}
+    if anchors:
+        for p_src, p_tgt in await F.load_edge_pairs(gx, PART_OF):
+            if p_tgt in anchors and p_src not in filed:
+                filed[p_src] = p_tgt
+
     closable_ids = sorted(
         e["id"] for bucket in (parts["ready"], parts["blocked"]) for e in bucket
         if e["id"] in dod and dod[e["id"]]["open"] == [] )
@@ -152,6 +163,8 @@ async def readiness(
                    if e["id"] in dod and dod[e["id"]]["open"]]
 
     ids: Set[str] = {e["id"] for bucket in parts.values() for e in bucket}
+    ids.update(filed[e["id"]] for bucket in parts.values() for e in bucket
+               if e["id"] in filed)
     for b in parts["blocked"]:
         ids.update(b["blocked_by"])
     for _, open_checks in drift_pairs:
@@ -170,13 +183,17 @@ async def readiness(
         d = dod.get(nid)
         return {"checks": {"done": d["done"], "total": d["total"]}} if d else {}
 
+    def _program(nid: str) -> Dict[str, Any]:
+        a = filed.get(nid)
+        return {"program": {"id": a, "label": _label(a)}} if a else {}
+
     ready = [{"id": e["id"], "label": _label(e["id"]),
               "gates": [{"id": g, "label": _label(g)} for g in e["gates"]],
-              **_checks(e["id"])}
+              **_checks(e["id"]), **_program(e["id"])}
              for e in parts["ready"] if _keep(e["id"])]
     blocked = [{"id": e["id"], "label": _label(e["id"]),
                 "blocked_by": [{"id": g, "label": _label(g)} for g in e["blocked_by"]],
-                **_checks(e["id"])}
+                **_checks(e["id"]), **_program(e["id"])}
                for e in parts["blocked"] if _keep(e["id"])]
     done = [{"id": e["id"], "label": _label(e["id"]), **_checks(e["id"])}
             for e in parts["done"] if _keep(e["id"])]
@@ -191,6 +208,8 @@ async def readiness(
     # one bucket; "all" is the legacy full dump (the viz/lens machine feed).
     counts = {"ready": len(ready), "blocked": len(blocked), "done": len(done),
               "closable": len(closable), "drift": len(drift)}
+    if anchors:
+        counts["unfiled"] = sum(1 for e in ready + blocked if "program" not in e)
     touch = _last_touch(assertions)
     ready = sorted(ready, key=lambda e: touch.get(e["id"], 0.0), reverse=True)
     done = sorted(done, key=lambda e: touch.get(e["id"], 0.0), reverse=True)

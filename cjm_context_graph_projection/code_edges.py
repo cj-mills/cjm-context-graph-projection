@@ -37,6 +37,7 @@ def classify_orphaned_links(
     resolved_ids: Set[str],               # ids that exist in the CURRENT graph
     code_names: Optional[Dict[str, str]] = None,  # current code name -> node id (the proposal universe)
     cutoff: float = 0.6,                  # difflib similarity cutoff for a proposal
+    code_bodies: Optional[Dict[str, str]] = None,  # current code name -> body text (content evidence)
 ) -> List[Dict[str, Any]]:  # one entry per orphaned edge (deduped)
     """Pure: the journaled links the next replay will silently drop.
 
@@ -67,12 +68,29 @@ def classify_orphaned_links(
             entry: Dict[str, Any] = {"side": side, "id": oid,
                                      "label": op.get(f"{side}_label")}
             label = entry["label"]
-            if label and code_names:
+            if label and code_names and code_bodies:
+                # Content beats name-shape (f2a04bc5): a symbol whose BODY
+                # mentions the retired name (docstring lineage, a rewrite's
+                # successor) is stronger evidence than any fuzzy name match —
+                # the name-only scorer once proposed an unrelated near-name
+                # over the true successor whose docstring names its
+                # predecessor. Ties among mentioners break by name shape.
+                mentions = [n for n, body in code_bodies.items()
+                            if n != label and n in code_names and label in body]
+                if mentions:
+                    best = max(mentions, key=lambda n: (
+                        difflib.SequenceMatcher(None, label, n).ratio(), n))
+                    entry["proposal"] = {
+                        "name": best, "id": code_names[best],
+                        "score": round(difflib.SequenceMatcher(None, label, best).ratio(), 3),
+                        "evidence": "body-mention"}
+            if label and code_names and "proposal" not in entry:
                 match = difflib.get_close_matches(label, list(code_names), n=1, cutoff=cutoff)
                 if match:
                     entry["proposal"] = {
                         "name": match[0], "id": code_names[match[0]],
-                        "score": round(difflib.SequenceMatcher(None, label, match[0]).ratio(), 3)}
+                        "score": round(difflib.SequenceMatcher(None, label, match[0]).ratio(), 3),
+                        "evidence": "name-similarity"}
             missing.append(entry)
         if not missing:
             continue
@@ -117,13 +135,18 @@ async def orphaned_edges(
     resolved = set(nodes)
 
     code_names: Dict[str, str] = {}
+    code_bodies: Dict[str, str] = {}
     for label in (DevNodeKinds.CODE_SYMBOL, DevNodeKinds.CODE_MODULE):
         for n in await F.load_label(gx, label):
             name = F.prop(n, "name") or F.prop(n, "title")
-            if name:
-                code_names.setdefault(str(name), F.nid(n))
+            if name and str(name) not in code_names:
+                code_names[str(name)] = F.nid(n)
+                body = F.prop(n, "body")
+                if body:
+                    code_bodies[str(name)] = str(body)
 
-    orphans = classify_orphaned_links(ops, resolved, code_names)
+    orphans = classify_orphaned_links(ops, resolved, code_names,
+                                      code_bodies=code_bodies)
 
     context_ids = {op_id for o in orphans
                    for op_id in (o["source_id"], o["target_id"])

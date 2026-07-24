@@ -30,6 +30,7 @@ from .devgraph import build_dev_graph_elements, notes_corpus_elements
 from .display import set_display_rule
 from .explorer_page import EXPLORER_HTML
 from .factlayer import note_alias_map
+from .filing import filing
 from .hybrid_page import HYBRID_HTML
 from .journal import (journal_sourced_note_paths, journal_window_view, M3_BASELINE_ACTOR,
                       m3_baseline_import, replay_journal)
@@ -312,6 +313,8 @@ async def _dispatch(args) -> int:
             print(render("readiness", res, args.format))
         elif args.command == "register-drift":
             print(render("register-drift", await register_drift(gx), args.format))
+        elif args.command == "filing":
+            print(render("filing", await filing(gx, top_k=args.top_k), args.format))
         elif args.command == "orphaned-edges":
             if not args.journal_path:
                 print("⚠ orphaned-edges needs --journal-path (the link ops to audit)")
@@ -884,6 +887,13 @@ def main() -> int:
                           help="Journaled link ops whose endpoint no longer resolves (the set "
                                "replay silently drops after a code rename) + fuzzy remap "
                                "proposals where a label was journaled")
+
+    p_fi = sub.add_parser("filing",
+                          help="Unfiled work items + PART_OF program-anchor proposals scored "
+                               "from each item's REFERENCES/SHAPES neighborhood (propose/"
+                               "confirm, never auto-fix; confirm = link <item> PART_OF <anchor>)")
+    p_fi.add_argument("--top-k", type=int, default=3,
+                      help="Proposals kept per unfiled item (default 3)")
 
     p_jw = sub.add_parser("journal-window",
                           help="The session lens: touched-node set for a time window or session "

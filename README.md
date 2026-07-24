@@ -17,6 +17,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - **`cjm_context_graph_projection.display`** — Graph-carried display rules: the presentation vocabulary (DEC `16bcd96e`).
 - **`cjm_context_graph_projection.explorer_page`** — The graph EXPLORER client page — the first client of the `serve` data API.
 - **`cjm_context_graph_projection.factlayer`** — Shared fine-tier reads over the fact-layering schema (slots + assertions).
+- **`cjm_context_graph_projection.filing`** — Filing reconciler: propose PART_OF program anchors for unfiled work items.
 - **`cjm_context_graph_projection.hybrid_page`** — The HYBRID graph explorer client — GPU physics canvas + DOM overlay (check-in 1233ab46).
 - **`cjm_context_graph_projection.journal`** — The write journal: the durable, replayable source of truth for born-on-graph writes.
 - **`cjm_context_graph_projection.lens`** — Lenses: graph-carried, parameterized views (DEC `f1b02b95` — tier 2 of the
@@ -119,6 +120,12 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `note_alias_map` _function_ — Confirmed note aliases as a {drifted-slug: canonical-slug} map.
 - `prop` _function_ — One property value off a node.
 - `props` _function_ — A node's properties dict (typed GraphNode or wire dict).
+
+### `cjm_context_graph_projection.filing`
+
+- `classify_filing` _function_ — Pure: partition open items into filed/unfiled and score anchor proposals.
+- `derive_anchors` _function_ — The program-anchor set: subjects whose ACTIVE `role` is one of ANCHOR_ROLES.
+- `filing` _function_ — The derived filing report over task_state subjects + PART_OF/REFERENCES/SHAPES edges.
 
 ### `cjm_context_graph_projection.journal`
 

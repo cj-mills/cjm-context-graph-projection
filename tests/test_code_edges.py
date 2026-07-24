@@ -83,3 +83,26 @@ def test_classify_suppresses_healed_orphans():
     out = classify_orphaned_links(ops, resolved_ids={"dec", "new-id"},
                                   code_names={"current_session_v2": "other-id"})
     assert len(out) == 1
+
+
+def test_classify_body_mention_outranks_fuzzy_name_and_heals():
+    # f2a04bc5: the retired `_old_helper` fuzzy-matches an unrelated near-name,
+    # but the true successor's docstring MENTIONS it — content wins.
+    ops = [{"source_id": "dec-1", "relation": "SHAPES", "target_id": "gone-id",
+            "target_label": "_old_helper"}]
+    code_names = {"_old_helper_x": "near-id", "renamed_walk": "succ-id"}
+    code_bodies = {"renamed_walk": "def renamed_walk():\n    'successor of _old_helper'"}
+    out = classify_orphaned_links(ops, {"dec-1"}, code_names,
+                                  code_bodies=code_bodies)
+    pr = out[0]["missing"][0]["proposal"]
+    assert pr["name"] == "renamed_walk" and pr["evidence"] == "body-mention"
+    # With the RIGHT proposal, a manual heal (re-link to the successor) is
+    # recognized and the orphan suppressed.
+    healed_ops = ops + [{"source_id": "dec-1", "relation": "SHAPES",
+                         "target_id": "succ-id"}]
+    out2 = classify_orphaned_links(healed_ops, {"dec-1", "succ-id"}, code_names,
+                                   code_bodies=code_bodies)
+    assert out2 == []
+    # Without bodies the fuzzy tier still proposes, tagged as name evidence.
+    out3 = classify_orphaned_links(ops, {"dec-1"}, code_names)
+    assert out3[0]["missing"][0]["proposal"]["evidence"] == "name-similarity"

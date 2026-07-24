@@ -371,6 +371,8 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             extra += f" · closable {c['closable']}"
         if c.get("drift"):
             extra += f" · DoD-drift {c['drift']}"
+        if c.get("unfiled") is not None:
+            extra += f" · unfiled {c['unfiled']}"
         lines = ["## Readiness frontier",
                  f"_ready {c.get('ready', 0)} · blocked {c.get('blocked', 0)} · "
                  f"done {c.get('done', 0)}{extra}_  (ready/blocked are DERIVED, never stored)", ""]
@@ -396,15 +398,35 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                 lines.append(f"**Ready ({start + 1}–{start + len(ready)} of {total_ready}):**")
             else:
                 lines.append("**Ready (all prerequisites done):**")
+            # Program grouping (f9ce3f22): group the shown page by PART_OF anchor
+            # (first-appearance order preserves the recency sort), unfiled last-ish
+            # and explicitly labeled. No anchors annotated -> the flat legacy view.
+            groups: List[Any] = []
+            by_anchor: Dict[Any, List[Dict[str, Any]]] = {}
             for r in ready:
-                gates = r.get("gates", [])
-                suffix = f"  _(gated by {len(gates)}, all done)_" if gates else ""
-                lines.append(f"  - ✅ **{_short(r.get('label', ''), 100)}** `{r.get('id')}`{suffix}{_dod(r)}")
+                key = (r.get("program") or {}).get("id")
+                if key not in by_anchor:
+                    by_anchor[key] = []
+                    groups.append((key, by_anchor[key]))
+                by_anchor[key].append(r)
+            grouped = any(k is not None for k, _ in groups)
+            for key, members in groups:
+                if grouped and key is None:
+                    lines.append(f"  ▸ _unfiled ({len(members)} shown — `filing` proposes anchors)_")
+                elif grouped:
+                    glabel = (members[0].get("program") or {}).get("label", "")
+                    lines.append(f"  ▸ _{_short(glabel, 70)}_")
+                for r in members:
+                    gates = r.get("gates", [])
+                    suffix = f"  _(gated by {len(gates)}, all done)_" if gates else ""
+                    lines.append(f"  - ✅ **{_short(r.get('label', ''), 100)}** `{r.get('id')}`{suffix}{_dod(r)}")
         blocked = obj.get("blocked", [])
         if blocked:
             lines.append("**Blocked (waiting on prerequisites):**")
             for b in blocked:
-                lines.append(f"  - ⛔ **{_short(b.get('label', ''), 100)}** `{b.get('id')}`{_dod(b)}")
+                ptag = (b.get("program") or {}).get("label")
+                ptag = f"  ▸ _{_short(ptag, 40)}_" if ptag else ""
+                lines.append(f"  - ⛔ **{_short(b.get('label', ''), 100)}** `{b.get('id')}`{_dod(b)}{ptag}")
                 for g in b.get("blocked_by", []):
                     lines.append(f"      ↳ needs _{_short(g.get('label', ''), 80)}_ `{g.get('id')}`")
         drift = obj.get("drift", [])
@@ -471,10 +493,55 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                 lines.append(f"    ↳ {m.get('side')} `{m.get('id')}` no longer resolves{label}")
                 if m.get("proposal"):
                     pr = m["proposal"]
+                    ev = f", {pr['evidence']}" if pr.get("evidence") else ""
                     lines.append(f"        → propose remap to **{pr.get('name')}** "
-                                 f"`{pr.get('id')}` (score {pr.get('score')})")
+                                 f"`{pr.get('id')}` (score {pr.get('score')}{ev})")
         if not orphans:
             lines.append("_(clean — every journaled link endpoint resolves; nothing will drop on replay)_")
+        return "\n".join(lines)
+    if kind == "filing":
+        c = obj.get("counts", {})
+        lines = ["## Filing (PART_OF program anchors)",
+                 f"_open items {c.get('open_items', 0)} · filed {c.get('filed', 0)} · "
+                 f"unfiled {c.get('unfiled', 0)} · with proposal {c.get('with_proposal', 0)} · "
+                 f"refile {c.get('refile', 0)}_  (propose only — confirm: "
+                 "`link <item> PART_OF <anchor>`)", ""]
+        anchors = obj.get("anchors", [])
+        if anchors:
+            lines.append("**Anchors (role-asserted):**")
+            for a in anchors:
+                lines.append(f"  - ◈ **{_short(a.get('label', ''), 70)}** "
+                             f"(`role={a.get('role')}`) `{a.get('id')}`")
+        else:
+            lines.append("_(no program anchors yet — assert `role=program` on a handful "
+                         "of portfolio nodes to activate proposals)_")
+
+        def _evidence(p: Dict[str, Any]) -> str:
+            kinds = [e.get("kind", "") for e in p.get("evidence", [])]
+            return ", ".join(f"{kinds.count(k)}×{k}" for k in dict.fromkeys(kinds))
+
+        unfiled = obj.get("unfiled", [])
+        shown = unfiled[:20]
+        if shown:
+            cap = (f" (top {len(shown)} of {len(unfiled)} by last touch)"
+                   if len(unfiled) > len(shown) else "")
+            lines.append(f"**Unfiled{cap}:**")
+            for u in shown:
+                lines.append(f"  - ⟂ **{_short(u.get('label', ''), 90)}** `{u.get('id')}`")
+                for p in u.get("proposals", []):
+                    lines.append(f"      → propose **{_short(p.get('label', ''), 60)}** "
+                                 f"`{p.get('anchor_id')}` (score {p.get('score')}: {_evidence(p)})")
+        refile = obj.get("refile", [])
+        if refile:
+            lines.append("**Refile (a stronger anchor emerged):**")
+            for r in refile:
+                cur = ", ".join(f"_{_short(x.get('label', ''), 40)}_" for x in r.get("current", []))
+                p = r.get("proposal", {})
+                lines.append(f"  - ↻ **{_short(r.get('label', ''), 90)}** `{r.get('id')}` (now {cur})")
+                lines.append(f"      → propose **{_short(p.get('label', ''), 60)}** "
+                             f"`{p.get('anchor_id')}` (score {p.get('score')}: {_evidence(p)})")
+        if anchors and not (unfiled or refile):
+            lines.append("_(every open item filed — nothing to reconcile)_")
         return "\n".join(lines)
     if kind == "oracle":
         c = obj.get("counts", {})
