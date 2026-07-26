@@ -74,7 +74,12 @@ DEFAULT_CODE_LIBS = ("cjm-dev-graph-schema", "cjm-markdown-decompose-core",
                      # are born-on-graph; off-graph interface libs are a legacy
                      # unlikely-to-edit exception, not a pattern).
                      "cjm-sentence-segmentation-adapter-interface",
-                     "cjm-capability-pysbd")
+                     "cjm-capability-pysbd",
+                     # Session D born-on-graph additions (the diarization pair,
+                     # DEC 18d7de80): interface + capability, both editable
+                     # until their publish slots in the window after 07-28.
+                     "cjm-speaker-diarization-adapter-interface",
+                     "cjm-capability-pyannote")
 # The substrate core is nbdev — ingest its NOTEBOOKS (the source), with cross-cell
 # @patch/incremental methods re-attributed to their true classes by the compositor.
 DEFAULT_NOTEBOOK_LIBS = ("cjm-substrate", "cjm-transcription-core",
