@@ -146,9 +146,14 @@ async def _apply_op(gx: GraphHandle, op: Dict[str, Any]) -> str:
         await alias(gx, a["drifted"], a["canonical"], actor=a.get("actor", "agent:session"),
                     evidence=a.get("evidence"))
     elif verb == "assert":
+        # asserted_at rides the op's journaled ts (0d50b921 companion): the one
+        # property-level verb-time stamp in the schema — without the override a
+        # rebuild re-stamps every assertion to rebuild time. Pre-ts records fall
+        # back to the verb's now() default. Oracle refreshes keep last_verified.
         await assert_value(gx, a["subject"], a["predicate"], a["value"],
                            actor=a.get("actor", "agent:session"),
-                           evidence=a.get("evidence"), supersede=a.get("supersede"))
+                           evidence=a.get("evidence"), supersede=a.get("supersede"),
+                           asserted_at=op.get("ts"))
     elif verb == "link":
         await link(gx, a["source_id"], a["target_id"], a["relation"],
                    actor=a.get("actor", "agent:session"))
