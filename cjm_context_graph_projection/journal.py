@@ -20,6 +20,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from cjm_context_graph_layer.ops import PROVENANCE_TS
 from cjm_context_graph_primitives.journal import append_write, read_journal
 from cjm_dev_graph_schema.identity import (code_module_node_id, note_node_id, section_node_id,
                                            session_node_id)
@@ -229,7 +230,15 @@ async def replay_journal(
     genesis = [op for op in ops if op.get("verb") == "new-note"]
     rest = [op for op in ops if op.get("verb") != "new-note"]
     for op in genesis + rest:
-        verb = await _apply_op(gx, op)
+        # Replay provenance window (0d50b921): every node/edge this op mints is
+        # stamped with the op's JOURNALED ts, so a rebuild restores true creation
+        # times instead of clamping the whole graph to rebuild time. Ops without
+        # a ts (pre-ts journal era) fall back to capability now()-stamping.
+        token = PROVENANCE_TS.set(op.get("ts"))
+        try:
+            verb = await _apply_op(gx, op)
+        finally:
+            PROVENANCE_TS.reset(token)
         if verb:
             counts[verb] += 1
         else:
