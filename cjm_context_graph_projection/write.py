@@ -18,7 +18,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from cjm_context_graph_layer.grammar import make_edge
-from cjm_context_graph_layer.ops import extend_graph, graph_task
+from cjm_context_graph_layer.ops import extend_graph, graph_task, PROVENANCE_TS
 from cjm_context_graph_primitives.provenance import SourceRef
 from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.aliases import resolve_subject_id
@@ -122,6 +122,12 @@ async def assert_value(
     Auto-supersedes older values on ordered predicates; records CONTRADICTS +
     returns the conflict on unordered disagreement; reports a soft signal on
     untyped disagreement. Idempotent on re-assertion of the same value+actor."""
+    # Replay window fallback (0d50b921 residual): assertions minted INSIDE a
+    # replayed verb (alias's aka, check's born-open task_state) carry no explicit
+    # asserted_at — date them to the op's journaled ts, not rebuild time. Live
+    # writes (window unset) keep the verb-time now() default.
+    if asserted_at is None:
+        asserted_at = PROVENANCE_TS.get()
     r = await resolve_subject(gx, subject)
     if r.get("error"):
         return {"error": r["error"], "subject": subject, "predicate": predicate,

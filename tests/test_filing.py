@@ -106,3 +106,39 @@ def test_render_filing_without_anchors_says_how_to_activate():
            "anchors": [], "unfiled": [], "refile": []}
     out = render("filing", obj, "human")
     assert "role=program" in out
+
+
+def test_near_duplicate_scores_catch_the_ba810a2a_paraphrase():
+    # ff4e275e regression, the exact historical miss: 3a0e392b was filed while
+    # canonical ba810a2a sat open — literal greps (add-symbol/__main__/appends)
+    # missed because the older statement says 'trailing region'; the shared rare
+    # vocabulary must still dominate the IDF cosine and surface it at rank 1.
+    from cjm_context_graph_projection.filing import near_duplicate_scores
+
+    canonical = ("SOAK CLI-GAP: add-symbol ALWAYS appends the new symbol as the "
+                 "highest-order region, so a module that keeps a must-stay-last "
+                 "trailing region — a __main__ dispatch that names every driver "
+                 "above it — gets the new symbol placed AFTER it, which breaks "
+                 "at runtime. There is NO in-module reorder verb, so the "
+                 "workaround is a strip-and-re-append dance. WANT: an "
+                 "ordered-insert (add-symbol --before/--after) or a reorder verb.")
+    corpus = {
+        "ba810a2a": canonical,
+        "open-1": "posts-membrane arc: public notes corpus deployment north star",
+        "open-2": ("weekly pairing: structure-from-relations composed modules "
+                   "tests pilot package endpoint"),
+        "open-3": ("prompt-tune residuals: uh recall and per-aseg bimodal "
+                   "compliance, demand-gated"),
+    }
+    new_statement = ("add-symbol emit placement — a minted symbol APPENDS at "
+                     "module tail, so on a module with an if __name__ == "
+                     "'__main__' block the new def lands AFTER the executable "
+                     "code: pytest stays green while python -m execution dies "
+                     "NameError. FIX: emit should place new symbols BEFORE "
+                     "trailing executable regions, or add-symbol takes an "
+                     "--after anchor.")
+    hits = near_duplicate_scores(new_statement, corpus)
+    assert hits and hits[0][0] == "ba810a2a" and hits[0][1] >= 0.1
+    # An unrelated statement stays quiet (no proposals above the floor).
+    assert near_duplicate_scores("speaker assignment lane placement registry",
+                                 corpus) == []

@@ -235,3 +235,56 @@ def test_class_method_refs_survive_add_symbol_emit(tmp_path, monkeypatch):
     assert not res.get("error")
     emitted = (tmp_path / "cjm_demo/m.py").read_text()
     assert "import json" in emitted and "import os" in emitted
+
+
+def test_add_symbol_lands_before_trailing_main_region(tmp_path, monkeypatch):
+    # ba810a2a / 3a0e392b regression (4 bites): a module with an executable tail — an
+    # `if __name__ == "__main__":` dispatch — must keep it LAST: the minted def lands
+    # BEFORE it (tail-appending kept pytest green while python -m died NameError).
+    mod = _module_node(tmp_path)
+    text = {"id": "txt1", "label": "CodeText",
+            "properties": {"module_id": "mod1", "region_key": "import os",
+                           "text": "import os", "order_index": 0}}
+    sym = {"id": "sym1", "label": "CodeSymbol",
+           "properties": {"module_id": "mod1", "qualname": "f", "name": "f",
+                          "symbol_kind": "function", "order_index": 1,
+                          "body": "def f():\n    return os.getcwd()",
+                          "import_bindings": [dict(_OS_BINDING)]}}
+    main = {"id": "txt2", "label": "CodeText",
+            "properties": {"module_id": "mod1",
+                           "region_key": 'if __name__ == "__main__":',
+                           "text": 'if __name__ == "__main__":\n    g()',
+                           "order_index": 2}}
+    fake = FakeGraph([mod, text, sym, main])
+    _wire(fake, monkeypatch)
+    res = asyncio.run(add_symbol(GX, "mod1", "def g():\n    return f()\n"))
+    assert not res.get("error") and res["written"]
+    assert 1 < res["order_index"] < 2  # midpoint slot — the dispatch keeps the tail
+    emitted = (tmp_path / "cjm_demo/m.py").read_text()
+    assert emitted.index("def g():") < emitted.index('if __name__ == "__main__":')
+    assert emitted.rstrip().endswith("g()")
+
+
+def test_add_symbol_after_anchor_places_midway(tmp_path, monkeypatch):
+    # DEC 0e590ca7: an explicit `after` anchor (top-level qualname or region node id)
+    # overrides the default placement — the minted def lands immediately after it;
+    # a bogus anchor refuses loudly instead of silently appending.
+    mod = _module_node(tmp_path)
+    f = {"id": "sym1", "label": "CodeSymbol",
+         "properties": {"module_id": "mod1", "qualname": "f", "name": "f",
+                        "symbol_kind": "function", "order_index": 0,
+                        "body": "def f():\n    return 1", "import_bindings": []}}
+    h = {"id": "sym2", "label": "CodeSymbol",
+         "properties": {"module_id": "mod1", "qualname": "h", "name": "h",
+                        "symbol_kind": "function", "order_index": 1,
+                        "body": "def h():\n    return 2", "import_bindings": []}}
+    fake = FakeGraph([mod, f, h])
+    _wire(fake, monkeypatch)
+    res = asyncio.run(add_symbol(GX, "mod1", "def g():\n    return 3\n", after="f"))
+    assert not res.get("error") and 0 < res["order_index"] < 1
+    emitted = (tmp_path / "cjm_demo/m.py").read_text()
+    assert (emitted.index("def f():") < emitted.index("def g():")
+            < emitted.index("def h():"))
+    bad = asyncio.run(add_symbol(GX, "mod1", "def q():\n    return 4\n",
+                                 after="nope_missing"))
+    assert "anchor" in bad["error"]

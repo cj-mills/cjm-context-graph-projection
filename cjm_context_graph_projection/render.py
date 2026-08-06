@@ -235,6 +235,12 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             lines.append(f"supported by {len(obj['supports'])} premise(s)")
         if obj.get("session"):
             lines.append(f"decided in session `{obj['session']}`")
+        nd = obj.get("near_duplicates") or []
+        if nd:
+            lines.append("⚠ **possible duplicates among OPEN items** — check before "
+                         "double-filing (supersede/link the canonical instead):")
+            lines += [f"  - {h.get('score', 0):.2f} · {_short(h.get('label', ''), 90)} "
+                      f"`{h.get('id')}` ({h.get('state', '')})" for h in nd]
         return "\n".join(lines)
     if kind == "link":
         if obj.get("error"):

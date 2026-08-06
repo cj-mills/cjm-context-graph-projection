@@ -30,7 +30,7 @@ from .devgraph import build_dev_graph_elements, notes_corpus_elements
 from .display import set_display_rule
 from .explorer_page import EXPLORER_HTML
 from .factlayer import note_alias_map
-from .filing import filing
+from .filing import filing, near_duplicates
 from .hybrid_page import HYBRID_HTML
 from .journal import (journal_sourced_note_paths, journal_window_view, M3_BASELINE_ACTOR,
                       m3_baseline_import, replay_journal)
@@ -385,6 +385,11 @@ async def _dispatch(args) -> int:
             res = await decide(gx, args.statement, actor=args.actor, supports=args.supports,
                                supersedes=args.supersedes, session=args.session,
                                title=args.title)
+            # Mint-time near-duplicate surfacing (ff4e275e shape (a)): propose-only —
+            # the mint always lands; the fresh decision carries no task_state yet so
+            # it never matches itself. Replay bypasses this branch (rebuilds stay flat).
+            if not res.get("error"):
+                res["near_duplicates"] = await near_duplicates(gx, args.statement)
             print(render("decide", res, args.format))
             if args.journal_path:
                 append_write(args.journal_path, "decide",
@@ -555,7 +560,7 @@ async def _dispatch(args) -> int:
             res = await add_symbol(gx, args.module, body, actor=args.actor,
                                    write=not args.no_write,
                                    source_journal_path=args.source_journal_path,
-                                   repos_dir=args.repos_dir)
+                                   repos_dir=args.repos_dir, after=args.after)
             print(render("add-symbol", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "add-text":
@@ -1071,9 +1076,13 @@ def main() -> int:
 
     p_asym = sub.add_parser("add-symbol",
                             help="Mint a NEW top-level symbol into a .py module (the authoring "
-                                 "CREATE leg; appends at end, emits the artifact, absorbs into "
+                                 "CREATE leg; lands before any trailing text run so a __main__ "
+                                 "dispatch stays last, emits the artifact, absorbs into "
                                  "the source journal when graph-sourced)")
     p_asym.add_argument("module", help="The CodeModule node id to add the symbol to")
+    p_asym.add_argument("--after", default=None,
+                        help="Placement anchor: insert immediately after this top-level "
+                             "qualname or region node id (default: before the trailing text run)")
     g_asym = p_asym.add_mutually_exclusive_group(required=True)
     g_asym.add_argument("--body", help="The symbol's verbatim source (exactly ONE top-level def/class)")
     g_asym.add_argument("--body-file", help="Read the symbol's verbatim source from a file")

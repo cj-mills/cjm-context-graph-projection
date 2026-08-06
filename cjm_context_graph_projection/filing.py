@@ -29,6 +29,9 @@ Same family as `register-drift` / `readiness`: a derived view over authored
 facts + edges; there is no write path here.
 """
 
+import math
+import re
+from collections import Counter
 from typing import Any, Dict, List, Set, Tuple
 
 from cjm_dev_graph_schema import predicates as P
@@ -193,3 +196,84 @@ async def filing(
          for a in anchors),
         key=lambda e: (e["role"], e["label"]))
     return report
+
+
+def near_duplicate_scores(
+    statement: str,        # The candidate new statement
+    corpus: Dict[str, str],  # id -> existing statement/title text
+    top_k: int = 5,        # Max proposals returned (5: the real canonical ranked 5th amid adjacent items)
+    threshold: float = 0.1,  # Minimum IDF-cosine (calibrated 2026-08-05: canonical 0.116, noise median ~0.04)
+) -> List[Tuple[str, float]]:  # [(id, score)] best-first, all >= threshold
+    """IDF-weighted token-set cosine between a new statement and existing items.
+
+    The ff4e275e scorer: literal-substring recall fails across paraphrase
+    ('trailing region' vs '__main__ block' filed the same defect twice), but two
+    fair statements of one defect share their RARE vocabulary. Tokens are
+    lowercased word runs (len >= 3, underscores kept so __main__ survives);
+    each weighs log(N/df)+1 over the corpus+statement document set, so
+    ubiquitous scaffolding words fade and shared distinctive terms dominate.
+    Pure and dependency-free by design — a semantic-embedding backend slots
+    behind this same seam if the lexical floor ever proves too coarse."""
+    def toks(text: str) -> Set[str]:
+        return {t for t in re.findall(r"[a-z0-9_]+", text.lower()) if len(t) >= 3}
+
+    docs = {cid: toks(text) for cid, text in corpus.items()}
+    q = toks(statement)
+    df: Counter = Counter()
+    for ts in docs.values():
+        df.update(ts)
+    df.update(q)
+    n_docs = len(docs) + 1
+
+    def weights(ts: Set[str]) -> Dict[str, float]:
+        return {t: math.log(n_docs / df[t]) + 1.0 for t in ts}
+
+    qw = weights(q)
+    qn = math.sqrt(sum(x * x for x in qw.values())) or 1.0
+    out: List[Tuple[str, float]] = []
+    for cid, ts in docs.items():
+        cw = weights(ts)
+        cn = math.sqrt(sum(x * x for x in cw.values())) or 1.0
+        score = sum(qw[t] * cw[t] for t in qw.keys() & cw.keys()) / (qn * cn)
+        if score >= threshold:
+            out.append((cid, round(score, 4)))
+    out.sort(key=lambda p: p[1], reverse=True)
+    return out[:top_k]
+
+
+async def near_duplicates(
+    gx: GraphHandle,
+    statement: str,        # The statement about to be minted
+    top_k: int = 5,        # Max proposals surfaced (matches the scorer's calibrated default)
+    threshold: float = 0.1,  # Minimum IDF-cosine to surface (calibrated 2026-08-05)
+) -> List[Dict[str, Any]]:  # [{id, score, label, state}] best-first
+    """Mint-time near-duplicate proposals over the OPEN work-item population.
+
+    The decide-time half of ff4e275e shape (a): the CLI surfaces these on every
+    live `decide`, so filing one defect twice under different vocabulary stops
+    depending on the author remembering to run `relevant` first — the miss class
+    goes impossible-by-construction. Same derived population as `filing`/
+    `readiness` (active task_state, checks excluded, done = history); surfacing
+    is propose-only — the mint always lands, and confirming a duplicate means
+    superseding/closing it yourself. Replay never calls this (rebuilds stay flat)."""
+    assertions = await F.load_assertions(gx)
+    supers = await F.load_supersedes(gx)
+    task_state = _active_task_states(assertions, supers)
+    check_ids = {chk for chk, _ in await F.load_edge_pairs(gx, DevRelations.CHECKS)}
+    open_ids = [i for i, s in task_state.items()
+                if s != P.TASK_DONE and i not in check_ids]
+    nodes = await F.load_nodes(gx, open_ids)
+    corpus: Dict[str, str] = {}
+    for nid, node in nodes.items():
+        text = str(F.prop(node, "statement") or F.prop(node, "text")
+                   or F.prop(node, "display_title") or "")
+        if text:
+            corpus[nid] = text
+    hits = near_duplicate_scores(statement, corpus, top_k=top_k, threshold=threshold)
+    out: List[Dict[str, Any]] = [{"id": cid, "score": score} for cid, score in hits]
+    if out:
+        await annotate_display(gx, [nodes[h["id"]] for h in out])
+        for h in out:
+            h["label"] = node_title(nodes[h["id"]])
+            h["state"] = task_state.get(h["id"], "")
+    return out

@@ -619,14 +619,16 @@ async def add_symbol(
     write: bool = True,         # Add the node + emit the artifact (False = dry-run preview)
     source_journal_path: Optional[str] = None,  # The source journal (journal-first routing)
     repos_dir: Optional[str] = None,  # The repos root (notebook journal keys derive under it)
+    after: Optional[str] = None,  # Placement anchor: insert after this top-level qualname/region id
 ) -> Dict[str, Any]:  # The add result (incl. the emitted artifact path + text), or error
     """Mint a NEW top-level CodeSymbol into a module, then emit its canonical artifact.
 
     The CREATE leg of authoring-on-graph (`author` edits an EXISTING slot; this closes
     the no-add-symbol soak gap). The body must parse standalone as exactly ONE top-level
-    def/class (decorators + leading comments ride along verbatim); the new region
-    APPENDS at the end of the module — placement stays a property in v1, relational
-    placement is the composed-modules item's business. The node lands with the SAME
+    def/class (decorators + leading comments ride along verbatim); the new region lands
+    AFTER the last top-level symbol and BEFORE any trailing CodeText run (a `__main__`
+    dispatch stays last — DEC 0e590ca7), or immediately after an explicit `after`
+    anchor; relational placement is still the composed-modules item's business. The node lands with the SAME
     identity ingest derives (`code_symbol_node_id(module, qualname)`) plus its
     DEFINES/CONTAINS edges, so the next rebuild re-derives it in place rather than
     conflicting. Derived overlays (USES/CALLS edges, a new class's method children) are
@@ -663,9 +665,9 @@ async def add_symbol(
     if dup is not None:
         return {"error": f"symbol `{qualname}` already exists in this module — author it "
                          f"(`{dup['id']}`)", "written": False}
-    order = max((w["properties"].get("order_index") if
-                 w["properties"].get("order_index") is not None else -1 for w in wires),
-                default=-1) + 1
+    order, oerr = _insertion_order(wires, after)
+    if oerr:
+        return {"error": oerr, "written": False}
 
     # Bind the new symbol's refs — nested defs INCLUDED (a minted class binds what
     # its methods reference, 2b6090dc) — against everything the module carries,
@@ -1028,3 +1030,39 @@ def _available_bindings(
         except SyntaxError:
             continue
     return available
+
+
+def _insertion_order(
+    wires: List[Dict[str, Any]],  # The module's wires (top-level regions carry order_index)
+    after: Optional[str] = None,  # Anchor override: a top-level qualname or region node id (>=6-char prefix)
+) -> Tuple[Optional[Any], Optional[str]]:  # (the new region's order_index, error)
+    """Pick a new top-level region's order_index — the placement contract (DEC 0e590ca7).
+
+    Default: AFTER the last top-level symbol, BEFORE any trailing CodeText run — a
+    `__main__` dispatch (or any ordered sentinel tail) stays last by construction, so
+    a minted def is bound before module-level code that calls it (the ba810a2a class:
+    tail-appending kept pytest green while `python -m` died NameError, 4 bites). A
+    module with no top-level symbols, or one ending in a symbol, keeps plain append.
+    An `after` anchor overrides: the new region lands immediately after it. Midpoint
+    orders are transient — the next ingest re-canonicalizes ints from file positions."""
+    regions = sorted((w for w in wires
+                      if w["properties"].get("order_index") is not None),
+                     key=lambda w: w["properties"]["order_index"])
+    if not regions:
+        return 0, None
+    orders = [w["properties"]["order_index"] for w in regions]
+    if after is not None:
+        hit = next((i for i, w in enumerate(regions)
+                    if w["id"] == after
+                    or (len(after) >= 6 and w["id"].startswith(after))
+                    or w["properties"].get("qualname") == after), None)
+        if hit is None:
+            return None, (f"--after anchor `{after}` is not a top-level region of this "
+                          f"module (pass a qualname or a region node id)")
+        return (orders[hit] + 1 if hit == len(regions) - 1
+                else (orders[hit] + orders[hit + 1]) / 2), None
+    last_sym = next((i for i in range(len(regions) - 1, -1, -1)
+                     if regions[i]["label"] == DevNodeKinds.CODE_SYMBOL), None)
+    if last_sym is None or last_sym == len(regions) - 1:
+        return orders[-1] + 1, None
+    return (orders[last_sym] + orders[last_sym + 1]) / 2, None
