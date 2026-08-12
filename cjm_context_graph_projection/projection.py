@@ -399,8 +399,15 @@ async def show(
     gx: GraphHandle,
     node_id: str,   # Node to expand (full id, or a unique id prefix)
     depth: int = 1, # Neighbourhood depth
-) -> Dict[str, Any]:  # {node, neighbours:[{node, relation, direction}]}
-    """One node in full, with its immediate neighbours + the relation to each."""
+    journal_paths: Optional[List[str]] = None,  # Writes/source journals for the metadata trace (axis D)
+) -> Dict[str, Any]:  # {node, properties, facts, journal, neighbours:[{node, relation, direction}]}
+    """One node in full, with its immediate neighbours + the relation to each.
+
+    Axis-D parity (DEC dc47dfb5): the curated view carries the SAME metadata
+    roster the TUI gets — `facts` = the node's ACTIVE assertion values keyed by
+    predicate (task_state, priority, role, ...), and `journal` = the node's
+    journal trace (created/updated ts + session keys + actors; nodes carry no
+    created_at, the write journal is the timeline authority)."""
     res = await resolve_node_ref(gx, node_id)
     if "candidates" in res:
         return {"node": None, "neighbours": [], "candidates": res["candidates"],
@@ -419,7 +426,21 @@ async def show(
             neighbours.append({"node": node_summary(by_id[tgt]), "relation": rel, "direction": "out"})
         elif tgt == node_id and src in by_id:
             neighbours.append({"node": node_summary(by_id[src]), "relation": rel, "direction": "in"})
-    return {"node": node_summary(node), "properties": _props(node), "neighbours": neighbours}
+    facts: Dict[str, List[str]] = {}
+    supers = await F.load_supersedes(gx)
+    for slot in F.group_by_slot(await F.load_assertions(gx)).values():
+        if F.prop(slot[0], "subject_id") != node_id:
+            continue
+        pred = str(F.prop(slot[0], "predicate") or "")
+        vals = [str(F.prop(a, "value", "")) for a in F.active_assertions(slot, supers)]
+        if pred and vals:
+            facts[pred] = vals
+    journal: Dict[str, Any] = {}
+    if journal_paths:
+        from .journal import node_journal_trace  # lazy: journal.py imports back into this package
+        journal = node_journal_trace([p for p in journal_paths if p], node_id)
+    return {"node": node_summary(node), "properties": _props(node),
+            "facts": facts, "journal": journal, "neighbours": neighbours}
 
 
 def _recency_factor(node: Any) -> float:

@@ -41,6 +41,7 @@ from .onboarding import project_onboarding
 from .oracle import run_version_oracle
 from .projection import (explore, full_graph_view, get_schema, grep, locate, relevant, show, state,
                          subgraph_view)
+from .prose_refs import prose_refs
 from .readiness import readiness
 from .readme import project_readme
 from .reconcile import reconcile_memory
@@ -293,7 +294,9 @@ async def _dispatch(args) -> int:
             res = await explore(gx, args.task, filters, depth=args.depth, budget=args.budget)
             print(render("explore", res, args.format))
         elif args.command == "show":
-            print(render("show", await show(gx, args.node_id, depth=args.depth), args.format))
+            jp = [p for p in (args.journal_path, args.source_journal_path) if p]
+            print(render("show", await show(gx, args.node_id, depth=args.depth,
+                                            journal_paths=jp), args.format))
         elif args.command == "locate":
             print(render("locate", await locate(gx, args.term, limit=args.limit), args.format))
         elif args.command == "grep":
@@ -318,6 +321,8 @@ async def _dispatch(args) -> int:
             print(render("readiness", res, args.format))
         elif args.command == "register-drift":
             print(render("register-drift", await register_drift(gx), args.format))
+        elif args.command == "prose-refs":
+            print(render("prose-refs", await prose_refs(gx, limit=args.limit), args.format))
         elif args.command == "filing":
             print(render("filing", await filing(gx, top_k=args.top_k), args.format))
         elif args.command == "orphaned-edges":
@@ -732,7 +737,7 @@ async def _dispatch(args) -> int:
                 print(out)
             return 1 if res.get("error") else 0
         elif args.command == "onboarding":
-            res = await project_onboarding(gx, config_path=args.config)
+            res = await project_onboarding(gx, config_path=args.config, anchor=args.anchor)
             # --out is the canonical surface; mirror_paths (config) are kept in sync
             # too (the M3 cutover: the auto-loaded MEMORY.md is a generated mirror).
             targets = [Path(args.out)] + [Path(p) for p in res.get("mirror_paths", [])]
@@ -741,14 +746,14 @@ async def _dispatch(args) -> int:
                             for t in targets)
                 present = all(t.exists() for t in targets)
                 print(f"onboarding: drift={drift} present={present} "
-                      f"notes={res['note_count']} missing_push={res['missing_push']} "
+                      f"anchor={res['anchor']!r} missing_refs={res['missing_refs']} "
                       f"-> {', '.join(str(t) for t in targets)}")
                 return 1 if drift else 0
             if args.write:
                 for t in targets:
                     t.write_text(res["markdown"])
                 print(f"onboarding: wrote {len(res['markdown'].encode())} bytes "
-                      f"notes={res['note_count']} missing_push={res['missing_push']} "
+                      f"anchor={res['anchor']!r} missing_refs={res['missing_refs']} "
                       f"-> {', '.join(str(t) for t in targets)}")
                 return 0
             # Default: print the surface verbatim (the viewer — `onboarding > file` is faithful).
@@ -892,6 +897,13 @@ def main() -> int:
     p_rg = sub.add_parser("register-drift",
                           help="Reconcile each <value>-register hub's REFERENCES cache against "
                                "the active role assertions (propose/confirm, never auto-fix)")
+
+    p_pr = sub.add_parser("prose-refs",
+                          help="Audit id-shaped tokens in asserted prose vs the edge layer: "
+                               "prose-only refs (propose link REFERENCES), unresolvable tokens, "
+                               "degree-zero asserted nodes (propose/confirm, never auto-fix)")
+    p_pr.add_argument("--limit", type=int, default=30,
+                      help="Cap each reported bucket (counts stay true totals)")
 
     p_oe = sub.add_parser("orphaned-edges",
                           help="Journaled link ops whose endpoint no longer resolves (the set "
@@ -1239,13 +1251,17 @@ def main() -> int:
     p_rm.add_argument("--repos-dir", default=DEFAULT_REPOS)
 
     p_ob = sub.add_parser("onboarding",
-                          help="Project the MEMORY onboarding surface from the graph "
-                               "(minimal resident core + landmark map + how-to-pull; read-only)")
+                          help="Project the MEMORY onboarding surface from the graph's ASSERTED "
+                               "lead structure (locks + pins + priority facts + derived sections; "
+                               "read-only)")
     p_ob.add_argument("--out", default=f"{DEFAULT_REPOS}/cjm-substrate/.cjm/onboarding-surface.md",
                       help="Where to write/compare the surface")
     p_ob.add_argument("--config", default=f"{DEFAULT_REPOS}/cjm-substrate/.cjm/onboarding.config.json",
-                      help="JSON overriding the dev seeds (push_slugs / landmarks / arc_lead); "
-                           "absent -> built-in defaults. The promotion loop edits this.")
+                      help="JSON config (REQUIRED keys: active_anchor + how_to_query; optional "
+                           "mirror_paths) — no in-code fallback, fails loud (axis F)")
+    p_ob.add_argument("--anchor", default=None,
+                      help="Override the config's active_anchor (anchor slug or node id) — "
+                           "topic selection precedes session start")
     p_ob.add_argument("--write", action="store_true", help="Write the surface to --out")
     p_ob.add_argument("--check", action="store_true",
                       help="Regen-check: compare --out to the projection (drift)")

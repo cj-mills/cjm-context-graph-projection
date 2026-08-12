@@ -432,3 +432,40 @@ async def journal_window_view(
     base["touched"] = out
     base["missing"] = sum(1 for i in out if i.get("missing"))
     return base
+
+
+def node_journal_trace(
+    paths: List[str],  # Journal files to scan (the writes + source journals together)
+    node_id: str,      # FULL node id to trace (the show verb passes a resolved id)
+) -> Dict[str, Any]:  # {first_ts, last_ts, sessions, actors, op_count}
+    """One node's journal TRACE: created/updated + session keys + actors (axis D).
+
+    Nodes carry no created_at — the JOURNAL is the timeline authority, so the
+    curated `show` derives its metadata line here. TOUCHES, not creations
+    (an `author`/`assert` on an old node updates last_ts), matched through
+    `touched_node_ids` exactly as the session lens matches; best-effort like it."""
+    first: Optional[float] = None
+    last: Optional[float] = None
+    sessions: List[str] = []
+    actors: List[str] = []
+    count = 0
+    for path in paths:
+        if not path or not Path(path).exists():
+            continue
+        for op in read_journal(path):
+            refs = touched_node_ids(op)
+            if not any(r == node_id or (len(r) >= 6 and node_id.startswith(r)) for r in refs):
+                continue
+            count += 1
+            ts = op.get("ts")
+            if isinstance(ts, (int, float)) and ts > 0:
+                first = float(ts) if first is None else min(first, float(ts))
+                last = float(ts) if last is None else max(last, float(ts))
+            s = op.get("session")
+            if s and s not in sessions:
+                sessions.append(s)
+            a = (op.get("args") or {}).get("actor")
+            if a and a not in actors:
+                actors.append(a)
+    return {"first_ts": first, "last_ts": last, "sessions": sessions,
+            "actors": actors, "op_count": count}

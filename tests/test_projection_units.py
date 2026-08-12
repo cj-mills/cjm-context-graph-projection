@@ -7,7 +7,7 @@ from cjm_context_graph_projection.projection import (
     node_summary, node_title,
 )
 from cjm_context_graph_projection.onboarding import (
-    SUBSTRATE_HOW_TO_QUERY, _load_seeds, _render_coverage,
+    _load_seeds, _pin_target, _render_coverage, _render_frontier, _strip_frontmatter,
 )
 from cjm_context_graph_projection.render import _short, render
 
@@ -169,35 +169,39 @@ def test_render_relevant_facets_bounded_even_with_giant_content():
     assert max(len(line) for line in out.splitlines()) < 400  # no line blows the budget
 
 
-def test_render_coverage_by_kind_and_hub_handles():
-    # The auto landmark view = facets of the default query: by-kind coverage + hub
-    # anchors, each a re-runnable `relevant` handle. Augments, never enumerates.
-    overview = {"by_kind": [{"kind": "Section", "count": 498}, {"kind": "Note", "count": 85}],
-                "hubs": [{"id": "h1", "title": "Substrate Foundational Picture", "degree": 100},
-                         {"id": "h2", "title": "Current Arc Status", "degree": 59}]}
-    out = _render_coverage(overview)
-    assert "Section×498 · Note×85" in out
-    assert '- **Substrate Foundational Picture** ×100 → `relevant "Substrate Foundational Picture"`' in out
-    assert max(len(line) for line in out.splitlines()) < 200  # bounded lines
-    # No hubs -> just the by-kind line (e.g. a fresh/empty graph).
-    assert "Hub anchors" not in _render_coverage({"by_kind": [{"kind": "Note", "count": 1}], "hubs": []})
+def test_render_coverage_by_kind_only_hubs_retired():
+    # The by-kind line stays (drift canary: a kind vanishing = rebuild-lossy tell,
+    # the b744b28e oracle-Procedure catch); the hub-anchors block is RETIRED —
+    # hub degree is an ingestion artifact (c49f8e0b), so hubs never render even
+    # when the overview still computes them.
+    out = _render_coverage({"by_kind": [{"kind": "Note", "count": 3},
+                                        {"kind": "Decision", "count": 2}],
+                            "hubs": [{"title": "Substrate Foundational Picture",
+                                      "degree": 100}]})
+    assert "_By kind:_ Note×3 · Decision×2" in out
+    assert "Hub anchors" not in out and "Substrate Foundational Picture" not in out
+    assert "### Graph at a glance (auto-derived)" in out
 
 
-def test_load_seeds_how_to_query_overrides_per_key(tmp_path):
-    # The substrate 'how to query' prose is now a config-overridable seed (data,
-    # not code) — the same default-in-code / override-in-JSON contract as arc_lead.
-    # No config -> falls back to the in-code default.
-    *_, how_to_query, _ = _load_seeds(None)
-    assert how_to_query == SUBSTRATE_HOW_TO_QUERY
-    # Config supplying `how_to_query` -> that prose wins.
+def test_load_seeds_fails_loud_never_falls_back(tmp_path):
+    # Axis F: NO in-code seeds. Missing file/key and RETIRED keys are errors —
+    # a silent fallback would project a stale surface (the pin-miss doctrine).
+    import pytest
+    with pytest.raises(RuntimeError, match="config missing"):
+        _load_seeds(None)
+    with pytest.raises(RuntimeError, match="config missing"):
+        _load_seeds(str(tmp_path / "absent.json"))
     cfg = tmp_path / "onboarding.config.json"
-    cfg.write_text(json.dumps({"how_to_query": "## Q\n- use `cg-write`"}))
-    *_, how_to_query, _ = _load_seeds(str(cfg))
-    assert how_to_query == "## Q\n- use `cg-write`"
-    # Config WITHOUT the key -> per-key fallback (override one seed, keep the rest).
-    cfg.write_text(json.dumps({"arc_lead": "LEAD"}))
-    _push, _landmarks, arc_lead, how_to_query, _hooks = _load_seeds(str(cfg))
-    assert arc_lead == "LEAD" and how_to_query == SUBSTRATE_HOW_TO_QUERY
+    cfg.write_text(json.dumps({"active_anchor": "portfolio"}))
+    with pytest.raises(RuntimeError, match="how_to_query"):
+        _load_seeds(str(cfg))
+    cfg.write_text(json.dumps({"active_anchor": "portfolio", "how_to_query": "## Q",
+                               "arc_lead": "LEGACY"}))
+    with pytest.raises(RuntimeError, match="retired key"):
+        _load_seeds(str(cfg))
+    cfg.write_text(json.dumps({"active_anchor": "portfolio", "how_to_query": "## Q",
+                               "mirror_paths": ["/x"]}))
+    assert _load_seeds(str(cfg)) == ("portfolio", "## Q")
 
 
 def test_render_explore_complete_vs_refacet():
@@ -214,3 +218,87 @@ def test_render_explore_complete_vs_refacet():
                                                             {"axis": "seed", "value": "s1"}]}}]}, "human")
     assert "re-facet below" in refacet and "Refine (by seed)" in refacet
     assert "--facet kind=Section --facet seed=s1" in refacet  # compound descent handle
+
+
+def test_pin_target_and_frontmatter_helpers():
+    # Pin value contract: FIRST token = node id, the rest (dash-stripped) = gloss.
+    assert _pin_target("abc123 — Read before authoring") == ("abc123", "Read before authoring")
+    assert _pin_target("abc123") == ("abc123", "")
+    assert _pin_target("") == ("", "")
+    # Lock notes render body-only: the leading frontmatter block drops.
+    assert _strip_frontmatter("---\nname: x\n---\n\nBODY\n") == "\nBODY\n"
+    assert _strip_frontmatter("no frontmatter") == "no frontmatter"
+    assert _strip_frontmatter("---\nunclosed") == "---\nunclosed"
+
+
+def test_render_frontier_scopes_tags_and_callouts():
+    # The DERIVED frontier: true counts, anchor scoping, `priority` facts as
+    # tags, and awaiting-user/closable call-outs (they block on the USER).
+    frontier = {
+        "counts": {"ready": 3, "blocked": 1, "done": 9, "closable": 1, "unfiled": 0},
+        "ready": [
+            {"id": "aaaa1111-x", "label": "TUI build", "program": {"id": "P1", "label": "Foundations"}},
+            {"id": "bbbb2222-x", "label": "walk item", "program": {"id": "P2", "label": "Vertical"}},
+            {"id": "cccc3333-x", "label": "fork ruling", "program": {"id": "P1", "label": "Foundations"}},
+        ],
+        "blocked": [{"id": "dddd4444-x", "label": "gated item"}],
+        "closable": [{"id": "eeee5555-x", "label": "done-checks item"}],
+        "drift": [],
+    }
+    priority = {"aaaa1111-x": "early", "cccc3333-x": "awaiting-user"}
+    out = _render_frontier(frontier, "P1", "Foundations", priority)
+    assert "_ready 3 · blocked 1 · done 9 · closable 1 · unfiled 0_" in out
+    assert "TUI build" in out and "`[early]`" in out
+    assert "walk item" not in out                      # scoped OUT (other anchor)
+    assert "**Awaiting user:**" in out and "fork ruling" in out
+    assert "**Closable 🏁:**" in out and "done-checks item" in out
+    # Portfolio view (anchor None) groups by program and keeps everything.
+    port = _render_frontier(frontier, None, "Portfolio", priority)
+    assert "Ready ▸ Foundations" in port and "Ready ▸ Vertical" in port
+
+
+def test_render_show_metadata_line_facts_and_journal():
+    # Axis-D parity (dc47dfb5): the curated show carries facts (active assertion
+    # values) + the journal trace (created/updated · ops · session keys).
+    obj = {"node": {"id": "n1", "label": "Decision", "title": "T"},
+           "properties": {},
+           "facts": {"task_state": ["open"], "priority": ["early"]},
+           "journal": {"first_ts": 1754000000.0, "last_ts": 1754100000.0,
+                       "sessions": ["s1", "s2", "s3", "s4"], "actors": ["agent:session"],
+                       "op_count": 7},
+           "neighbours": []}
+    out = render("show", obj, "human")
+    assert "priority=early · task_state=open" in out
+    assert "ops 7" in out and "`s2`, `s3`, `s4` +1 earlier" in out and "⏱ created" in out
+    # No facts / no trace -> no metadata line (state view stays unchanged).
+    bare = render("show", {"node": {"id": "n1", "label": "Note", "title": "T"},
+                           "properties": {}, "neighbours": []}, "human")
+    assert "⏱" not in bare and "task_state" not in bare
+
+
+def test_extract_id_tokens_shapes_and_exclusions():
+    from cjm_context_graph_projection.prose_refs import extract_id_tokens
+    text = ("DEC 367eaaae references a9c40c18 twice: a9c40c18. Date 20260810 is not "
+            "an id; full b8305121-6de8-563e-a1de-be791f554cdb resolves whole; "
+            "deadbeef counts; UPPER ABCD1234 does not; short 16fdc46 (7-hex commit) does not.")
+    toks = extract_id_tokens(text)
+    assert toks == ["367eaaae", "a9c40c18", "b8305121-6de8-563e-a1de-be791f554cdb", "deadbeef"]
+    assert extract_id_tokens("") == [] and extract_id_tokens(None) == []
+
+
+def test_render_prose_refs_buckets_and_clean():
+    obj = {"sources_scanned": 10,
+           "counts": {"sources": 10, "unlinked": 1, "unresolvable": 1, "degree_zero": 1},
+           "unlinked": [{"source_id": "aaaa1111-x", "source": "Schedule DEC",
+                         "token": "bbbb2222", "target_id": "bbbb2222-y",
+                         "target": "Work item", "ambiguous": False}],
+           "unresolvable": [{"source_id": "aaaa1111-x", "source": "Schedule DEC",
+                             "token": "367aeae4"}],
+           "degree_zero": [{"id": "cccc3333-z", "label": "Orphan DEC"}]}
+    out = render("prose-refs", obj, "human")
+    assert "_sources 10 · unlinked 1 · unresolvable 1 · degree-zero 1_" in out
+    assert "**Schedule DEC** `aaaa1111` → `bbbb2222` **Work item**" in out
+    assert "`367aeae4`" in out and "**Orphan DEC** `cccc3333`" in out
+    clean = render("prose-refs", {"counts": {}, "unlinked": [], "unresolvable": [],
+                                  "degree_zero": []}, "human")
+    assert "clean" in clean

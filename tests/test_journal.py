@@ -288,3 +288,28 @@ def test_replay_offset_skips_applied_prefix(tmp_path, monkeypatch):
     monkeypatch.setattr(journal_mod, "_apply_op", fake_apply)
     rc = asyncio.run(journal_mod.replay_journal(None, p, offset=2))
     assert applied == [2, 3] and rc["link"] == 2
+
+
+def test_node_journal_trace_first_last_sessions(tmp_path):
+    # Axis-D show metadata: a node's trace = first/last touch ts + session keys,
+    # matched through touched_node_ids (TOUCHES, not creations; best-effort).
+    from cjm_context_graph_projection.journal import node_journal_trace
+    import json as _json
+    nid = "abcd1234-0000-0000-0000-000000000000"
+    ops = [
+        {"verb": "link", "args": {"source_id": nid, "target_id": "x"}, "ts": 100.0,
+         "session": "2026-08-01_09-00-00"},
+        {"verb": "assert", "args": {"subject": nid, "actor": "agent:session"}, "ts": 300.0,
+         "session": "2026-08-02_09-00-00"},
+        {"verb": "assert", "args": {"subject": "unrelated-name"}, "ts": 999.0,
+         "session": "2026-08-03_09-00-00"},
+    ]
+    p = tmp_path / "writes.jsonl"
+    p.write_text("".join(_json.dumps(o) + "\n" for o in ops))
+    tr = node_journal_trace([str(p), ""], nid)
+    assert tr["first_ts"] == 100.0 and tr["last_ts"] == 300.0 and tr["op_count"] == 2
+    assert tr["sessions"] == ["2026-08-01_09-00-00", "2026-08-02_09-00-00"]
+    assert tr["actors"] == ["agent:session"]
+    # A missing path is skipped, an untouched node traces empty.
+    assert node_journal_trace([str(tmp_path / "absent.jsonl")], nid)["op_count"] == 0
+    assert node_journal_trace([str(p)], "ffff0000-1111-2222-3333-444444444444")["op_count"] == 0

@@ -461,6 +461,31 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                          "`--state ready|blocked|done [--limit N --offset N]`; "
                          "a positional term still scope-filters_")
         return "\n".join(lines)
+    if kind == "prose-refs":
+        c = obj.get("counts", {})
+        lines = ["## Prose-ref drift",
+                 f"_sources {c.get('sources', 0)} · unlinked {c.get('unlinked', 0)} · "
+                 f"unresolvable {c.get('unresolvable', 0)} · "
+                 f"degree-zero {c.get('degree_zero', 0)}_  "
+                 "(propose only — confirm = `link <src> REFERENCES <target>`)", ""]
+        if obj.get("unlinked"):
+            lines.append("**Prose-only refs (token resolves, NO edge either direction):**")
+            for e in obj["unlinked"]:
+                amb = " ⚠ ambiguous-prefix" if e.get("ambiguous") else ""
+                lines.append(f"- **{_short(e.get('source', ''), 60)}** `{e['source_id'][:8]}` "
+                             f"→ `{e['token'][:8]}` **{_short(e.get('target', ''), 60)}**{amb}")
+        if obj.get("unresolvable"):
+            lines.append("**Unresolvable tokens (typo'd / rotted / out-of-graph):**")
+            for e in obj["unresolvable"]:
+                lines.append(f"- **{_short(e.get('source', ''), 60)}** "
+                             f"`{e['source_id'][:8]}` → `{e['token']}`")
+        if obj.get("degree_zero"):
+            lines.append("**Degree-zero asserted nodes (connected to NOTHING):**")
+            for e in obj["degree_zero"]:
+                lines.append(f"- **{_short(e.get('label', ''), 70)}** `{e['id'][:8]}`")
+        if not (obj.get("unlinked") or obj.get("unresolvable") or obj.get("degree_zero")):
+            lines.append("_clean — every prose id-token is edged, resolvable, and connected_")
+        return "\n".join(lines)
     if kind == "register-drift":
         c = obj.get("counts", {})
         lines = ["## Register drift",
@@ -884,6 +909,21 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         path = (obj.get("properties") or {}).get("path")
         if path:
             lines += [f"📄 `{path}`", ""]  # where it lives on disk (the locate-at-a-glance line)
+        meta = []  # axis-D parity (dc47dfb5): same metadata roster as the TUI
+        facts = obj.get("facts") or {}
+        if facts:
+            meta.append(" · ".join(f"{k}={'/'.join(v)}" for k, v in sorted(facts.items())))
+        j = obj.get("journal") or {}
+        if j.get("op_count"):
+            def _jd(ts):
+                return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M") if ts else "?"
+            sess = j.get("sessions") or []
+            shown = ", ".join(f"`{s}`" for s in sess[-3:])
+            more = f" +{len(sess) - 3} earlier" if len(sess) > 3 else ""
+            meta.append(f"⏱ created {_jd(j.get('first_ts'))} · updated {_jd(j.get('last_ts'))} "
+                        f"· ops {j['op_count']}" + (f" · sessions {shown}{more}" if sess else ""))
+        if meta:
+            lines += ["_" + " — ".join(meta) + "_", ""]
         if node.get("description"):
             lines += [node["description"], ""]
         elif node.get("gloss"):

@@ -87,15 +87,18 @@ async def _list_label(gx: GraphHandle, label: str, limit: int, offset: int = 0,
             "truncated": total > offset + len(rows)}
 
 
-async def _list_predicate(gx: GraphHandle, predicate: str, limit: int,
-                          value: Optional[str] = None) -> Dict[str, Any]:
+async def _list_predicate(gx: GraphHandle, predicate: str, limit: int, offset: int = 0,
+                          value: Optional[str] = None,
+                          contains: Optional[str] = None) -> Dict[str, Any]:
     """Every ACTIVE assertion of `predicate` (subject + value + actor), across all slots.
 
     The readiness-ground-truth read: `list --predicate task_state` shows each work-item's
     current state. Only non-superseded assertions are reported (the slot's live value).
     `value` narrows to assertions carrying that value — the register read
-    (`list --predicate role --value north-star` = the cohort's subjects), grown as a
-    verb arg per the lens invariant (richer filtering = richer verb args)."""
+    (`list --predicate role --value north-star` = the cohort's subjects). Axis-D
+    parity (dc47dfb5): rows are labelled + sorted BEFORE the window, so `--offset`
+    pages deterministically and `--contains` (subject/value substring) filters the
+    class — every mode is fully enumerable, never capped at one silent page."""
     assertions = await F.load_assertions(gx)
     supers = await F.load_supersedes(gx)
     hits: List[Dict[str, Any]] = []
@@ -107,29 +110,40 @@ async def _list_predicate(gx: GraphHandle, predicate: str, limit: int,
                     continue
                 hits.append({"subject_id": F.prop(a, "subject_id"),
                              "value": F.prop(a, "value"), "actor": F.prop(a, "actor")})
-    total = len(hits)
-    hits = hits[:limit]
     labels = await _labels_for(gx, {h["subject_id"] for h in hits})
     rows = [{**h, "subject": labels.get(h["subject_id"], h["subject_id"])} for h in hits]
+    if contains:
+        needle = contains.lower()
+        rows = [r for r in rows
+                if needle in r["subject"].lower() or needle in str(r["value"]).lower()]
     rows.sort(key=lambda r: (r["subject"], str(r["value"])))
+    total = len(rows)
+    rows = rows[offset:offset + limit]
     return {"mode": "predicate", "key": predicate, "rows": rows,
-            "count": len(rows), "total": total, "truncated": total > limit}
+            "count": len(rows), "total": total, "truncated": total > offset + len(rows)}
 
 
-async def _list_relation(gx: GraphHandle, relation: str, limit: int) -> Dict[str, Any]:
-    """Every edge of `relation` (source -> target, both labelled), bounded by `limit`.
+async def _list_relation(gx: GraphHandle, relation: str, limit: int, offset: int = 0,
+                         contains: Optional[str] = None) -> Dict[str, Any]:
+    """Every edge of `relation` (source -> target, both labelled), windowed.
 
     The structure read: `list --relation GATED_BY` shows the dependency edges the
-    readiness projector derives over."""
+    readiness projector derives over. Axis-D parity (dc47dfb5): rows are labelled
+    + sorted BEFORE the window, so `--offset` pages deterministically and
+    `--contains` (source/target substring) filters the class."""
     pairs = await F.load_edge_pairs(gx, relation)
-    total = len(pairs)
-    pairs = pairs[:limit]
     labels = await _labels_for(gx, {p for pair in pairs for p in pair})
     rows = [{"source_id": s, "source": labels.get(s, s),
              "target_id": t, "target": labels.get(t, t)} for s, t in pairs]
+    if contains:
+        needle = contains.lower()
+        rows = [r for r in rows
+                if needle in r["source"].lower() or needle in r["target"].lower()]
     rows.sort(key=lambda r: (r["source"], r["target"]))
+    total = len(rows)
+    rows = rows[offset:offset + limit]
     return {"mode": "relation", "key": relation, "rows": rows,
-            "count": len(rows), "total": total, "truncated": total > limit}
+            "count": len(rows), "total": total, "truncated": total > offset + len(rows)}
 
 
 async def list_graph(
@@ -139,8 +153,8 @@ async def list_graph(
     predicate: Optional[str] = None,  # Enumerate active assertions of this predicate
     relation: Optional[str] = None,   # Enumerate edges of this relation type
     limit: int = 50,                  # Cap the row list (the window size for label mode)
-    offset: int = 0,                  # Label mode: window start (page through big kinds)
-    contains: Optional[str] = None,   # Label mode: title substring filter (case-insensitive)
+    offset: int = 0,                  # Window start — pages EVERY mode deterministically (axis D)
+    contains: Optional[str] = None,   # Substring filter (case-insensitive), every mode
     where: Optional[List[str]] = None,  # Label mode: `PROP=VALUE` property filters (repeatable, ANDed, server-side)
     value: Optional[str] = None,      # Predicate mode: keep only assertions with this value (the register read)
 ) -> Dict[str, Any]:  # {mode, key, rows, count, total, truncated} or {error}
@@ -164,5 +178,6 @@ async def list_graph(
         return await _list_label(gx, key, limit, offset=offset, contains=contains,
                                  where=preds)
     if mode == "predicate":
-        return await _list_predicate(gx, key, limit, value=value)
-    return await _list_relation(gx, key, limit)
+        return await _list_predicate(gx, key, limit, offset=offset, value=value,
+                                     contains=contains)
+    return await _list_relation(gx, key, limit, offset=offset, contains=contains)

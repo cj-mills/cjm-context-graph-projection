@@ -23,9 +23,10 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - **`cjm_context_graph_projection.lens`** — Lenses: graph-carried, parameterized views (DEC `f1b02b95` — tier 2 of the
 - **`cjm_context_graph_projection.listing`** — Structured enumeration: every node of a LABEL / assertion of a PREDICATE / edge of a RELATION.
 - **`cjm_context_graph_projection.module_ops`** — Module-edit ops — create / rename / delete / regroup a module as graph edge ops.
-- **`cjm_context_graph_projection.onboarding`** — Project the MEMORY onboarding surface from the dev graph (the dev driver).
+- **`cjm_context_graph_projection.onboarding`** — Project the MEMORY onboarding surface from the graph's ASSERTED lead structure.
 - **`cjm_context_graph_projection.oracle`** — The version oracle: a programmatic Procedure that keeps `version` slots fresh.
 - **`cjm_context_graph_projection.projection`** — The projection core: schema / show / relevance / state over a context graph.
+- **`cjm_context_graph_projection.prose_refs`** — Prose-ref drift: id-shaped tokens in asserted prose vs the edge layer.
 - **`cjm_context_graph_projection.readiness`** — The readiness frontier: which work-items are READY vs BLOCKED — derived, never stored.
 - **`cjm_context_graph_projection.readme`** — README-as-projection (v1, STRUCTURAL-ONLY): generate a repo's README FROM THE GRAPH.
 - **`cjm_context_graph_projection.reconcile`** — M2b shadow-phase RECONCILE — surface + (explicitly) absorb out-of-band `.md` edits.
@@ -126,6 +127,8 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `classify_filing` _function_ — Pure: partition open items into filed/unfiled and score anchor proposals.
 - `derive_anchors` _function_ — The program-anchor set: subjects whose ACTIVE `role` is one of ANCHOR_ROLES.
 - `filing` _function_ — The derived filing report over task_state subjects + PART_OF/REFERENCES/SHAPES edges.
+- `near_duplicate_scores` _function_ — IDF-weighted token-set cosine between a new statement and existing items.
+- `near_duplicates` _function_ — Mint-time near-duplicate proposals over the OPEN work-item population.
 
 ### `cjm_context_graph_projection.journal`
 
@@ -133,6 +136,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `journal_window` _function_ — The journal-window projection: which nodes a window/session touched, when, how.
 - `journal_window_view` _function_ — The SESSION LENS read verb: `journal_window` + graph join (title/label per ref).
 - `m3_baseline_import` _function_ — One-time M3 GENESIS IMPORT: emit a per-note `new-note` baseline op into the journal.
+- `node_journal_trace` _function_ — One node's journal TRACE: created/updated + session keys + actors (axis D).
 - `replay_journal` _function_ — Re-apply every journaled write through its core verb (idempotent).
 - `touched_node_ids` _function_ — Best-effort node refs a journaled op touched — the session-lens feed (2f51ff5d).
 
@@ -161,7 +165,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 
 ### `cjm_context_graph_projection.onboarding`
 
-- `project_onboarding` _function_ — Project the onboarding surface from the graph's `Note` nodes + the dev seeds.
+- `project_onboarding` _function_ — Project the onboarding surface by WALKING the asserted lead structure.
 
 ### `cjm_context_graph_projection.oracle`
 
@@ -185,6 +189,11 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `show` _function_ — One node in full, with its immediate neighbours + the relation to each.
 - `state` _function_ — Graph overview (no subject) or a subject's effective view (`show`).
 - `subgraph_view` _function_ — The BULK read verb: a node SET -> nodes + interconnecting edges, batched.
+
+### `cjm_context_graph_projection.prose_refs`
+
+- `extract_id_tokens` _function_ — Id-shaped tokens in prose: 8-hex prefixes / full UUIDs, ordered, deduped.
+- `prose_refs` _function_ — The prose-ref drift audit over asserted Decisions + Notes (pure read).
 
 ### `cjm_context_graph_projection.readiness`
 
