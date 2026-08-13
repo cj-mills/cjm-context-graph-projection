@@ -118,6 +118,8 @@ async def readiness(
     state: Optional[str] = None,  # None = bounded default · ready|blocked|done = one bucket, paged · all = the full dump (viz/lens feed)
     limit: int = 15,              # Page size (and the bounded default's ready top-K)
     offset: int = 0,              # Page start within the selected bucket (paged states only)
+    assertions: Optional[List[Any]] = None,  # Preloaded Assertion nodes (one load per VIEW — f4701770)
+    supers: Optional[Any] = None,            # Preloaded supersedes, same reason
 ) -> Dict[str, Any]:  # {ready, blocked, done, closable, drift, counts, view}
     """The derived ready/blocked/done frontier over authored `task_state` + `GATED_BY` edges.
 
@@ -125,8 +127,8 @@ async def readiness(
     reserved synonym `BLOCKED_BY`), classifies, then decorates each entry with a
     display label. `scope` narrows to work-items whose label matches (the frontier
     is small, but the dependency forest will grow)."""
-    assertions = await F.load_assertions(gx)
-    supers = await F.load_supersedes(gx)
+    assertions = assertions if assertions is not None else await F.load_assertions(gx)
+    supers = supers if supers is not None else await F.load_supersedes(gx)
     task_state = _active_task_states(assertions, supers)
 
     gate_pairs = (await F.load_edge_pairs(gx, DevRelations.GATED_BY)

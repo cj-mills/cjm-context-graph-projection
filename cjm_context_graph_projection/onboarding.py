@@ -208,6 +208,8 @@ def _pin_target(value: str) -> Tuple[str, str]:
 
 async def _lead_structure(
     gx: Any,  # The open graph context
+    assertions: Optional[List[Any]] = None,  # Preloaded Assertion nodes (one load per VIEW — f4701770)
+    supers: Optional[Any] = None,            # Preloaded supersedes, same reason
 ) -> Dict[str, Any]:  # {roles, pins, priority, statuses, lock_of}
     """Load the ASSERTED lead structure once: roles, pins, priorities, statuses, locks.
 
@@ -215,8 +217,8 @@ async def _lead_structure(
     -> per-anchor (role, value) pin lists; `priority` -> the judgment tags;
     `<value>-status` -> per-register status maps (e.g. model-status). Locks
     resolve via ABOUT edges from `role=lock` notes to their anchors."""
-    assertions = await F.load_assertions(gx)
-    supers = await F.load_supersedes(gx)
+    assertions = assertions if assertions is not None else await F.load_assertions(gx)
+    supers = supers if supers is not None else await F.load_supersedes(gx)
     roles: Dict[str, str] = {}
     pins: Dict[str, List[Tuple[str, str]]] = {}
     priority: Dict[str, str] = {}

@@ -70,6 +70,12 @@ def _subgraph_lines(obj: Dict[str, Any]) -> List[str]:
 
 def _human(kind: str, obj: Dict[str, Any]) -> str:
     """Render a result dict as markdown, dispatched on the command kind."""
+    if kind == "portfolio":
+        return _render_portfolio(obj)
+    if kind == "lead":
+        return _render_lead(obj)
+    if kind == "feed":
+        return _render_feed(obj)
     if kind == "subgraph":
         if obj.get("error"):
             return f"⚠ {obj['error']}"
@@ -1024,3 +1030,113 @@ def _journal_receipt_line(rec: Dict[str, Any]) -> str:
     head = "PREVIEW — would journal" if not rec.get("written") else "journal-first"
     op = f" [{rec['op']}]" if rec.get("op") else ""
     return f"  ↳ {head}{op}: " + " · ".join(bits)
+
+
+def _render_portfolio(obj: Dict[str, Any]) -> str:
+    """The workbench front door, rendered: one block per anchor, portfolio first."""
+    c = obj.get("counts", {})
+    unfiled = f" · unfiled {c['unfiled']}" if "unfiled" in c else ""
+    lines = ["## Portfolio — front door",
+             f"_ready {c.get('ready', 0)} · blocked {c.get('blocked', 0)} · "
+             f"done {c.get('done', 0)} · closable {c.get('closable', 0)}{unfiled}_", ""]
+    anchors = sorted(obj.get("anchors", []), key=lambda a: a.get("role") != "portfolio")
+    slugs = {a["id"]: a.get("slug", a["id"][:8]) for a in anchors}
+    for a in anchors:
+        v = a.get("vitals", {})
+        lines.append(f"### `{a.get('slug')}` — {a.get('title', '')}")
+        vbits = [f"ready {v.get('ready', 0)}", f"blocked {v.get('blocked', 0)}",
+                 f"closable {v.get('closable', 0)}", f"findings {v.get('findings', 0)}",
+                 f"pins {a.get('pins', 0)}"]
+        if a.get("last_touch"):
+            vbits.append(f"last touch {_fmt_ts(a['last_touch'])}")
+        lines.append("_" + " · ".join(vbits) + "_")
+        lock = a.get("lock")
+        if lock is None:
+            lines.append("⚠ NO LOCK asserted — author a `role=lock` note ABOUT this anchor")
+        elif lock.get("error"):
+            lines.append(f"⚠ lock `{lock['id'][:8]}` unreadable: {lock['error']}")
+        else:
+            lead = " ".join(str(lock.get("lead", "")).split())
+            if len(lead) > 240:  # the HUMAN profile bounds; --agent JSON stays full
+                lead = lead[:239].rstrip() + "…"
+            lines.append(f"{lead}  ↳ `lead {a.get('slug')}`")
+        lines.append("")
+    links = obj.get("links", [])
+    if links:
+        lines.append("**Links:** " + " · ".join(
+            f"{slugs.get(l['source'], l['source'][:8])} —{l['relation']}→ "
+            f"{slugs.get(l['target'], l['target'][:8])}" for l in links))
+    return "\n".join(lines).rstrip()
+
+
+def _render_lead(obj: Dict[str, Any]) -> str:
+    """One anchor's pin tree, rendered: lock body + role-typed pins + registers."""
+    if obj.get("error"):
+        return f"⚠ {obj['error']}"
+    a = obj.get("anchor", {})
+    lines = [f"## Lead — `{a.get('slug')}` ({a.get('role')})", f"**{a.get('title', '')}**", ""]
+    lock = obj.get("lock")
+    if lock is None:
+        lines.append("_(NO LOCK NOTE asserted for this anchor)_")
+    elif lock.get("error"):
+        lines.append(f"⚠ lock `{lock['id'][:8]}` unreadable: {lock['error']}")
+    else:
+        lines.append(f"**Lock** `{lock['id'][:8]}`:")
+        lines.append(lock.get("body", ""))
+    pins = obj.get("pins", [])
+    if pins:
+        lines.append("")
+        lines.append("**Pins:**")
+        for p in pins:
+            if p.get("missing"):
+                lines.append(f"- `[{p['role']}]` ⚠ MISSING pin target `{p['id']}` — {p.get('gloss', '')}")
+            else:
+                lines.append(f"- `[{p['role']}]` **{p.get('title', '')}** — {p.get('gloss', '')}"
+                             f"  ↳ `show {p['id'][:8]}`")
+    for reg in obj.get("registers", []):
+        if reg.get("missing"):
+            lines.append(f"- `[register]` ⚠ MISSING hub `{reg['id']}`")
+            continue
+        members = " · ".join(
+            str(m.get("title", "")) + (f" ({m['status']})" if m.get("status") else "")
+            for m in reg.get("members", [])) or "_(no role-asserted members)_"
+        lines.append(f"- `[register]` **{reg.get('title', '')}** — {members}  ↳ `show {reg['id'][:8]}`")
+    return "\n".join(lines)
+
+
+def _render_feed(obj: Dict[str, Any]) -> str:
+    """The two-zoom session feed, rendered: op ledger, then touched-node cards.
+
+    The `cursor` prints RAW (a float) so the next poll can pass it back to
+    `--since` verbatim — wall-clock is for humans, the cursor is plumbing."""
+    w = obj.get("window", {})
+    head = []
+    if w.get("session"):
+        head.append(f"session `{w['session']}`")
+    if w.get("since"):
+        head.append(f"since {_fmt_ts(w['since'])}")
+    head.append(f"{w.get('shown', 0)} of {w.get('total_ops', 0)} op(s)")
+    if w.get("cursor"):
+        head.append(f"cursor `{w['cursor']}`")
+    lines = ["## Feed — " + " · ".join(head)]
+    for op in obj.get("ops", []):
+        refs = ", ".join(
+            (f"⚠ {r['ref'][:8]}" if r.get("missing") else str(r.get("title") or r.get("ref", "?"))[:40])
+            for r in op.get("refs", []))
+        actor = f" {op['actor']}" if op.get("actor") else ""
+        summary = f" — {op['summary']}" if op.get("summary") else ""
+        target = f" → {refs}" if refs else ""
+        lines.append(f"- {_fmt_ts(op['ts'])} **{op['verb']}**{actor}{summary}{target}")
+    cards = obj.get("cards", [])
+    if cards:
+        missing = f", ⚠ {obj['missing']} missing" if obj.get("missing") else ""
+        lines.append("")
+        lines.append(f"### Touched ({len(cards)}{missing})")
+        for card in cards:
+            verbs = " ".join(f"{v}×{n}" for v, n in (card.get("verbs") or {}).items())
+            title = card.get("title") or card.get("ref", "?")
+            miss = "⚠ MISSING " if card.get("missing") else ""
+            label = f" _{card['label']}_" if card.get("label") else ""
+            lines.append(f"- {miss}**{title}**{label} — ×{card.get('touches', 0)} ({verbs}) "
+                         f"{_fmt_ts(card.get('first_ts'))} → {_fmt_ts(card.get('last_ts'))}")
+    return "\n".join(lines)

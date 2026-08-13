@@ -16,12 +16,13 @@ binary" tension). Replay is idempotent: every write verb has deterministic ids, 
 re-applying the log collides into verified no-ops.
 """
 
+import json
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from cjm_context_graph_layer.ops import PROVENANCE_TS
-from cjm_context_graph_primitives.journal import append_write, read_journal
+from cjm_context_graph_primitives.journal import append_write, journal_segments, read_journal
 from cjm_dev_graph_schema.identity import (code_module_node_id, note_node_id, section_node_id,
                                            session_node_id)
 from cjm_dev_graph_schema.nodes import DecisionNode
@@ -338,7 +339,9 @@ def journal_window(
     re-evaluatable — an OPEN end is live mode, re-evaluate on append; evaluate the
     same window at T for time-travel). Session matching prefers the top-level
     provenance stamp and falls back to a `decide` op's `args.session` (the sparse
-    pre-cutover tagging), so one filter spans both eras."""
+    pre-cutover tagging), so one filter spans both eras. Reads ride the segment
+    touch-row cache (f4701770): rotated segments never re-parse, the live tail
+    re-derives on append — the projection stays declarative over rows."""
     # DEC 6124d8bf resolution order: post-cutover ops match by TAG; HISTORICAL ops
     # (no stamp) match by the session's WINDOW [started_at, next session's start).
     # The windows are journal-derived too — the retrofit/live `session` ops carry
@@ -350,10 +353,9 @@ def journal_window(
         for path in paths:
             if not path:
                 continue
-            for op in read_journal(path):
-                a = op.get("args") or {}
-                if op.get("verb") == "session" and a.get("key") and a.get("started_at") is not None:
-                    starts[a["key"]] = float(a["started_at"])  # upsert: last op wins
+            for row in journal_touch_rows(path):
+                if row["session_key"] and row["started_at"] is not None:
+                    starts[row["session_key"]] = float(row["started_at"])  # upsert: last op wins
         if session in starts:
             win_start = starts[session]
             later = [t for t in starts.values() if t > win_start]
@@ -364,21 +366,21 @@ def journal_window(
     for path in paths:
         if not path:
             continue
-        for op in read_journal(path):
-            ts = float(op.get("ts") or 0.0)
+        for row in journal_touch_rows(path):
+            ts = row["ts"]
             if start is not None and ts < start:
                 continue
             if end is not None and ts > end:
                 continue
             if session is not None:
-                tag = op.get("session") or (op.get("args") or {}).get("session")
+                tag = row["session"] or row["args_session"]
                 in_window = (win_start is not None and ts >= win_start
                              and (win_end is None or ts < win_end))
                 if tag != session and not in_window:
                     continue
             entries += 1
-            verb = op.get("verb") or "?"
-            for ref in touched_node_ids(op):
+            verb = row["verb"]
+            for ref in row["refs"]:
                 rec = per.setdefault(ref, {"ref": ref, "verbs": {}, "touches": 0,
                                            "first_ts": ts, "last_ts": ts})
                 rec["touches"] += 1
@@ -443,7 +445,10 @@ def node_journal_trace(
     Nodes carry no created_at — the JOURNAL is the timeline authority, so the
     curated `show` derives its metadata line here. TOUCHES, not creations
     (an `author`/`assert` on an old node updates last_ts), matched through
-    `touched_node_ids` exactly as the session lens matches; best-effort like it."""
+    `touched_node_ids` exactly as the session lens matches; best-effort like it.
+    Reads ride the segment touch-row cache (f4701770) — refs are often DERIVED
+    (a decide's statement hash, a module path's id), so there is no sound raw-line
+    prefilter; the derived rows are the reusable form."""
     first: Optional[float] = None
     last: Optional[float] = None
     sessions: List[str] = []
@@ -452,20 +457,72 @@ def node_journal_trace(
     for path in paths:
         if not path or not Path(path).exists():
             continue
-        for op in read_journal(path):
-            refs = touched_node_ids(op)
+        for row in journal_touch_rows(path):
+            refs = row["refs"]
             if not any(r == node_id or (len(r) >= 6 and node_id.startswith(r)) for r in refs):
                 continue
             count += 1
-            ts = op.get("ts")
-            if isinstance(ts, (int, float)) and ts > 0:
-                first = float(ts) if first is None else min(first, float(ts))
-                last = float(ts) if last is None else max(last, float(ts))
-            s = op.get("session")
+            ts = row["ts"]
+            if ts > 0:
+                first = ts if first is None else min(first, ts)
+                last = ts if last is None else max(last, ts)
+            s = row["session"]
             if s and s not in sessions:
                 sessions.append(s)
-            a = (op.get("args") or {}).get("actor")
+            a = row["actor"]
             if a and a not in actors:
                 actors.append(a)
     return {"first_ts": first, "last_ts": last, "sessions": sessions,
             "actors": actors, "op_count": count}
+
+
+def _segment_touch_rows(seg: str) -> List[Dict[str, Any]]:
+    """One segment's ops as DERIVED touch rows, cached by (size, mtime).
+
+    A row keeps only what the trace/window projections read — verb, ts, session
+    stamps, actor, the session-verb key, and `touched_node_ids` refs — never the
+    op payload, so the cache stays small while skipping the expensive part
+    (json-decoding module snapshots + re-deriving ids) on every repeat read.
+    Rotated segments are IMMUTABLE, so their rows never recompute; the live
+    tail invalidates on append (size changes). Latency item f4701770: this was
+    ~200ms of EVERY show/portfolio pull in a long-lived seat."""
+    p = Path(seg)
+    try:
+        st = p.stat()
+    except OSError:
+        return []
+    key = (st.st_size, st.st_mtime)
+    hit = _TOUCH_ROWS_CACHE.get(seg)
+    if hit and hit[0] == key:
+        return hit[1]
+    rows: List[Dict[str, Any]] = []
+    for line in p.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        op = json.loads(line)
+        a = op.get("args") or {}
+        verb = op.get("verb") or "?"
+        rows.append({"verb": verb,
+                     "ts": float(op.get("ts") or 0.0),
+                     "session": op.get("session"),
+                     "args_session": a.get("session"),
+                     "actor": a.get("actor"),
+                     "session_key": a.get("key") if verb == "session" else None,
+                     "started_at": a.get("started_at") if verb == "session" else None,
+                     "refs": touched_node_ids(op)})
+    _TOUCH_ROWS_CACHE[seg] = (key, rows)
+    return rows
+
+
+def journal_touch_rows(path: str) -> List[Dict[str, Any]]:
+    """A journal's touch rows across its whole segment family (cold first,
+    live tail last — `read_journal` order), served from the segment cache."""
+    rows: List[Dict[str, Any]] = []
+    for seg in journal_segments(path):
+        rows.extend(_segment_touch_rows(seg))
+    return rows
+
+
+# Per-segment derived touch-row cache: {segment path -> ((size, mtime), rows)}.
+_TOUCH_ROWS_CACHE: Dict[str, Tuple[Tuple[int, float], List[Dict[str, Any]]]] = {}

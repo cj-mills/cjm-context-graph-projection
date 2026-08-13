@@ -23,6 +23,18 @@ class FakeGraph:
             return self.nodes.get(kw["node_id"])
         if op == "find_nodes_by_label":
             return [n for n in self.nodes.values() if n["label"] == kw["label"]]
+        if op == "query_nodes":
+            q = kw["query"]
+            rows = list(self.nodes.values())
+            if q.get("ids") is not None:
+                rows = [n for n in rows if n["id"] in set(q["ids"])]
+            if q.get("label"):
+                rows = [n for n in rows if n["label"] == q["label"]]
+            for p in q.get("where") or []:
+                assert p["op"] == "eq", f"fake supports eq only (got {p['op']})"
+                rows = [n for n in rows
+                        if (n.get("properties") or {}).get(p["prop"]) == p["value"]]
+            return {"nodes": rows}
         if op == "add_nodes":
             for n in kw["nodes"]:
                 self.nodes[n["id"]] = n

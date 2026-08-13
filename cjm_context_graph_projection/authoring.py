@@ -39,6 +39,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from cjm_context_graph_layer.grammar import make_edge
 from cjm_context_graph_layer.ops import graph_task
 from cjm_context_graph_primitives.provenance import SourceRef
+from cjm_context_graph_primitives.query import PropertyPredicate
 from cjm_dev_graph_schema.nodes import CodeSymbolNode
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 from cjm_markdown_decompose_core.extract import note_from_file
@@ -145,9 +146,9 @@ async def _module_region_wires(
     """All of a .py module's region nodes (top-level symbols + code-text), as wire dicts."""
     out: List[Dict[str, Any]] = []
     for label in (DevNodeKinds.CODE_SYMBOL, DevNodeKinds.CODE_TEXT):
-        for n in await F.load_label(gx, label):
-            if F.prop(n, "module_id") == module_id:
-                out.append(_as_wire(n, label))
+        for n in await F.load_label_where(
+                gx, label, [PropertyPredicate("module_id", "eq", module_id)]):
+            out.append(_as_wire(n, label))
     return out
 
 
@@ -203,8 +204,9 @@ async def _note_section_wires(
 ) -> List[Dict[str, Any]]:  # Section wire dicts for one Note (whole-note reconstruction)
     """All of a Note's Section nodes, as wire dicts (carrying `raw`/`order`)."""
     return [_as_wire(n, DevNodeKinds.SECTION)
-            for n in await F.load_label(gx, DevNodeKinds.SECTION)
-            if F.prop(n, "note_id") == note_id]
+            for n in await F.load_label_where(
+                gx, DevNodeKinds.SECTION,
+                [PropertyPredicate("note_id", "eq", note_id)])]
 
 
 async def read_node(

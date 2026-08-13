@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from cjm_context_graph_layer.ops import extend_graph, graph_task
 from cjm_context_graph_primitives.journal import append_write, read_journal
 from cjm_context_graph_primitives.provenance import SourceRef
+from cjm_context_graph_primitives.query import PropertyPredicate
 from cjm_dev_graph_schema.identity import code_module_node_id
 from cjm_dev_graph_schema.nodes import CodeModuleNode
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
@@ -106,9 +107,9 @@ async def _module_subtree_ids(gx: GraphHandle, module_id: str) -> List[str]:
     notebook cells) — the ids to drop so a rename/delete leaves no stale, resurrectable node."""
     ids = [module_id]
     for label in (DevNodeKinds.CODE_SYMBOL, DevNodeKinds.CODE_TEXT, DevNodeKinds.CELL):
-        for n in await F.load_label(gx, label):
-            if F.prop(n, "module_id") == module_id:
-                ids.append(F.nid(n))
+        for n in await F.load_label_where(
+                gx, label, [PropertyPredicate("module_id", "eq", module_id)]):
+            ids.append(F.nid(n))
     return ids
 
 

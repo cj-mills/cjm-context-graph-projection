@@ -44,12 +44,13 @@ from .projection import (explore, full_graph_view, get_schema, grep, locate, rel
 from .prose_refs import prose_refs
 from .readiness import readiness
 from .readme import project_readme
+from .reads import configure_reads, record_read
 from .reconcile import reconcile_memory
 from .refactor import refactor_candidates
 from .refactor_ops import move
 from .registers import register_drift
 from .rename_ops import rename_symbol
-from .render import render
+from .render import render as _render_base
 from .runtime import DEFAULT_MANIFESTS, open_graph
 from .seeds import repo_dir_name
 from .serve import serve_graphs
@@ -57,6 +58,7 @@ from .source_state import (absorb_authored_text, cutover_module, emit_source_art
                            graph_sourced_modules, source_check)
 from .structure import add_section, new_note
 from .viz import project_viz
+from .workbench import anchor_lead_view, portfolio_view, session_feed
 from .worklist import dangling_reference_sources, worklist
 from .write import add_check, alias, assert_value, decide, link, register_session, unlink
 
@@ -80,26 +82,21 @@ DEFAULT_CODE_LIBS = ("cjm-dev-graph-schema", "cjm-markdown-decompose-core",
                      # DEC 18d7de80): interface + capability, both editable
                      # until their publish slots in the window after 07-28.
                      "cjm-speaker-diarization-adapter-interface",
-                     "cjm-capability-pyannote")
-# The substrate core is nbdev — ingest its NOTEBOOKS (the source), with cross-cell
-# @patch/incremental methods re-attributed to their true classes by the compositor.
-DEFAULT_NOTEBOOK_LIBS = ("cjm-substrate", "cjm-transcription-core",
-                         "cjm-transcript-decomp-core",
-                         "cjm-transcript-correction-core",
-                         # c25780e8 bulk sweep (DEC 5a7c2af7): the in-scope
-                         # still-nbdev ecosystem deps, transitioning.
-                         "cjm-capability-demucs", "cjm-capability-ffmpeg",
-                         "cjm-capability-graph-sqlite",
-                         "cjm-capability-monitor-nvidia",
-                         "cjm-capability-primitives",
-                         "cjm-capability-qwen3-forced-aligner",
-                         "cjm-capability-silero-vad",
-                         "cjm-capability-voxtral-hf", "cjm-capability-whisper",
-                         "cjm-context-graph-layer",
-                         "cjm-context-graph-primitives",
-                         "cjm-substrate-hf-utils", "cjm-substrate-torch-utils",
-                         "cjm-transcript-graph-schema",
-                         "cjm-transcription-adapter-interface")
+                     "cjm-capability-pyannote",
+                     # Workbench round (833d27e4): the graph-workbench TUI,
+                     # born-on-graph 2026-08-11.
+                     "cjm-graph-workbench-tui",
+                     # Qt pilot (d2a6d8e1, DEC 1e5b9a76): the PySide6 lane's
+                     # slab-1 spike, born-on-graph 2026-08-13.
+                     "cjm-graph-workbench-qt")
+# Repos whose NOTEBOOKS are the ingest source (cross-cell @patch/incremental methods
+# re-attributed to their true classes by the compositor). EMPTY since the 2026-08-13
+# audit: every lib the c25780e8/5a7c2af7-era list carried is now graph-sourced .py
+# (0 notebooks repo-wide, cjm-substrate included). The five still-notebook adapter
+# interfaces (forced-alignment / graph-storage / media-processing / source-separation
+# / vad) were never listed and stay out of ingest scope until their on-graph
+# transition. The whole DEFAULT_* block migrates to config under a1d965b0.
+DEFAULT_NOTEBOOK_LIBS = ()
 
 # Pillar-1 seam registry (DEC 6ee4b4f2): every CLI verb that can MUTATE source files on
 # disk, mapped to whether its implementation routes through `journaled_emit` (events
@@ -343,6 +340,21 @@ async def _dispatch(args) -> int:
             res = await subgraph_view(gx, args.refs, hops=args.hops,
                                       relations=args.relation, cap=args.cap)
             print(render("subgraph", res, args.format))
+        elif args.command == "portfolio":
+            paths = [p for p in (args.journal_path, args.source_journal_path) if p]
+            print(render("portfolio", await portfolio_view(gx, journal_paths=paths),
+                         args.format))
+        elif args.command == "lead":
+            print(render("lead", await anchor_lead_view(gx, args.anchor), args.format))
+        elif args.command == "feed":
+            paths = [p for p in (args.journal_path, args.source_journal_path) if p]
+            if not paths:
+                print("error: feed needs --journal-path (and usually "
+                      "--source-journal-path — code touches live there)", file=sys.stderr)
+                return 1
+            res = await session_feed(gx, paths, session=args.session,
+                                     since=_parse_ts(args.since), limit=args.limit)
+            print(render("feed", res, args.format))
         elif args.command == "export":
             res = await full_graph_view(gx)
             print(render("export", res, args.format))
@@ -788,6 +800,11 @@ def main() -> int:
                          "(shadow): a SEPARATE stream from --journal-path (public code source "
                          "state vs private planning). Used by flip-module / source-check. No default.")
     ap.add_argument("--format", choices=("human", "agent"), default="human")
+    ap.add_argument("--reads-path", default=None,
+                    help="Content-access READS ledger (JSONL): given, every rendered read "
+                         "appends {verb, delivered ids, n, request, session} — a SEPARATE "
+                         "prunable telemetry stream, never the write journal (DEC 45df767d). "
+                         "No default (cg-read bakes it).")
     sub = ap.add_subparsers(dest="command", required=True)
 
     p_ing = sub.add_parser("ingest", help="Build/refresh the dev graph (idempotent)")
@@ -926,6 +943,24 @@ def main() -> int:
                       help="Window end (same forms; omit = OPEN — the in-progress live window)")
     p_jw.add_argument("--session", default=None,
                       help="Filter by session key instead of/alongside time bounds")
+
+    p_pf = sub.add_parser("portfolio",
+                          help="Workbench front door: every role-asserted anchor + lock lead "
+                               "line + derived vitals (per-anchor frontier counts, pins, "
+                               "last touch) + anchor-to-anchor links")
+    p_ld = sub.add_parser("lead",
+                          help="One anchor's lead as STRUCTURE: lock body + role-typed pins "
+                               "+ registers expanded (the navigable pin tree)")
+    p_ld.add_argument("anchor", help="Anchor slug, full id, or id prefix (>= 6 hex chars)")
+    p_fd = sub.add_parser("feed",
+                          help="The two-zoom session feed: op ledger + touched-node cards "
+                               "(open end = live; poll by re-passing the printed cursor)")
+    p_fd.add_argument("--session", default=None, help="Session key filter")
+    p_fd.add_argument("--since", default=None,
+                      help="EXCLUSIVE cursor: unix ts, YYYY-MM-DD_HH-MM-SS, or YYYY-MM-DD "
+                           "— only ops strictly after it")
+    p_fd.add_argument("--limit", type=int, default=200,
+                      help="Ledger rows returned, newest kept (default 200)")
 
     p_sg = sub.add_parser("subgraph",
                           help="BULK read: a node SET (ids/prefixes) -> nodes + interconnecting "
@@ -1286,11 +1321,13 @@ def main() -> int:
     p_vz.add_argument("--write", action="store_true", help="Write the HTML to --out")
 
     args = ap.parse_args()
+    configure_reads(args.reads_path, request=_read_request(args))
     return asyncio.run(_dispatch(args))
 
 
-if __name__ == "__main__":
-    sys.exit(main())
+# The __main__ dispatch was demoted from here to a TAIL region (2026-08-13): under
+# `python -m` regions execute in slot order, so the dispatch must follow every def —
+# this module's tail symbols post-date the region and a mid-file region can't be reordered.
 
 
 def _parse_ts(value: Optional[str]) -> Optional[float]:  # Unix seconds, or None
@@ -1310,3 +1347,29 @@ def _parse_ts(value: Optional[str]) -> Optional[float]:  # Unix seconds, or None
             continue
     raise SystemExit(f"error: can't parse time '{value}' "
                      "(unix seconds, YYYY-MM-DD_HH-MM-SS, or YYYY-MM-DD)")
+
+
+def render(kind: str, data, fmt: str) -> str:
+    """The read-delivery seam: tap the reads ledger, then delegate to the real
+    renderer. Shadows the imported render ON PURPOSE — every verb branch that
+    renders routes through here BY CONSTRUCTION (the 6124d8bf coverage doctrine:
+    no per-verb call to forget), so a future verb is recorded the day it lands."""
+    record_read(kind, data)
+    return _render_base(kind, data, fmt)
+
+
+def _read_request(args) -> Dict[str, str]:
+    """The identifying request params for a read event — what was asked for
+    (the ledger's `ids` say what was delivered)."""
+    keys = ("node_id", "term", "task", "subject", "scope", "session", "state",
+            "contains", "refs", "slug", "anchor", "label", "predicate", "relation")
+    out = {}
+    for k in keys:
+        v = getattr(args, k, None)
+        if v not in (None, "", []):
+            out[k] = v if isinstance(v, str) else json.dumps(v, default=str)
+    return out
+
+
+if __name__ == "__main__":  # runtime-order: must trail every def (python -m executes in slot order)
+    sys.exit(main())
