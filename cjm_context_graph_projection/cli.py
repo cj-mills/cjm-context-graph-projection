@@ -88,7 +88,13 @@ DEFAULT_CODE_LIBS = ("cjm-dev-graph-schema", "cjm-markdown-decompose-core",
                      "cjm-graph-workbench-tui",
                      # Qt pilot (d2a6d8e1, DEC 1e5b9a76): the PySide6 lane's
                      # slab-1 spike, born-on-graph 2026-08-13.
-                     "cjm-graph-workbench-qt")
+                     "cjm-graph-workbench-qt",
+                     # Transcription migration (DEC dcf8a712): the first workflow
+                     # TUI on the Qt lane, born-on-graph 2026-08-14.
+                     "cjm-transcription-qt",
+                     # The shared Qt foundation lib (DEC c4b0d6e5: minted at the
+                     # first real duplication), born-on-graph 2026-08-14.
+                     "cjm-substrate-qt-kit")
 # Repos whose NOTEBOOKS are the ingest source (cross-cell @patch/incremental methods
 # re-attributed to their true classes by the compositor). EMPTY since the 2026-08-13
 # audit: every lib the c25780e8/5a7c2af7-era list carried is now graph-sourced .py
