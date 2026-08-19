@@ -97,7 +97,18 @@ DEFAULT_CODE_LIBS = ("cjm-dev-graph-schema", "cjm-markdown-decompose-core",
                      "cjm-substrate-qt-kit",
                      # Decomp migration (DEC 6c574c89): the second workflow
                      # TUI on the Qt lane, born-on-graph 2026-08-15.
-                     "cjm-transcript-decomp-qt")
+                     "cjm-transcript-decomp-qt",
+                     # Correction migration (DEC 0f11683d): the third workflow
+                     # TUI on the Qt lane — the direct port, born-on-graph
+                     # 2026-08-15.
+                     "cjm-transcript-correction-qt",
+                     # Hub migration (DEC 61b46ae8): the Qt front door — the
+                     # last migration repo, spawn-not-suspend, born-on-graph
+                     # 2026-08-15.
+                     "cjm-workflow-hub-qt",
+                     # Composition seat v0 (DECs 2a062aff + ea85eab7): the
+                     # session scratchpad, born-on-graph 2026-08-19.
+                     "cjm-session-scratchpad-qt")
 # Repos whose NOTEBOOKS are the ingest source (cross-cell @patch/incremental methods
 # re-attributed to their true classes by the compositor). EMPTY since the 2026-08-13
 # audit: every lib the c25780e8/5a7c2af7-era list carried is now graph-sourced .py
