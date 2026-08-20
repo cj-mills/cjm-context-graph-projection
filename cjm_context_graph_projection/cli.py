@@ -24,6 +24,7 @@ from cjm_context_graph_primitives.journal import append_write, read_journal
 from .authoring import add_symbol, author, emit_artifact, read_node, read_slot
 from .code_edges import orphaned_edges
 from .cohesion import cohesion
+from .config import load_graph_config
 from .contradictions import contradictions
 from .conventions import conventions
 from .devgraph import build_dev_graph_elements, notes_corpus_elements
@@ -820,6 +821,28 @@ async def _dispatch(args) -> int:
         return 0
 
 
+def _apply_graph_config(args) -> None:
+    """Overlay the graph-sibling config onto parsed args (config = DATA,
+    a1d965b0): an EXPLICIT flag always wins; a value still at its baked
+    scaffolding default is replaced by the config's answer. code_libs /
+    notebook_libs feed ingest's repo inventory; the DEFAULT_* constants
+    remain only the absent-config fallback."""
+    if not getattr(args, "graph_db_path", None):
+        return
+    cfg = load_graph_config(args.graph_db_path)
+    if not cfg:
+        return
+    for key, attr, baked in (("code_libs", "code_lib", None),
+                             ("notebook_libs", "notebook_lib", None),
+                             ("memory_dir", "memory_dir", DEFAULT_MEMORY),
+                             ("repos_dir", "repos_dir", DEFAULT_REPOS),
+                             ("manifests_dir", "manifests_dir", DEFAULT_MANIFESTS)):
+        if key in cfg and hasattr(args, attr):
+            current = getattr(args, attr)
+            if (not current) if baked is None else (current == baked):
+                setattr(args, attr, cfg[key])
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(prog="cjm-context-graph",
                                  description="Projection/navigation + write surface over a context graph.")
@@ -1355,6 +1378,7 @@ def main() -> int:
     p_vz.add_argument("--write", action="store_true", help="Write the HTML to --out")
 
     args = ap.parse_args()
+    _apply_graph_config(args)
     configure_reads(args.reads_path, request=_read_request(args))
     return asyncio.run(_dispatch(args))
 
