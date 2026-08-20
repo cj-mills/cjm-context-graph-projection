@@ -61,7 +61,8 @@ from .structure import add_section, new_note
 from .viz import project_viz
 from .workbench import anchor_lead_view, portfolio_view, session_feed
 from .worklist import dangling_reference_sources, worklist
-from .write import add_check, alias, assert_value, decide, link, register_session, unlink
+from .write import (add_check, alias, assert_value, decide, link, register_session, retract_session,
+                    unlink)
 
 DEFAULT_MEMORY = ("/home/innom-dt/.claude/projects/"
                   "-mnt-SN850X-8TB-EXT4-Projects-GitHub-cj-mills-cjm-substrate/memory")
@@ -521,6 +522,27 @@ async def _dispatch(args) -> int:
                 append_write(args.journal_path, "session",
                              {"key": args.key, "started_at": started, "title": args.title,
                               "actor": args.actor})
+            return 1 if res.get("error") else 0
+        elif args.command == "retract-session":
+            # Emptiness guard CALLER-side (the verb + replay apply unconditionally):
+            # any journaled op attributed to the key besides its own registrations
+            # means the session is real history — refuse without --force.
+            paths = [p for p in (args.journal_path, args.source_journal_path) if p]
+            foreign = [
+                op for p in paths for op in read_journal(p)
+                if (op.get("session") or (op.get("args") or {}).get("session")) == args.key
+                and not (op.get("verb") == "session"
+                         and (op.get("args") or {}).get("key") == args.key)]
+            if foreign and not args.force:
+                print(f"error: session '{args.key}' has {len(foreign)} journaled op(s) "
+                      f"attributed to it — not an empty mint. Re-run with --force to "
+                      f"retract anyway.", file=sys.stderr)
+                return 1
+            res = await retract_session(gx, args.key, actor=args.actor)
+            print(render("retract-session", res, args.format))
+            if args.journal_path and res.get("written"):
+                append_write(args.journal_path, "retract-session",
+                             {"key": args.key, "actor": args.actor})
             return 1 if res.get("error") else 0
         elif args.command == "oracle":
             res = await run_version_oracle(gx, repos_dir=args.repos_dir, only=args.only)
@@ -1142,6 +1164,14 @@ def main() -> int:
     p_sn.add_argument("--title", default=None,
                       help="Human-friendly name (typically asserted at session END)")
     p_sn.add_argument("--actor", default=_DEFAULT_ACTOR)
+
+    p_rs = sub.add_parser("retract-session",
+                          help="RETRACT a Session spine node (journaled compensating op — the write "
+                               "dual of `session`; refuses a non-empty session unless --force)")
+    p_rs.add_argument("key", help="The session key to retract (e.g. a key-repeat empty double-mint)")
+    p_rs.add_argument("--force", action="store_true",
+                      help="Retract even when journaled ops are attributed to the key")
+    p_rs.add_argument("--actor", default=_DEFAULT_ACTOR)
 
     p_or = sub.add_parser("oracle", help="Run the version oracle (refresh version slots)")
     p_or.add_argument("--repos-dir", default=DEFAULT_REPOS)

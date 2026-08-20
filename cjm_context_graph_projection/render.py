@@ -130,6 +130,11 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         if obj.get("title"):
             lines.append(f"title: {obj['title']}")
         return "\n".join(lines)
+    if kind == "retract-session":
+        if obj.get("error"):
+            return f"⚠ {obj['error']}"
+        verb = "retracted" if obj.get("deleted") else "already absent (no-op)"
+        return (f"**session {verb}:** `{obj.get('key')}`\n`{obj.get('session_id')}`")
     if kind == "journal-window":
         w = obj.get("window", {})
         parts = []

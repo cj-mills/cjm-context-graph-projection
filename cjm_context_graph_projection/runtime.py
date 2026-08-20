@@ -48,6 +48,12 @@ async def open_graph(
                            f"(discovered: {sorted(by_name)})")
     if not manager.load_capability(by_name[graph_id], config={"db_path": str(graph_db_path)}):
         raise RuntimeError(f"failed to load {graph_id} on {graph_db_path}")
+    if hasattr(manager, "set_observability_class"):
+        # Graph ops are AMBIENT work (DEC 8bf656c0): compute-light and
+        # re-derivable from the context-graph journals — their per-op success
+        # accounting must not grind the substrate journal at feed-poll /
+        # rebuild-storm cadence (hasattr: older substrate = pre-gate behavior).
+        manager.set_observability_class(graph_id, "ambient")
     queue = JobQueue(deps=manager)
     await queue.start()
     try:

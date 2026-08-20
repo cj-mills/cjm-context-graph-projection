@@ -33,7 +33,7 @@ from .lens import lens_node_id, set_lens
 from .runtime import GraphHandle
 from .structure import add_section, reconstruct_note
 from .write import (add_check, alias, assert_value, author_section, decide, link, register_session,
-                    unlink)
+                    retract_session, unlink)
 
 # The provenance actor stamped on the M3 one-time genesis import (a per-note `new-note` op
 # capturing the pre-cutover baseline). The lineage floor every later edit traces back to.
@@ -59,7 +59,8 @@ M3_BASELINE_ACTOR = "import:m3-baseline"
 # link is undone by a compensating op, not an erasure — replay applies it in append order
 # after the link it retracts, and a rebuild converges with the edge absent.
 JOURNAL_VERBS = ("decide", "alias", "assert", "link", "unlink", "section", "new-note",
-                 "add-section", "display-rule", "set-lens", "check", "session")
+                 "add-section", "display-rule", "set-lens", "check", "session",
+                 "retract-session")
 
 
 def m3_baseline_import(
@@ -197,6 +198,11 @@ async def _apply_op(gx: GraphHandle, op: Dict[str, Any]) -> str:
         # last-op-wins on replay, like display-rule — sessions are data, not content).
         await register_session(gx, a["key"], started_at=a.get("started_at"),
                                title=a.get("title"), actor=a.get("actor", "agent:session"))
+    elif verb == "retract-session":
+        # Session retraction (unlink's compensating-op pattern): replayed in append
+        # order AFTER the registrations it retracts, so a rebuild converges with the
+        # spine node absent. A missing node is a tolerated no-op (idempotent).
+        await retract_session(gx, a["key"], actor=a.get("actor", "agent:session"))
     else:
         return ""
     return verb
@@ -319,7 +325,7 @@ def touched_node_ids(
     elif verb == "set-lens":
         if a.get("slug"):
             out.append(lens_node_id(a["slug"]))
-    elif verb == "session":
+    elif verb in ("session", "retract-session"):
         if a.get("key"):
             out.append(session_node_id(a["key"]))
     elif a.get("repo_key") and a.get("module_path"):

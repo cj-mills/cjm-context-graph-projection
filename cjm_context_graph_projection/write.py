@@ -472,3 +472,31 @@ async def unlink(
     return {"source_id": source_id, "target_id": target_id, "relation": relation,
             "actor": actor, "edge_id": edge_id, "deleted": int(deleted or 0),
             "written": True}
+
+
+async def retract_session(
+    gx: GraphHandle,
+    key: str,           # The session key whose spine node should be removed
+    *,
+    actor: str = "agent:session",  # Who retracted it (journal provenance; the node itself is gone)
+) -> Dict[str, Any]:  # The write result
+    """RETRACT a Session spine node — the write dual of `register_session`, on
+    `unlink`'s compensating-op pattern (finding 2f1d9382): the journal is
+    append-only, so removal is an OP, not an erasure — replay applies the
+    retraction in append order AFTER the registrations it retracts, and a
+    rebuild converges with the node absent. Exists for the empty-mint case
+    (a key-repeat Shift+S minting two spine nodes one second apart). Emptiness
+    guards live CALLER-side (CLI / workbench pre-checks): replay must re-apply
+    the journaled retraction unconditionally, and a missing node is a tolerated
+    no-op (`deleted: 0`, deterministic id) — that is what keeps replay
+    idempotent. `cascade=True` mirrors node deletion semantics elsewhere; an
+    actually-empty session has no edges for it to reach."""
+    sess_id = SessionNode(key=key).id
+    existing = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=sess_id)
+    if existing is None:
+        return {"session_id": sess_id, "key": key, "deleted": 0, "written": True,
+                "actor": actor}
+    deleted = await graph_task(gx.queue, gx.graph_id, "delete_nodes",
+                               node_ids=[sess_id], cascade=True)
+    return {"session_id": sess_id, "key": key, "deleted": int(deleted or 0),
+            "written": True, "actor": actor}
