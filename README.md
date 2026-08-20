@@ -29,6 +29,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - **`cjm_context_graph_projection.prose_refs`** — Prose-ref drift: id-shaped tokens in asserted prose vs the edge layer.
 - **`cjm_context_graph_projection.readiness`** — The readiness frontier: which work-items are READY vs BLOCKED — derived, never stored.
 - **`cjm_context_graph_projection.readme`** — README-as-projection (v1, STRUCTURAL-ONLY): generate a repo's README FROM THE GRAPH.
+- **`cjm_context_graph_projection.reads`** — The content-access READS ledger: which nodes each read delivered into context.
 - **`cjm_context_graph_projection.reconcile`** — M2b shadow-phase RECONCILE — surface + (explicitly) absorb out-of-band `.md` edits.
 - **`cjm_context_graph_projection.refactor`** — Refactoring-candidate identification over the code graph (the IDENTIFY half of move).
 - **`cjm_context_graph_projection.refactor_ops`** — `move` — relocate a symbol between modules (the EXECUTE half of refactor-candidates).
@@ -41,6 +42,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - **`cjm_context_graph_projection.source_state`** — N+3 Phase 1 (SHADOW): capture a module's canonical source into a SOURCE journal and
 - **`cjm_context_graph_projection.structure`** — M2a GRADIENT — structural memory authoring: create a note / add a section, born on-graph.
 - **`cjm_context_graph_projection.viz`** — A minimal READ-ONLY visualization: the readiness frontier + its dependency DAG, as HTML.
+- **`cjm_context_graph_projection.workbench`** — Workbench lens layer: the front-door / pin-tree / session-feed derived views.
 - **`cjm_context_graph_projection.worklist`** — The propose/confirm worklist: candidate fixes that need a human decision.
 - **`cjm_context_graph_projection.write`** — The write surface: `assert` a slot value, `decide` a conclusion.
 
@@ -61,6 +63,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 ### `cjm_context_graph_projection.cli`
 
 - `main` _function_
+- `render` _function_ — The read-delivery seam: tap the reads ledger, then delegate to the real
 
 ### `cjm_context_graph_projection.code_edges`
 
@@ -133,6 +136,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 ### `cjm_context_graph_projection.journal`
 
 - `journal_sourced_note_paths` _function_ — The memory `.md` files `ingest` must NOT read — they're journal-sourced now.
+- `journal_touch_rows` _function_ — A journal's touch rows across its whole segment family (cold first,
 - `journal_window` _function_ — The journal-window projection: which nodes a window/session touched, when, how.
 - `journal_window_view` _function_ — The SESSION LENS read verb: `journal_window` + graph join (title/label per ref).
 - `m3_baseline_import` _function_ — One-time M3 GENESIS IMPORT: emit a per-note `new-note` baseline op into the journal.
@@ -205,6 +209,13 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 
 - `project_readme` _function_ — Project a repo's README markdown from the graph (structural-only v1).
 - `repo_purpose` _function_ — The repo's intro/"why" prose: the active `purpose` assertion on the repo Entity.
+
+### `cjm_context_graph_projection.reads`
+
+- `append_read` _function_ — Append one read event; `ts`/`session` stamping rides `append_op`.
+- `configure_reads` _function_ — Arm (or disarm, path=None) read recording for this process.
+- `delivered_ids` _function_ — Node ids a rendered result delivered into the consumer's context.
+- `record_read` _function_ — The render-boundary tap: no-op unarmed, FAIL-OPEN armed.
 
 ### `cjm_context_graph_projection.reconcile`
 
@@ -287,6 +298,13 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `render_viz_html` _function_ — Render the elements into one self-contained interactive HTML page (Cytoscape + dagre).
 - `viz_elements` _function_ — Pure: turn a readiness frontier into Cytoscape elements — the whole data model.
 
+### `cjm_context_graph_projection.workbench`
+
+- `anchor_lead_view` _function_ — One anchor's LEAD as STRUCTURE (DEC ee9e9be6): the navigable pin tree.
+- `journal_ops` _function_ — The feed's OP-LEDGER zoom (DEC ee9e9be6): one row per journaled op.
+- `portfolio_view` _function_ — The workbench FRONT DOOR (DEC ee9e9be6): every role-asserted anchor, one row.
+- `session_feed` _function_ — The TWO-ZOOM session feed (DEC ee9e9be6): op ledger + touched-node cards.
+
 ### `cjm_context_graph_projection.worklist`
 
 - `dangling_reference_proposals` _function_ — Referenced `[[slugs]]` with no note, each with a fuzzy suggestion (no auto-fix).
@@ -308,4 +326,4 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 ## Dependencies
 
 **Depends on:** `cjm-context-graph-layer`, `cjm-context-graph-primitives`, `cjm-dev-graph-schema`, `cjm-markdown-decompose-core`, `cjm-notebook-decompose-core`, `cjm-python-decompose-core`, `cjm-substrate`
-**Used by:** `cjm-notebook-decompose-core`
+**Used by:** `cjm-graph-workbench-qt`, `cjm-graph-workbench-tui`, `cjm-notebook-decompose-core`, `cjm-transcript-correction-tui`

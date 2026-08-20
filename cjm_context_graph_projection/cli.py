@@ -67,6 +67,12 @@ DEFAULT_MEMORY = ("/home/innom-dt/.claude/projects/"
 DEFAULT_REPOS = "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills"
 # The born-non-nbdev arc libs decomposed as the code source-type by default (the
 # code-on-graph corpus); plain `.py`, so the python decomposer applies cleanly.
+# The write-journal actor default (per-actor stamping 76397242): CJM_ACTOR
+# overrides the baked default so distinct actors (primary agent, named
+# sub-agents, the workbench) stamp distinguishable provenance with zero
+# per-verb flags; an explicit --actor always wins over the env.
+_DEFAULT_ACTOR = os.environ.get("CJM_ACTOR") or "agent:session"
+
 DEFAULT_CODE_LIBS = ("cjm-dev-graph-schema", "cjm-markdown-decompose-core",
                      "cjm-notebook-decompose-core",
                      "cjm-context-graph-projection", "cjm-python-decompose-core",
@@ -108,7 +114,15 @@ DEFAULT_CODE_LIBS = ("cjm-dev-graph-schema", "cjm-markdown-decompose-core",
                      "cjm-workflow-hub-qt",
                      # Composition seat v0 (DECs 2a062aff + ea85eab7): the
                      # session scratchpad, born-on-graph 2026-08-19.
-                     "cjm-session-scratchpad-qt")
+                     "cjm-session-scratchpad-qt",
+                     # Spine absorption (DEC 12f342f1, 2026-08-19): the workflow
+                     # cores absorbed the shells' toolkit-neutral domain modules
+                     # (spine/state/runs/segments/candidates/launch…), so the
+                     # cores join the ingest list — the moved code keeps its
+                     # graph visibility (locate/grep) across the re-homing.
+                     "cjm-transcription-core",
+                     "cjm-transcript-decomp-core",
+                     "cjm-transcript-correction-core")
 # Repos whose NOTEBOOKS are the ingest source (cross-cell @patch/incremental methods
 # re-attributed to their true classes by the compositor). EMPTY since the 2026-08-13
 # audit: every lib the c25780e8/5a7c2af7-era list carried is now graph-sourced .py
@@ -1019,7 +1033,7 @@ def main() -> int:
     p_sle.add_argument("--spec-file", default=None, help="Read the spec JSON from a file")
     p_sle.add_argument("--title", default=None, help="Display title (presentation only)")
     p_sle.add_argument("--description", default=None, help="One orientation line for the shelf")
-    p_sle.add_argument("--actor", default="agent:session")
+    p_sle.add_argument("--actor", default=_DEFAULT_ACTOR)
 
     p_ls = sub.add_parser("list",
                           help="Enumerate a class: nodes by --label / assertions by --predicate / edges by --relation")
@@ -1048,14 +1062,14 @@ def main() -> int:
     p_as.add_argument("subject")
     p_as.add_argument("predicate")
     p_as.add_argument("value")
-    p_as.add_argument("--actor", default="agent:session")
+    p_as.add_argument("--actor", default=_DEFAULT_ACTOR)
     p_as.add_argument("--evidence", action="append", help="Supporting node id (repeatable)")
     p_as.add_argument("--supersede", action="append", help="Prior assertion id OR value to supersede (repeatable)")
 
     p_al = sub.add_parser("alias", help="Confirm a drifted link slug as an alias of a real note")
     p_al.add_argument("drifted", help="The drifted `[[wiki-link]]` slug (resolves to no note)")
     p_al.add_argument("canonical", help="The real note slug it means (frontmatter `name`)")
-    p_al.add_argument("--actor", default="agent:session")
+    p_al.add_argument("--actor", default=_DEFAULT_ACTOR)
     p_al.add_argument("--session", default=None, help="Session key (actor becomes agent:session:<key>)")
     p_al.add_argument("--memory-dir", default=DEFAULT_MEMORY,
                       help="Corpus dir to auto-discover the source notes as evidence")
@@ -1064,7 +1078,7 @@ def main() -> int:
 
     p_de = sub.add_parser("decide", help="Record a decision + its premise edges")
     p_de.add_argument("statement")
-    p_de.add_argument("--actor", default="agent:session")
+    p_de.add_argument("--actor", default=_DEFAULT_ACTOR)
     p_de.add_argument("--supports", action="append", help="Premise assertion id (repeatable)")
     p_de.add_argument("--supersedes", action="append", help="Prior decision id (repeatable)")
     p_de.add_argument("--session", default=None, help="Session key this was decided in")
@@ -1083,7 +1097,7 @@ def main() -> int:
                                "derives closable/drift from it")
     p_ck.add_argument("item", help="The work item (node id, or a unique id prefix)")
     p_ck.add_argument("text", help="The check statement")
-    p_ck.add_argument("--actor", default="agent:session")
+    p_ck.add_argument("--actor", default=_DEFAULT_ACTOR)
 
     p_dr = sub.add_parser("display-rule",
                           help="Author/update the graph-carried DisplayRule for a node kind — "
@@ -1094,7 +1108,7 @@ def main() -> int:
                       help="Title template: short stable identity (~60 chars)")
     p_dr.add_argument("--gloss", default=None,
                       help="Gloss template: one orientation line (what it says/points to/state)")
-    p_dr.add_argument("--actor", default="agent:session")
+    p_dr.add_argument("--actor", default=_DEFAULT_ACTOR)
 
     p_sn = sub.add_parser("session",
                           help="Register/update a timestamp-keyed Session node (the session spine; "
@@ -1104,7 +1118,7 @@ def main() -> int:
                       help="Unix start ts (default: parsed from a timestamp-form key)")
     p_sn.add_argument("--title", default=None,
                       help="Human-friendly name (typically asserted at session END)")
-    p_sn.add_argument("--actor", default="agent:session")
+    p_sn.add_argument("--actor", default=_DEFAULT_ACTOR)
 
     p_or = sub.add_parser("oracle", help="Run the version oracle (refresh version slots)")
     p_or.add_argument("--repos-dir", default=DEFAULT_REPOS)
@@ -1114,7 +1128,7 @@ def main() -> int:
     p_ln.add_argument("source_id", help="Source node id (must exist)")
     p_ln.add_argument("relation", help="Edge relation (free string; e.g. IMPLEMENTED_BY)")
     p_ln.add_argument("target_id", help="Target node id (must exist)")
-    p_ln.add_argument("--actor", default="agent:session")
+    p_ln.add_argument("--actor", default=_DEFAULT_ACTOR)
 
     p_ul = sub.add_parser("unlink",
                           help="RETRACT a deliberate edge (journaled compensating op — the write dual of link)")
@@ -1123,7 +1137,7 @@ def main() -> int:
     p_ul.add_argument("target_id", help="Target node id / unique prefix")
     p_ul.add_argument("--force", action="store_true",
                       help="Retract even without a matching journaled link op (structural override)")
-    p_ul.add_argument("--actor", default="agent:session")
+    p_ul.add_argument("--actor", default=_DEFAULT_ACTOR)
 
     p_au = sub.add_parser("author",
                           help="Author a node's verbatim slot (CodeSymbol body / CodeText / Cell / memory Section), emit the .py/.ipynb/.md")
@@ -1137,7 +1151,7 @@ def main() -> int:
                       help="Open $EDITOR on the current slot text (the minimal human authoring UI)")
     p_au.add_argument("--no-write", action="store_true",
                       help="Dry run: emit + print the artifact, don't touch disk")
-    p_au.add_argument("--actor", default="agent:session")
+    p_au.add_argument("--actor", default=_DEFAULT_ACTOR)
     p_au.add_argument("--repos-dir", default=DEFAULT_REPOS,
                       help="Repos root — derives a notebook's repo-relative source-journal key")
 
@@ -1155,7 +1169,7 @@ def main() -> int:
     g_asym.add_argument("--body-file", help="Read the symbol's verbatim source from a file")
     p_asym.add_argument("--no-write", action="store_true",
                         help="Dry run: emit + print the artifact, don't touch graph or disk")
-    p_asym.add_argument("--actor", default="agent:session")
+    p_asym.add_argument("--actor", default=_DEFAULT_ACTOR)
     p_asym.add_argument("--repos-dir", default=DEFAULT_REPOS,
                         help="Repos root (parity with author; the absorb gate reads it)")
 
@@ -1171,7 +1185,7 @@ def main() -> int:
     g_atxt.add_argument("--body-file", help="Read the region's verbatim source from a file")
     p_atxt.add_argument("--no-write", action="store_true",
                         help="Dry run: emit + print the artifact, don't touch graph or disk")
-    p_atxt.add_argument("--actor", default="agent:session")
+    p_atxt.add_argument("--actor", default=_DEFAULT_ACTOR)
     p_atxt.add_argument("--repos-dir", default=DEFAULT_REPOS,
                         help="Repos root (parity with author; the absorb gate reads it)")
 
@@ -1183,7 +1197,7 @@ def main() -> int:
     g_asec.add_argument("--content-file", help="Read the new section's text from a file")
     p_asec.add_argument("--after", default=None, help="Insert after this anchor (default: append at end)")
     p_asec.add_argument("--no-write", action="store_true", help="Dry run: apply to graph, don't write the .md")
-    p_asec.add_argument("--actor", default="agent:session")
+    p_asec.add_argument("--actor", default=_DEFAULT_ACTOR)
 
     p_nn = sub.add_parser("new-note", help="M2 gradient: create a new memory note, born on-graph")
     p_nn.add_argument("--path", required=True, help="Where to write the new .md")

@@ -527,6 +527,9 @@ def _stamp_session(record: Dict[str, Any]) -> Dict[str, Any]:
     session = os.environ.get("CJM_SESSION") or None
     if session:
         record["session"] = session
+    actor = os.environ.get("CJM_ACTOR") or None
+    if actor:
+        record["actor"] = actor
     return record
 
 
