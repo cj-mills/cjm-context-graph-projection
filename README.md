@@ -11,6 +11,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - **`cjm_context_graph_projection.cli`** — The `cjm-context-graph` CLI — first driver of the projection core.
 - **`cjm_context_graph_projection.code_edges`** — Orphaned code-target edge detector: journaled links whose endpoint no longer resolves.
 - **`cjm_context_graph_projection.cohesion`** — Module cohesion audit over the code graph — the read-only cohesion ORACLE (N+1).
+- **`cjm_context_graph_projection.config`** — Graph-sibling config discovery — the DEFAULT_* hardcodes retired to DATA
 - **`cjm_context_graph_projection.contradictions`** — The standing dedup query: slots whose ACTIVE assertions disagree.
 - **`cjm_context_graph_projection.conventions`** — Structural convention audit over the code/notebook graph (the enforcement nbdev lacks).
 - **`cjm_context_graph_projection.devgraph`** — Build the dev graph's nodes + edges from its sources (the dev-graph DRIVER).
@@ -74,6 +75,10 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 
 - `cohesion` _function_ — Audit module cohesion: grab-bag (under_split) + scattered-helper (over_split) candidates.
 - `compute_cohesion` _function_ — Compute module cohesion candidates from the code graph slices (pure).
+
+### `cjm_context_graph_projection.config`
+
+- `load_graph_config` _function_ — Read the graph-sibling config. Absent = {} (fallback to DEFAULT_*);
 
 ### `cjm_context_graph_projection.contradictions`
 
