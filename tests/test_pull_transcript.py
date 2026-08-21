@@ -50,3 +50,31 @@ def test_incremental_suffix_chains_to_prior_op():
 def test_pull_transcript_is_a_journal_verb():
     from cjm_context_graph_projection.journal import JOURNAL_VERBS
     assert "pull-transcript" in JOURNAL_VERBS  # replay counts + durability registry
+
+
+def test_message_write_verbs_are_journal_verbs():
+    # The scratchpad-v2 composition seam (DEC 93e3e881 pt 5): composer mints,
+    # in-place edits, and compose-send derivations all replay from the journal.
+    from cjm_context_graph_projection.journal import JOURNAL_VERBS
+    assert {"mint-messages", "edit-message", "derive-message"} <= set(JOURNAL_VERBS)
+
+
+def test_derived_edges_carry_send_order():
+    from cjm_context_graph_projection.pull_transcript import build_derived_edges
+    edges = build_derived_edges("sent1", ["p1", "p2", "p3"])
+    assert [e["relation_type"] for e in edges] == ["DERIVED_FROM"] * 3
+    assert all(e["source_id"] == message_node_id("sent1") for e in edges)
+    assert [e["target_id"] for e in edges] == [message_node_id(p) for p in ("p1", "p2", "p3")]
+    assert [e["properties"]["order"] for e in edges] == [0, 1, 2]  # send order on the edge
+
+
+def test_composer_source_rides_the_same_mint_batch():
+    # One label, many sources (DEC 91c47b4a pt 1): a composer part is the same
+    # payload shape with its own provenance facet, never a new label.
+    from cjm_context_graph_projection.pull_transcript import MESSAGE_SOURCE_COMPOSER
+    payload = [{"uuid": "part1", "parent_uuid": None, "prev_uuid": None, "role": "user",
+                "text": "draft", "timestamp": "2026-08-21T16:00:00.000Z",
+                "source": MESSAGE_SOURCE_COMPOSER}]
+    nodes, _ = build_mint_batch("2026-08-21_11-26-36", payload)
+    assert nodes[1]["properties"]["source"] == MESSAGE_SOURCE_COMPOSER
+    assert nodes[1]["label"] == DevNodeKinds.MESSAGE

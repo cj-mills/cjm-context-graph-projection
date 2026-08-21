@@ -60,7 +60,8 @@ M3_BASELINE_ACTOR = "import:m3-baseline"
 # after the link it retracts, and a rebuild converges with the edge absent.
 JOURNAL_VERBS = ("decide", "alias", "assert", "link", "unlink", "section", "new-note",
                  "add-section", "display-rule", "set-lens", "check", "session",
-                 "retract-session", "pull-transcript")
+                 "retract-session", "pull-transcript", "mint-messages", "edit-message",
+                 "derive-message")
 
 
 def m3_baseline_import(
@@ -212,6 +213,27 @@ async def _apply_op(gx: GraphHandle, op: Dict[str, Any]) -> str:
         await mint_pulled_messages(gx, a["session_key"], a.get("cc_session_uuid", ""),
                                    a.get("messages") or [],
                                    actor=a.get("actor", "agent:session"))
+    elif verb == "mint-messages":
+        # Composer-born Message payload (DEC 93e3e881 pt 5): the same
+        # source-agnostic mint machinery as pull-transcript, minus the CC
+        # pairing fact — the payload's own `source` stamps provenance.
+        from .pull_transcript import mint_pulled_messages
+        await mint_pulled_messages(gx, a["session_key"], "", a.get("messages") or [],
+                                   actor=a.get("actor", "user:scratchpad"))
+    elif verb == "edit-message":
+        # In-place Message body edit (DEC 91c47b4a pt 3): last-op-wins on
+        # replay, like `section` STATE ops; a missing node is a tolerated
+        # no-op (its mint op precedes it in append order).
+        from .pull_transcript import edit_message
+        await edit_message(gx, a["source_uuid"], a["text"],
+                           actor=a.get("actor", "user:scratchpad"))
+    elif verb == "derive-message":
+        # Compose-send reconciliation (DEC fc6a0cdc pt 5): DERIVED_FROM edges
+        # sent-message -> parts, order on edge properties. Deterministic edge
+        # ids converge on replay.
+        from .pull_transcript import derive_message
+        await derive_message(gx, a["sent_uuid"], a.get("part_uuids") or [],
+                             actor=a.get("actor", "user:scratchpad"))
     else:
         return ""
     return verb

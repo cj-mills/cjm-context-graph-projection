@@ -28,6 +28,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - **`cjm_context_graph_projection.oracle`** — The version oracle: a programmatic Procedure that keeps `version` slots fresh.
 - **`cjm_context_graph_projection.projection`** — The projection core: schema / show / relevance / state over a context graph.
 - **`cjm_context_graph_projection.prose_refs`** — Prose-ref drift: id-shaped tokens in asserted prose vs the edge layer.
+- **`cjm_context_graph_projection.pull_transcript`** — The transcript pull verb: harness-transcript messages onto the session spine.
 - **`cjm_context_graph_projection.readiness`** — The readiness frontier: which work-items are READY vs BLOCKED — derived, never stored.
 - **`cjm_context_graph_projection.readme`** — README-as-projection (v1, STRUCTURAL-ONLY): generate a repo's README FROM THE GRAPH.
 - **`cjm_context_graph_projection.reads`** — The content-access READS ledger: which nodes each read delivered into context.
@@ -204,6 +205,16 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `extract_id_tokens` _function_ — Id-shaped tokens in prose: 8-hex prefixes / full UUIDs, ordered, deduped.
 - `prose_refs` _function_ — The prose-ref drift audit over asserted Decisions + Notes (pure read).
 
+### `cjm_context_graph_projection.pull_transcript`
+
+- `build_derived_edges` _function_ — The pure aggregation-seam assembly: sent Message DERIVED_FROM each part,
+- `build_mint_batch` _function_ — The pure node/edge assembly the live mint AND replay share.
+- `build_pull_payload` _function_ — The journalable payload for an extraction sequence.
+- `derive_message` _function_ — The compose-send aggregation seam (DEC fc6a0cdc pt 5): the sent message
+- `edit_message` _function_ — In-place body edit of a Message — the journaled edit-op half of the
+- `mint_pulled_messages` _function_ — Land pulled messages on the spine — the code path live pull AND replay share.
+- `pull_transcript` _function_ — The live pull: derive the mapping, extract the active path, mint the delta.
+
 ### `cjm_context_graph_projection.readiness`
 
 - `classify_readiness` _function_ — Pure: partition work-items into done / ready / blocked from authored ground truth.
@@ -326,9 +337,10 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `link` _function_ — Mint a deliberate edge between two EXISTING nodes (heterogeneous interlink).
 - `register_session` _function_ — Register/update a timestamp-keyed Session node — the session SPINE (DEC 6124d8bf).
 - `resolve_subject` _function_ — Resolve a subject to an entity id (rename-stable), minting a `term` entity
+- `retract_session` _function_ — RETRACT a Session spine node — the write dual of `register_session`, on
 - `unlink` _function_ — RETRACT a deliberate edge — the write dual of `link` (finding 2f1d9382).
 
 ## Dependencies
 
 **Depends on:** `cjm-context-graph-layer`, `cjm-context-graph-primitives`, `cjm-dev-graph-schema`, `cjm-markdown-decompose-core`, `cjm-notebook-decompose-core`, `cjm-python-decompose-core`, `cjm-substrate`
-**Used by:** `cjm-graph-workbench-qt`, `cjm-graph-workbench-tui`, `cjm-notebook-decompose-core`, `cjm-transcript-correction-tui`
+**Used by:** `cjm-graph-workbench-qt`, `cjm-graph-workbench-tui`, `cjm-notebook-decompose-core`, `cjm-session-scratchpad-qt`, `cjm-transcript-correction-tui`

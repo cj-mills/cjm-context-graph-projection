@@ -17,15 +17,21 @@ NOTHING (the watcher-cadence guarantee: quiet polls leave no trace)."""
 
 from typing import Any, Dict, List, Optional, Tuple
 
+from cjm_context_graph_layer.grammar import make_edge
 from cjm_context_graph_layer.ops import extend_graph, graph_task
 from cjm_dev_graph_schema.nodes import MessageNode, SessionNode
+from cjm_dev_graph_schema.vocab import DevRelations
 
 from .runtime import GraphHandle
 from .write import assert_value
 
 # The capture-source facet stamped on pulled messages (one label, many sources —
-# editor-born parts will stamp their own).
+# editor-born parts stamp MESSAGE_SOURCE_COMPOSER).
 MESSAGE_SOURCE_CC = "cc-transcript"
+
+# The capture-source facet on editor-born composition parts (DEC fc6a0cdc pt 5:
+# composition chain, unit = PART; same mint machinery, different provenance).
+MESSAGE_SOURCE_COMPOSER = "composer"
 
 
 def build_pull_payload(
@@ -100,6 +106,58 @@ async def mint_pulled_messages(
             "cc_session_uuid": cc_session_uuid, "minted": len(messages),
             "nodes_added": res.nodes_added, "edges_added": res.edges_added,
             "fact_assertion": (fact or {}).get("assertion_id"), "written": True}
+
+
+async def edit_message(
+    gx: GraphHandle,
+    source_uuid: str,   # The message's capture-source uuid (identity input)
+    text: str,          # The replacement body
+    *,
+    actor: str = "user:scratchpad",
+) -> Dict[str, Any]:  # The write result
+    """In-place body edit of a Message — the journaled edit-op half of the
+    correction flow (DEC 91c47b4a pts 3-4: no SUPERSEDES ceremony for drafts;
+    the journal op is the durable record, the node converges by last-op-wins).
+    Replay tolerates a missing node (the mint op precedes it in append order)."""
+    node_id = MessageNode(source_uuid=source_uuid, role="", text="").id
+    existing = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=node_id)
+    if existing is None:
+        return {"error": f"no Message node for source uuid {source_uuid}",
+                "written": False}
+    await graph_task(gx.queue, gx.graph_id, "update_node", node_id=node_id,
+                     properties={"text": text})
+    return {"message_id": node_id, "source_uuid": source_uuid, "written": True}
+
+
+def build_derived_edges(
+    sent_uuid: str,           # The sent transcript message's capture uuid
+    part_uuids: List[str],    # Composition-part uuids, send order
+) -> List[Dict[str, Any]]:  # DERIVED_FROM edge wire dicts
+    """The pure aggregation-seam assembly: sent Message DERIVED_FROM each part,
+    send order riding the `order` edge property."""
+    sent_id = MessageNode(source_uuid=sent_uuid, role="", text="").id
+    return [make_edge(sent_id, MessageNode(source_uuid=pu, role="", text="").id,
+                      DevRelations.DERIVED_FROM, properties={"order": i})
+            for i, pu in enumerate(part_uuids)]
+
+
+async def derive_message(
+    gx: GraphHandle,
+    sent_uuid: str,           # The sent transcript message's capture uuid
+    part_uuids: List[str],    # Composition-part uuids, send order
+    *,
+    actor: str = "user:scratchpad",
+) -> Dict[str, Any]:  # The write result
+    """The compose-send aggregation seam (DEC fc6a0cdc pt 5): the sent message
+    DERIVED_FROM each composition part it was assembled from, order riding
+    edge properties (the IN_SERIES pattern — no new relation). Deterministic
+    edge ids make re-derivation converge to no-ops."""
+    sent_id = MessageNode(source_uuid=sent_uuid, role="", text="").id
+    res = await extend_graph(gx.queue, gx.graph_id, [],
+                             build_derived_edges(sent_uuid, part_uuids))
+    return {"message_id": sent_id, "sent_uuid": sent_uuid,
+            "parts": len(part_uuids), "edges_added": res.edges_added,
+            "written": True}
 
 
 async def pull_transcript(
