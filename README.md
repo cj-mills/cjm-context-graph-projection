@@ -39,6 +39,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - **`cjm_context_graph_projection.rename_ops`** — Symbol `rename` — the Ext-B increment: scoped identifier substitution INTO bodies.
 - **`cjm_context_graph_projection.render`** — Render projection results for a consumer: agent (JSON) or human (markdown).
 - **`cjm_context_graph_projection.runtime`** — Open a context graph for reading/writing (domain-neutral runtime wiring).
+- **`cjm_context_graph_projection.scratchpad_export`** — Scratchpad session .md exporter — the projection lens (increment iv of the
 - **`cjm_context_graph_projection.seeds`** — Hand-seeded load-bearing slots + the rename-stable repo-key machinery.
 - **`cjm_context_graph_projection.serve`** — A served, read-only graph EXPLORER data API over the read verbs — the richer-viz INSTRUMENT.
 - **`cjm_context_graph_projection.source_state`** — N+3 Phase 1 (SHADOW): capture a module's canonical source into a SOURCE journal and
@@ -266,6 +267,12 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 
 - `GraphHandle` _class_ — A live, started graph: the queue + the capability id to address it.
 - `open_graph` _function_ — Load the graph-storage capability on `graph_db_path` and yield a started handle.
+
+### `cjm_context_graph_projection.scratchpad_export`
+
+- `derive_entries` _function_ — Chronological entries with derived `on_active_path` (transcript tip
+- `export_session_markdown` _function_ — Gather the session's message graph and render the .md projection.
+- `render_session_markdown` _function_ — The pure renderer: one portable markdown document from derived entries.
 
 ### `cjm_context_graph_projection.seeds`
 

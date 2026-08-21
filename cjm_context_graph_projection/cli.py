@@ -569,6 +569,30 @@ async def _dispatch(args) -> int:
                               "cc_session_uuid": res.get("cc_session_uuid", ""),
                               "messages": res["new_messages"], "actor": args.actor})
             return 0
+        elif args.command == "export-session":
+            # The exporter lens (5ab24c57): read-only projection — no journal op.
+            import json as _json
+            from .scratchpad_export import DEFAULT_CONFIG, export_session_markdown
+            config = dict(DEFAULT_CONFIG)
+            if args.config_file:
+                config.update(_json.loads(Path(args.config_file).expanduser().read_text()))
+            if args.include_superseded:
+                config["superseded"] = True
+            if args.lanes:
+                config["lanes"] = args.lanes
+            res = await export_session_markdown(gx, args.key, config)
+            if res.get("error"):
+                print(f"error: {res['error']}", file=sys.stderr)
+                return 1
+            if args.out:
+                out = Path(args.out).expanduser()
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_text(res["text"], encoding="utf-8")
+                print(f"**exported** `{args.key}` → {out} ({res['messages']} transcript "
+                      f"message(s) + {res['parts']} part(s))")
+            else:
+                print(res["text"])
+            return 0
         elif args.command == "oracle":
             res = await run_version_oracle(gx, repos_dir=args.repos_dir, only=args.only)
             print(render("oracle", res, args.format))
@@ -1210,6 +1234,22 @@ def main() -> int:
                       help="Also match transcripts whose boot prompt lacks the "
                            "minted-in-workbench signal (resumed/manually booted sessions)")
     p_pt.add_argument("--actor", default=_DEFAULT_ACTOR)
+
+    p_es = sub.add_parser("export-session",
+                          help="Project a session's scratchpad message graph to portable "
+                               "markdown (the exporter lens, item 5ab24c57 — one projection "
+                               "among N; read-only, journals nothing; an edited export is a "
+                               "fork, never a sync)")
+    p_es.add_argument("key", help="The session key to export (e.g. 2026-08-21_11-26-36)")
+    p_es.add_argument("--config-file", default=None,
+                      help="JSON overriding DEFAULT_CONFIG (config-as-data controls: "
+                           "transcript/composition/superseded/lanes/ids/timestamps)")
+    p_es.add_argument("--include-superseded", action="store_true",
+                      help="Include off-active-path transcript branches (annotated)")
+    p_es.add_argument("--lanes", choices=["interleaved", "separate"], default=None,
+                      help="Override the lane presentation")
+    p_es.add_argument("--out", default=None,
+                      help="Write the .md here (default: print to stdout)")
 
     p_or = sub.add_parser("oracle", help="Run the version oracle (refresh version slots)")
     p_or.add_argument("--repos-dir", default=DEFAULT_REPOS)
