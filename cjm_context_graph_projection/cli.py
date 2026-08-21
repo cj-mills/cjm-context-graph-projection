@@ -544,6 +544,31 @@ async def _dispatch(args) -> int:
                 append_write(args.journal_path, "retract-session",
                              {"key": args.key, "actor": args.actor})
             return 1 if res.get("error") else 0
+        elif args.command == "pull-transcript":
+            # Scratchpad-v2 pull (fc6a0cdc): mint the active path's user-facing
+            # messages onto the session spine. Journal-first with the NEW-message
+            # PAYLOAD (transcripts are prunable external files — the journal must
+            # reconstruct alone); nothing new = nothing journaled, the
+            # watcher-cadence guarantee.
+            from .pull_transcript import pull_transcript
+            res = await pull_transcript(gx, args.key,
+                                        str(Path(args.transcript_dir).expanduser()),
+                                        require_signal=not args.any_boot,
+                                        actor=args.actor)
+            if res.get("error"):
+                print(f"error: {res['error']}", file=sys.stderr)
+                return 1
+            print(f"**pulled** `{args.key}` <- transcript `{res['cc_session_uuid']}`: "
+                  f"{res['messages_new']} new / {res['messages_total']} total message(s) "
+                  f"({res['nodes_added']} node(s), {res['edges_added']} edge(s) added)")
+            if res.get("other_candidates"):
+                print(f"  other candidate transcript(s): {res['other_candidates']}")
+            if args.journal_path and res.get("new_messages"):
+                append_write(args.journal_path, "pull-transcript",
+                             {"session_key": args.key,
+                              "cc_session_uuid": res.get("cc_session_uuid", ""),
+                              "messages": res["new_messages"], "actor": args.actor})
+            return 0
         elif args.command == "oracle":
             res = await run_version_oracle(gx, repos_dir=args.repos_dir, only=args.only)
             print(render("oracle", res, args.format))
@@ -1172,6 +1197,19 @@ def main() -> int:
     p_rs.add_argument("--force", action="store_true",
                       help="Retract even when journaled ops are attributed to the key")
     p_rs.add_argument("--actor", default=_DEFAULT_ACTOR)
+
+    p_pt = sub.add_parser("pull-transcript",
+                          help="Pull a harness transcript's user-facing messages onto the "
+                               "session spine (Message nodes + spine edges; journals the "
+                               "NEW-message payload, so a quiet pull journals nothing)")
+    p_pt.add_argument("key", help="The session key to pull for (e.g. 2026-08-20_17-05-20)")
+    p_pt.add_argument("--transcript-dir", required=True,
+                      help="The harness project transcript dir holding the *.jsonl files "
+                           "(e.g. ~/.claude/projects/<munged-project-path>)")
+    p_pt.add_argument("--any-boot", action="store_true",
+                      help="Also match transcripts whose boot prompt lacks the "
+                           "minted-in-workbench signal (resumed/manually booted sessions)")
+    p_pt.add_argument("--actor", default=_DEFAULT_ACTOR)
 
     p_or = sub.add_parser("oracle", help="Run the version oracle (refresh version slots)")
     p_or.add_argument("--repos-dir", default=DEFAULT_REPOS)

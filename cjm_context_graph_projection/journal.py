@@ -60,7 +60,7 @@ M3_BASELINE_ACTOR = "import:m3-baseline"
 # after the link it retracts, and a rebuild converges with the edge absent.
 JOURNAL_VERBS = ("decide", "alias", "assert", "link", "unlink", "section", "new-note",
                  "add-section", "display-rule", "set-lens", "check", "session",
-                 "retract-session")
+                 "retract-session", "pull-transcript")
 
 
 def m3_baseline_import(
@@ -203,6 +203,15 @@ async def _apply_op(gx: GraphHandle, op: Dict[str, Any]) -> str:
         # order AFTER the registrations it retracts, so a rebuild converges with the
         # spine node absent. A missing node is a tolerated no-op (idempotent).
         await retract_session(gx, a["key"], actor=a.get("actor", "agent:session"))
+    elif verb == "pull-transcript":
+        # Scratchpad-v2 pull (fc6a0cdc): re-mint the journaled NEW-message payload —
+        # self-contained (transcripts are prunable external files; the journal alone
+        # reconstructs the graph). Idempotent: Message ids derive from capture-record
+        # uuids, chain edges from each payload message's own prev_uuid.
+        from .pull_transcript import mint_pulled_messages
+        await mint_pulled_messages(gx, a["session_key"], a.get("cc_session_uuid", ""),
+                                   a.get("messages") or [],
+                                   actor=a.get("actor", "agent:session"))
     else:
         return ""
     return verb

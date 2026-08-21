@@ -1,0 +1,52 @@
+"""The transcript pull verb's pure halves: payload chaining + mint-batch assembly."""
+
+from types import SimpleNamespace
+
+from cjm_context_graph_projection.pull_transcript import (
+    MESSAGE_SOURCE_CC, build_mint_batch, build_pull_payload)
+from cjm_dev_graph_schema.identity import message_node_id, session_node_id
+from cjm_dev_graph_schema.vocab import DevNodeKinds
+
+
+def em(uuid, role="user", text="hi", parent=None, ts="2026-08-20T22:00:00.000Z"):
+    return SimpleNamespace(uuid=uuid, parent_uuid=parent, role=role, text=text, timestamp=ts)
+
+
+def test_payload_threads_prev_uuid():
+    payload = build_pull_payload([em("u1"), em("a1", role="assistant", parent="u1"),
+                                  em("u2", parent="a1")])
+    assert [m["prev_uuid"] for m in payload] == [None, "u1", "a1"]
+    assert payload[1]["parent_uuid"] == "u1"  # DAG ancestry rides beside the chain
+
+
+def test_mint_batch_shapes_the_spine():
+    key = "2026-08-20_17-05-20"
+    payload = build_pull_payload([em("u1"), em("a1", role="assistant", parent="u1")])
+    nodes, edges = build_mint_batch(key, payload)
+
+    assert nodes[0]["id"] == session_node_id(key)          # the spine anchor rides along
+    assert [n["label"] for n in nodes[1:]] == [DevNodeKinds.MESSAGE] * 2
+    assert nodes[1]["id"] == message_node_id("u1")          # deterministic = idempotent
+    assert nodes[1]["properties"]["source"] == MESSAGE_SOURCE_CC
+
+    rels = [(e["source_id"], e["relation_type"], e["target_id"]) for e in edges]
+    assert (message_node_id("u1"), "PART_OF", session_node_id(key)) in rels
+    assert (session_node_id(key), "STARTS_WITH", message_node_id("u1")) in rels  # chain head
+    assert (message_node_id("u1"), "NEXT", message_node_id("a1")) in rels        # succession
+    assert len(edges) == 4  # 2 PART_OF + 1 STARTS_WITH + 1 NEXT
+
+
+def test_incremental_suffix_chains_to_prior_op():
+    # An incremental pull's payload starts mid-chain: prev_uuid points at a message
+    # minted by an EARLIER op — the NEXT edge must land without it in this batch.
+    payload = [{"uuid": "u9", "parent_uuid": "a8", "prev_uuid": "a8",
+                "role": "user", "text": "later", "timestamp": ""}]
+    _, edges = build_mint_batch("2026-08-20_17-05-20", payload)
+    rels = [(e["source_id"], e["relation_type"], e["target_id"]) for e in edges]
+    assert (message_node_id("a8"), "NEXT", message_node_id("u9")) in rels
+    assert not any(r[1] == "STARTS_WITH" for r in rels)  # not a chain head
+
+
+def test_pull_transcript_is_a_journal_verb():
+    from cjm_context_graph_projection.journal import JOURNAL_VERBS
+    assert "pull-transcript" in JOURNAL_VERBS  # replay counts + durability registry
