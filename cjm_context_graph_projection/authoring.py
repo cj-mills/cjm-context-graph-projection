@@ -262,6 +262,14 @@ async def read_node(
         # Decision returned "no readable content", forcing a fall-back to SQL/`show`.
         return {"node_id": node_id, "label": label, "kind": "statement",
                 "text": str(p.get("statement") or "")}
+    if label == DevNodeKinds.MESSAGE:
+        # A Message's body IS its `text` property — raw markdown source, the
+        # authoritative content (DEC 91c47b4a). Same show-only gap the Decision
+        # branch closed, dogfooded at the v2 drive (walkthrough sitting 2: the
+        # workbench detail pane and `read` had no Message body to deliver).
+        return {"node_id": node_id, "label": label, "kind": "message",
+                "role": p.get("role"), "source": p.get("source"),
+                "text": str(p.get("text") or "")}
     resolved = _slot_for(node)
     if resolved is not None:
         slot, _artifact, lab = resolved
