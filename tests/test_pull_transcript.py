@@ -3,7 +3,8 @@
 from types import SimpleNamespace
 
 from cjm_context_graph_projection.pull_transcript import (
-    MESSAGE_SOURCE_CC, build_mint_batch, build_pull_payload)
+    MESSAGE_SOURCE_CC, MESSAGE_SOURCE_TOOL_PARAM, build_mint_batch,
+    build_pull_payload)
 from cjm_dev_graph_schema.identity import message_node_id, session_node_id
 from cjm_dev_graph_schema.vocab import DevNodeKinds
 
@@ -78,3 +79,18 @@ def test_composer_source_rides_the_same_mint_batch():
     nodes, _ = build_mint_batch("2026-08-21_11-26-36", payload)
     assert nodes[1]["properties"]["source"] == MESSAGE_SOURCE_COMPOSER
     assert nodes[1]["label"] == DevNodeKinds.MESSAGE
+
+
+def test_tool_param_source_rides_payload_to_mint():
+    # Extractor-faceted entries (finding 60d719fe) keep their birth class
+    # through payload -> mint; unfaceted entries default to the transcript
+    # facet — and older journal ops without the key replay the same way.
+    faceted = SimpleNamespace(uuid="t1", parent_uuid="a1", role="assistant",
+                              text="caption", timestamp="2026-08-21T21:00:05.000Z",
+                              source=MESSAGE_SOURCE_TOOL_PARAM)
+    payload = build_pull_payload([em("u1"), faceted])
+    assert payload[0]["source"] is None                        # em() has no source attr
+    assert payload[1]["source"] == MESSAGE_SOURCE_TOOL_PARAM
+    nodes, _ = build_mint_batch("2026-08-21_20-46-05", payload)
+    assert nodes[1]["properties"]["source"] == MESSAGE_SOURCE_CC
+    assert nodes[2]["properties"]["source"] == MESSAGE_SOURCE_TOOL_PARAM

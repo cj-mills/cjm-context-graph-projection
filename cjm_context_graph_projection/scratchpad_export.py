@@ -15,7 +15,7 @@ The chain derivation mirrors the scratchpad app's timeline module (active
 path = tip ancestry over NEXT, forks are outbound, composer parts always
 live) — kept independently small here so the exporter stays Qt-free."""
 
-from datetime import datetime, timezone
+from datetime import datetime, tzinfo
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from cjm_context_graph_layer.ops import graph_task
@@ -62,12 +62,24 @@ def derive_entries(
     return out
 
 
+def _local_stamp(ts: Any, tz: Optional[tzinfo] = None) -> str:
+    """A stored UTC-Z stamp rendered in LOCAL time for the reading projection.
+
+    Display-only: sorting and identity stay on the raw ISO string; tz overrides
+    the machine zone for tests. Odd shapes pass through verbatim."""
+    try:
+        local = datetime.fromisoformat(str(ts).replace("Z", "+00:00")).astimezone(tz)
+    except ValueError:
+        return str(ts)
+    return local.strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _header_line(m: Dict[str, Any], sent_ids: set, config: Dict[str, Any]) -> str:
     composer = m.get("source") == MESSAGE_SOURCE_COMPOSER
     glyph = "PART" if composer else _GLYPHS.get(str(m.get("role")), str(m.get("role")).upper())
     bits = [f"**{glyph}**"]
     if config.get("timestamps") and m.get("timestamp"):
-        bits.append(str(m["timestamp"]))
+        bits.append(_local_stamp(m["timestamp"]))
     if config.get("ids"):
         bits.append(f"`{str(m['id'])[:8]}`")
     if composer and m["id"] in sent_ids:
@@ -103,7 +115,7 @@ def render_session_markdown(
     kept = [m for m in entries if keep(m)]
     transcript_n = sum(1 for m in kept if m.get("source") != MESSAGE_SOURCE_COMPOSER)
     parts_n = len(kept) - transcript_n
-    stamp = exported_at or datetime.now(timezone.utc).isoformat(timespec="seconds")
+    stamp = exported_at or datetime.now().astimezone().isoformat(timespec="seconds")
     head = f"# Session scratchpad — {session_key}" + (f" — {title}" if title else "")
     lines = [head, "",
              f"_exported {stamp} · {transcript_n} transcript message(s) · "

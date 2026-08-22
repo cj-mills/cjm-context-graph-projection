@@ -1,7 +1,9 @@
 """The exporter lens's pure halves: entry derivation + markdown rendering."""
 
+from datetime import timedelta, timezone
+
 from cjm_context_graph_projection.scratchpad_export import (
-    derive_entries, render_session_markdown)
+    _local_stamp, derive_entries, render_session_markdown)
 
 KEY = "2026-08-21_11-26-36"
 
@@ -76,3 +78,12 @@ def test_render_chain_filters():
          msg("p1", "2026-08-21T10:00:30.000Z", source="composer", text="only part")], [])
     md = render_session_markdown(KEY, entries, [], config={"transcript": False})
     assert "only part" in md and "hello" not in md
+
+
+def test_header_stamps_render_local_time():
+    # Stored stamps are UTC Z; the projection renders them in local time
+    # (tz pinned so the assertion is machine-independent); odd shapes pass
+    # through verbatim.
+    pinned = timezone(timedelta(hours=-7))
+    assert _local_stamp("2026-08-22T04:25:10.574Z", tz=pinned) == "2026-08-21 21:25:10"
+    assert _local_stamp("garbage", tz=pinned) == "garbage"

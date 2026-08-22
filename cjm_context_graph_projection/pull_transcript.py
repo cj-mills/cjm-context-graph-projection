@@ -33,6 +33,11 @@ MESSAGE_SOURCE_CC = "cc-transcript"
 # composition chain, unit = PART; same mint machinery, different provenance).
 MESSAGE_SOURCE_COMPOSER = "composer"
 
+# The facet the extractor stamps on tool-parameter prose (finding 60d719fe);
+# the literal is born extractor-side (TOOL_PARAM_SOURCE, cjm-harness-transcripts)
+# and mirrored here as graph-side vocabulary — the timeline COMPOSER_SOURCE pattern.
+MESSAGE_SOURCE_TOOL_PARAM = "cc-tool-param"
+
 
 def build_pull_payload(
     extracted: List[Any],  # ExtractedMessage sequence (uuid/parent_uuid/role/text/timestamp), chronological
@@ -48,7 +53,8 @@ def build_pull_payload(
     for em in extracted:
         payload.append({"uuid": em.uuid, "parent_uuid": em.parent_uuid,
                         "prev_uuid": prev_uuid, "role": em.role, "text": em.text,
-                        "timestamp": em.timestamp})
+                        "timestamp": em.timestamp,
+                        "source": getattr(em, "source", None)})
         prev_uuid = em.uuid
     return payload
 
