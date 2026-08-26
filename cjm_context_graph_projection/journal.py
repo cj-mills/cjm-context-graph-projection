@@ -226,6 +226,7 @@ async def _apply_op(gx: GraphHandle, op: Dict[str, Any]) -> str:
         # no-op (its mint op precedes it in append order).
         from .pull_transcript import edit_message
         await edit_message(gx, a["source_uuid"], a["text"],
+                           properties=a.get("properties"),
                            actor=a.get("actor", "user:scratchpad"))
     elif verb == "derive-message":
         # Compose-send reconciliation (DEC fc6a0cdc pt 5): DERIVED_FROM edges

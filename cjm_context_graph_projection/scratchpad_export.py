@@ -35,7 +35,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "timestamps": True,      # capture clock on each message header
 }
 
-_GLYPHS = {"user": "YOU", "assistant": "CLAUDE"}
+_GLYPHS = {"user": "YOU", "assistant": "CLAUDE", "harness": "HARNESS"}
 
 
 def derive_entries(

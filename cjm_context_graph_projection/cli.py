@@ -569,6 +569,40 @@ async def _dispatch(args) -> int:
                               "cc_session_uuid": res.get("cc_session_uuid", ""),
                               "messages": res["new_messages"], "actor": args.actor})
             return 0
+        elif args.command == "edit-message":
+            # In-place Message edit (DEC 91c47b4a pt 3, CLI dual of the
+            # scratchpad's journaled op; widened for the 47b83adb retro-sweep):
+            # journal-first body + optional --set property updates (role/source
+            # facet corrections), last-op-wins on replay.
+            from .pull_transcript import edit_message
+            if (args.text is None) == (args.text_file is None):
+                print("error: exactly one of --text / --text-file is required",
+                      file=sys.stderr)
+                return 1
+            text = (Path(args.text_file).expanduser().read_text()
+                    if args.text_file else args.text)
+            props: Dict[str, str] = {}
+            for kv in args.set or []:
+                if "=" not in kv:
+                    print(f"error: --set expects KEY=VALUE, got {kv!r}", file=sys.stderr)
+                    return 1
+                k, v = kv.split("=", 1)
+                props[k] = v
+            res = await edit_message(gx, args.source_uuid, text,
+                                     properties=props or None, actor=args.actor)
+            if res.get("error"):
+                print(f"error: {res['error']}", file=sys.stderr)
+                return 1
+            print(f"**edited** Message `{res['message_id'][:8]}` (source uuid "
+                  f"`{args.source_uuid}`"
+                  + (f"; set {', '.join(sorted(props))}" if props else "") + ")")
+            if args.journal_path:
+                op = {"source_uuid": args.source_uuid,
+                      "text": text, "actor": args.actor}
+                if props:
+                    op["properties"] = props
+                append_write(args.journal_path, "edit-message", op)
+            return 0
         elif args.command == "export-session":
             # The exporter lens (5ab24c57): read-only projection — no journal op.
             import json as _json
@@ -1234,6 +1268,19 @@ def main() -> int:
                       help="Also match transcripts whose boot prompt lacks the "
                            "minted-in-workbench signal (resumed/manually booted sessions)")
     p_pt.add_argument("--actor", default=_DEFAULT_ACTOR)
+
+    p_em = sub.add_parser("edit-message",
+                          help="In-place edit of a Message node's body (+ optional --set "
+                               "property updates, e.g. role/source facet corrections — the "
+                               "47b83adb retro-sweep verb); journal-first, last-op-wins "
+                               "on replay")
+    p_em.add_argument("source_uuid", help="The message's capture-source uuid (identity input)")
+    p_em.add_argument("--text", default=None, help="The replacement body")
+    p_em.add_argument("--text-file", default=None,
+                      help="Read the replacement body from a file")
+    p_em.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
+                      help="Extra property update (repeatable), e.g. --set role=harness")
+    p_em.add_argument("--actor", default=_DEFAULT_ACTOR)
 
     p_es = sub.add_parser("export-session",
                           help="Project a session's scratchpad message graph to portable "

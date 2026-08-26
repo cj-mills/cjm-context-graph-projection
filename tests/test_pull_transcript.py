@@ -3,8 +3,8 @@
 from types import SimpleNamespace
 
 from cjm_context_graph_projection.pull_transcript import (
-    MESSAGE_SOURCE_CC, MESSAGE_SOURCE_TOOL_PARAM, build_mint_batch,
-    build_pull_payload)
+    MESSAGE_SOURCE_CC, MESSAGE_SOURCE_HARNESS, MESSAGE_SOURCE_TOOL_PARAM,
+    build_mint_batch, build_pull_payload)
 from cjm_dev_graph_schema.identity import message_node_id, session_node_id
 from cjm_dev_graph_schema.vocab import DevNodeKinds
 
@@ -94,3 +94,19 @@ def test_tool_param_source_rides_payload_to_mint():
     nodes, _ = build_mint_batch("2026-08-21_20-46-05", payload)
     assert nodes[1]["properties"]["source"] == MESSAGE_SOURCE_CC
     assert nodes[2]["properties"]["source"] == MESSAGE_SOURCE_TOOL_PARAM
+
+
+def test_harness_role_and_source_ride_payload_to_mint():
+    # The third-author facet (finding 47b83adb): a distilled task-notification
+    # extracts as role="harness" + MESSAGE_SOURCE_HARNESS and keeps both
+    # through payload -> mint untouched — no user/assistant assumption anywhere.
+    notice = SimpleNamespace(uuid="n1", parent_uuid="a1", role="harness",
+                             text='Background command "Run sweep" completed (exit code 0)',
+                             timestamp="2026-08-22T20:05:00.000Z",
+                             source=MESSAGE_SOURCE_HARNESS)
+    payload = build_pull_payload([em("u1"), notice])
+    assert payload[1]["role"] == "harness"
+    assert payload[1]["source"] == MESSAGE_SOURCE_HARNESS
+    nodes, _ = build_mint_batch("2026-08-22_20-29-06", payload)
+    assert nodes[2]["properties"]["role"] == "harness"
+    assert nodes[2]["properties"]["source"] == MESSAGE_SOURCE_HARNESS

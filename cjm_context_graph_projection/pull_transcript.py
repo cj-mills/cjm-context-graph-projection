@@ -38,6 +38,11 @@ MESSAGE_SOURCE_COMPOSER = "composer"
 # and mirrored here as graph-side vocabulary — the timeline COMPOSER_SOURCE pattern.
 MESSAGE_SOURCE_TOOL_PARAM = "cc-tool-param"
 
+# The facet the extractor stamps on harness task-notification records (finding
+# 47b83adb): role="harness", neither party's prose — the literal is born
+# extractor-side (HARNESS_SOURCE) and mirrored here per the same pattern.
+MESSAGE_SOURCE_HARNESS = "cc-harness"
+
 
 def build_pull_payload(
     extracted: List[Any],  # ExtractedMessage sequence (uuid/parent_uuid/role/text/timestamp), chronological
@@ -119,19 +124,22 @@ async def edit_message(
     source_uuid: str,   # The message's capture-source uuid (identity input)
     text: str,          # The replacement body
     *,
+    properties: Optional[Dict[str, Any]] = None,  # Extra property updates (e.g. role/source — the 47b83adb retro-sweep)
     actor: str = "user:scratchpad",
 ) -> Dict[str, Any]:  # The write result
     """In-place body edit of a Message — the journaled edit-op half of the
     correction flow (DEC 91c47b4a pts 3-4: no SUPERSEDES ceremony for drafts;
     the journal op is the durable record, the node converges by last-op-wins).
-    Replay tolerates a missing node (the mint op precedes it in append order)."""
+    Replay tolerates a missing node (the mint op precedes it in append order).
+    `properties` widens the same op to facet corrections (finding 47b83adb):
+    extra keys ride the update alongside the body, last-op-wins identically."""
     node_id = MessageNode(source_uuid=source_uuid, role="", text="").id
     existing = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=node_id)
     if existing is None:
         return {"error": f"no Message node for source uuid {source_uuid}",
                 "written": False}
     await graph_task(gx.queue, gx.graph_id, "update_node", node_id=node_id,
-                     properties={"text": text})
+                     properties={"text": text, **(properties or {})})
     return {"message_id": node_id, "source_uuid": source_uuid, "written": True}
 
 
