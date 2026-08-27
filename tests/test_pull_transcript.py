@@ -110,3 +110,38 @@ def test_harness_role_and_source_ride_payload_to_mint():
     nodes, _ = build_mint_batch("2026-08-22_20-29-06", payload)
     assert nodes[2]["properties"]["role"] == "harness"
     assert nodes[2]["properties"]["source"] == MESSAGE_SOURCE_HARNESS
+
+
+def test_thinking_summary_facet_mirrors_extractor_and_rides_to_mint():
+    # The graph-side literal mirrors the extractor's (the one-label-many-
+    # sources pattern, item 6c3a0118) and survives payload -> mint intact.
+    from cjm_context_graph_projection.pull_transcript import (
+        MESSAGE_SOURCE_THINKING_SUMMARY)
+    from cjm_harness_transcripts.extract import THINKING_SUMMARY_SOURCE
+    assert MESSAGE_SOURCE_THINKING_SUMMARY == THINKING_SUMMARY_SOURCE
+    summary = SimpleNamespace(uuid="a1#th0", parent_uuid="a1", role="assistant",
+                              text="I've confirmed the thread.",
+                              timestamp="2026-08-26T22:00:03.000Z",
+                              source=MESSAGE_SOURCE_THINKING_SUMMARY)
+    payload = build_pull_payload([em("u1"), summary, em("a1", role="assistant")])
+    assert payload[1]["source"] == MESSAGE_SOURCE_THINKING_SUMMARY
+    assert payload[2]["prev_uuid"] == "a1#th0"          # summary leads its prose
+    nodes, _ = build_mint_batch("2026-08-26_15-14-43", payload)
+    assert nodes[2]["properties"]["source"] == MESSAGE_SOURCE_THINKING_SUMMARY
+    assert nodes[2]["properties"]["role"] == "assistant"
+
+
+def test_stale_next_edges_plan_names_only_superseded_predecessors():
+    # Chain re-link (finding e358fe97): a message inserted mid-chain by a
+    # wider extraction (a thinking summary between prev and prose) leaves the
+    # stale prev->prose NEXT edge beside the new pair; the plan names exactly
+    # that edge — never a still-valid predecessor, never the chain head.
+    from cjm_context_graph_projection.pull_transcript import stale_next_edges
+    payload = build_pull_payload([em("u1"), em("a1#th0", role="assistant"),
+                                  em("a1", role="assistant")])
+    mid = message_node_id
+    inbound = {mid("a1#th0"): [mid("u1")],                 # fresh and valid
+               mid("a1"): [mid("u1"), mid("a1#th0")]}      # stale u1->a1 survives
+    assert stale_next_edges(payload, inbound) == [(mid("u1"), mid("a1"))]
+    assert stale_next_edges(payload, {}) == []             # nothing on-graph yet
+    assert stale_next_edges(payload, {mid("u1"): [mid("zz")]}) == []  # head: skipped

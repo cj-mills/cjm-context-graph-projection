@@ -17,13 +17,14 @@ NOTHING (the watcher-cadence guarantee: quiet polls leave no trace)."""
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from cjm_context_graph_layer.grammar import make_edge
+from cjm_context_graph_layer.grammar import make_edge, SpineRelations
 from cjm_context_graph_layer.ops import extend_graph, graph_task
+from cjm_context_graph_primitives.query import EdgeQuery
 from cjm_dev_graph_schema.nodes import MessageNode, SessionNode
 from cjm_dev_graph_schema.vocab import DevRelations
 
 from .runtime import GraphHandle
-from .write import assert_value
+from .write import assert_value, unlink
 
 # The capture-source facet stamped on pulled messages (one label, many sources —
 # editor-born parts stamp MESSAGE_SOURCE_COMPOSER).
@@ -37,6 +38,12 @@ MESSAGE_SOURCE_COMPOSER = "composer"
 # the literal is born extractor-side (TOOL_PARAM_SOURCE, cjm-harness-transcripts)
 # and mirrored here as graph-side vocabulary — the timeline COMPOSER_SOURCE pattern.
 MESSAGE_SOURCE_TOOL_PARAM = "cc-tool-param"
+
+# The facet the extractor stamps on persisted thinking summaries (item 6c3a0118:
+# Claude Code 2.1.246+ stores the model's summary of a reasoning run as the
+# thinking block's text) — role stays "assistant" (agent-origin); the literal is
+# born extractor-side (THINKING_SUMMARY_SOURCE) and mirrored here per the pattern.
+MESSAGE_SOURCE_THINKING_SUMMARY = "cc-thinking-summary"
 
 # The facet the extractor stamps on harness task-notification records (finding
 # 47b83adb): role="harness", neither party's prose — the literal is born
@@ -62,6 +69,35 @@ def build_pull_payload(
                         "source": getattr(em, "source", None)})
         prev_uuid = em.uuid
     return payload
+
+
+def stale_next_edges(
+    payload: List[Dict[str, Any]],      # build_pull_payload output (uuid / prev_uuid), chronological
+    inbound: Dict[str, List[str]],      # Message node id -> source node ids of its ON-GRAPH inbound NEXT edges
+) -> List[Tuple[str, str]]:  # (source_id, target_id) NEXT pairs to retract, payload order
+    """The chain re-link plan (finding e358fe97) — pure, so the live pull and
+    tests share it.
+
+    Every transcript message has at most ONE predecessor (forks are outbound —
+    rewind points), and the payload's `prev_uuid` is authoritative for the
+    active path. A wider extraction that inserts a message mid-chain (the
+    2.1.246 thinking summaries between a prompt and its assistant prose) leaves
+    the stale prev->prose NEXT edge beside the new prev->insert->prose pair,
+    because pulls are additive; this names every inbound NEXT edge whose source
+    is not the payload predecessor. Chain heads (no prev_uuid) are skipped —
+    their entry is STARTS_WITH, and a demoted head is not a case the transcript
+    DAG produces."""
+    plan: List[Tuple[str, str]] = []
+    for m in payload:
+        prev = m.get("prev_uuid")
+        if not prev:
+            continue
+        target = MessageNode(source_uuid=m["uuid"], role="", text="").id
+        expected = MessageNode(source_uuid=prev, role="", text="").id
+        for src in inbound.get(target, []):
+            if src != expected:
+                plan.append((src, target))
+    return plan
 
 
 def build_mint_batch(
@@ -214,7 +250,29 @@ async def pull_transcript(
             new_payload.append(m)
     res = await mint_pulled_messages(gx, session_key, best.cc_session_uuid,
                                      payload, actor=actor)
+    # Chain re-link (finding e358fe97): pulls are ADDITIVE, so a message the
+    # extractor now yields MID-chain (a 2.1.246 thinking summary on a session
+    # pulled before the 6c3a0118 facet) leaves the stale prev->next NEXT edge
+    # beside the new pair. Read every payload message's inbound NEXT edges,
+    # retract the ones the payload's prev_uuid does not vouch for, and report
+    # them — the caller journals the compensating unlinks after the pull op.
+    # Runs even when nothing new minted: that is the repair pull.
+    ids = [MessageNode(source_uuid=m["uuid"], role="", text="").id for m in payload]
+    inbound: Dict[str, List[str]] = {}
+    for i in range(0, len(ids), 500):
+        eres = await graph_task(gx.queue, gx.graph_id, "query_edges",
+                                query=EdgeQuery(relation_type=SpineRelations.NEXT,
+                                                target_ids=ids[i:i + 500],
+                                                project=["id"]).to_dict())
+        for row in (eres.rows or []):
+            inbound.setdefault(row["target_id"], []).append(row["source_id"])
+    retracted: List[Dict[str, Any]] = []
+    for src, dst in stale_next_edges(payload, inbound):
+        ures = await unlink(gx, src, dst, SpineRelations.NEXT, actor=actor)
+        if ures.get("written"):
+            retracted.append({"source_id": src, "target_id": dst,
+                              "relation": SpineRelations.NEXT})
     return {**res, "transcript_path": str(best.path),
             "messages_total": len(payload), "messages_new": len(new_payload),
-            "new_messages": new_payload,
+            "new_messages": new_payload, "retracted_edges": retracted,
             "other_candidates": [m.cc_session_uuid for m in matches[1:]]}

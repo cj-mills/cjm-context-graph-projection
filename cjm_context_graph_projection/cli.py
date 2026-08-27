@@ -568,6 +568,18 @@ async def _dispatch(args) -> int:
                              {"session_key": args.key,
                               "cc_session_uuid": res.get("cc_session_uuid", ""),
                               "messages": res["new_messages"], "actor": args.actor})
+            # Chain re-link (finding e358fe97): a wider extraction that inserts
+            # a message MID-chain leaves the stale prev->next edge beside the
+            # new ones; the pull retracts it and reports it here — journal the
+            # compensating `unlink` ops AFTER the pull op so a rebuild converges
+            # (independent of new_messages: a repair pull may mint nothing).
+            for e in res.get("retracted_edges") or []:
+                print(f"  re-linked: retracted stale NEXT "
+                      f"{e['source_id'][:8]} -> {e['target_id'][:8]}")
+                if args.journal_path:
+                    append_write(args.journal_path, "unlink",
+                                 {"source_id": e["source_id"], "target_id": e["target_id"],
+                                  "relation": e["relation"], "actor": args.actor})
             return 0
         elif args.command == "edit-message":
             # In-place Message edit (DEC 91c47b4a pt 3, CLI dual of the
