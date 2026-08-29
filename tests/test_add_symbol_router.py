@@ -300,3 +300,26 @@ def test_add_symbol_after_anchor_places_midway(tmp_path, monkeypatch):
     bad = asyncio.run(add_symbol(GX, "mod1", "def q():\n    return 4\n",
                                  after="nope_missing"))
     assert "anchor" in bad["error"]
+
+
+def test_add_symbol_refuses_a_never_rebuilt_module_with_a_nonempty_file(tmp_path, monkeypatch):
+    """The clobber guard (finding d6c3eca0): a module whose LIVE projection holds zero
+    regions while its file on disk is non-empty is captured-but-never-reingested — an
+    emit would write only the new symbol and delete every prior one. add-symbol and
+    add-text refuse loudly and touch nothing; a BORN module (no file yet) still takes
+    its first symbol."""
+    from cjm_context_graph_projection.authoring import add_text
+    mod = _module_node(tmp_path)
+    fake = FakeGraph([mod])
+    _wire(fake, monkeypatch)
+    path = tmp_path / "cjm_demo/m.py"
+    original = "import os\n\n\ndef f():\n    return os.getcwd()\n"
+    path.write_text(original)
+    res = asyncio.run(add_symbol(GX, "mod1", "def g():\n    return 1", write=True))
+    assert res["written"] is False and "CLOBBER" in res["error"] and "d6c3eca0" in res["error"]
+    assert path.read_text() == original and "sym" not in "".join(fake.nodes)  # untouched
+    res_t = asyncio.run(add_text(GX, "mod1", "X = 1", write=True))
+    assert res_t["written"] is False and "CLOBBER" in res_t["error"]
+    path.unlink()  # a BORN module (no file yet) is not stale — its first symbol lands
+    res2 = asyncio.run(add_symbol(GX, "mod1", "def g():\n    return 1", write=False))
+    assert not res2.get("error") and res2["qualname"] == "g"

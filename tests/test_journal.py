@@ -313,3 +313,103 @@ def test_node_journal_trace_first_last_sessions(tmp_path):
     # A missing path is skipped, an untouched node traces empty.
     assert node_journal_trace([str(tmp_path / "absent.jsonl")], nid)["op_count"] == 0
     assert node_journal_trace([str(p)], "ffff0000-1111-2222-3333-444444444444")["op_count"] == 0
+
+
+def test_procedure_verb_is_journaled_and_replays_through_mint(tmp_path, monkeypatch):
+    """Journal-first for programmatic value-sources (finding b744b28e): the oracle's
+    Procedure mint rides a `procedure` op, replay re-mints through `mint_procedure`,
+    the touch feed resolves it to the deterministic per-method id, and a replayed
+    `assert` carries the oracle's `method` through to the write verb."""
+    import asyncio
+    from cjm_context_graph_layer.identity import derive_node_id
+    import cjm_context_graph_projection.journal as journal_mod
+    assert "procedure" in journal_mod.JOURNAL_VERBS
+    p = str(tmp_path / "writes.jsonl")
+    proc_args = {"method": "version-oracle/v1", "name": "version oracle",
+                 "actor": "programmatic", "root_kind": "asserted"}
+    assert journal_mod.append_write(p, "procedure", proc_args) is True
+    assert journal_mod.append_write(p, "assert", {
+        "subject": "e1", "predicate": "version", "value": "0.0.2",
+        "actor": "procedure:version-oracle/v1", "evidence": ["p"], "supersede": None,
+        "method": "version-oracle/v1"}) is True
+    assert journal_mod.touched_node_ids({"verb": "procedure", "args": proc_args}) == [
+        derive_node_id("procedure", "version-oracle/v1")]
+    minted, asserted = [], []
+
+    async def fake_mint(gx, method, name, *, actor, root_kind):
+        minted.append((method, name, actor, root_kind))
+        return {"procedure_id": "p"}
+
+    async def fake_assert(gx, subject, predicate, value, **kw):
+        asserted.append((subject, predicate, value, kw.get("method")))
+        return {}
+
+    monkeypatch.setattr(journal_mod, "mint_procedure", fake_mint)
+    monkeypatch.setattr(journal_mod, "assert_value", fake_assert)
+    rc = asyncio.run(journal_mod.replay_journal(None, p))
+    assert rc["procedure"] == 1 and rc["assert"] == 1 and rc["skipped"] == 0
+    assert minted == [("version-oracle/v1", "version oracle", "programmatic", "asserted")]
+    assert asserted == [("e1", "version", "0.0.2", "version-oracle/v1")]
+
+
+def test_version_oracle_journals_procedure_and_changed_assertions(tmp_path, monkeypatch):
+    """The oracle's writes are journal-first (b744b28e): one `procedure` op (deduped on
+    re-run) + one `assert` op per assertion that CHANGED the graph; an unchanged read
+    and a born-superseded value journal nothing (replay would no-op)."""
+    import asyncio
+    import cjm_context_graph_projection.oracle as oracle_mod
+    from cjm_context_graph_primitives.journal import read_journal
+
+    def repo(key):
+        return {"id": f"e-{key}", "label": "Entity",
+                "properties": {"entity_kind": "repo", "key": f"cjm-{key}", "name": f"cjm-{key}"}}
+
+    entities = [repo("new"), repo("same"), repo("old")]
+    outcomes = {"e-new": {"nodes_added": 2, "superseded": [], "born_superseded": False},
+                "e-same": {"nodes_added": 0, "superseded": [], "born_superseded": False},
+                "e-old": {"nodes_added": 1, "superseded": [], "born_superseded": True}}
+
+    async def fake_load_label(gx, label):
+        return entities
+
+    async def fake_mint(gx, method, name, **kw):
+        return {"procedure_id": "proc-1"}
+
+    async def fake_assert(gx, subject, predicate, value, **kw):
+        return {"assertion_id": f"a-{subject}", **outcomes[subject]}
+
+    monkeypatch.setattr(oracle_mod.F, "load_label", fake_load_label)
+    monkeypatch.setattr(oracle_mod, "mint_procedure", fake_mint)
+    monkeypatch.setattr(oracle_mod, "assert_value", fake_assert)
+    monkeypatch.setattr(oracle_mod, "read_repo_version", lambda name, repos_dir=None: "1.2.3")
+    p = str(tmp_path / "writes.jsonl")
+    res = asyncio.run(oracle_mod.run_version_oracle(None, journal_path=p))
+    ops = read_journal(p)
+    assert [o["verb"] for o in ops] == ["procedure", "assert"]
+    assert ops[0]["args"]["method"] == oracle_mod.ORACLE_METHOD
+    assert ops[1]["args"] == {"subject": "e-new", "predicate": "version", "value": "1.2.3",
+                              "actor": oracle_mod.ORACLE_ACTOR, "evidence": ["proc-1"],
+                              "supersede": None, "method": oracle_mod.ORACLE_METHOD}
+    assert res["journaled"] == 2 and res["counts"]["journaled"] == 2
+    assert res["counts"]["unchanged"] == 1 and res["counts"]["skipped"] == 1
+    res2 = asyncio.run(oracle_mod.run_version_oracle(None, journal_path=p))
+    assert res2["journaled"] == 0 and len(read_journal(p)) == 2  # exact-dup dedup: quiet re-run
+    assert asyncio.run(oracle_mod.run_version_oracle(None))["journaled"] == 0  # no path = unjournaled
+
+
+def test_journal_window_verb_filters(tmp_path):
+    """da9ea508 (4): `--verb` keeps and `--exclude-verb` drops op verbs BEFORE the touch
+    aggregation, so a retraction sweep (unlink×30) can be filtered out of a session lens."""
+    import cjm_context_graph_projection.journal as journal_mod
+    p = str(tmp_path / "writes.jsonl")
+    journal_mod.append_write(p, "link", {"source_id": "a", "target_id": "b", "relation": "R"})
+    journal_mod.append_write(p, "unlink", {"source_id": "a", "target_id": "b", "relation": "R"})
+    journal_mod.append_write(p, "check", {"item_id": "a", "text": "t"})
+    base = journal_mod.journal_window([p])
+    assert base["entries"] == 3
+    only = journal_mod.journal_window([p], verbs=["check"])
+    assert only["entries"] == 1 and [t["ref"] for t in only["touched"]] == ["a"]
+    drop = journal_mod.journal_window([p], exclude_verbs=["unlink"])
+    assert drop["entries"] == 2 and drop["window"]["exclude_verbs"] == ["unlink"]
+    a = next(t for t in drop["touched"] if t["ref"] == "a")
+    assert set(a["verbs"]) == {"link", "check"}

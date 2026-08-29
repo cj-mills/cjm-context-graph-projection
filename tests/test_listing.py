@@ -100,3 +100,17 @@ def test_list_label_rows_carry_durable_key(tmp_path):
     assert rows[titled["id"]]["key"] == "2026-07-08_10-58-13"       # key survives titling
     assert rows[titled["id"]]["title"] == "check-in-1: shipped"     # title stays display-only
     assert rows[untitled["id"]]["key"] == "2026-07-08_18-30-35"
+
+
+def test_render_list_full_mode_untruncated_with_body():
+    """1d8d4486: --full renders the whole title/gloss and each node's body text — the
+    batch body read that replaces one `read` subprocess per node."""
+    long_title = "T" * 120
+    obj = {"mode": "label", "key": "Decision", "full": True,
+           "rows": [{"id": "d1", "title": long_title, "gloss": "g" * 200,
+                     "text": "line one\nline two"}],
+           "count": 1, "total": 1, "truncated": False}
+    out = render("list", obj, "human")
+    assert long_title in out and "g" * 200 in out and "line one\nline two" in out
+    short = render("list", {**obj, "full": False}, "human")
+    assert long_title not in short and "line one" not in short

@@ -386,6 +386,8 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         extra = ""
         if c.get("closable"):
             extra += f" · closable {c['closable']}"
+            if c.get("honored"):
+                extra += f" ({c['honored']} honored by a done DEC)"
         if c.get("drift"):
             extra += f" · DoD-drift {c['drift']}"
         if c.get("unfiled") is not None:
@@ -394,14 +396,27 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                  f"_ready {c.get('ready', 0)} · blocked {c.get('blocked', 0)} · "
                  f"done {c.get('done', 0)}{extra}_  (ready/blocked are DERIVED, never stored)", ""]
         closable_ids = {e.get("id") for e in obj.get("closable", [])}
+        honored_by = {e.get("id"): e.get("honored_by") for e in obj.get("closable", [])
+                      if e.get("honored_by")}
 
         def _dod(e):
             ck = e.get("checks")
+            hb = honored_by.get(e.get("id"))
+            if hb and not ck:
+                # dd80b1d7: a done Decision is EVIDENCE_FOR / SUPERSEDES this open item —
+                # propose closure (confirm: assert <id> task_state done --evidence <dec>).
+                return f"  🏁 _honored by {', '.join(h[:8] for h in hb)} — closable_"
             if not ck:
                 return ""
             if e.get("id") in closable_ids:
                 return f"  🏁 _DoD {ck['done']}/{ck['total']} met — closable_"
             return f"  _[DoD {ck['done']}/{ck['total']}]_"
+
+        def _chips(e):
+            # da9ea508 (1): priority facts (awaiting-user / demand-gated / gate-fired…)
+            # ride the row as chips, so a fired gate is visible without `show`.
+            facts = e.get("facts") or {}
+            return "".join(f"  _[{k}={'/'.join(v)}]_" for k, v in sorted(facts.items()))
 
         view = obj.get("view") or {}
         ready = obj.get("ready", [])
@@ -436,14 +451,14 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                 for r in members:
                     gates = r.get("gates", [])
                     suffix = f"  _(gated by {len(gates)}, all done)_" if gates else ""
-                    lines.append(f"  - ✅ **{_short(r.get('label', ''), 100)}** `{r.get('id')}`{suffix}{_dod(r)}")
+                    lines.append(f"  - ✅ **{_short(r.get('label', ''), 100)}** `{r.get('id')}`{suffix}{_chips(r)}{_dod(r)}")
         blocked = obj.get("blocked", [])
         if blocked:
             lines.append("**Blocked (waiting on prerequisites):**")
             for b in blocked:
                 ptag = (b.get("program") or {}).get("label")
                 ptag = f"  ▸ _{_short(ptag, 40)}_" if ptag else ""
-                lines.append(f"  - ⛔ **{_short(b.get('label', ''), 100)}** `{b.get('id')}`{_dod(b)}{ptag}")
+                lines.append(f"  - ⛔ **{_short(b.get('label', ''), 100)}** `{b.get('id')}`{_chips(b)}{_dod(b)}{ptag}")
                 for g in b.get("blocked_by", []):
                     lines.append(f"      ↳ needs _{_short(g.get('label', ''), 80)}_ `{g.get('id')}`")
         drift = obj.get("drift", [])
@@ -589,7 +604,8 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         c = obj.get("counts", {})
         lines = ["## Version oracle",
                  f"_bumped {c.get('bumped', 0)} · first-seen {c.get('first_seen', 0)} · "
-                 f"unchanged {c.get('unchanged', 0)} · skipped {c.get('skipped', 0)}_", ""]
+                 f"unchanged {c.get('unchanged', 0)} · skipped {c.get('skipped', 0)} · "
+                 f"journaled {c.get('journaled', 0)} op(s)_", ""]
         for b in obj.get("bumped", []):
             lines.append(f"- ⬆ **{b.get('repo')}** → {b.get('version')} "
                          f"(superseded {len(b.get('superseded', []))})")
@@ -850,6 +866,28 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
     if kind == "read":
         if obj.get("error"):
             return f"⚠ {obj['error']}"
+        if obj.get("kind") == "batch":
+            # 1d8d4486: N ids in one subprocess — one delimited block per node.
+            parts = []
+            for it in obj.get("items", []):
+                head = f"### {it.get('label') or '?'} `{it.get('node_id')}`"
+                body = (f"⚠ {it['error']}" if it.get("error")
+                        else _human("read", it).rstrip())
+                parts.append(f"{head}\n\n{body}\n")
+            return "\n".join(parts)
+        if obj.get("kind") == "messages":
+            # 1d8d4486: a session spine's Message bodies in chain order, role-filtered.
+            head = (f"## Session `{obj.get('session_key')}` — {obj.get('count', 0)} message(s)"
+                    + (f" · role={obj['role']}" if obj.get("role") else ""))
+            parts = [head, ""]
+            for m in obj.get("items", []):
+                tag = "" if m.get("on_active_path", True) else " _(superseded branch)_"
+                parts.append(f"### [{m.get('role')}] {m.get('timestamp') or ''} "
+                             f"`{str(m.get('id') or '')[:8]}`{tag}")
+                parts.append("")
+                parts.append(str(m.get("text") or "").rstrip())
+                parts.append("")
+            return "\n".join(parts)
         if obj.get("kind") == "nested":
             return f"⚠ {obj.get('hint')} (enclosing module `{obj.get('module_id')}`)"
         if obj.get("kind") == "slice":
@@ -870,13 +908,16 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         if not rows:
             return f"{title}\n\n_(none)_"
         lines = [title, ""]
+        full = bool(obj.get("full"))  # 1d8d4486: --full = untruncated title/gloss + the body
         for r in rows:
             if mode == "label":
-                line = f"- **{_short(r.get('title', ''), 80)}** `{r.get('id')}`"
+                line = f"- **{r.get('title', '') if full else _short(r.get('title', ''), 80)}** `{r.get('id')}`"
                 if r.get("path"):
                     line += f"  📄 `{r['path']}`"
                 if r.get("gloss"):
-                    line += f"\n    ↳ _{_short(r['gloss'], 140)}_"
+                    line += f"\n    ↳ _{r['gloss'] if full else _short(r['gloss'], 140)}_"
+                if full and r.get("text"):
+                    line += "\n\n" + str(r["text"]).rstrip() + "\n"
                 lines.append(line)
             elif mode == "predicate":
                 lines.append(f"- **{_short(r.get('subject', ''), 70)}** = _{r.get('value')}_ "
@@ -922,8 +963,16 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             lines += [f"📄 `{path}`", ""]  # where it lives on disk (the locate-at-a-glance line)
         meta = []  # axis-D parity (dc47dfb5): same metadata roster as the TUI
         facts = obj.get("facts") or {}
+        facts_at = obj.get("facts_at") or {}
         if facts:
-            meta.append(" · ".join(f"{k}={'/'.join(v)}" for k, v in sorted(facts.items())))
+            # da9ea508 (3): each fact carries its assertion time; a SUPERSEDED node says
+            # so instead of rendering as a plain `done`.
+            meta.append(" · ".join(
+                f"{k}={'/'.join(v)}" + (f" @{_fmt_ts(facts_at[k])[:16]}" if facts_at.get(k) else "")
+                for k, v in sorted(facts.items())))
+        sup = obj.get("superseded_by") or []
+        if sup:
+            meta.append("⤵ SUPERSEDED by " + ", ".join(f"`{s[:8]}`" for s in sup))
         j = obj.get("journal") or {}
         if j.get("op_count"):
             def _jd(ts):
@@ -998,7 +1047,11 @@ def render(
     if fmt == "agent":
         return json.dumps(obj, indent=2, default=str)
     out = _human(kind, obj)
-    if isinstance(obj, dict) and isinstance(obj.get("journal"), dict) and not obj.get("error"):
+    # Only a journaled_emit RECEIPT (it carries `journal_first`) gets the line — a read
+    # verb's journal TRACE (`show`'s axis-D metadata) is a different dict under the same
+    # key and used to print 'PREVIEW — would journal' on every show (da9ea508 (3)).
+    if (isinstance(obj, dict) and isinstance(obj.get("journal"), dict)
+            and "journal_first" in obj["journal"] and not obj.get("error")):
         out += "\n" + _journal_receipt_line(obj["journal"])
     return out
 

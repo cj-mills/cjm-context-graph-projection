@@ -333,15 +333,35 @@ async def _dispatch(args) -> int:
         elif args.command == "locate":
             print(render("locate", await locate(gx, args.term, limit=args.limit), args.format))
         elif args.command == "grep":
-            print(render("grep", await grep(gx, args.term, limit=args.limit), args.format))
+            jp = [p for p in (args.journal_path, args.source_journal_path) if p]
+            print(render("grep", await grep(gx, args.term, limit=args.limit,
+                                            context=args.context, labels=args.label,
+                                            session=args.session, journal_paths=jp),
+                         args.format))
         elif args.command == "read":
-            res = await read_node(gx, args.node_id)
+            if args.session:
+                # 1d8d4486: a spine's Message bodies in chain order (role-filtered).
+                from .scratchpad_export import read_session_messages
+                res = await read_session_messages(gx, args.session, role=args.role,
+                                                  include_superseded=args.superseded,
+                                                  include_parts=args.parts)
+            elif not args.node_id:
+                print("error: read needs node id(s) or --session <key>", file=sys.stderr)
+                return 2
+            elif len(args.node_id) > 1:
+                # 1d8d4486: N ids in ONE subprocess — a delimited block per node; one
+                # unresolvable id is reported in its block, never fails the batch.
+                items = [await read_node(gx, nid) for nid in args.node_id]
+                res = {"kind": "batch", "items": items, "count": len(items),
+                       "errors": sum(1 for it in items if it.get("error"))}
+            else:
+                res = await read_node(gx, args.node_id[0])
             out = render("read", res, args.format)
             # Content delivery: print the verbatim text exactly (a note body already ends
             # with its file's trailing newline) so `read > file` is byte-faithful; status/
             # JSON lines (errors, nested-symbol hints) get the usual newline.
             if (args.format == "human" and not res.get("error")
-                    and res.get("kind") != "nested"):
+                    and res.get("kind") not in ("nested", "batch", "messages")):
                 sys.stdout.write(out)
             else:
                 print(out)
@@ -350,7 +370,8 @@ async def _dispatch(args) -> int:
             print(render("contradictions", await contradictions(gx, args.scope), args.format))
         elif args.command == "readiness":
             res = await readiness(gx, args.scope or args.contains, state=args.state,
-                                  limit=args.limit, offset=args.offset)
+                                  limit=args.limit, offset=args.offset,
+                                  anchor=args.anchor, where=args.where)
             print(render("readiness", res, args.format))
         elif args.command == "register-drift":
             print(render("register-drift", await register_drift(gx), args.format))
@@ -370,7 +391,9 @@ async def _dispatch(args) -> int:
                       "--source-journal-path — code touches live there)", file=sys.stderr)
                 return 1
             res = await journal_window_view(gx, paths, start=_parse_ts(args.start),
-                                            end=_parse_ts(args.end), session=args.session)
+                                            end=_parse_ts(args.end), session=args.session,
+                                            verbs=args.verb, exclude_verbs=args.exclude_verb,
+                                            labels=args.label)
             print(render("journal-window", res, args.format))
         elif args.command == "subgraph":
             res = await subgraph_view(gx, args.refs, hops=args.hops,
@@ -398,7 +421,7 @@ async def _dispatch(args) -> int:
             res = await list_graph(gx, label=args.label, predicate=args.predicate,
                                    relation=args.relation, limit=args.limit,
                                    offset=args.offset, contains=args.contains,
-                                   where=args.where, value=args.value)
+                                   where=args.where, value=args.value, full=args.full)
             print(render("list", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "conventions":
@@ -640,7 +663,10 @@ async def _dispatch(args) -> int:
                 print(res["text"])
             return 0
         elif args.command == "oracle":
-            res = await run_version_oracle(gx, repos_dir=args.repos_dir, only=args.only)
+            # Journal-first (b744b28e): the Procedure mint + every changed assertion ride
+            # the writes journal so a rebuild keeps the oracle's facts (cg-write bakes it).
+            res = await run_version_oracle(gx, repos_dir=args.repos_dir, only=args.only,
+                                           journal_path=args.journal_path)
             print(render("oracle", res, args.format))
             return 0
         elif args.command == "link":
@@ -1051,13 +1077,32 @@ def main() -> int:
     p_gr = sub.add_parser("grep",
                           help="Exact-substring CONTENT search over node text fields "
                                "(the literal complement of locate/relevant)")
-    p_gr.add_argument("term", help="The exact substring / phrase (case-insensitive)")
+    p_gr.add_argument("term", help="The exact substring / phrase (case-insensitive; a term "
+                                   "starting with '-' goes after a bare `--`)")
     p_gr.add_argument("--limit", type=int, default=25)
+    p_gr.add_argument("--label", action="append", default=None,
+                      help="Keep only nodes of this label (repeatable; e.g. Decision — keeps "
+                           "Message hits from swamping a phrase)")
+    p_gr.add_argument("--session", default=None,
+                      help="Keep only nodes this session's journal window touched")
+    p_gr.add_argument("--context", type=int, default=60,
+                      help="Snippet context chars either side of the hit (default 60)")
 
     p_read = sub.add_parser("read",
                             help="Deliver a node's verbatim CONTENT (Note body / Section / "
-                                 "CodeSymbol body / CodeText / Cell / module) — the read dual of author/emit")
-    p_read.add_argument("node_id")
+                                 "CodeSymbol body / CodeText / Cell / module) — the read dual of "
+                                 "author/emit; N ids = one delimited block each; --session = a "
+                                 "spine's Message bodies in chain order")
+    p_read.add_argument("node_id", nargs="*",
+                        help="Node id(s) / unique prefixes — several = one block per node (1d8d4486)")
+    p_read.add_argument("--session", default=None,
+                        help="Deliver this session key's Message bodies in chain order instead")
+    p_read.add_argument("--role", default=None, choices=("user", "assistant", "harness"),
+                        help="--session: keep only this role")
+    p_read.add_argument("--superseded", action="store_true",
+                        help="--session: include off-active-path (rewound) branches")
+    p_read.add_argument("--parts", action="store_true",
+                        help="--session: include composer parts (drafts) beside sent messages")
 
     p_conv = sub.add_parser("conventions",
                             help="Audit notebook code conventions (undocumented / no-docstring / non-granular)")
@@ -1084,6 +1129,12 @@ def main() -> int:
                       help="Substring filter on item labels (alias of the scope positional)")
     p_rd.add_argument("--limit", type=int, default=15, help="Page size (default 15)")
     p_rd.add_argument("--offset", type=int, default=0, help="Page start within the selected bucket")
+    p_rd.add_argument("--anchor", default=None,
+                      help="Restrict to items filed PART_OF this program anchor (id prefix or "
+                           "label substring)")
+    p_rd.add_argument("--where", action="append", metavar="PRED=VALUE",
+                      help="Active-fact filter on items (repeatable, ANDed — e.g. "
+                           "priority=awaiting-user)")
 
     p_rg = sub.add_parser("register-drift",
                           help="Reconcile each <value>-register hub's REFERENCES cache against "
@@ -1117,6 +1168,12 @@ def main() -> int:
                       help="Window end (same forms; omit = OPEN — the in-progress live window)")
     p_jw.add_argument("--session", default=None,
                       help="Filter by session key instead of/alongside time bounds")
+    p_jw.add_argument("--verb", action="append", default=None,
+                      help="Keep only these op verbs (repeatable; e.g. decide, source)")
+    p_jw.add_argument("--exclude-verb", action="append", default=None,
+                      help="Drop these op verbs (repeatable; e.g. unlink for a retraction sweep)")
+    p_jw.add_argument("--label", action="append", default=None,
+                      help="Keep only touched nodes of this label (repeatable)")
 
     p_pf = sub.add_parser("portfolio",
                           help="Workbench front door: every role-asserted anchor + lock lead "
@@ -1193,6 +1250,9 @@ def main() -> int:
     p_ls.add_argument("--value", default=None,
                       help="Predicate mode: keep only assertions with this value (the register "
                            "read — e.g. --predicate role --value north-star)")
+    p_ls.add_argument("--full", action="store_true",
+                      help="Label mode: untruncated title/gloss + each node's body text "
+                           "(statement/description) — the batch body read (1d8d4486)")
 
     p_wl = sub.add_parser("worklist", help="Propose/confirm queue (dangling refs, soft conflicts)")
     p_wl.add_argument("--memory-dir", default=DEFAULT_MEMORY,

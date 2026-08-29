@@ -87,3 +87,30 @@ def test_header_stamps_render_local_time():
     pinned = timezone(timedelta(hours=-7))
     assert _local_stamp("2026-08-22T04:25:10.574Z", tz=pinned) == "2026-08-21 21:25:10"
     assert _local_stamp("garbage", tz=pinned) == "garbage"
+
+
+def test_read_session_messages_orders_filters_role_and_hides_branches(monkeypatch):
+    """1d8d4486: `read --session` delivers the ACTIVE transcript path in chain order,
+    role-filtered; superseded branches and composer parts are opt-in."""
+    import asyncio
+    import cjm_context_graph_projection.scratchpad_export as se
+
+    async def fake_load(gx, key):
+        return {"messages": [msg("n3", "2026-08-21T10:02:00.000Z", text="take 2"),
+                             msg("n1", "2026-08-21T10:00:00.000Z", text="q"),
+                             msg("n2", "2026-08-21T10:01:00.000Z", role="assistant",
+                                 text="dead end"),
+                             msg("p1", "2026-08-21T10:00:30.000Z", source="composer",
+                                 text="draft")],
+                "next_pairs": [("n1", "n2"), ("n1", "n3")], "derived_pairs": [],
+                "title": "T"}
+
+    monkeypatch.setattr(se, "_load_session_messages", fake_load)
+    res = asyncio.run(se.read_session_messages(None, KEY))
+    assert res["kind"] == "messages" and [m["id"] for m in res["items"]] == ["n1", "n3"]
+    users = asyncio.run(se.read_session_messages(None, KEY, role="user"))
+    assert [m["text"] for m in users["items"]] == ["q", "take 2"]
+    everything = asyncio.run(se.read_session_messages(None, KEY, include_superseded=True,
+                                                      include_parts=True))
+    assert [m["id"] for m in everything["items"]] == ["n1", "p1", "n2", "n3"]
+    assert everything["items"][2]["on_active_path"] is False

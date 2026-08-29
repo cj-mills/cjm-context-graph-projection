@@ -18,6 +18,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from cjm_context_graph_layer.grammar import make_edge
+from cjm_context_graph_layer.identity import derive_node_id
 from cjm_context_graph_layer.ops import extend_graph, graph_task, PROVENANCE_TS
 from cjm_context_graph_primitives.provenance import SourceRef
 from cjm_dev_graph_schema import predicates as P
@@ -25,7 +26,7 @@ from cjm_dev_graph_schema.aliases import resolve_subject_id
 from cjm_dev_graph_schema.identity import note_node_id, section_node_id
 from cjm_dev_graph_schema.nodes import (AssertionNode, CheckNode, DecisionNode, EntityNode,
                                         FactSlotNode, SessionNode)
-from cjm_dev_graph_schema.vocab import DevRelations
+from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 
 from . import factlayer as F
 from .projection import ambiguity_error, resolve_node_ref
@@ -500,3 +501,27 @@ async def retract_session(
                                node_ids=[sess_id], cascade=True)
     return {"session_id": sess_id, "key": key, "deleted": int(deleted or 0),
             "written": True, "actor": actor}
+
+
+async def mint_procedure(
+    gx: GraphHandle,
+    method: str,                   # The procedure's method slug — its deterministic identity (e.g. "version-oracle/v1")
+    name: str,                     # Display name (e.g. "version oracle")
+    *,
+    actor: str = "programmatic",   # The procedure's actor class (trust gradient: programmatic > human > LLM)
+    root_kind: str = "asserted",   # The value-source root kind the procedure feeds
+) -> Dict[str, Any]:  # {procedure_id, method, name, nodes_added, written}
+    """Upsert a Procedure node by deterministic (method) id — the programmatic value-source
+    an oracle's assertions cite as evidence.
+
+    Journal-first (finding b744b28e): the ONLY mint path for Procedure nodes — the oracle
+    journals a `procedure` op beside it and replay re-mints through this same function, so
+    a rebuild keeps the node instead of dropping it until the next oracle run. Idempotent
+    (deterministic id + `extend_graph`): a re-mint verifies into a no-op."""
+    node = {"id": derive_node_id("procedure", method), "label": DevNodeKinds.PROCEDURE,
+            "properties": {"name": name, "method": method, "actor": actor,
+                           "root_kind": root_kind},
+            "sources": []}
+    res = await extend_graph(gx.queue, gx.graph_id, [node], [])
+    return {"procedure_id": node["id"], "method": method, "name": name,
+            "nodes_added": getattr(res, "nodes_added", 0), "written": True}

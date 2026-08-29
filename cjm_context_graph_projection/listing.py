@@ -47,7 +47,8 @@ async def _labels_for(
 
 async def _list_label(gx: GraphHandle, label: str, limit: int, offset: int = 0,
                       contains: Optional[str] = None,
-                      where: Optional[List[PropertyPredicate]] = None) -> Dict[str, Any]:
+                      where: Optional[List[PropertyPredicate]] = None,
+                      full: bool = False) -> Dict[str, Any]:
     """Nodes carrying `label`, windowed by `offset`+`limit`, filtered by property
     predicates (`where`, server-side) and/or title substring (`contains`, client-side).
 
@@ -55,7 +56,9 @@ async def _list_label(gx: GraphHandle, label: str, limit: int, offset: int = 0,
     page with `offset`, narrow with `--where prop=value` (the query machinery the
     primitives always had, exposed) or `contains` (case-insensitive title substring —
     that filter scans the whole label, so the window is over the MATCHES). `total` is
-    the TRUE class/match size, never the page size."""
+    the TRUE class/match size, never the page size. `full` (finding 1d8d4486) adds each
+    node's body `text` (statement / description / text / body / raw — first present) so
+    one page delivers N bodies instead of N `read` subprocesses."""
     preds = list(where or [])
     if contains:
         # Title filtering needs display annotation, so load all matches client-side;
@@ -74,16 +77,25 @@ async def _list_label(gx: GraphHandle, label: str, limit: int, offset: int = 0,
                   if preds else
                   (await F.load_label(gx, label, limit=offset + limit))[offset:offset + limit])
         await annotate_display(gx, window)
+
+    def _text(n: Any) -> str:
+        for slot in ("statement", "description", "text", "body", "raw"):
+            v = F.prop(n, slot)
+            if v:
+                return str(v)
+        return ""
+
     # `key` rides along where the node carries one (Session keys, Lens slugs):
     # a picker/consumer must bind the DURABLE key, never the display title —
     # titles are presentation and may change under it (the session-picker lesson).
     rows = [{"id": F.nid(n), "title": node_title(n), "path": F.prop(n, "path"),
              **({"key": F.prop(n, "key")} if F.prop(n, "key") is not None else {}),
-             **({"gloss": F.prop(n, "display_gloss")} if F.prop(n, "display_gloss") else {})}
+             **({"gloss": F.prop(n, "display_gloss")} if F.prop(n, "display_gloss") else {}),
+             **({"text": _text(n)} if full and _text(n) else {})}
             for n in window]
     return {"mode": "label", "key": label, "rows": rows, "count": len(rows),
             "total": total, "offset": offset, "contains": contains,
-            "where": [p.to_dict() for p in preds],
+            "where": [p.to_dict() for p in preds], "full": full,
             "truncated": total > offset + len(rows)}
 
 
@@ -157,6 +169,7 @@ async def list_graph(
     contains: Optional[str] = None,   # Substring filter (case-insensitive), every mode
     where: Optional[List[str]] = None,  # Label mode: `PROP=VALUE` property filters (repeatable, ANDed, server-side)
     value: Optional[str] = None,      # Predicate mode: keep only assertions with this value (the register read)
+    full: bool = False,               # Label mode: carry each node's body text (the batch body read, 1d8d4486)
 ) -> Dict[str, Any]:  # {mode, key, rows, count, total, truncated} or {error}
     """Enumerate one CLASS of the graph: nodes by label / assertions by predicate / edges
     by relation. Exactly one of `label`/`predicate`/`relation` selects the mode; `total`
@@ -176,7 +189,7 @@ async def list_graph(
         return {"error": "--value filters assertion values — predicate mode only"}
     if mode == "label":
         return await _list_label(gx, key, limit, offset=offset, contains=contains,
-                                 where=preds)
+                                 where=preds, full=full)
     if mode == "predicate":
         return await _list_predicate(gx, key, limit, offset=offset, value=value,
                                      contains=contains)

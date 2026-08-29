@@ -153,6 +153,24 @@ async def export_session_markdown(
     config: Optional[Dict[str, Any]] = None,  # Overrides on DEFAULT_CONFIG
 ) -> Dict[str, Any]:  # {text, session_key, messages, parts} or {error}
     """Gather the session's message graph and render the .md projection."""
+    loaded = await _load_session_messages(gx, session_key)
+    if loaded.get("error"):
+        return loaded
+    messages = loaded["messages"]
+    entries = derive_entries(messages, loaded["next_pairs"])
+    text = render_session_markdown(session_key, entries, loaded["derived_pairs"],
+                                   config=config, title=loaded["title"])
+    transcript_n = sum(1 for m in messages if m.get("source") != MESSAGE_SOURCE_COMPOSER)
+    return {"text": text, "session_key": session_key, "title": loaded["title"],
+            "messages": transcript_n, "parts": len(messages) - transcript_n}
+
+
+async def _load_session_messages(
+    gx: GraphHandle,
+    session_key: str,  # The session spine key
+) -> Dict[str, Any]:  # {messages, next_pairs, derived_pairs, title} or {error}
+    """Gather a session's Message property dicts + NEXT / DERIVED_FROM pairs + the
+    spine's display title — the shared load behind the exporter and `read --session`."""
     nodes = await load_label_where(
         gx, "Message", [PropertyPredicate("session_key", "eq", session_key)],
         limit=100000)
@@ -181,9 +199,39 @@ async def export_session_markdown(
         sprops = (sess.get("properties") if isinstance(sess, dict)
                   else getattr(sess, "properties", None)) or {}
         title = str(sprops.get("display_title") or "")
-    entries = derive_entries(messages, next_pairs)
-    text = render_session_markdown(session_key, entries, derived_pairs,
-                                   config=config, title=title)
-    transcript_n = sum(1 for m in messages if m.get("source") != MESSAGE_SOURCE_COMPOSER)
-    return {"text": text, "session_key": session_key, "title": title,
-            "messages": transcript_n, "parts": len(messages) - transcript_n}
+    return {"messages": messages, "next_pairs": next_pairs, "derived_pairs": derived_pairs,
+            "title": title}
+
+
+async def read_session_messages(
+    gx: GraphHandle,
+    session_key: str,                 # The session spine key
+    role: Optional[str] = None,       # Keep only this role (user | assistant | harness); None = every role
+    include_superseded: bool = False, # Include off-active-path transcript branches (annotated)
+    include_parts: bool = False,      # Include composer parts (drafts) beside sent transcript messages
+) -> Dict[str, Any]:  # {kind: "messages", session_key, role, count, items:[{id, role, timestamp, source, on_active_path, text}]} or {error}
+    """A session spine's Message BODIES in chain order — the `read --session` verb.
+
+    The batch-read precondition for transcript mining at scale (finding 1d8d4486: a
+    survey read 1,573 bodies at one subprocess each; `journal-window` never saw a
+    Message). Plain bodies, no markdown dressing — the exporter lens is the presentation
+    projection; this is the delivery one. Default = the ACTIVE transcript path only (a
+    superseded branch is a rewind the reader did not take), sent messages only (a
+    composer part is a draft of a message that is already on the spine)."""
+    loaded = await _load_session_messages(gx, session_key)
+    if loaded.get("error"):
+        return loaded
+    entries = derive_entries(loaded["messages"], loaded["next_pairs"])
+    items = []
+    for m in entries:
+        if m.get("source") == MESSAGE_SOURCE_COMPOSER and not include_parts:
+            continue
+        if not m.get("on_active_path", True) and not include_superseded:
+            continue
+        if role and str(m.get("role") or "") != role:
+            continue
+        items.append({"id": m.get("id"), "role": m.get("role"), "timestamp": m.get("timestamp"),
+                      "source": m.get("source"), "on_active_path": m.get("on_active_path", True),
+                      "text": str(m.get("text") or "")})
+    return {"kind": "messages", "session_key": session_key, "title": loaded["title"],
+            "role": role, "count": len(items), "items": items}

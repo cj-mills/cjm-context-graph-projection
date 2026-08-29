@@ -427,20 +427,30 @@ async def show(
         elif tgt == node_id and src in by_id:
             neighbours.append({"node": node_summary(by_id[src]), "relation": rel, "direction": "in"})
     facts: Dict[str, List[str]] = {}
+    facts_at: Dict[str, float] = {}  # da9ea508 (3): when each active fact was asserted
     supers = await F.load_supersedes(gx)
     for slot in F.group_by_slot(await F.load_assertions(gx)).values():
         if F.prop(slot[0], "subject_id") != node_id:
             continue
         pred = str(F.prop(slot[0], "predicate") or "")
-        vals = [str(F.prop(a, "value", "")) for a in F.active_assertions(slot, supers)]
+        active = F.active_assertions(slot, supers)
+        vals = [str(F.prop(a, "value", "")) for a in active]
         if pred and vals:
             facts[pred] = vals
+            ts = max((float(F.prop(a, "asserted_at") or 0.0) for a in active), default=0.0)
+            if ts:
+                facts_at[pred] = ts
+    # A node with an INCOMING SUPERSEDES edge is superseded — say so, instead of
+    # rendering it as a plain `done` (da9ea508 (3), sighted on 765936e3).
+    superseded_by = [n["node"]["id"] for n in neighbours
+                     if n["relation"] == "SUPERSEDES" and n["direction"] == "in"]
     journal: Dict[str, Any] = {}
     if journal_paths:
         from .journal import node_journal_trace  # lazy: journal.py imports back into this package
         journal = node_journal_trace([p for p in journal_paths if p], node_id)
     return {"node": node_summary(node), "properties": _props(node),
-            "facts": facts, "journal": journal, "neighbours": neighbours}
+            "facts": facts, "facts_at": facts_at, "superseded_by": superseded_by,
+            "journal": journal, "neighbours": neighbours}
 
 
 def _recency_factor(node: Any) -> float:
@@ -697,6 +707,9 @@ async def grep(
     term: str,          # Exact substring / phrase to find (case-insensitive)
     limit: int = 25,    # Cap the match list
     context: int = 60,  # Snippet context chars either side of the hit
+    labels: Optional[List[str]] = None,   # Keep only nodes of these labels (case-insensitive; e.g. Decision, Note)
+    session: Optional[str] = None,        # Keep only nodes the session's journal window TOUCHED (needs journal_paths)
+    journal_paths: Optional[List[str]] = None,  # Writes/source journals for the session filter
 ) -> Dict[str, Any]:  # {term, matches:[{id, label, title, field, snippet}], count, truncated}
     """Exact-substring CONTENT search over every node's text fields — the literal third leg.
 
@@ -708,12 +721,28 @@ async def grep(
     business for RANKING; this is for WHEN YOU KNOW THE WORDS — so the scan is EXHAUSTIVE
     (a bounded scan silently missed nodes past its cap: found on the capability graph's
     6.5k Segments, where grep hits came and went with load order — `_scan_rows` is
-    uncapped by default and projects just the text fields)."""
+    uncapped by default and projects just the text fields). Assimilation filters (finding
+    da9ea508 (2)): `labels` keeps Message hits from swamping a phrase, `session` scopes
+    to one sitting's touched set, `context` widens the snippet past the second read hop."""
     needle = term.lower()
     if not needle:
         return {"term": term, "matches": [], "count": 0, "truncated": False}
+    label_set = {l.lower() for l in (labels or [])}
+    touched_full: Optional[set] = None
+    touched_prefixes: List[str] = []
+    if session:
+        from .journal import journal_window  # lazy: journal.py imports back into this package
+        refs = [t["ref"] for t in journal_window(list(journal_paths or []),
+                                                 session=session)["touched"]]
+        touched_full = {r for r in refs if len(r) == 36}
+        touched_prefixes = [r for r in refs if len(r) != 36]
     hits: List[tuple] = []
-    for row in await _scan_rows(gx, list(_TEXT_FIELDS)):
+    for row in await _scan_rows(gx, ["label", *_TEXT_FIELDS]):
+        if label_set and str(row.get("label") or "").lower() not in label_set:
+            continue
+        if touched_full is not None and row["id"] not in touched_full and not any(
+                row["id"].startswith(r) for r in touched_prefixes):
+            continue
         for f in _TEXT_FIELDS:
             v = row.get(f)
             if not v:
@@ -736,4 +765,6 @@ async def grep(
             for nid, f, snippet in hits]
     rows.sort(key=lambda r: (r["label"] or "", r["title"] or ""))
     return {"term": term, "matches": rows[:limit], "count": len(rows),
-            "truncated": len(rows) > limit}
+            "truncated": len(rows) > limit,
+            **({"labels": sorted(label_set)} if label_set else {}),
+            **({"session": session} if session else {})}

@@ -120,16 +120,23 @@ async def readiness(
     offset: int = 0,              # Page start within the selected bucket (paged states only)
     assertions: Optional[List[Any]] = None,  # Preloaded Assertion nodes (one load per VIEW — f4701770)
     supers: Optional[Any] = None,            # Preloaded supersedes, same reason
+    anchor: Optional[str] = None,  # Restrict to items filed PART_OF this program anchor (id/prefix or label substring)
+    where: Optional[List[str]] = None,  # `PRED=VALUE` active-fact filters on the items (repeatable, ANDed — e.g. priority=awaiting-user)
 ) -> Dict[str, Any]:  # {ready, blocked, done, closable, drift, counts, view}
     """The derived ready/blocked/done frontier over authored `task_state` + `GATED_BY` edges.
 
     Pure read: loads the active task states and the gate edges (`GATED_BY` plus its
     reserved synonym `BLOCKED_BY`), classifies, then decorates each entry with a
     display label. `scope` narrows to work-items whose label matches (the frontier
-    is small, but the dependency forest will grow)."""
+    is small, but the dependency forest will grow). Assimilation-pass filters
+    (finding da9ea508): `anchor` scopes to one program, `where` to active facts; each
+    open row carries its non-task_state `facts` (priority chips). Closable is
+    derived two ways: DoD checks all done, OR an open item a DONE Decision honors via
+    EVIDENCE_FOR / SUPERSEDES (`honored_by` — finding dd80b1d7)."""
     assertions = assertions if assertions is not None else await F.load_assertions(gx)
     supers = supers if supers is not None else await F.load_supersedes(gx)
     task_state = _active_task_states(assertions, supers)
+    item_facts = _active_facts(assertions, supers)
 
     gate_pairs = (await F.load_edge_pairs(gx, DevRelations.GATED_BY)
                   + await F.load_edge_pairs(gx, DevRelations.BLOCKED_BY))
@@ -158,9 +165,13 @@ async def readiness(
             if p_tgt in anchors and p_src not in filed:
                 filed[p_src] = p_tgt
 
-    closable_ids = sorted(
-        e["id"] for bucket in (parts["ready"], parts["blocked"]) for e in bucket
-        if e["id"] in dod and dod[e["id"]]["open"] == [] )
+    open_ids = [e["id"] for bucket in (parts["ready"], parts["blocked"]) for e in bucket]
+    closable_ids = sorted(i for i in open_ids if i in dod and dod[i]["open"] == [])
+    # dd80b1d7: a DONE Decision that is EVIDENCE_FOR / SUPERSEDES an open item proposes
+    # its closure — the honored-but-never-closed class (ff8522fa sat 6 weeks so).
+    honored = honored_closable(task_state, open_ids,
+                               await F.load_edge_pairs(gx, "EVIDENCE_FOR") + list(supers),
+                               dod)
     drift_pairs = [(e["id"], dod[e["id"]]["open"]) for e in parts["done"]
                    if e["id"] in dod and dod[e["id"]]["open"]]
 
@@ -174,12 +185,21 @@ async def readiness(
     labels = await _resolve_labels(gx, ids)
 
     scope_l = scope.lower() if scope else None
+    anchor_l = anchor.lower() if anchor else None
+    where_pairs = [tuple(w.split("=", 1)) for w in (where or []) if "=" in w]
 
     def _label(nid: str) -> str:
         return labels.get(nid, nid)
 
     def _keep(nid: str) -> bool:
-        return scope_l is None or scope_l in _label(nid).lower()
+        if scope_l is not None and scope_l not in _label(nid).lower():
+            return False
+        if anchor_l is not None:
+            a = filed.get(nid)
+            if not a or not (a.lower().startswith(anchor_l) or anchor_l in _label(a).lower()):
+                return False
+        facts = item_facts.get(nid, {})
+        return all(v in facts.get(k, []) for k, v in where_pairs)
 
     def _checks(nid: str) -> Dict[str, Any]:
         d = dod.get(nid)
@@ -189,18 +209,24 @@ async def readiness(
         a = filed.get(nid)
         return {"program": {"id": a, "label": _label(a)}} if a else {}
 
+    def _facts(nid: str) -> Dict[str, Any]:
+        f = item_facts.get(nid)
+        return {"facts": f} if f else {}
+
     ready = [{"id": e["id"], "label": _label(e["id"]),
               "gates": [{"id": g, "label": _label(g)} for g in e["gates"]],
-              **_checks(e["id"]), **_program(e["id"])}
+              **_checks(e["id"]), **_program(e["id"]), **_facts(e["id"])}
              for e in parts["ready"] if _keep(e["id"])]
     blocked = [{"id": e["id"], "label": _label(e["id"]),
                 "blocked_by": [{"id": g, "label": _label(g)} for g in e["blocked_by"]],
-                **_checks(e["id"]), **_program(e["id"])}
+                **_checks(e["id"]), **_program(e["id"]), **_facts(e["id"])}
                for e in parts["blocked"] if _keep(e["id"])]
     done = [{"id": e["id"], "label": _label(e["id"]), **_checks(e["id"])}
             for e in parts["done"] if _keep(e["id"])]
-    closable = [{"id": i, "label": _label(i), **_checks(i)}
-                for i in closable_ids if _keep(i)]
+    closable = ([{"id": i, "label": _label(i), **_checks(i)}
+                 for i in closable_ids if _keep(i)]
+                + [{"id": i, "label": _label(i), "honored_by": srcs}
+                   for i, srcs in sorted(honored.items()) if _keep(i)])
     drift = [{"id": i, "label": _label(i),
               "open_checks": [{"id": c, "label": _label(c)} for c in open_checks]}
              for i, open_checks in drift_pairs if _keep(i)]
@@ -209,13 +235,15 @@ async def readiness(
     # never enumerates Done and caps ready to a recency top-K; a --state pick pages
     # one bucket; "all" is the legacy full dump (the viz/lens machine feed).
     counts = {"ready": len(ready), "blocked": len(blocked), "done": len(done),
-              "closable": len(closable), "drift": len(drift)}
+              "closable": len(closable), "drift": len(drift),
+              "honored": sum(1 for c in closable if c.get("honored_by"))}
     if anchors:
         counts["unfiled"] = sum(1 for e in ready + blocked if "program" not in e)
     touch = _last_touch(assertions)
     ready = sorted(ready, key=lambda e: touch.get(e["id"], 0.0), reverse=True)
     done = sorted(done, key=lambda e: touch.get(e["id"], 0.0), reverse=True)
-    view: Dict[str, Any] = {"state": state or "default", "limit": limit, "offset": offset}
+    view: Dict[str, Any] = {"state": state or "default", "limit": limit, "offset": offset,
+                            "anchor": anchor, "where": list(where or [])}
     if state is None:
         ready = ready[:limit]
         done = []
@@ -249,3 +277,48 @@ def _last_touch(
         if ts >= out.get(subject, -1.0):
             out[subject] = ts
     return out
+
+
+def _active_facts(
+    assertions: List[Any],              # All Assertion nodes
+    supersedes: List[Tuple[str, str]],  # All SUPERSEDES (superseder, superseded) pairs
+    skip: Tuple[str, ...] = (P.TASK_STATE,),  # Predicates NOT to report (task_state has its own column)
+) -> Dict[str, Dict[str, List[str]]]:  # subject_id -> {predicate: [active values]}
+    """Each subject's ACTIVE non-task_state facts (priority, role, …), resolving supersession.
+
+    The frontier's chip source (finding da9ea508 (1)): a `priority=awaiting-user` or a
+    fired gate used to be invisible without a `show` per item."""
+    out: Dict[str, Dict[str, List[str]]] = {}
+    for slot_assertions in F.group_by_slot(assertions).values():
+        active = F.active_assertions(slot_assertions, supersedes)
+        if not active:
+            continue
+        pred = str(F.prop(active[0], "predicate") or "")
+        if not pred or pred in skip:
+            continue
+        subject = F.prop(active[0], "subject_id")
+        if not subject:
+            continue
+        out.setdefault(subject, {})[pred] = [str(F.prop(a, "value", "")) for a in active]
+    return out
+
+
+def honored_closable(
+    task_state: Dict[str, str],            # node id -> ACTIVE task_state (items AND decisions)
+    open_ids: List[str],                   # The open work-items to test (ready + blocked)
+    evidence_pairs: List[Tuple[str, str]], # (source, target) EVIDENCE_FOR / SUPERSEDES pairs
+    dod: Dict[str, Dict[str, Any]],        # Items that carry DoD checks (those close via checks)
+) -> Dict[str, List[str]]:  # open item id -> the DONE source ids honoring it
+    """Pure: open items a DONE Decision points at via EVIDENCE_FOR / SUPERSEDES — closable
+    by HONOR, proposed never applied (finding dd80b1d7: a fix DEC honored a finding for
+    12 days while `closable` walked only Check nodes; ff8522fa sat 6 weeks the same way).
+    Items with checks keep the DoD path; confirm = `assert <item> task_state done
+    --evidence <dec>` (and the mint-time discipline: a fix DEC links what it discharges)."""
+    # An honoring source is one that is NOT itself open work: a done item, or a plain
+    # (stateless) Decision — the usual fix DEC carries no task_state at all. An open
+    # source is a claim in progress, never a discharge.
+    by_target: Dict[str, List[str]] = {}
+    for src, tgt in evidence_pairs:
+        if task_state.get(src, P.TASK_DONE) == P.TASK_DONE:
+            by_target.setdefault(tgt, []).append(src)
+    return {i: sorted(set(by_target[i])) for i in open_ids if i in by_target and i not in dod}

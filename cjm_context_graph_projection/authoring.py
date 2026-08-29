@@ -377,8 +377,15 @@ async def emit_artifact(
         if cells:
             artifact, text = "notebook", render_notebook(cells)
         else:
+            wires = await _module_region_wires(gx, module_id)
+            if write:
+                # 1b089df2: on a born/captured-but-never-rebuilt module the projection
+                # is empty and a --write would land a 0-byte file — refuse, don't clobber.
+                stale = _stale_projection_error(module, wires, "emit --write")
+                if stale:
+                    return {"error": stale, "module_id": module_id, "written": False}
             text = emit_module_from_nodes(
-                await _module_region_wires(gx, module_id), module_node=module,
+                wires, module_node=module,
                 derive_imports=not is_test_module_path(F.prop(module, "module_path", "")))
             artifact = "module"
     res = {"module_id": module_id, "artifact": artifact, "artifact_path": artifact_path,
@@ -670,6 +677,9 @@ async def add_symbol(
                          "regions, not symbols)", "written": False}
     qualname = tree.body[0].name
     wires = await _module_region_wires(gx, module_id)
+    stale = _stale_projection_error(module, wires, "add-symbol")
+    if stale:
+        return {"error": stale, "written": False}
     dup = next((w for w in wires if w["label"] == DevNodeKinds.CODE_SYMBOL
                 and w["properties"].get("qualname") == qualname), None)
     if dup is not None:
@@ -797,6 +807,9 @@ async def add_text(
             else "docstring" if stripped.startswith(('"""', "'''", '"', "'"))
             else "code")
     wires = await _module_region_wires(gx, module_id)
+    stale = _stale_projection_error(module, wires, "add-text")
+    if stale:
+        return {"error": stale, "written": False}
     dup = next((w for w in wires if w["label"] == DevNodeKinds.CODE_TEXT
                 and w["properties"].get("region_key") == region.region_key), None)
     if dup is not None:
@@ -1076,3 +1089,34 @@ def _insertion_order(
     if last_sym is None or last_sym == len(regions) - 1:
         return orders[-1] + 1, None
     return (orders[last_sym] + orders[last_sym + 1]) / 2, None
+
+
+def _stale_projection_error(
+    module: Any,                    # The CodeModule node the verb is about to emit from
+    wires: List[Dict[str, Any]],    # Its LIVE region wires (`_module_region_wires`)
+    verb: str,                      # The refusing verb, for the message
+) -> Optional[str]:  # An error string to refuse with, or None when the emit is safe
+    """The never-rebuilt-since-capture guard (findings d6c3eca0 + 1b089df2).
+
+    A module captured (`flip-module` + `cutover`) in one sitting and not re-ingested
+    since has an EMPTY live projection while its file on disk is not: a region-emitting
+    verb would lay down ONLY the new region (`add-symbol`/`add-text`) or NOTHING
+    (`emit --write`) and clobber the file. `author --edit` fails safe on such a module
+    ('OLD not found'); this makes the create/emit legs fail safe too. A module whose
+    file is absent or empty (a `new-module` birth) is not stale — its first region
+    may land."""
+    if wires:
+        return None
+    path = str(F.prop(module, "path") or "")
+    try:
+        size = Path(path).stat().st_size if path else 0
+    except OSError:
+        return None
+    if size == 0:
+        return None
+    return (f"`{verb}` refused: the live projection of "
+            f"{F.prop(module, 'module_path') or path} holds ZERO regions but the file is "
+            f"{size} bytes on disk — captured but never re-ingested, so the emit would "
+            "write only the new content and CLOBBER the file (finding d6c3eca0). Run "
+            "cg-rebuild first; to land the change now, edit the file directly and "
+            "`flip-module` to absorb it.")

@@ -19,12 +19,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from cjm_context_graph_layer.identity import derive_node_id
-from cjm_context_graph_layer.ops import extend_graph
+from cjm_context_graph_primitives.journal import append_write
 from cjm_dev_graph_schema.vocab import DevNodeKinds
 
 from . import factlayer as F
 from .runtime import GraphHandle
-from .write import assert_value
+from .write import assert_value, mint_procedure
 
 ORACLE_METHOD = "version-oracle/v1"
 ORACLE_ACTOR = "procedure:version-oracle/v1"
@@ -64,15 +64,32 @@ async def run_version_oracle(
     gx: GraphHandle,
     repos_dir: Optional[str] = None,  # Active repos dir (for the on-disk version fallback)
     only: Optional[List[str]] = None,  # Restrict to these repo keys/names (None = every repo entity)
-) -> Dict[str, Any]:  # {procedure_id, bumped, first_seen, unchanged, skipped}
+    journal_path: Optional[str] = None,  # The write journal — the Procedure mint + every CHANGED assertion land here (None = unjournaled: preview/test only)
+) -> Dict[str, Any]:  # {procedure_id, bumped, first_seen, unchanged, skipped, journaled, counts}
     """Refresh `version` slots for repo entities; report what changed.
 
     Each repo gets one `version` assertion (actor=the oracle, evidence=the
     Procedure). Semver ordering means a bump auto-supersedes the old value and a
-    same-version read is a verified no-op."""
+    same-version read is a verified no-op.
+
+    Journal-first (finding b744b28e): the Procedure mint rides a `procedure` op and
+    each assertion that CHANGED the graph (first-seen / bumped) rides an `assert` op
+    carrying the oracle's actor/evidence/method, so a rebuild replays both instead of
+    dropping every oracle write until the next run (the pre-fix state: zero oracle ops
+    in the journal's whole history — the Procedure AND every `version` fact died on
+    each swap). Unchanged reads and born-superseded values journal nothing (replay
+    would no-op), and `append_write`'s exact-duplicate dedup keeps a re-run quiet."""
     proc = procedure_node()
-    await extend_graph(gx.queue, gx.graph_id, [proc], [])
-    proc_id = proc["id"]
+    props = proc["properties"]
+    minted = await mint_procedure(gx, ORACLE_METHOD, props["name"], actor=props["actor"],
+                                  root_kind=props["root_kind"])
+    proc_id = minted["procedure_id"]
+    journaled = 0
+    if journal_path:
+        journaled += int(append_write(journal_path, "procedure",
+                                      {"method": ORACLE_METHOD, "name": props["name"],
+                                       "actor": props["actor"],
+                                       "root_kind": props["root_kind"]}))
 
     entities = await F.load_label(gx, DevNodeKinds.ENTITY)
     repos = [e for e in entities if F.prop(e, "entity_kind") == "repo"]
@@ -93,14 +110,23 @@ async def run_version_oracle(
         rec = {"repo": name or key, "version": version, "assertion_id": res["assertion_id"]}
         if res["born_superseded"]:
             skipped.append({**rec, "reason": "older than current active"})
-        elif res["superseded"]:
+            continue
+        if res["superseded"]:
             bumped.append({**rec, "superseded": res["superseded"]})
         elif res["nodes_added"]:
             first_seen.append(rec)
         else:
             unchanged.append(rec)
+            continue
+        if journal_path:
+            journaled += int(append_write(journal_path, "assert",
+                                          {"subject": F.nid(e), "predicate": "version",
+                                           "value": version, "actor": ORACLE_ACTOR,
+                                           "evidence": [proc_id], "supersede": None,
+                                           "method": ORACLE_METHOD}))
 
     return {"procedure_id": proc_id, "bumped": bumped, "first_seen": first_seen,
-            "unchanged": unchanged, "skipped": skipped,
+            "unchanged": unchanged, "skipped": skipped, "journaled": journaled,
             "counts": {"bumped": len(bumped), "first_seen": len(first_seen),
-                       "unchanged": len(unchanged), "skipped": len(skipped)}}
+                       "unchanged": len(unchanged), "skipped": len(skipped),
+                       "journaled": journaled}}

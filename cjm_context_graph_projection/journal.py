@@ -21,6 +21,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from cjm_context_graph_layer.identity import derive_node_id
 from cjm_context_graph_layer.ops import PROVENANCE_TS
 from cjm_context_graph_primitives.journal import append_write, journal_segments, read_journal
 from cjm_dev_graph_schema.identity import (code_module_node_id, note_node_id, section_node_id,
@@ -32,8 +33,8 @@ from .display import display_rule_node_id, set_display_rule
 from .lens import lens_node_id, set_lens
 from .runtime import GraphHandle
 from .structure import add_section, reconstruct_note
-from .write import (add_check, alias, assert_value, author_section, decide, link, register_session,
-                    retract_session, unlink)
+from .write import (add_check, alias, assert_value, author_section, decide, link, mint_procedure,
+                    register_session, retract_session, unlink)
 
 # The provenance actor stamped on the M3 one-time genesis import (a per-note `new-note` op
 # capturing the pre-cutover baseline). The lineage floor every later edit traces back to.
@@ -58,10 +59,14 @@ M3_BASELINE_ACTOR = "import:m3-baseline"
 # `unlink` = edge RETRACTION (finding 2f1d9382): the journal is append-only, so a mis-minted
 # link is undone by a compensating op, not an erasure — replay applies it in append order
 # after the link it retracts, and a rebuild converges with the edge absent.
+# `procedure` = a programmatic Procedure node (an oracle's value-source) upserted by
+# deterministic per-method id — journal-first for the b744b28e class (the oracle's mint was
+# db-direct and every rebuild dropped it, taking its `version` facts along); last op wins
+# on replay, like display-rule.
 JOURNAL_VERBS = ("decide", "alias", "assert", "link", "unlink", "section", "new-note",
                  "add-section", "display-rule", "set-lens", "check", "session",
                  "retract-session", "pull-transcript", "mint-messages", "edit-message",
-                 "derive-message")
+                 "derive-message", "procedure")
 
 
 def m3_baseline_import(
@@ -156,7 +161,7 @@ async def _apply_op(gx: GraphHandle, op: Dict[str, Any]) -> str:
         await assert_value(gx, a["subject"], a["predicate"], a["value"],
                            actor=a.get("actor", "agent:session"),
                            evidence=a.get("evidence"), supersede=a.get("supersede"),
-                           asserted_at=op.get("ts"))
+                           asserted_at=op.get("ts"), method=a.get("method"))
     elif verb == "link":
         await link(gx, a["source_id"], a["target_id"], a["relation"],
                    actor=a.get("actor", "agent:session"))
@@ -235,6 +240,13 @@ async def _apply_op(gx: GraphHandle, op: Dict[str, Any]) -> str:
         from .pull_transcript import derive_message
         await derive_message(gx, a["sent_uuid"], a.get("part_uuids") or [],
                              actor=a.get("actor", "user:scratchpad"))
+    elif verb == "procedure":
+        # Programmatic value-source (b744b28e): upsert the Procedure by deterministic
+        # per-method id so a rebuild keeps an oracle's evidence node — the `assert`
+        # ops citing it follow in append order.
+        await mint_procedure(gx, a["method"], a["name"],
+                             actor=a.get("actor", "programmatic"),
+                             root_kind=a.get("root_kind", "asserted"))
     else:
         return ""
     return verb
@@ -360,6 +372,9 @@ def touched_node_ids(
     elif verb in ("session", "retract-session"):
         if a.get("key"):
             out.append(session_node_id(a["key"]))
+    elif verb == "procedure":
+        if a.get("method"):
+            out.append(derive_node_id("procedure", a["method"]))
     elif a.get("repo_key") and a.get("module_path"):
         out.append(code_module_node_id(a["repo_key"], a["module_path"]))
     return out
@@ -370,6 +385,8 @@ def journal_window(
     start: Optional[float] = None,  # Window start (unix ts; None = journal dawn)
     end: Optional[float] = None,    # Window end (unix ts; None = OPEN — live mode)
     session: Optional[str] = None,  # Session key filter (stamped, or a decide's args.session)
+    verbs: Optional[List[str]] = None,          # Keep only these op verbs (e.g. decide, source)
+    exclude_verbs: Optional[List[str]] = None,  # Drop these op verbs (e.g. unlink — the retraction sweeps)
 ) -> Dict[str, Any]:  # {window, entries, touched: [{ref, verbs, touches, first_ts, last_ts}]}
     """The journal-window projection: which nodes a window/session touched, when, how.
 
@@ -379,7 +396,10 @@ def journal_window(
     provenance stamp and falls back to a `decide` op's `args.session` (the sparse
     pre-cutover tagging), so one filter spans both eras. Reads ride the segment
     touch-row cache (f4701770): rotated segments never re-parse, the live tail
-    re-derives on append — the projection stays declarative over rows."""
+    re-derives on append — the projection stays declarative over rows. Verb
+    filters (finding da9ea508 (4)) apply per op BEFORE the touch aggregation, so a
+    130-op session reads at the grain asked for (`--exclude-verb unlink` drops a
+    30-row retraction sweep; `--verb decide` is the decision-lens-only pass)."""
     # DEC 6124d8bf resolution order: post-cutover ops match by TAG; HISTORICAL ops
     # (no stamp) match by the session's WINDOW [started_at, next session's start).
     # The windows are journal-derived too — the retrofit/live `session` ops carry
@@ -399,6 +419,8 @@ def journal_window(
             later = [t for t in starts.values() if t > win_start]
             win_end = min(later) if later else None  # last session = open (in-progress)
 
+    keep_verbs = set(verbs or [])
+    drop_verbs = set(exclude_verbs or [])
     per: Dict[str, Dict[str, Any]] = {}
     entries = 0
     for path in paths:
@@ -416,8 +438,10 @@ def journal_window(
                              and (win_end is None or ts < win_end))
                 if tag != session and not in_window:
                     continue
-            entries += 1
             verb = row["verb"]
+            if (keep_verbs and verb not in keep_verbs) or verb in drop_verbs:
+                continue
+            entries += 1
             for ref in row["refs"]:
                 rec = per.setdefault(ref, {"ref": ref, "verbs": {}, "touches": 0,
                                            "first_ts": ts, "last_ts": ts})
@@ -426,7 +450,9 @@ def journal_window(
                 rec["first_ts"] = min(rec["first_ts"], ts)
                 rec["last_ts"] = max(rec["last_ts"], ts)
     touched = sorted(per.values(), key=lambda r: r["last_ts"], reverse=True)
-    out: Dict[str, Any] = {"window": {"start": start, "end": end, "session": session},
+    out: Dict[str, Any] = {"window": {"start": start, "end": end, "session": session,
+                                      "verbs": sorted(keep_verbs),
+                                      "exclude_verbs": sorted(drop_verbs)},
                            "entries": entries, "touched": touched}
     if win_start is not None:
         out["session_window"] = {"start": win_start, "end": win_end}
@@ -440,6 +466,9 @@ async def journal_window_view(
     start: Optional[float] = None,  # Window start (unix ts)
     end: Optional[float] = None,    # Window end (unix ts; None = OPEN — live mode)
     session: Optional[str] = None,  # Session key filter
+    verbs: Optional[List[str]] = None,          # Keep only these op verbs (journal_window)
+    exclude_verbs: Optional[List[str]] = None,  # Drop these op verbs (journal_window)
+    labels: Optional[List[str]] = None,         # Keep only touched nodes of these labels (post-join; a missing node has none)
 ) -> Dict[str, Any]:  # journal_window result, refs joined to live nodes
     """The SESSION LENS read verb: `journal_window` + graph join (title/label per ref).
 
@@ -448,12 +477,14 @@ async def journal_window_view(
     latency). Prefix refs resolve there too (the id-prefix convention); a ref
     whose node no longer exists stays listed with `missing: True` — this is an
     AUDIT surface (read-parity, DEC 60aae839 theme 4): it must not silently drop
-    what the journal says was touched."""
+    what the journal says was touched. The `labels` filter (da9ea508 (4)) is the
+    one deliberate narrowing: an explicit kind pick, applied after the join."""
     # Function-local: `.projection` imports `.journal` via `.write` — a module-level
     # import here would cycle (write.py -> projection.py is the existing edge).
     from .projection import subgraph_view
 
-    base = journal_window(journal_paths, start=start, end=end, session=session)
+    base = journal_window(journal_paths, start=start, end=end, session=session,
+                          verbs=verbs, exclude_verbs=exclude_verbs)
     refs = [rec["ref"] for rec in base["touched"]]
     sg = (await subgraph_view(gx, refs) if refs
           else {"resolved": {}, "nodes": []})
@@ -469,6 +500,10 @@ async def journal_window_view(
             item["label"] = node.get("label")
             item["title"] = node.get("title")
         out.append(item)
+    if labels:
+        label_set = {l.lower() for l in labels}
+        out = [i for i in out if str(i.get("label") or "").lower() in label_set]
+        base["window"]["labels"] = sorted(label_set)
     base["touched"] = out
     base["missing"] = sum(1 for i in out if i.get("missing"))
     return base

@@ -206,3 +206,34 @@ def test_render_readiness_groups_by_program_and_counts_unfiled():
     obj["counts"].pop("unfiled")
     out2 = render("readiness", obj, "human")
     assert "▸" not in out2 and "unfiled" not in out2
+
+
+def test_honored_closable_proposes_open_items_a_done_decision_points_at():
+    """dd80b1d7: an open item a DONE Decision honors via EVIDENCE_FOR / SUPERSEDES is
+    proposed closable; an open source, an item with DoD checks, and a done item are not."""
+    from cjm_context_graph_projection.readiness import honored_closable
+    task_state = {"finding": "open", "fix": "done", "wip": "open", "checked": "open",
+                  "old": "done"}
+    pairs = [("fix", "finding"), ("wip", "finding"), ("fix", "checked"), ("fix", "old"),
+             ("dec", "finding")]  # `dec` carries no task_state: a plain fix DEC honors too
+    out = honored_closable(task_state, ["finding", "checked", "wip"], pairs,
+                           dod={"checked": {"total": 1, "done": 0, "open": ["c1"]}})
+    assert out == {"finding": ["dec", "fix"]}
+
+
+def test_render_readiness_honored_closable_and_fact_chips():
+    """The frontier row shows priority-fact chips (da9ea508) and marks an honored item
+    🏁 with the DEC that honors it; the counts line reports the honored share."""
+    obj = {"ready": [{"id": "f1", "label": "FINDING: x", "gates": [],
+                      "facts": {"priority": ["awaiting-user"]}},
+                     {"id": "w1", "label": "WORK ITEM: y", "gates": []}],
+           "blocked": [], "done": [],
+           "closable": [{"id": "f1", "label": "FINDING: x", "honored_by": ["3190d742-aaaa"]}],
+           "drift": [],
+           "counts": {"ready": 2, "blocked": 0, "done": 0, "closable": 1, "drift": 0,
+                      "honored": 1}}
+    out = render("readiness", obj, "human")
+    assert "closable 1 (1 honored by a done DEC)" in out
+    assert "_[priority=awaiting-user]_" in out
+    assert "🏁 _honored by 3190d742 — closable_" in out
+    assert "WORK ITEM: y" in out and out.count("🏁") == 1

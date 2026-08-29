@@ -302,3 +302,39 @@ def test_render_prose_refs_buckets_and_clean():
     clean = render("prose-refs", {"counts": {}, "unlinked": [], "unresolvable": [],
                                   "degree_zero": []}, "human")
     assert "clean" in clean
+
+
+def test_render_show_trace_never_prints_a_journal_receipt():
+    """da9ea508 (3): `show` returns a journal TRACE under `journal`; only a journaled_emit
+    RECEIPT (carrying `journal_first`) earns the trailing receipt line — a read verb must
+    never say 'PREVIEW — would journal'. Superseded nodes and fact timestamps render."""
+    obj = {"node": {"id": "n1", "title": "Item", "label": "Decision"}, "properties": {},
+           "facts": {"task_state": ["done"]}, "facts_at": {"task_state": 1787966647.0},
+           "superseded_by": ["ab12cd34-0000"],
+           "journal": {"first_ts": 1.0, "last_ts": 2.0, "sessions": [], "actors": [],
+                       "op_count": 3},
+           "neighbours": []}
+    out = render("show", obj, "human")
+    assert "PREVIEW" not in out and "would journal" not in out
+    assert "task_state=done @" in out and "⤵ SUPERSEDED by `ab12cd34`" in out
+    receipt = render("author", {"journal": {"journal_first": True, "written": False,
+                                            "events": [], "op": "author"}}, "human")
+    assert "PREVIEW — would journal" in receipt
+
+
+def test_render_read_batch_and_session_messages():
+    """1d8d4486: a multi-id read renders one delimited block per node (an unresolved id
+    reports inside its block); a session read renders role-tagged bodies in order."""
+    batch = {"kind": "batch", "count": 2, "errors": 1,
+             "items": [{"node_id": "a1", "label": "Section", "kind": "section", "text": "body A"},
+                       {"node_id": "zz", "error": "no node `zz`"}]}
+    out = render("read", batch, "human")
+    assert "### Section `a1`\n\nbody A" in out and "### ? `zz`\n\n⚠ no node `zz`" in out
+    msgs = {"kind": "messages", "session_key": "2026-08-28_18-02-43", "role": "user",
+            "count": 1, "items": [{"id": "m1-xxxx-yyyy", "role": "user",
+                                   "timestamp": "2026-08-28T18:03:00Z", "text": "hello",
+                                   "on_active_path": False}]}
+    out2 = render("read", msgs, "human")
+    assert "## Session `2026-08-28_18-02-43` — 1 message(s) · role=user" in out2
+    assert "### [user] 2026-08-28T18:03:00Z `m1-xxxx-` _(superseded branch)_" in out2
+    assert "\nhello\n" in out2
