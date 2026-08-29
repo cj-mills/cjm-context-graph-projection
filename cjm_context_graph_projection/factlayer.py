@@ -32,6 +32,13 @@ def nid(node: Any) -> Optional[str]:
     return getattr(node, "id", None)
 
 
+def label(node: Any) -> Optional[str]:
+    """A node's label / kind (typed GraphNode or wire dict) — the sibling of `nid`/`props`."""
+    if isinstance(node, dict):
+        return node.get("label")
+    return getattr(node, "label", None)
+
+
 def props(node: Any) -> Dict[str, Any]:
     """A node's properties dict (typed GraphNode or wire dict)."""
     p = getattr(node, "properties", None)

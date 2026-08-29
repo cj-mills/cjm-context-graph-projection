@@ -34,7 +34,7 @@ over authored facts + edges.
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from cjm_dev_graph_schema import predicates as P
-from cjm_dev_graph_schema.vocab import DevRelations
+from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 
 from . import factlayer as F
 from .display import annotate_display, node_title
@@ -169,9 +169,13 @@ async def readiness(
     closable_ids = sorted(i for i in open_ids if i in dod and dod[i]["open"] == [])
     # dd80b1d7: a DONE Decision that is EVIDENCE_FOR / SUPERSEDES an open item proposes
     # its closure — the honored-but-never-closed class (ff8522fa sat 6 weeks so).
-    honored = honored_closable(task_state, open_ids,
-                               await F.load_edge_pairs(gx, "EVIDENCE_FOR") + list(supers),
-                               dod)
+    ev_pairs = await F.load_edge_pairs(gx, "EVIDENCE_FOR") + list(supers)
+    # Only DECISION sources honor: a survey's evidence SECTION is EVIDENCE_FOR the
+    # finding's EXISTENCE, not its fix (false-positive class sighted live 2026-08-28).
+    ev_nodes = await F.load_nodes(gx, sorted({s for s, _ in ev_pairs}))
+    ev_pairs = [(s, t) for s, t in ev_pairs
+                if F.label(ev_nodes.get(s)) == DevNodeKinds.DECISION]
+    honored = honored_closable(task_state, open_ids, ev_pairs, dod)
     drift_pairs = [(e["id"], dod[e["id"]]["open"]) for e in parts["done"]
                    if e["id"] in dod and dod[e["id"]]["open"]]
 
