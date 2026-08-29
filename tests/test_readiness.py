@@ -237,3 +237,23 @@ def test_render_readiness_honored_closable_and_fact_chips():
     assert "_[priority=awaiting-user]_" in out
     assert "🏁 _honored by 3190d742 — closable_" in out
     assert "WORK ITEM: y" in out and out.count("🏁") == 1
+
+
+def test_render_readiness_captures_view_and_count():
+    """a3d196c6 shape (a): captures (authored capture_state) render on their own view with
+    a glyph per state and the ridden item's label + task_state; the counts line points at
+    `--captures`; an empty frontier with captures never says 'no work-items'."""
+    obj = {"ready": [], "blocked": [], "done": [], "closable": [], "drift": [],
+           "captures": [{"id": "c1", "label": "CAPTURE: seed idea", "capture_state": "seed"},
+                        {"id": "c2", "label": "CAPTURE: later", "capture_state": "deferred"},
+                        {"id": "c3", "label": "CAPTURE: rider",
+                         "capture_state": "riding:w1-full",
+                         "rides": {"id": "w1-full", "label": "WORK ITEM: host", "state": "open"}}],
+           "counts": {"ready": 0, "blocked": 0, "done": 0, "closable": 0, "drift": 0,
+                      "captures": 3}, "view": {"state": "captures"}}
+    out = render("readiness", obj, "human")
+    assert "captures 3 (`--captures`)" in out
+    assert "🌱 seed — **CAPTURE: seed idea** `c1`" in out
+    assert "⏸ deferred — **CAPTURE: later** `c2`" in out
+    assert "🚌 riding _WORK ITEM: host_ `w1-full` (open) — **CAPTURE: rider** `c3`" in out
+    assert "no work-items" not in out

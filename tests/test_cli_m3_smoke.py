@@ -101,3 +101,31 @@ def test_link_resolves_id_prefixes_and_journals_resolved_ids(tmp_path):
     miss = _run(*base, "link", "deadbeef", "REFERENCES", b)
     assert miss.returncode != 0
     assert len([o for o in read_journal(journal) if o["verb"] == "link"]) == 1
+
+
+def test_decide_capture_asserts_capture_state_and_links_the_ridden_item(tmp_path):
+    """a3d196c6 shape (a): `decide --capture` journals decide + assert capture_state in one
+    invocation; `riding:<prefix>` resolves the item, journals the FULL id in the value and
+    a REFERENCES link; a bad spec / --state+--capture together refuse BEFORE minting."""
+    db = str(tmp_path / "dev.db")
+    journal = str(tmp_path / "writes.jsonl")
+    base = ("--graph-db-path", db, "--journal-path", journal)
+    r = _run(*base, "decide", "WORK ITEM: host", "--title", "WORK ITEM: host", "--state", "open")
+    assert r.returncode == 0, r.stderr or r.stdout
+    host = read_journal(journal)[1]["args"]["subject"]
+    r = _run(*base, "decide", "CAPTURE: seed", "--capture", "seed")
+    assert r.returncode == 0, r.stderr or r.stdout
+    r = _run(*base, "decide", "CAPTURE: rider", "--capture", f"riding:{host[:8]}")
+    assert r.returncode == 0, r.stderr or r.stdout
+    ops = read_journal(journal)
+    assert [o["verb"] for o in ops] == ["decide", "assert", "decide", "assert", "decide",
+                                        "assert", "link"]
+    assert ops[3]["args"] == {**ops[3]["args"], "predicate": "capture_state", "value": "seed"}
+    assert ops[5]["args"]["value"] == f"riding:{host}"  # full id, never the prefix
+    assert ops[6]["args"]["relation"] == "REFERENCES" and ops[6]["args"]["target_id"] == host
+    before = len(ops)
+    bad = _run(*base, "decide", "CAPTURE: bad", "--capture", "someday")
+    assert bad.returncode != 0 and "--capture expects" in bad.stderr
+    both = _run(*base, "decide", "X", "--state", "open", "--capture", "seed")
+    assert both.returncode == 2 and "OR --capture" in both.stderr
+    assert len(read_journal(journal)) == before  # refused specs mint nothing

@@ -392,6 +392,8 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             extra += f" · DoD-drift {c['drift']}"
         if c.get("unfiled") is not None:
             extra += f" · unfiled {c['unfiled']}"
+        if c.get("captures"):
+            extra += f" · captures {c['captures']} (`--captures`)"
         lines = ["## Readiness frontier",
                  f"_ready {c.get('ready', 0)} · blocked {c.get('blocked', 0)} · "
                  f"done {c.get('done', 0)}{extra}_  (ready/blocked are DERIVED, never stored)", ""]
@@ -479,7 +481,18 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                 lines.append("**Done:**")
             for d in done:
                 lines.append(f"  - ◾ {_short(d.get('label', ''), 100)} `{d.get('id')}`{_dod(d)}")
-        if not (ready or blocked or done):
+        caps = obj.get("captures", [])
+        if caps:
+            # a3d196c6 shape (a): captures are AUTHORED dispositions, never work items.
+            lines.append("**Captures (authored capture_state — not work items):**")
+            glyph = {"seed": "🌱", "deferred": "⏸"}
+            for cp in caps:
+                st = str(cp.get("capture_state") or "")
+                r = cp.get("rides")
+                tag = (f"🚌 riding _{_short(r.get('label', ''), 60)}_ `{r.get('id')}` "
+                       f"({r.get('state')})" if r else f"{glyph.get(st, '•')} {st}")
+                lines.append(f"  - {tag} — **{_short(cp.get('label', ''), 100)}** `{cp.get('id')}`")
+        if not (ready or blocked or done or caps):
             lines.append("_(no work-items — author `task_state` to populate)_")
         if view.get("state") == "default" and c.get("done", 0):
             lines.append("")

@@ -160,6 +160,36 @@ def _will_write(args) -> bool:
     return not getattr(args, "no_write", False)
 
 
+async def _resolve_capture(
+    gx,                 # The open graph handle
+    spec: str,          # The `--capture` spec: seed | deferred | riding:<item-id-or-prefix>
+):  # -> (spec {value, rides?} | None, error | None) — no Tuple import in cli
+    """Validate a `decide --capture` spec (finding a3d196c6, user-ratified shape (a)).
+
+    A capture's disposition is AUTHORED ground truth at mint — a derived seeds register
+    cannot tell a deliberate deferral from a seed. `riding:<ref>` resolves the ridden
+    item NOW (a prefix resolves against today's db; the journaled value carries the full
+    id) so the capture can be REFERENCES-linked to it and `readiness --captures` can
+    show the item's state beside it."""
+    from .projection import ambiguity_error, resolve_node_ref
+    s = (spec or "").strip()
+    if s in ("seed", "deferred"):
+        return {"value": s}, None
+    if s.startswith("riding:"):
+        ref = s[len("riding:"):].strip()
+        if not ref:
+            return None, "--capture riding:<item> needs an item id (or unique prefix)"
+        r = await resolve_node_ref(gx, ref)
+        if "candidates" in r:
+            return None, ambiguity_error(ref, r["candidates"])
+        node = r.get("node")
+        if node is None:
+            return None, f"--capture riding: no node `{ref}` — mint the item first, then cite it"
+        full = node.get("id") if isinstance(node, dict) else getattr(node, "id", None)
+        return {"value": f"riding:{full}", "rides": full}, None
+    return None, f"--capture expects seed | deferred | riding:<item> (got {spec!r})"
+
+
 def _editor_pop(
     initial: str,         # The current slot text to seed the buffer with
     suffix: str = ".py",  # Temp-file suffix (editor syntax highlighting)
@@ -369,7 +399,8 @@ async def _dispatch(args) -> int:
         elif args.command == "contradictions":
             print(render("contradictions", await contradictions(gx, args.scope), args.format))
         elif args.command == "readiness":
-            res = await readiness(gx, args.scope or args.contains, state=args.state,
+            res = await readiness(gx, args.scope or args.contains,
+                                  state=("captures" if args.captures else args.state),
                                   limit=args.limit, offset=args.offset,
                                   anchor=args.anchor, where=args.where)
             print(render("readiness", res, args.format))
@@ -458,6 +489,18 @@ async def _dispatch(args) -> int:
                               "actor": actor, "evidence": evidence})
             return 1 if res.get("error") else 0
         elif args.command == "decide":
+            if args.state and args.capture:
+                print("error: a capture is not a work item — pass --state OR --capture",
+                      file=sys.stderr)
+                return 2
+            capture = None
+            if args.capture:
+                # Validate + resolve BEFORE minting, so a bad spec never leaves a stray
+                # unstated decision behind (mint-first would strand it).
+                capture, cerr = await _resolve_capture(gx, args.capture)
+                if cerr:
+                    print(f"error: {cerr}", file=sys.stderr)
+                    return 1
             res = await decide(gx, args.statement, actor=args.actor, supports=args.supports,
                                supersedes=args.supersedes, session=args.session,
                                title=args.title)
@@ -484,6 +527,28 @@ async def _dispatch(args) -> int:
                                  {"subject": res["decision_id"], "predicate": "task_state",
                                   "value": args.state, "actor": args.actor,
                                   "evidence": None, "supersede": False})
+            # --capture: the AUTHORED capture_state (a3d196c6 shape (a)) lands beside the
+            # mint like --state does, and a riding capture REFERENCES the item it rides —
+            # both journaled, so a rebuild keeps the capture visible to `readiness --captures`.
+            if capture and not res.get("error"):
+                st = await assert_value(gx, res["decision_id"], "capture_state",
+                                        capture["value"], actor=args.actor)
+                print(render("assert", st, args.format))
+                if args.journal_path and not st.get("error"):
+                    append_write(args.journal_path, "assert",
+                                 {"subject": res["decision_id"], "predicate": "capture_state",
+                                  "value": capture["value"], "actor": args.actor,
+                                  "evidence": None, "supersede": False})
+                if capture.get("rides"):
+                    lk = await link(gx, res["decision_id"], capture["rides"], "REFERENCES",
+                                    actor=args.actor)
+                    print(render("link", lk, args.format))
+                    if args.journal_path and lk.get("written"):
+                        append_write(args.journal_path, "link",
+                                     {"source_id": lk["source_id"], "target_id": lk["target_id"],
+                                      "relation": "REFERENCES", "actor": args.actor,
+                                      "source_label": lk.get("source_label"),
+                                      "target_label": lk.get("target_label")})
         elif args.command == "display-rule":
             res = await set_display_rule(gx, args.for_label, args.title, args.gloss,
                                          actor=args.actor)
@@ -1129,6 +1194,10 @@ def main() -> int:
                       help="Substring filter on item labels (alias of the scope positional)")
     p_rd.add_argument("--limit", type=int, default=15, help="Page size (default 15)")
     p_rd.add_argument("--offset", type=int, default=0, help="Page start within the selected bucket")
+    p_rd.add_argument("--captures", action="store_true",
+                      help="Enumerate CAPTURES (Decisions carrying an authored capture_state: "
+                           "seed / deferred / riding:<item>) instead of the work-item frontier "
+                           "(a3d196c6 shape (a); --where capture_state=seed narrows)")
     p_rd.add_argument("--anchor", default=None,
                       help="Restrict to items filed PART_OF this program anchor (id prefix or "
                            "label substring)")
@@ -1285,6 +1354,12 @@ def main() -> int:
     p_de.add_argument("--title", default=None,
                       help="Explicit display title (tier-1 override; else the statement's "
                            "first clause is extracted)")
+    p_de.add_argument("--capture", default=None, metavar="seed|deferred|riding:<item>",
+                      help="Assert capture_state on the new decision in the same invocation "
+                           "(finding a3d196c6, shape (a)): a CAPTURE is not a work item — "
+                           "seed / deferred / riding:<item-id-or-prefix> (resolved and "
+                           "REFERENCES-linked) — so `readiness --captures` renders it; "
+                           "mutually exclusive with --state")
     p_de.add_argument("--state", default=None, choices=["open"],
                       help="Assert task_state on the new decision in the same invocation — "
                            "a work item/finding is invisible to `readiness` until its "

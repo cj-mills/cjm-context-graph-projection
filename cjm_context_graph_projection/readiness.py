@@ -179,9 +179,22 @@ async def readiness(
     drift_pairs = [(e["id"], dod[e["id"]]["open"]) for e in parts["done"]
                    if e["id"] in dod and dod[e["id"]]["open"]]
 
+    # a3d196c6 shape (a): CAPTURES carry an AUTHORED capture_state (seed | deferred |
+    # riding:<item>) — never work items, enumerated on their own view (`--captures`).
+    cap_rows: List[Tuple[str, str, Optional[str]]] = []
+    for cid, cfacts in item_facts.items():
+        cvals = cfacts.get("capture_state") or []
+        if not cvals or cid in task_state:
+            continue
+        cval = str(cvals[0])
+        rides = cval[len("riding:"):] if cval.startswith("riding:") else None
+        cap_rows.append((cid, cval, rides))
+
     ids: Set[str] = {e["id"] for bucket in parts.values() for e in bucket}
     ids.update(filed[e["id"]] for bucket in parts.values() for e in bucket
                if e["id"] in filed)
+    ids.update(cid for cid, _, _ in cap_rows)
+    ids.update(r for _, _, r in cap_rows if r)
     for b in parts["blocked"]:
         ids.update(b["blocked_by"])
     for _, open_checks in drift_pairs:
@@ -234,13 +247,20 @@ async def readiness(
     drift = [{"id": i, "label": _label(i),
               "open_checks": [{"id": c, "label": _label(c)} for c in open_checks]}
              for i, open_checks in drift_pairs if _keep(i)]
+    captures = sorted(
+        [{"id": cid, "label": _label(cid), "capture_state": cval,
+          **({"rides": {"id": r, "label": _label(r), "state": task_state.get(r, "?")}}
+             if r else {})}
+         for cid, cval, r in cap_rows if _keep(cid)],
+        key=lambda e: (e["capture_state"].split(":")[0], e["label"]))
 
     # Bounded view (707327ea, fixes 4258da35): counts stay TRUE totals; the default
     # never enumerates Done and caps ready to a recency top-K; a --state pick pages
     # one bucket; "all" is the legacy full dump (the viz/lens machine feed).
     counts = {"ready": len(ready), "blocked": len(blocked), "done": len(done),
               "closable": len(closable), "drift": len(drift),
-              "honored": sum(1 for c in closable if c.get("honored_by"))}
+              "honored": sum(1 for c in closable if c.get("honored_by")),
+              "captures": len(captures)}
     if anchors:
         counts["unfiled"] = sum(1 for e in ready + blocked if "program" not in e)
     touch = _last_touch(assertions)
@@ -248,6 +268,7 @@ async def readiness(
     done = sorted(done, key=lambda e: touch.get(e["id"], 0.0), reverse=True)
     view: Dict[str, Any] = {"state": state or "default", "limit": limit, "offset": offset,
                             "anchor": anchor, "where": list(where or [])}
+    shown_captures: List[Dict[str, Any]] = []  # counted always; enumerated only on --captures
     if state is None:
         ready = ready[:limit]
         done = []
@@ -258,8 +279,14 @@ async def readiness(
         ready, blocked, done, closable, drift = [], blocked[offset:offset + limit], [], [], []
     elif state == "done":
         ready, blocked, done, closable, drift = [], [], done[offset:offset + limit], [], []
+    elif state == "captures":
+        ready, blocked, done, closable, drift = [], [], [], [], []
+        shown_captures = captures[offset:offset + limit]
+    elif state == "all":
+        shown_captures = captures
     return {"ready": ready, "blocked": blocked, "done": done,
-            "closable": closable, "drift": drift, "counts": counts, "view": view}
+            "closable": closable, "drift": drift, "captures": shown_captures,
+            "counts": counts, "view": view}
 
 
 def _last_touch(
