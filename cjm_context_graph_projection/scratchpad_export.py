@@ -43,9 +43,20 @@ def derive_entries(
     next_pairs: Sequence[Tuple[str, str]],     # NEXT edges (source_id, target_id)
 ) -> List[Dict[str, Any]]:
     """Chronological entries with derived `on_active_path` (transcript tip
-    ancestry; composer parts are always live)."""
+    ancestry; composer parts are always live).
+
+    SEVERED-CHAIN RECOVERY (finding 6cc6de01): a chain repair that unlinks NEXT
+    edges leaves everything before the break unreachable from the tip — the old
+    walk marked those messages superseded, so the batch read and the exporter
+    silently dropped them (2/17 user messages on 2026-08-26_15-14-43). The
+    classifier: an unvisited message whose predecessor chain REACHES the active
+    path is a genuinely superseded branch (a rewind the reader did not take);
+    one whose chain dead-ends WITHOUT touching it is a severed segment —
+    recovered as active and annotated `recovered: True` so readers see the seam
+    instead of losing the prefix."""
     transcript = [m for m in messages if m.get("source") != MESSAGE_SOURCE_COMPOSER]
     active: set = set()
+    recovered: set = set()
     if transcript:
         ids = {m["id"] for m in transcript}
         tip = max(transcript, key=lambda m: str(m.get("timestamp") or ""))["id"]
@@ -54,10 +65,34 @@ def derive_entries(
         while node is not None and node not in active:
             active.add(node)
             node = pred.get(node)
+
+        reaches: Dict[str, bool] = {}  # memoized: does this id's ancestry touch `active`?
+
+        def _reaches_active(start: str) -> bool:
+            chain: List[str] = []
+            n: Optional[str] = start
+            seen: set = set()
+            while n is not None and n not in reaches and n not in active and n not in seen:
+                seen.add(n)
+                chain.append(n)
+                n = pred.get(n)
+            verdict = False if n is None or n in seen else \
+                (reaches[n] if n in reaches else n in active)
+            for c in chain:
+                reaches[c] = verdict
+            return verdict
+
+        for m in transcript:
+            if m["id"] not in active and not _reaches_active(m["id"]):
+                recovered.add(m["id"])
+        active |= recovered
     out = []
     for m in messages:
         composer = m.get("source") == MESSAGE_SOURCE_COMPOSER
-        out.append({**m, "on_active_path": True if composer else (m["id"] in active)})
+        entry = {**m, "on_active_path": True if composer else (m["id"] in active)}
+        if entry.get("id") in recovered:
+            entry["recovered"] = True
+        out.append(entry)
     out.sort(key=lambda m: str(m.get("timestamp") or ""))
     return out
 
@@ -84,6 +119,8 @@ def _header_line(m: Dict[str, Any], sent_ids: set, config: Dict[str, Any]) -> st
         bits.append(f"`{str(m['id'])[:8]}`")
     if composer and m["id"] in sent_ids:
         bits.append("sent ✓")
+    if m.get("recovered"):
+        bits.append("_(recovered — severed chain)_")
     if not m.get("on_active_path", True):
         bits.append("_(superseded)_")
     return " · ".join(bits)
@@ -222,6 +259,9 @@ async def read_session_messages(
     if loaded.get("error"):
         return loaded
     entries = derive_entries(loaded["messages"], loaded["next_pairs"])
+    transcript_total = sum(1 for m in entries
+                           if m.get("source") != MESSAGE_SOURCE_COMPOSER)
+    recovered_n = sum(1 for m in entries if m.get("recovered"))
     items = []
     for m in entries:
         if m.get("source") == MESSAGE_SOURCE_COMPOSER and not include_parts:
@@ -230,8 +270,14 @@ async def read_session_messages(
             continue
         if role and str(m.get("role") or "") != role:
             continue
-        items.append({"id": m.get("id"), "role": m.get("role"), "timestamp": m.get("timestamp"),
-                      "source": m.get("source"), "on_active_path": m.get("on_active_path", True),
-                      "text": str(m.get("text") or "")})
+        it = {"id": m.get("id"), "role": m.get("role"), "timestamp": m.get("timestamp"),
+              "source": m.get("source"), "on_active_path": m.get("on_active_path", True),
+              "text": str(m.get("text") or "")}
+        if m.get("recovered"):
+            it["recovered"] = True
+        items.append(it)
+    # Coverage is part of the delivery (6cc6de01 fix c): the reader must be able
+    # to see a severed-chain recovery happened rather than trust the walk blindly.
     return {"kind": "messages", "session_key": session_key, "title": loaded["title"],
-            "role": role, "count": len(items), "items": items}
+            "role": role, "count": len(items), "items": items,
+            "transcript_total": transcript_total, "recovered": recovered_n}

@@ -149,6 +149,28 @@ MUTATES_SOURCE: Dict[str, bool] = {
     "delete-module": True, "rename-symbol": True,
 }
 
+# Id-ref registry (work item b73e7688): every POSITIONAL that accepts a node id —
+# and therefore MUST resolve a unique id prefix through the shared seam
+# (`resolve_node_ref` / `resolve_subject` / `_resolve_module_ref`) — is declared
+# here, verb by verb. The conformance test statically scans the parser source for
+# id-shaped positionals and fails the build on any undeclared one, so verb N+1
+# cannot ship without prefix support (the flip-module wall: 28 hits / 20 sessions
+# before 8bc9abf4). `repo_key` on the three source-state verbs is DUAL: a repo
+# slug in the two-positional form, a CodeModule id/prefix in the single-arg form.
+# `edit-message.source_uuid` is exempt — a capture-source uuid, not a graph node.
+ID_REFS: Dict[str, tuple] = {
+    "state": ("subject",), "show": ("node_id",), "read": ("node_id",),
+    "locate": ("term",), "lead": ("anchor",), "subgraph": ("refs",),
+    "assert": ("subject",), "check": ("item",),
+    "link": ("source_id", "target_id"), "unlink": ("source_id", "target_id"),
+    "author": ("node_id",), "add-symbol": ("module",), "add-text": ("module",),
+    "emit": ("module_id",), "move": ("symbol_id", "target_module_id"),
+    "regroup": ("symbol_ids",), "rename-module": ("module_id",),
+    "delete-module": ("module_id",), "rename-symbol": ("symbol_id",),
+    "flip-module": ("repo_key",), "cutover": ("repo_key",),
+    "emit-artifact": ("repo_key",),
+}
+
 
 def _will_write(args) -> bool:
     """Whether this invocation would MUTATE source files (the seam-gate predicate).
@@ -188,6 +210,36 @@ async def _resolve_capture(
         full = node.get("id") if isinstance(node, dict) else getattr(node, "id", None)
         return {"value": f"riding:{full}", "rides": full}, None
     return None, f"--capture expects seed | deferred | riding:<item> (got {spec!r})"
+
+
+async def _resolve_module_ref(
+    gx,          # The open graph handle
+    ref: str,    # A CodeModule node id, or a unique id prefix (>= 6 hex chars)
+):  # -> ({repo_key, module_path} | None, error | None) — the _resolve_capture shape
+    """Resolve a CodeModule id/prefix to (repo_key, module_path) for the source-state
+    verbs (work item 8bc9abf4): flip-module / cutover / emit-artifact were the only
+    id-taking verbs refusing a node id — the miner corpus's most-repeated wall (28
+    hits / 20 sessions). Wrong label, ambiguity, and no-match all fail LOUD; the
+    RESOLVED repo_key + module_path are what the source journal records, so replay
+    never depends on a rebuildable node id."""
+    from .projection import ambiguity_error, resolve_node_ref
+    r = await resolve_node_ref(gx, ref)
+    if "candidates" in r:
+        return None, ambiguity_error(ref, r["candidates"])
+    node = r.get("node")
+    if node is None:
+        return None, (f"no node `{ref}` — pass repo_key + module_path, or a "
+                      f"CodeModule id / unique prefix (`locate` the module first)")
+    label = node.get("label") if isinstance(node, dict) else getattr(node, "label", None)
+    props = (node.get("properties") if isinstance(node, dict)
+             else getattr(node, "properties", None)) or {}
+    if label != "CodeModule":
+        return None, (f"`{ref}` resolves to a {label} node, not a CodeModule — "
+                      f"this verb wants the module (`locate <file>` gives its id)")
+    repo_key, module_path = props.get("repo_key"), props.get("module_path")
+    if not (repo_key and module_path):
+        return None, f"CodeModule `{ref}` carries no repo_key/module_path properties"
+    return {"repo_key": repo_key, "module_path": module_path}, None
 
 
 def _editor_pop(
@@ -910,8 +962,16 @@ async def _dispatch(args) -> int:
             if not args.source_journal_path:
                 print("error: flip-module needs --source-journal-path", file=sys.stderr)
                 return 1
-            res = flip_module(args.source_journal_path, args.repos_dir, args.repo_key,
-                              args.module_path, import_name=args.import_name,
+            repo_key, module_path = args.repo_key, args.module_path
+            if module_path is None:
+                # Single-arg form (8bc9abf4): the positional is a CodeModule id/prefix.
+                spec, merr = await _resolve_module_ref(gx, args.repo_key)
+                if merr:
+                    print(f"error: {merr}", file=sys.stderr)
+                    return 1
+                repo_key, module_path = spec["repo_key"], spec["module_path"]
+            res = flip_module(args.source_journal_path, args.repos_dir, repo_key,
+                              module_path, import_name=args.import_name,
                               write=not args.no_write)
             print(render("flip", res, args.format))
             return 1 if res.get("error") else 0
@@ -942,8 +1002,16 @@ async def _dispatch(args) -> int:
             if not args.source_journal_path:
                 print("error: cutover needs --source-journal-path", file=sys.stderr)
                 return 1
+            repo_key, module_path = args.repo_key, args.module_path
+            if module_path is None:
+                # Single-arg form (8bc9abf4): the positional is a CodeModule id/prefix.
+                spec, merr = await _resolve_module_ref(gx, args.repo_key)
+                if merr:
+                    print(f"error: {merr}", file=sys.stderr)
+                    return 1
+                repo_key, module_path = spec["repo_key"], spec["module_path"]
             res = cutover_module(args.source_journal_path, args.repos_dir,
-                                 args.repo_key, args.module_path,
+                                 repo_key, module_path,
                                  write=not args.no_write)
             print(render("cutover", res, args.format))
             return 1 if res.get("error") else 0
@@ -951,8 +1019,16 @@ async def _dispatch(args) -> int:
             if not args.source_journal_path:
                 print("error: emit-artifact needs --source-journal-path", file=sys.stderr)
                 return 1
+            repo_key, module_path = args.repo_key, args.module_path
+            if module_path is None:
+                # Single-arg form (8bc9abf4): the positional is a CodeModule id/prefix.
+                spec, merr = await _resolve_module_ref(gx, args.repo_key)
+                if merr:
+                    print(f"error: {merr}", file=sys.stderr)
+                    return 1
+                repo_key, module_path = spec["repo_key"], spec["module_path"]
             res = emit_source_artifact(args.source_journal_path, args.repos_dir,
-                                       args.repo_key, args.module_path,
+                                       repo_key, module_path,
                                        write=not args.no_write)
             print(render("emit-artifact", res, args.format))
             return 1 if res.get("error") else 0
@@ -1592,9 +1668,12 @@ def main() -> int:
 
     p_fl = sub.add_parser("flip-module",
                           help="N+3 Phase 1 (SHADOW): capture a module's canonical source into the source journal")
-    p_fl.add_argument("repo_key", help="The repo's durable conceptual slug")
-    p_fl.add_argument("module_path", help="Repo-relative source path (e.g. pkg/sub.py, or "
-                                          "nbs/core/mod.ipynb for a notebook-sourced module)")
+    p_fl.add_argument("repo_key", help="The repo's durable conceptual slug — or a CodeModule "
+                                       "id / unique id prefix (the single-arg form, 8bc9abf4)")
+    p_fl.add_argument("module_path", nargs="?", default=None,
+                      help="Repo-relative source path (e.g. pkg/sub.py, or "
+                           "nbs/core/mod.ipynb for a notebook-sourced module); omit it "
+                           "when the first positional is a CodeModule id/prefix")
     p_fl.add_argument("--import-name", help="Dotted import name (derived from module_path if omitted)")
     p_fl.add_argument("--no-write", action="store_true",
                       help="Dry run: report what a flip would capture, journal nothing")
@@ -1623,16 +1702,22 @@ def main() -> int:
     p_co = sub.add_parser("cutover",
                           help="N+3 Phase 2: make the journal a module's source of truth "
                                "(guarded — requires a clean shadow); the file becomes a generated committed artifact")
-    p_co.add_argument("repo_key", help="The repo's durable conceptual slug")
-    p_co.add_argument("module_path", help="Repo-relative source path (.py or nbs/*.ipynb)")
+    p_co.add_argument("repo_key", help="The repo's durable conceptual slug — or a CodeModule "
+                                       "id / unique id prefix (the single-arg form, 8bc9abf4)")
+    p_co.add_argument("module_path", nargs="?", default=None,
+                      help="Repo-relative source path (.py or nbs/*.ipynb); omit it "
+                           "when the first positional is a CodeModule id/prefix")
     p_co.add_argument("--no-write", action="store_true",
                       help="Dry run: run every cutover guard, flip nothing")
     p_co.add_argument("--repos-dir", default=DEFAULT_REPOS)
 
     p_ea = sub.add_parser("emit-artifact",
                           help="(Re)generate a module's file from its journaled source (the journal is authoritative)")
-    p_ea.add_argument("repo_key", help="The repo's durable conceptual slug")
-    p_ea.add_argument("module_path", help="Repo-relative source path (.py or nbs/*.ipynb)")
+    p_ea.add_argument("repo_key", help="The repo's durable conceptual slug — or a CodeModule "
+                                       "id / unique id prefix (the single-arg form, 8bc9abf4)")
+    p_ea.add_argument("module_path", nargs="?", default=None,
+                      help="Repo-relative source path (.py or nbs/*.ipynb); omit it "
+                           "when the first positional is a CodeModule id/prefix")
     p_ea.add_argument("--repos-dir", default=DEFAULT_REPOS)
     p_ea.add_argument("--no-write", action="store_true", help="Dry run: report drift, don't touch the file")
 

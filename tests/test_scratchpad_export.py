@@ -26,6 +26,41 @@ def test_derive_marks_abandoned_branch_and_sorts():
     assert flags == {"n1": True, "p1": True, "n2": False, "n3": True}
 
 
+def test_derive_recovers_severed_chain_and_keeps_superseded_branch():
+    # 6cc6de01: a chain repair unlinked NEXT edges mid-session, so the tip walk
+    # could not reach the pre-repair prefix — the old derivation marked it
+    # superseded and `read --session` silently dropped it (2/17 user messages on
+    # 2026-08-26_15-14-43). The severed prefix (t1->t2, NO edge into t3) must
+    # recover as active + `recovered`; a genuine abandoned branch forking OFF the
+    # active chain (t3->x vs t3->t4) stays superseded and unrecovered.
+    messages = [
+        msg("t1", "2026-08-26T01:00:00.000Z"),
+        msg("t2", "2026-08-26T02:00:00.000Z"),
+        msg("t3", "2026-08-26T03:00:00.000Z"),
+        msg("x", "2026-08-26T03:30:00.000Z"),
+        msg("t4", "2026-08-26T04:00:00.000Z"),
+    ]
+    entries = derive_entries(messages, [("t1", "t2"), ("t3", "x"), ("t3", "t4")])
+    flags = {e["id"]: e["on_active_path"] for e in entries}
+    assert flags == {"t1": True, "t2": True, "t3": True, "x": False, "t4": True}
+    assert {e["id"] for e in entries if e.get("recovered")} == {"t1", "t2"}
+
+
+def test_render_marks_recovered_messages():
+    # The recovered seam must be VISIBLE in the export projection (6cc6de01 fix c):
+    # a recovered message renders active with a "(recovered — severed chain)"
+    # header marker, never as superseded.
+    entries = derive_entries(
+        [msg("t1", "2026-08-26T01:00:00.000Z", text="pre-repair"),
+         msg("t2", "2026-08-26T02:00:00.000Z"),
+         msg("t3", "2026-08-26T03:00:00.000Z", text="post-repair")],
+        [("t1", "t2")])  # severed: no edge from t2 into t3 (the tip)
+    text = render_session_markdown(KEY, entries, [])
+    assert "pre-repair" in text and "post-repair" in text  # nothing dropped
+    assert "_(recovered — severed chain)_" in text
+    assert "_(superseded)_" not in text
+
+
 def test_render_default_excludes_superseded_and_marks_sent():
     entries = derive_entries(
         [msg("n1", "2026-08-21T10:00:00.000Z", text="question"),

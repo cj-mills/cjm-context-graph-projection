@@ -227,6 +227,13 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                 lines.append(f"  - _{c.get('value')}_ (actor {c.get('actor')}) `{c.get('assertion_id')}`")
         elif obj.get("soft_conflict"):
             lines.append("• soft conflict on an untyped predicate → see `worklist`")
+        if obj.get("multi_active"):
+            lines.append("⚠ **MULTI-ACTIVE (supersession gap):** this non-multivalued "
+                         "slot still holds other active value(s) —")
+            for c in obj["multi_active"]:
+                lines.append(f"  - _{c.get('value')}_ (actor {c.get('actor')}) `{c.get('assertion_id')}`")
+            lines.append("  close with `assert … --supersede <assertion-id-or-prefix>` "
+                         "(or link SUPERSEDES) until one value remains")
         return "\n".join(lines)
     if kind == "alias":
         if obj.get("error"):
@@ -892,9 +899,18 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             # 1d8d4486: a session spine's Message bodies in chain order, role-filtered.
             head = (f"## Session `{obj.get('session_key')}` — {obj.get('count', 0)} message(s)"
                     + (f" · role={obj['role']}" if obj.get("role") else ""))
-            parts = [head, ""]
+            parts = [head]
+            if obj.get("recovered"):
+                # 6cc6de01: a severed NEXT chain was recovered — say so, LOUDLY.
+                parts.append(f"⚠ severed chain recovered: {obj['recovered']} of "
+                             f"{obj.get('transcript_total', '?')} transcript message(s) "
+                             f"were unreachable from the tip (a chain repair cut the "
+                             f"active path) and are delivered tagged _(recovered)_")
+            parts.append("")
             for m in obj.get("items", []):
                 tag = "" if m.get("on_active_path", True) else " _(superseded branch)_"
+                if m.get("recovered"):
+                    tag = " _(recovered)_"
                 parts.append(f"### [{m.get('role')}] {m.get('timestamp') or ''} "
                              f"`{str(m.get('id') or '')[:8]}`{tag}")
                 parts.append("")

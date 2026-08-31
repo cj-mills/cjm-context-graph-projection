@@ -86,24 +86,42 @@ async def resolve_subject(
 
 
 def _match_supersede_targets(
-    targets: List[str],            # Caller-named ids OR values to supersede
+    targets: List[str],            # Caller-named ids, unique id PREFIXES, or values to supersede
     slot_assertions: List[Any],    # Existing assertions in the slot
     predicate: str,
-) -> List[str]:
-    """Resolve `--supersede` tokens (assertion ids OR values) to assertion ids."""
+) -> Dict[str, Any]:  # {ids: [...], unmatched: [tokens], ambiguous: [{token, candidates}]}
+    """Resolve `--supersede` tokens to assertion ids on THIS slot — never silently.
+
+    Match order: exact assertion id, prior value (canonicalized), then unique id
+    PREFIX against the slot's assertion ids (41449193: an 8-char prefix used to be
+    a silent no-op). Anything unmatched or ambiguous is RETURNED, and the caller
+    refuses the write — a supersede that lands nothing leaves two active values,
+    the exact trap the flag exists to close."""
     by_id = {F.nid(a): a for a in slot_assertions}
     by_canon: Dict[str, str] = {}
     for a in slot_assertions:
         by_canon.setdefault(P.canonical_value(predicate, F.prop(a, "value", "")), F.nid(a))
-    out: List[str] = []
+    ids: List[str] = []
+    unmatched: List[str] = []
+    ambiguous: List[Dict[str, Any]] = []
     for t in targets:
         if t in by_id:
-            out.append(t)
+            ids.append(t)
+            continue
+        cid = by_canon.get(P.canonical_value(predicate, t))
+        if cid:
+            ids.append(cid)
+            continue
+        pref = t.lower()
+        hits = ([i for i in by_id if i.lower().startswith(pref)]
+                if _ID_PREFIX_SHAPED_RE.match(t) else [])
+        if len(hits) == 1:
+            ids.append(hits[0])
+        elif hits:
+            ambiguous.append({"token": t, "candidates": sorted(hits)})
         else:
-            cid = by_canon.get(P.canonical_value(predicate, t))
-            if cid:
-                out.append(cid)
-    return out
+            unmatched.append(t)
+    return {"ids": ids, "unmatched": unmatched, "ambiguous": ambiguous}
 
 
 async def assert_value(
@@ -173,11 +191,25 @@ async def assert_value(
                 edges.append(make_edge(old_id, assertion.id, DevRelations.SUPERSEDES))
                 born_superseded = True
 
-    # Explicit supersede targets (ids or values).
-    for tid in _match_supersede_targets(supersede or [], slot_existing, predicate):
-        if tid != assertion.id and tid not in superseded_ids:
-            edges.append(assertion.supersedes_edge(tid))
-            superseded_ids.append(tid)
+    # Explicit supersede targets (ids, unique prefixes, or values) — resolved on
+    # THIS slot, and REFUSED LOUDLY on any miss (41449193): a supersede that lands
+    # nothing leaves two active values, so nothing is written and the CLI journals
+    # nothing (same never-journal-a-refused-write rule as the subject path).
+    if supersede:
+        m = _match_supersede_targets(supersede, slot_existing, predicate)
+        if m["unmatched"] or m["ambiguous"]:
+            details = [await _diagnose_supersede_miss(gx, t, slot.id)
+                       for t in m["unmatched"]]
+            details += [f"`{a['token']}` is ambiguous on this slot — candidates: "
+                        + ", ".join(a["candidates"]) for a in m["ambiguous"]]
+            return {"error": "--supersede refused (nothing superseded, nothing "
+                             "written): " + "; ".join(details),
+                    "subject": subject, "predicate": predicate, "value": value,
+                    "written": False}
+        for tid in m["ids"]:
+            if tid != assertion.id and tid not in superseded_ids:
+                edges.append(assertion.supersedes_edge(tid))
+                superseded_ids.append(tid)
 
     res = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
 
@@ -206,13 +238,22 @@ async def assert_value(
         elif P.soft_conflict(predicate, active_vals):
             soft = True
 
+    # Multi-active warn (6a27c56f gap 1): a non-multivalued slot holding >1 active
+    # value after the write is a supersession gap. Warn-record-flag, never block —
+    # the two-active trap used to be silent until a projector rendered stale.
+    multi_active: List[Dict[str, Any]] = []
+    if not P.is_multivalued(predicate) and len(active_after) > 1:
+        multi_active = [{"assertion_id": F.nid(a), "value": F.prop(a, "value"),
+                         "actor": F.prop(a, "actor")}
+                        for a in active_after if F.nid(a) != assertion.id]
+
     return {
         "subject": subject, "subject_id": subject_id, "slot_id": slot.id,
         "predicate": predicate, "value": value, "actor": actor,
         "assertion_id": assertion.id, "created_subject": created is not None,
         "nodes_added": res.nodes_added, "edges_added": res.edges_added,
         "superseded": superseded_ids, "born_superseded": born_superseded,
-        "conflict": conflict, "soft_conflict": soft,
+        "conflict": conflict, "soft_conflict": soft, "multi_active": multi_active,
     }
 
 
@@ -525,3 +566,35 @@ async def mint_procedure(
     res = await extend_graph(gx.queue, gx.graph_id, [node], [])
     return {"procedure_id": node["id"], "method": method, "name": name,
             "nodes_added": getattr(res, "nodes_added", 0), "written": True}
+
+
+async def _diagnose_supersede_miss(
+    gx: GraphHandle,
+    token: str,    # The --supersede token that matched nothing on the slot
+    slot_id: str,  # The slot the assert is writing to
+) -> str:  # One diagnostic line naming WHY the token missed
+    """Explain a missed `--supersede` token so the refusal teaches (41449193).
+
+    The silent classes this makes loud: an id PREFIX that matches nothing, a full
+    assertion id living on a DIFFERENT slot (the 2026-08-27 pin.ritual miss — the
+    re-assert resolved to another subject, so the old assertion was invisible),
+    a non-Assertion node id, and a plain value the slot never held."""
+    res = await resolve_node_ref(gx, token)
+    if "candidates" in res:
+        return ambiguity_error(token, res["candidates"])
+    node = res.get("node")
+    if node is None:
+        return (f"`{token}` matches no assertion id/prefix on this slot, no prior "
+                f"value, and no node in the graph")
+    label = node.get("label") if isinstance(node, dict) else getattr(node, "label", None)
+    p = F.props(node)
+    if label != "Assertion" and p.get("slot_id") is None:
+        return (f"`{token}` resolves to a {label or 'non-Assertion'} node, not an "
+                f"Assertion — name the assertion id from `show <slot>`")
+    other_slot = p.get("slot_id")
+    if other_slot and other_slot != slot_id:
+        return (f"`{token}` is an assertion on a DIFFERENT slot "
+                f"(slot `{other_slot}`, predicate `{p.get('predicate')}`, value "
+                f"`{p.get('value')}`) — this write targets slot `{slot_id}`; "
+                f"re-check the subject (aliases can resolve two spellings apart)")
+    return f"`{token}` did not resolve against this slot's assertions"
