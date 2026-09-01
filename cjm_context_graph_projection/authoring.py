@@ -480,6 +480,14 @@ async def author(
     node_id = F.nid(node)
     resolved = _slot_for(node)
     if resolved is None:
+        # A CONTAINER (CodeModule / Note) routes an --edit to the one child slot
+        # holding OLD (build 55a3489e — the write half of the no-authorable-slot wall).
+        routed_c = await _route_container_edit(gx, node, edit=edit, actor=actor,
+                                               write=write,
+                                               source_journal_path=source_journal_path,
+                                               repos_dir=repos_dir)
+        if routed_c is not None:
+            return routed_c
         # A nested CodeSymbol ROUTES through its owning slot (the 3e13d95a hint, executed).
         routed = await _route_nested_symbol(gx, node, replace=replace, edit=edit,
                                             actor=actor, write=write,
@@ -496,6 +504,10 @@ async def author(
     current = str(F.prop(node, slot, ""))
     new_text, err = _apply(current, replace, edit)
     if err is not None:
+        if edit is not None and "OLD not found" in err:
+            near = _nearest_match(current, edit[0])
+            if near is not None:
+                err = f"{err}\n{near[1]}"
         return {"error": err, "node_id": node_id, "label": label, "slot": slot, "written": False}
 
     # Resolve the enclosing container: a CodeModule for code/notebooks, a Note for memory.
@@ -1194,3 +1206,99 @@ def _stale_wires_error(
             "from these wires would silently REVERT them (finding 889b3025). Run "
             "cg-rebuild first; to land the change now, edit the file directly and "
             "`flip-module` to absorb it.")
+
+
+def _nearest_match(
+    current: str,  # The slot's verbatim text
+    old: str,      # The OLD that failed to match
+) -> Optional[Tuple[float, str]]:  # (similarity, rendered snippet) of the closest region, or None
+    """The closest slot region to a failed `--edit OLD` — the assist for the corpus's
+    third wall (26 hits / 20 sessions, build 55a3489e): instead of a bare refusal,
+    show WHERE the slot diverges from what the caller pasted (stale whitespace, a
+    drifted line, the wrong symbol) so the retry carries the slot's real text.
+    Sliding window of len(OLD)-lines over the slot, difflib ratio, best window
+    rendered with 1-based line numbers; None when nothing clears 40% (a wrong-node
+    paste should say so, not decorate itself with noise)."""
+    import difflib
+    cur_lines = current.splitlines()
+    old_lines = old.splitlines()
+    if not cur_lines or not old_lines or len(cur_lines) > 4000:
+        return None
+    w = len(old_lines)
+    m = difflib.SequenceMatcher(None, "", old)
+    best_ratio, best_at = 0.0, 0
+    for i in range(0, max(1, len(cur_lines) - w + 1)):
+        m.set_seq1("\n".join(cur_lines[i:i + w]))
+        if m.real_quick_ratio() <= best_ratio:
+            continue
+        r = m.ratio()
+        if r > best_ratio:
+            best_ratio, best_at = r, i
+    if best_ratio < 0.4:
+        return None
+    snippet = "\n".join(f"  {best_at + 1 + j:>4}│ {ln}"
+                        for j, ln in enumerate(cur_lines[best_at:best_at + w]))
+    return best_ratio, (f"closest slot match ({best_ratio:.0%} similar, "
+                        f"lines {best_at + 1}-{best_at + w}):\n{snippet}")
+
+
+async def _route_container_edit(
+    gx: GraphHandle,
+    node: Any,                              # The CodeModule / Note an edit was addressed to
+    *,
+    edit: Optional[Tuple[str, str]],        # (old, new) — routing is edit-mode only
+    actor: str,
+    write: bool,
+    source_journal_path: Optional[str],
+    repos_dir: Optional[str],
+) -> Optional[Dict[str, Any]]:  # The routed author result, a pointing error, or None (not ours)
+    """Route an `--edit` addressed to a CONTAINER to the one child slot holding OLD.
+
+    The write half of the corpus's second wall (35 hits / 22 sessions: 'node has no
+    authorable verbatim slot' — build 55a3489e): `author <module-id> --edit` and
+    `author <note-id> --edit` now resolve themselves instead of refusing. Exactly one
+    child slot containing OLD routes the edit there (the result carries `routed_from`);
+    several matches list the candidates (the edit was ambiguous at container scope —
+    target the slot, or widen OLD); zero matches answer with the closest child region
+    (`_nearest_match`). `--replace` on a container stays refused — replacing a whole
+    module/note through a container id is ambiguous by construction."""
+    label = _label_of(node)
+    if edit is None or label not in (DevNodeKinds.CODE_MODULE, DevNodeKinds.NOTE):
+        return None
+    nid = F.nid(node)
+    if label == DevNodeKinds.CODE_MODULE:
+        wires = await _module_region_wires(gx, nid)
+        if not wires:
+            wires = await _notebook_cell_wires(gx, nid)
+    else:
+        wires = await _note_section_wires(gx, nid)
+    slot_of = {DevNodeKinds.CODE_SYMBOL: "body", DevNodeKinds.CODE_TEXT: "text",
+               DevNodeKinds.CELL: "source", DevNodeKinds.SECTION: "raw"}
+    old = edit[0]
+
+    def _name(w: Dict[str, Any]) -> str:
+        p = w["properties"]
+        return str(p.get("qualname") or p.get("anchor") or p.get("region_key") or "")[:60]
+
+    hits = [w for w in wires
+            if old in str(w["properties"].get(slot_of.get(w["label"], ""), "") or "")]
+    if len(hits) == 1:
+        res = await author(gx, hits[0]["id"], edit=edit, actor=actor, write=write,
+                           source_journal_path=source_journal_path, repos_dir=repos_dir)
+        if not res.get("error"):
+            res["routed_from"] = nid
+        return res
+    if len(hits) > 1:
+        listing = "; ".join(f"`{w['id'][:8]}` ({w['label']} {_name(w)})" for w in hits[:6])
+        return {"error": f"edit OLD matches {len(hits)} slots in this {label} — target "
+                         f"one: {listing}", "node_id": nid, "written": False}
+    best = None
+    for w in wires:
+        near = _nearest_match(str(w["properties"].get(slot_of.get(w["label"], ""), "") or ""), old)
+        if near and (best is None or near[0] > best[0]):
+            best = (near[0], w, near[1])
+    err = f"edit OLD found in no slot of this {label}"
+    if best is not None:
+        err += (f" — closest is `{best[1]['id'][:8]}` ({best[1]['label']} "
+                f"{_name(best[1])}):\n{best[2]}")
+    return {"error": err, "node_id": nid, "written": False}
