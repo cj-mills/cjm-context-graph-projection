@@ -397,3 +397,33 @@ def test_journaled_emit_refuses_whole_batch_on_one_bad_emission():
         assert "canonical emit failed" in rec["error"]
         # All-or-nothing: the GOOD emission journaled/wrote nothing either.
         assert Path(j).read_text() == before_journal and f.read_text() == before_file
+
+
+def test_source_journal_appends_route_through_one_choke_point():
+    """Finding 160466f7 (P-48): every source-journal append lands via `_append_record`.
+
+    Guards the choke point structurally — no raw append-mode open may exist in
+    source_state.py outside the helper — and behaviorally: each event verb lands
+    session/actor-stamped through the same path."""
+    import inspect
+    import os
+    import re
+    from cjm_context_graph_projection import source_state
+    src = inspect.getsource(source_state)
+    helper_src = inspect.getsource(source_state._append_record)
+    raw_appends = len(re.findall(r'\.open\("a"\)', src))
+    assert raw_appends == len(re.findall(r'\.open\("a"\)', helper_src)) == 1
+    with tempfile.TemporaryDirectory() as d:
+        j = str(Path(d) / "nested" / "source.jsonl")  # parent dir created by the helper
+        os.environ["CJM_ACTOR"] = "agent:test-choke"
+        try:
+            assert source_state.append_register(j, "demo", repo_root=d) is True
+            assert append_source(j, "demo", "demo/m.py", "demo.m", "A\n") is True
+            source_state._append_cutover(j, "demo", "demo/m.py")
+            assert source_state.append_retire(j, "demo", "demo/m.py", superseded_by=None) is True
+        finally:
+            del os.environ["CJM_ACTOR"]
+        recs = list(read_source_journal(j))
+        assert [r["verb"] for r in recs] == ["register", "source", "cutover", "retire"]
+        assert all(r.get("actor") == "agent:test-choke" for r in recs)  # stamped by the one path
+        assert all("ts" in r and r.get("generation") == 1 for r in recs)

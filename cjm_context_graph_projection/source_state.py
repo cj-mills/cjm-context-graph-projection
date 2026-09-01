@@ -265,14 +265,12 @@ def append_retire(
     `generation`/`op` ride the record as replay-ignored envelope (see `append_source`)."""
     if (repo_key, module_path) not in latest_source_ops(path):
         return False
-    record = _stamp_session({"verb": "retire", "ts": time.time(), "generation": 1,
-                             "args": {"repo_key": repo_key, "module_path": module_path,
-                                      "superseded_by": superseded_by}})
+    record: Dict[str, Any] = {"verb": "retire", "ts": time.time(), "generation": 1,
+                              "args": {"repo_key": repo_key, "module_path": module_path,
+                                       "superseded_by": superseded_by}}
     if op_meta:
         record["op"] = op_meta
-    with Path(path).open("a") as f:
-        f.write(json.dumps(record, sort_keys=True) + "\n")
-    maybe_rotate(path)
+    _append_record(path, record)
     return True
 
 
@@ -294,16 +292,12 @@ def append_source(
     cur = latest_source_ops(path).get((repo_key, module_path))
     if cur is not None and cur.get("text") == text:
         return False
-    record = _stamp_session({"verb": "source", "ts": time.time(), "generation": 1,
-                             "args": {"repo_key": repo_key, "module_path": module_path,
-                                      "import_name": import_name, "text": text}})
+    record: Dict[str, Any] = {"verb": "source", "ts": time.time(), "generation": 1,
+                              "args": {"repo_key": repo_key, "module_path": module_path,
+                                       "import_name": import_name, "text": text}}
     if op_meta:
         record["op"] = op_meta
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    with p.open("a") as f:
-        f.write(json.dumps(record, sort_keys=True) + "\n")
-    maybe_rotate(path)
+    _append_record(path, record)
     return True
 
 
@@ -544,13 +538,11 @@ def _append_cutover(
     The GUARDED path is `cutover_module` (shadow-clean checks); this is the shared
     append it and `journaled_emit` route through when the caller has already validated
     (e.g. flip-to-py births a `.py` graph-sourced from a state it just canonicalized)."""
-    record = _stamp_session({"verb": "cutover", "ts": time.time(), "generation": 1,
-                             "args": {"repo_key": repo_key, "module_path": module_path}})
+    record: Dict[str, Any] = {"verb": "cutover", "ts": time.time(), "generation": 1,
+                              "args": {"repo_key": repo_key, "module_path": module_path}}
     if op_meta:
         record["op"] = op_meta
-    with Path(path).open("a") as f:
-        f.write(json.dumps(record, sort_keys=True) + "\n")
-    maybe_rotate(path)
+    _append_record(path, record)
 
 
 def append_register(
@@ -574,13 +566,9 @@ def append_register(
     args = {"repo_key": repo_key, "repo_root": repo_root, "source_kind": source_kind}
     if latest == args:
         return False
-    record = _stamp_session({"verb": "register", "ts": time.time(), "generation": 1,
-                             "args": args})
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    with p.open("a") as f:
-        f.write(json.dumps(record, sort_keys=True) + "\n")
-    maybe_rotate(path)
+    record: Dict[str, Any] = {"verb": "register", "ts": time.time(), "generation": 1,
+                              "args": args}
+    _append_record(path, record)
     return True
 
 
@@ -720,3 +708,25 @@ def uncaptured_modules(
         if missing:
             out[key] = missing
     return out
+
+
+def _append_record(
+    path: str,                # Source-journal file path (JSONL)
+    record: Dict[str, Any],   # The op record — `verb`/`ts`/`generation`/`args` (+ optional `op`), pre-built by the caller
+) -> None:
+    """THE source-journal append choke point (finding 160466f7, P-48).
+
+    Every source-journal event (`source` / `retire` / `cutover` / `register`) lands
+    through here: session+actor stamping (`_stamp_session`), parent-dir creation, the
+    one-line JSONL write, and the POST-append rotation check (`maybe_rotate`) live in
+    ONE place, so append-level behavior added later (validation, telemetry, a rotation
+    policy) cannot silently miss a site. Callers own the record's shape and any
+    no-op/dedup decision; this helper only lands what it is given. Kept LOCAL (no
+    `.journal` import — this module is a leaf). Regression: no `open("a")` may exist
+    in this module outside this function."""
+    _stamp_session(record)
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("a") as f:
+        f.write(json.dumps(record, sort_keys=True) + "\n")
+    maybe_rotate(path)
