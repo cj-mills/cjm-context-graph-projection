@@ -26,7 +26,7 @@ from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 from cjm_python_decompose_core.emit import emit_module_from_nodes, synth_import
 
 from . import factlayer as F
-from .authoring import _module_node, _module_region_wires, _source_emission
+from .authoring import _module_node, _module_region_wires, _source_emission, _stale_wires_error
 from .runtime import GraphHandle
 from .source_state import is_test_module_path, journaled_emit, latest_source_ops
 
@@ -149,6 +149,12 @@ async def _relocate(
     for src_module_id, items in by_src.items():
         A = await _module_node(gx, src_module_id)
         a_wires = await _module_region_wires(gx, src_module_id)
+        # The stale-wires guard (finding 889b3025): every module this op re-emits must
+        # have wires that reproduce its file — a second move/regroup without an
+        # intervening rebuild re-emits from pre-op wires and silently reverts the first.
+        a_stale = _stale_wires_error(A, emit_module_from_nodes(a_wires), op_name)
+        if a_stale:
+            return {"error": a_stale, "written": False}
         a_uses = await _uses_derived_imports(gx, src_module_id, override)
         a_derive = not is_test_module_path(F.prop(A, "module_path", ""))
         a_text = emit_module_from_nodes([w for w in a_wires if w["id"] not in moved_ids],
@@ -159,6 +165,9 @@ async def _relocate(
 
     # The TARGET module, re-emitted with every moved symbol appended in order.
     b_wires = await _module_region_wires(gx, target_module_id)
+    b_stale = _stale_wires_error(B, emit_module_from_nodes(b_wires), op_name)
+    if b_stale:
+        return {"error": b_stale, "written": False}
     max_order = max((w["properties"].get("order_index", -1) for w in b_wires), default=-1)
     moved_wires = [_symbol_wire(node, target_module_id, max_order + 1 + i)
                    for i, sid in enumerate(symbol_ids)
@@ -194,6 +203,7 @@ async def _relocate(
                 continue  # the target's own imports are handled by its re-derived block
             m = await _module_node(gx, mid)
             text = emit_module_from_nodes(await _module_region_wires(gx, mid))
+            base_text = text
             caller_pkg = ".".join(F.prop(m, "import_name", "").split(".")[:-1])
             changed_any = False
             for _sid, _node, qual in items:
@@ -201,6 +211,9 @@ async def _relocate(
                                                       caller_package=caller_pkg)
                 changed_any = changed_any or changed
             if changed_any:
+                m_stale = _stale_wires_error(m, base_text, op_name)
+                if m_stale:
+                    return {"error": m_stale, "written": False}
                 files.append((F.prop(m, "path"), text))
                 emissions.append(_emission_for(m, text))
                 caller_hits.append(F.prop(m, "import_name", mid))

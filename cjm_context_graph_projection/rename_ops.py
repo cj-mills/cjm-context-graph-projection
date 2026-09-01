@@ -26,7 +26,7 @@ from cjm_dev_graph_schema.vocab import DevRelations
 from cjm_python_decompose_core.emit import emit_module_from_nodes
 
 from . import factlayer as F
-from .authoring import _module_node, _module_region_wires
+from .authoring import _module_node, _module_region_wires, _stale_wires_error
 from .refactor_ops import _emission_for, _get
 from .runtime import GraphHandle
 from .source_state import journaled_emit
@@ -297,73 +297,137 @@ async def rename_symbol(
 ) -> Dict[str, Any]:  # The rename result (modules updated, diagnostics, or error)
     """Rename a top-level free function/class everywhere it is referenced, graph-driven.
 
-    Scoped-renames the defining module (def site + internal refs), then each importer:
-    re-points the import and — when the symbol is imported unaliased — scoped-renames the
-    body references too. An `ast.parse` gate refuses to write if any emitted module would be
-    invalid. The symbol's id changes with its name, so the graph re-derives on the next
-    `ingest` (Fork-1(a))."""
-    node = await _get(gx, symbol_id)
-    if node is None:
-        return {"error": f"no node `{symbol_id}`", "written": False}
-    p = F.props(node)
-    if not p.get("body") or p.get("order_index") is None:
-        return {"error": "only a TOP-LEVEL symbol (with a verbatim body) can be renamed",
-                "written": False}
-    qual, kind = p.get("qualname", ""), p.get("symbol_kind", "")
-    if "." in qual:
-        return {"error": "v1 renames top-level free functions/classes, not methods",
-                "written": False}
-    if kind not in ("function", "class"):
-        return {"error": f"v1 renames functions/classes (not {kind})", "written": False}
-    if not new_name.isidentifier():
-        return {"error": f"`{new_name}` is not a valid identifier", "written": False}
-    if qual == new_name:
-        return {"error": "new name equals the current name", "written": False}
-    old = qual
-    def_module_id = p.get("module_id")
-    D = await _module_node(gx, def_module_id)
-    d_import = F.prop(D, "import_name", "")
+    The single-pair surface over `rename_symbols` (one wire snapshot, one emit,
+    stale-wires guarded — finding 889b3025): scoped-renames the defining module
+    (def site + internal refs), then each importer, with an `ast.parse` gate before
+    any write. The symbol's id changes with its name, so the graph re-derives on
+    the next `ingest` (Fork-1(a))."""
+    res = await rename_symbols(gx, [(symbol_id, new_name)],
+                               write=write, source_journal_path=source_journal_path)
+    if res.get("error") or not res.get("renames"):
+        return res
+    one = res["renames"][0]
+    return {**res, "old_name": one["from"], "new_name": one["to"],
+            "symbol_kind": one["kind"], "module": one["module"],
+            "note": "the symbol id changes with its name — re-ingest to re-derive the graph"}
 
-    d_text = emit_module_from_nodes(await _module_region_wires(gx, def_module_id))
-    d_new, n_def = scoped_rename(d_text, old, new_name)
-    files: List[Tuple[str, str]] = [(F.prop(D, "path"), d_new)]
-    emissions: List[Optional[Dict[str, Any]]] = [_emission_for(D, d_new)]
+
+async def rename_symbols(
+    gx: GraphHandle,
+    renames: List[Tuple[str, str]],  # (symbol_id, new_name) pairs — applied to ONE wire snapshot
+    *,
+    write: bool = True,  # Write the affected files (Fork-1(a)); False = dry run
+    source_journal_path: Optional[str] = None,  # The source journal (events land BEFORE files)
+) -> Dict[str, Any]:  # The batch result (renames, modules updated, diagnostics, or error)
+    """Batch top-level renames in ONE emit set (finding 889b3025).
+
+    Sequential `rename_symbol` calls on one module clobber: call 2 re-emits from
+    pre-call-1 wires (no ingest between) and silently REVERTS call 1 on disk. Here
+    every pair applies to a SINGLE in-memory snapshot of the affected modules'
+    emissions — guarded by `_stale_wires_error` on first touch — and the whole set
+    lands in one `journaled_emit`, so rename k cannot revert rename j by
+    construction. Chained renames (a pair's new name being another pair's old name
+    in the same module) are ambiguous and refused."""
+    if not renames:
+        return {"error": "no renames given", "written": False}
+    plans: List[Dict[str, Any]] = []
+    for symbol_id, new_name in renames:
+        node = await _get(gx, symbol_id)
+        if node is None:
+            return {"error": f"no node `{symbol_id}`", "written": False}
+        p = F.props(node)
+        qual, kind = p.get("qualname", ""), p.get("symbol_kind", "")
+        if not p.get("body") or p.get("order_index") is None:
+            return {"error": f"`{qual or symbol_id}`: only a TOP-LEVEL symbol (with a "
+                    "verbatim body) can be renamed", "written": False}
+        if "." in qual:
+            return {"error": f"`{qual}`: v1 renames top-level free functions/classes, "
+                    "not methods", "written": False}
+        if kind not in ("function", "class"):
+            return {"error": f"`{qual}`: v1 renames functions/classes (not {kind})",
+                    "written": False}
+        if not new_name.isidentifier():
+            return {"error": f"`{new_name}` is not a valid identifier", "written": False}
+        if qual == new_name:
+            return {"error": f"`{qual}`: new name equals the current name", "written": False}
+        plans.append({"old": qual, "new": new_name, "kind": kind,
+                      "module_id": p.get("module_id")})
+    olds = {(pl["module_id"], pl["old"]) for pl in plans}
+    if len(olds) < len(plans):
+        return {"error": "duplicate rename of one symbol in the batch", "written": False}
+    chained = [pl["new"] for pl in plans if (pl["module_id"], pl["new"]) in olds]
+    if chained:
+        return {"error": f"chained rename (`{chained[0]}` is both a new name and a rename "
+                "source in one module) — ambiguous; run separate batches with a rebuild "
+                "between", "written": False}
+
+    texts: Dict[str, str] = {}      # module id -> evolving snapshot text
+    baseline: Dict[str, str] = {}   # module id -> pre-batch emission
+    mnodes: Dict[str, Any] = {}
+
+    async def _seed(mid: str) -> Optional[str]:
+        if mid in texts:
+            return None
+        M = await _module_node(gx, mid)
+        t = emit_module_from_nodes(await _module_region_wires(gx, mid))
+        stale = _stale_wires_error(M, t, "rename-symbol")
+        if stale:
+            return stale
+        mnodes[mid], texts[mid], baseline[mid] = M, t, t
+        return None
+
+    def_site_edits = 0
     modules_updated: List[str] = []
     diagnostics: List[str] = []
-
     import_pairs = await F.load_edge_pairs(gx, DevRelations.IMPORTS)
-    importers = [s for s, t in import_pairs if t == def_module_id and s != def_module_id]
-    for mid in dict.fromkeys(importers):
-        M = await _module_node(gx, mid)
-        m_text = emit_module_from_nodes(await _module_region_wires(gx, mid))
-        new_text, local_name, has_qualified = rewrite_import_for_rename(m_text, d_import, old, new_name)
-        if local_name == old:  # imported unaliased -> body references use `old` too
-            new_text, _ = scoped_rename(new_text, old, new_name)
-        if new_text != m_text:
-            files.append((F.prop(M, "path"), new_text))
-            emissions.append(_emission_for(M, new_text))
-            modules_updated.append(F.prop(M, "import_name", mid))
-        if has_qualified:
-            diagnostics.append(f"{F.prop(M, 'import_name', mid)}: qualified "
-                               f"`{d_import}.{old}` usage not rewritten (v1)")
+    for pl in plans:
+        mid = pl["module_id"]
+        err = await _seed(mid)
+        if err:
+            return {"error": err, "written": False}
+        d_import = F.prop(mnodes[mid], "import_name", "")
+        texts[mid], n_def = scoped_rename(texts[mid], pl["old"], pl["new"])
+        def_site_edits += n_def
+        importers = [s for s, t in import_pairs if t == mid and s != mid]
+        for imid in dict.fromkeys(importers):
+            err = await _seed(imid)
+            if err:
+                return {"error": err, "written": False}
+            new_text, local_name, has_qualified = rewrite_import_for_rename(
+                texts[imid], d_import, pl["old"], pl["new"])
+            if local_name == pl["old"]:  # imported unaliased -> body references use old too
+                new_text, _ = scoped_rename(new_text, pl["old"], pl["new"])
+            if new_text != texts[imid]:
+                texts[imid] = new_text
+                modules_updated.append(F.prop(mnodes[imid], "import_name", imid))
+            if has_qualified:
+                diagnostics.append(f"{F.prop(mnodes[imid], 'import_name', imid)}: qualified "
+                                   f"`{d_import}.{pl['old']}` usage not rewritten (v1)")
 
+    changed = [mid for mid in texts if texts[mid] != baseline[mid]]
+    files = [(F.prop(mnodes[mid], "path"), texts[mid]) for mid in changed]
     for path, content in files:
         try:
             ast.parse(content)
         except SyntaxError as e:
             return {"error": f"rename would produce invalid Python in {path}: {e}",
                     "written": False}
-
-    result = {"old_name": old, "new_name": new_name, "symbol_kind": kind, "module": d_import,
-              "def_site_edits": n_def, "modules_updated": sorted(dict.fromkeys(modules_updated)),
+    result = {"renames": [{"from": pl["old"], "to": pl["new"], "kind": pl["kind"],
+                           "module": F.prop(mnodes[pl["module_id"]], "import_name", "")}
+                          for pl in plans],
+              "def_site_edits": def_site_edits,
+              "modules_updated": sorted(dict.fromkeys(modules_updated)),
               "diagnostics": diagnostics, "files": [f for f, _ in files], "written": False,
-              "note": "the symbol id changes with its name — re-ingest to re-derive the graph"}
+              "note": "symbol ids change with their names — re-ingest to re-derive the graph"}
+    emissions = [_emission_for(mnodes[mid], texts[mid]) for mid in changed]
     if any(e is None for e in emissions):
         return {**result, "error": "cannot derive a source-journal key for an affected "
                 "module (notebook-backed importer?) — refusing to write unjournaled"}
-    rec = journaled_emit(source_journal_path, emissions=emissions,
-                         op={"op": "rename-symbol", "from": old, "to": new_name},
-                         write=write)
+    op: Dict[str, Any] = {"op": "rename-symbol",
+                          "renames": [{"from": pl["old"], "to": pl["new"]} for pl in plans]}
+    if len(plans) == 1:
+        op["from"], op["to"] = plans[0]["old"], plans[0]["new"]
+    rec = journaled_emit(source_journal_path, emissions=emissions, op=op, write=write)
     if rec.get("error"):
         return {**result, "error": rec["error"]}
     result["journal"] = rec

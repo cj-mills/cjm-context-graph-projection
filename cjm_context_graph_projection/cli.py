@@ -50,7 +50,7 @@ from .reconcile import reconcile_memory
 from .refactor import refactor_candidates
 from .refactor_ops import move
 from .registers import register_drift
-from .rename_ops import rename_symbol
+from .rename_ops import rename_symbol, rename_symbols
 from .render import render as _render_base
 from .runtime import DEFAULT_MANIFESTS, open_graph
 from .seeds import repo_dir_name
@@ -953,9 +953,36 @@ async def _dispatch(args) -> int:
             print(render("module", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "rename-symbol":
-            res = await rename_symbol(gx, args.symbol_id, args.new_name,
-                                      write=not args.no_write,
-                                      source_journal_path=args.source_journal_path)
+            # b73e7688 ID_REFS conformance (finding 889b3025 gap 2): the positional takes
+            # a full id OR unique prefix; ambiguity and no-match fail loud. Extra
+            # SYMBOL_ID NEW_NAME pairs route through the batch engine — one snapshot,
+            # one emit, so rename k cannot revert rename j.
+            from .projection import ambiguity_error, resolve_node_ref
+            extra = list(getattr(args, "more", None) or [])
+            if len(extra) % 2:
+                print("error: rename-symbol takes SYMBOL_ID NEW_NAME pairs — odd "
+                      "trailing argument", file=sys.stderr)
+                return 1
+            pairs = []
+            for ref, nn in [(args.symbol_id, args.new_name)] + list(zip(extra[::2], extra[1::2])):
+                r = await resolve_node_ref(gx, ref)
+                if "candidates" in r:
+                    print(ambiguity_error(ref, r["candidates"]), file=sys.stderr)
+                    return 1
+                node = r.get("node")
+                if node is None:
+                    print(f"error: no node `{ref}` — `locate` the symbol first",
+                          file=sys.stderr)
+                    return 1
+                pairs.append((node.get("id") if isinstance(node, dict)
+                              else getattr(node, "id", ref), nn))
+            if len(pairs) == 1:
+                res = await rename_symbol(gx, pairs[0][0], pairs[0][1],
+                                          write=not args.no_write,
+                                          source_journal_path=args.source_journal_path)
+            else:
+                res = await rename_symbols(gx, pairs, write=not args.no_write,
+                                           source_journal_path=args.source_journal_path)
             print(render("rename", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "flip-module":
@@ -1662,8 +1689,12 @@ def main() -> int:
 
     p_rs = sub.add_parser("rename-symbol",
                           help="Rename a top-level function/class everywhere (def + refs + importer imports)")
-    p_rs.add_argument("symbol_id", help="The top-level CodeSymbol id to rename")
+    p_rs.add_argument("symbol_id", help="The top-level CodeSymbol id (or unique id prefix) to rename")
     p_rs.add_argument("new_name", help="Its new bare name")
+    p_rs.add_argument("more", nargs="*", metavar="SYMBOL_ID NEW_NAME",
+                      help="Additional SYMBOL_ID NEW_NAME pairs — the batch applies to ONE "
+                           "wire snapshot with one emit, so rename k cannot revert rename j "
+                           "(sequential single renames on a module clobber; finding 889b3025)")
     p_rs.add_argument("--no-write", action="store_true", help="Dry run: report the plan, don't touch disk")
 
     p_fl = sub.add_parser("flip-module",

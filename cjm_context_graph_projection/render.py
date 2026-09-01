@@ -744,6 +744,18 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             return f"⚠ {obj['error']}"
         verb = "renamed" if obj.get("written") else "would rename (dry run)"
         mu = obj.get("modules_updated", [])
+        if obj.get("old_name") is None and obj.get("renames"):
+            lines = [f"**{verb}** (batch — one snapshot, one emit):"]
+            for r in obj["renames"]:
+                lines.append(f"  {r.get('kind')} `{r.get('from')}` → `{r.get('to')}`"
+                             f"  _in {r.get('module')}_")
+            lines.append(f"  def-site + internal edits: {obj.get('def_site_edits')}; "
+                         f"files re-emitted: {len(obj.get('files', []))}")
+            lines.append(f"  importing modules updated: {', '.join(mu) if mu else '(none)'}")
+            for d in obj.get("diagnostics", []):
+                lines.append(f"  ⚠ {d}")
+            lines.append(f"  _{obj.get('note', '')}_")
+            return "\n".join(lines)
         lines = [f"**{verb}** {obj.get('symbol_kind')} `{obj.get('old_name')}` → "
                  f"`{obj.get('new_name')}`  _in {obj.get('module')}_",
                  f"  def-site + internal edits: {obj.get('def_site_edits')}; "

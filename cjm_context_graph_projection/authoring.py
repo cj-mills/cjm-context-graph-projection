@@ -521,6 +521,7 @@ async def author(
                     "label": label, "written": False}
     else:
         wires = await _module_region_wires(gx, container_id)
+    pre_emitted = emit_module_from_nodes(wires) if artifact == "module" else None
     for w in wires:
         if w["id"] == node_id:
             w["properties"][slot] = new_text
@@ -530,6 +531,15 @@ async def author(
         emitted = note_text_from_graph_nodes(_as_wire(container, DevNodeKinds.NOTE), wires)
     else:
         emitted = emit_module_from_nodes(wires)
+        # The stale-wires guard (finding 889b3025): the pre-edit emission must reproduce
+        # the file, or this emit would revert journaled-but-not-ingested source ops. A
+        # CONVERGENT mismatch (post-edit emission == file) is the sanctioned 11c981b7
+        # repair — the file already carries the fix; re-landing it syncs the journal.
+        stale = _stale_wires_error(container, pre_emitted or "", "author",
+                                   converged_text=emitted)
+        if stale:
+            return {"error": stale, "node_id": node_id, "label": label, "slot": slot,
+                    "written": False}
 
     # Re-derive the edited slot's bindings (2b6090dc): the author edit is the moment
     # a code slot's references change, so the frozen import_bindings refresh HERE —
@@ -680,6 +690,15 @@ async def add_symbol(
     stale = _stale_projection_error(module, wires, "add-symbol")
     if stale:
         return {"error": stale, "written": False}
+    # The stale-wires guard (finding 889b3025): wires must reproduce the file (in either
+    # emission form) before this emit may treat them as current truth.
+    stale_w = _stale_wires_error(
+        module, emit_module_from_nodes(wires), "add-symbol",
+        converged_text=emit_module_from_nodes(
+            wires, module_node=module,
+            derive_imports=not is_test_module_path(str(F.prop(module, "module_path") or ""))))
+    if stale_w:
+        return {"error": stale_w, "written": False}
     dup = next((w for w in wires if w["label"] == DevNodeKinds.CODE_SYMBOL
                 and w["properties"].get("qualname") == qualname), None)
     if dup is not None:
@@ -810,6 +829,14 @@ async def add_text(
     stale = _stale_projection_error(module, wires, "add-text")
     if stale:
         return {"error": stale, "written": False}
+    # The stale-wires guard (finding 889b3025) — see add_symbol.
+    stale_w = _stale_wires_error(
+        module, emit_module_from_nodes(wires), "add-text",
+        converged_text=emit_module_from_nodes(
+            wires, module_node=module,
+            derive_imports=not is_test_module_path(str(F.prop(module, "module_path") or ""))))
+    if stale_w:
+        return {"error": stale_w, "written": False}
     dup = next((w for w in wires if w["label"] == DevNodeKinds.CODE_TEXT
                 and w["properties"].get("region_key") == region.region_key), None)
     if dup is not None:
@@ -1118,5 +1145,52 @@ def _stale_projection_error(
             f"{F.prop(module, 'module_path') or path} holds ZERO regions but the file is "
             f"{size} bytes on disk — captured but never re-ingested, so the emit would "
             "write only the new content and CLOBBER the file (finding d6c3eca0). Run "
+            "cg-rebuild first; to land the change now, edit the file directly and "
+            "`flip-module` to absorb it.")
+
+
+def _stale_wires_error(
+    module: Any,                    # The enclosing CodeModule node
+    live_text: str,                 # The module's PRE-op emission from live wires
+    verb: str,                      # The refusing verb, for the message
+    converged_text: Optional[str] = None,  # Alternate acceptable emission (e.g. the post-edit text: == file means the sanctioned convergent repair)
+) -> Optional[str]:  # An error string to refuse with, or None when the rewrite is safe
+    """The stale-wires guard (finding 889b3025, build 89c0fb15).
+
+    A wire-driven rewrite treats the live emission as current truth; when journaled
+    source ops (a rename, a move, a flip-module absorb) have landed since the last
+    ingest, that emission no longer reproduces the file — emitting from it would
+    silently REVERT them (the move-#2 / rename-#2 / author-after-flip class). The
+    file on disk is the arbiter, and the file holds the CANONICAL emission
+    (`journaled_emit` folds the absorb-rewrite in: unused imports pruned, formatting
+    converged) — so candidates are compared raw AND in canonical space before ruling.
+    A raw-vs-file mismatch that converges canonically is the lone-unused-import case
+    (slot retains the line, the file prunes it until a body binds it) — safe. A
+    `converged_text` match is the sanctioned 11c981b7 repair (the file already
+    carries the fix by hand; re-landing it brings the journal in step). An absent
+    file is a birth; an empty-projection module is `_stale_projection_error`'s class."""
+    path = str(F.prop(module, "path") or "")
+    if not path:
+        return None
+    try:
+        on_disk = Path(path).read_text()
+    except OSError:
+        return None
+    candidates = [live_text] + ([converged_text] if converged_text is not None else [])
+    if on_disk in candidates:
+        return None
+    from .source_state import _canonical
+    for cand in candidates:
+        try:
+            if on_disk == _canonical(F.prop(module, "repo_key", ""),
+                                     str(F.prop(module, "module_path") or ""),
+                                     path, cand, F.prop(module, "import_name")):
+                return None
+        except (SyntaxError, ValueError):
+            pass
+    return (f"`{verb}` refused: the live projection of "
+            f"{F.prop(module, 'module_path') or path} no longer reproduces the file on "
+            "disk — journaled source ops landed since the last ingest, so a rewrite "
+            "from these wires would silently REVERT them (finding 889b3025). Run "
             "cg-rebuild first; to land the change now, edit the file directly and "
             "`flip-module` to absorb it.")
