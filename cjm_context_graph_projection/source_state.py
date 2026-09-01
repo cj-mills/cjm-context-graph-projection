@@ -684,3 +684,39 @@ def journaled_emit(
         receipt["files_deleted"].append(d)
     receipt["written"] = write
     return receipt
+
+
+def uncaptured_modules(
+    source_journal_path: str,   # The source journal (JSONL)
+    code_libs,                  # Iterable of conceptual repo keys (the ingest inventory)
+    repos_dir: str,             # The repos root the journal keys resolve under
+) -> Dict[str, List[str]]:  # {repo_key: [module_path, ...]} — .py files with NO journal capture
+    """The uncaptured-module audit (build a6453f70) — the ac3d52f4 recipe as a verb.
+
+    In an on-graph library every .py the repo carries should be journal-captured
+    (shadow or cut over): a file-sourced module's edits are unjournaled plain writes,
+    invisible to journal-window and unrecoverable from the journals (the 2026-08-27
+    hand audit found 21 uncaptured test modules across 7 repos). This walks each
+    code_libs repo tree — tests/ INCLUDED, caches/runtime/hidden dirs skipped — and
+    diffs against the journal's captured keys. Rows are advisory: capture each with
+    flip-module + cutover (nbdev v3 repos keep config in pyproject.toml — a lone
+    settings.ini repo is unmigrated, see the nbdev-v3 note e73525de)."""
+    from .seeds import repo_dir_name
+    captured = set(latest_source_ops(source_journal_path))
+    skip = {"__pycache__", ".git", ".venv", "runtime", "build", "dist",
+            ".ipynb_checkpoints", "_proc", "node_modules"}
+    out: Dict[str, List[str]] = {}
+    for key in code_libs:
+        root = Path(repos_dir) / repo_dir_name(key)
+        if not root.is_dir():
+            continue
+        missing = []
+        for p in sorted(root.rglob("*.py")):
+            rel = p.relative_to(root)
+            if any(part in skip or part.startswith(".") for part in rel.parts[:-1]):
+                continue
+            if (key, rel.as_posix()) not in captured:
+                missing.append(rel.as_posix())
+        if missing:
+            out[key] = missing
+    return out

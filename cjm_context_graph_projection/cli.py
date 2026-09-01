@@ -16,7 +16,7 @@ import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from cjm_context_graph_layer.ops import extend_graph
 from cjm_context_graph_primitives.journal import append_write, read_journal
@@ -541,6 +541,42 @@ async def _dispatch(args) -> int:
                               "actor": actor, "evidence": evidence})
             return 1 if res.get("error") else 0
         elif args.command == "decide":
+            # decide safety (build 1b109ddc): shell-proof statement input + debris
+            # refusal + unknown-id citation warning — a Decision statement has NO
+            # repair path, so mangling must be caught BEFORE the mint.
+            import re as _re
+            statement = args.statement
+            if getattr(args, "statement_file", None):
+                if statement is not None:
+                    print("error: pass a positional statement OR --statement-file, "
+                          "not both", file=sys.stderr)
+                    return 2
+                statement = Path(args.statement_file).read_text().strip()
+            if not statement:
+                print("error: no statement — pass it positionally or via "
+                      "--statement-file", file=sys.stderr)
+                return 2
+            debris = next((m for m in (": command not found",
+                                       ": No such file or directory")
+                           if m in statement), None)
+            if debris is not None:
+                print(f"error: the statement carries shell-mangling debris ({debris!r})"
+                      " — a backtick inside a double-quoted statement is command-"
+                      "substituted BEFORE the CLI sees it. Re-mint via "
+                      "--statement-file.", file=sys.stderr)
+                return 2
+            from .projection import resolve_node_ref as _rnr
+            unknown = []
+            for tok in dict.fromkeys(_re.findall(r"\b[0-9a-f]{6,40}\b", statement)):
+                if not _re.search(r"[a-f]", tok) or len(unknown) >= 8:
+                    continue  # all-digit tokens are usually dates/counts, not citations
+                if not await _rnr(gx, tok):
+                    unknown.append(tok)
+            if unknown:
+                print("⚠ statement cites id(s) that resolve to no node: "
+                      + ", ".join(f"`{t}`" for t in unknown)
+                      + " — forward-written id? Mint first, cite after (the citation "
+                        "stands verbatim in an unrepairable statement).", file=sys.stderr)
             if args.state and args.capture:
                 print("error: a capture is not a work item — pass --state OR --capture",
                       file=sys.stderr)
@@ -553,18 +589,18 @@ async def _dispatch(args) -> int:
                 if cerr:
                     print(f"error: {cerr}", file=sys.stderr)
                     return 1
-            res = await decide(gx, args.statement, actor=args.actor, supports=args.supports,
+            res = await decide(gx, statement, actor=args.actor, supports=args.supports,
                                supersedes=args.supersedes, session=args.session,
                                title=args.title)
             # Mint-time near-duplicate surfacing (ff4e275e shape (a)): propose-only —
             # the mint always lands; the fresh decision carries no task_state yet so
             # it never matches itself. Replay bypasses this branch (rebuilds stay flat).
             if not res.get("error"):
-                res["near_duplicates"] = await near_duplicates(gx, args.statement)
+                res["near_duplicates"] = await near_duplicates(gx, statement)
             print(render("decide", res, args.format))
             if args.journal_path:
                 append_write(args.journal_path, "decide",
-                             {"statement": args.statement, "actor": args.actor,
+                             {"statement": statement, "actor": args.actor,
                               "supports": args.supports, "supersedes": args.supersedes,
                               "session": args.session, "title": args.title})
             # --state open: the frontier-visibility enforcement — a freshly minted work
@@ -601,6 +637,28 @@ async def _dispatch(args) -> int:
                                       "relation": "REFERENCES", "actor": args.actor,
                                       "source_label": lk.get("source_label"),
                                       "target_label": lk.get("target_label")})
+        elif args.command == "uncaptured":
+            from .source_state import uncaptured_modules
+            cfg = load_graph_config(args.graph_db_path)
+            libs = args.repo or cfg.get("code_libs") or list(DEFAULT_CODE_LIBS)
+            if not args.source_journal_path:
+                print("error: uncaptured needs --source-journal-path (cg-write bakes it)",
+                      file=sys.stderr)
+                return 1
+            repos_dir = cfg.get("repos_dir") or args.repos_dir
+            rows = uncaptured_modules(args.source_journal_path, libs, repos_dir)
+            if not rows:
+                print(f"every .py in {len(libs)} code_libs repo(s) is journal-captured ✓")
+                return 0
+            total = sum(len(v) for v in rows.values())
+            print(f"## Uncaptured modules ({total} file(s) across {len(rows)} repo(s))")
+            for key in sorted(rows):
+                print(f"- **{key}** ({len(rows[key])}):")
+                for m in rows[key]:
+                    print(f"    {m}")
+            print("_capture: `flip-module <repo_key> <module_path>` then `cutover` — "
+                  "tests/ included (user rule ac3d52f4)_")
+            return 1
         elif args.command == "display-rule":
             res = await set_display_rule(gx, args.for_label, args.title, args.gloss,
                                          actor=args.actor)
@@ -857,6 +915,7 @@ async def _dispatch(args) -> int:
                                source_journal_path=args.source_journal_path,
                                repos_dir=args.repos_dir)
             print(render("author", res, args.format))
+            _cli_import_smoke(res)
             # M2b shadow: a memory-section author also journals its raw STATE (the .md stays the
             # ingest source for now; the journal shadows + soaks). NON-cut-over code/notebook
             # authoring stays un-journaled (Fork-1(a)); GRAPH-SOURCED modules/notebooks land in
@@ -874,17 +933,48 @@ async def _dispatch(args) -> int:
                                    source_journal_path=args.source_journal_path,
                                    repos_dir=args.repos_dir, after=args.after)
             print(render("add-symbol", res, args.format))
+            _cli_import_smoke(res)
             return 1 if res.get("error") else 0
         elif args.command == "add-text":
             # Local import: adding a name to this module's import line is the open
             # binding-table gap (47b256de) — stay self-contained until it closes.
             from .authoring import add_text
             body = Path(args.body_file).read_text() if args.body_file else args.body
+            # Multi-region AUTO-SPLIT (build a1a48c70, the 13/12 miner wall): a body
+            # decomposing into N regions lands as N sequential ops — text regions via
+            # add-text, def/class regions via add-symbol — instead of a refusal that
+            # made the caller do exactly this split by hand.
+            try:
+                from cjm_python_decompose_core.parse import parse_regions
+                regions = parse_regions(body)
+            except SyntaxError:
+                regions = []
+            if len(regions) > 1:
+                print(f"body decomposed into {len(regions)} regions — auto-splitting "
+                      "into one op per region:")
+                for reg in regions:
+                    if reg.kind == "symbol":
+                        r = await add_symbol(gx, args.module, reg.text, actor=args.actor,
+                                             write=not args.no_write,
+                                             source_journal_path=args.source_journal_path,
+                                             repos_dir=args.repos_dir)
+                        print(render("add-symbol", r, args.format))
+                    else:
+                        r = await add_text(gx, args.module, reg.text, actor=args.actor,
+                                           write=not args.no_write,
+                                           source_journal_path=args.source_journal_path,
+                                           repos_dir=args.repos_dir)
+                        print(render("add-text", r, args.format))
+                    if r.get("error"):
+                        return 1
+                _cli_import_smoke(r)
+                return 0
             res = await add_text(gx, args.module, body, actor=args.actor,
                                  write=not args.no_write,
                                  source_journal_path=args.source_journal_path,
                                  repos_dir=args.repos_dir)
             print(render("add-text", res, args.format))
+            _cli_import_smoke(res)
             return 1 if res.get("error") else 0
         elif args.command == "reconcile-memory":
             res = await reconcile_memory(gx, note_slug=args.note, absorb_anchors=args.absorb,
@@ -894,7 +984,24 @@ async def _dispatch(args) -> int:
             return 1 if res.get("error") else 0
         elif args.command == "add-section":
             raw = Path(args.content_file).read_text() if args.content_file else args.content
-            res = await add_section(gx, args.slug, raw, after=args.after, write=not args.no_write)
+            slug = args.slug
+            # Accept a Note id / unique prefix too (build a1a48c70, the 6/6 wall):
+            # id-shaped input resolves to the note's slug; a non-Note fails loud.
+            import re as _re2
+            if _re2.fullmatch(r"[0-9a-f][0-9a-f-]{5,39}", slug or ""):
+                from .projection import ambiguity_error, resolve_node_ref
+                r = await resolve_node_ref(gx, slug)
+                if "candidates" in r:
+                    print(ambiguity_error(slug, r["candidates"]), file=sys.stderr)
+                    return 1
+                rn = r.get("node")
+                if rn is not None:
+                    if (rn.get("label") if isinstance(rn, dict) else "") != "Note":
+                        print(f"error: `{slug}` is not a Note — add-section targets a "
+                              "note slug or Note id", file=sys.stderr)
+                        return 1
+                    slug = (rn.get("properties") or {}).get("slug") or slug
+            res = await add_section(gx, slug, raw, after=args.after, write=not args.no_write)
             print(render("structure", res, args.format))
             # M3 structural journaling: a live add-section is journal-sourced too — record the
             # add-section op (slug/raw/after) so a rebuild re-splices the section on-graph (the
@@ -904,7 +1011,7 @@ async def _dispatch(args) -> int:
             if (args.journal_path and res.get("added") and not res.get("error")
                     and not args.no_write):
                 append_write(args.journal_path, "add-section",
-                             {"slug": args.slug, "raw": res.get("section_raw"),
+                             {"slug": slug, "raw": res.get("section_raw"),
                               "after": res.get("after"), "actor": args.actor})
             return 1 if res.get("error") else 0
         elif args.command == "new-note":
@@ -1449,7 +1556,13 @@ def main() -> int:
                       help="Override evidence: a source-note id (repeatable)")
 
     p_de = sub.add_parser("decide", help="Record a decision + its premise edges")
-    p_de.add_argument("statement")
+    p_de.add_argument("statement", nargs="?", default=None,
+                      help="The decision statement. Prefer --statement-file for anything "
+                           "with backticks/quotes — bash mangles a double-quoted statement "
+                           "SILENTLY and a Decision statement has no repair path")
+    p_de.add_argument("--statement-file", default=None, metavar="PATH",
+                      help="Read the statement from a file (build 1b109ddc): the "
+                           "shell-proof input — no quoting hazards, no command substitution")
     p_de.add_argument("--actor", default=_DEFAULT_ACTOR)
     p_de.add_argument("--supports", action="append", help="Premise assertion id (repeatable)")
     p_de.add_argument("--supersedes", action="append", help="Prior decision id (repeatable)")
@@ -1463,7 +1576,7 @@ def main() -> int:
                            "seed / deferred / riding:<item-id-or-prefix> (resolved and "
                            "REFERENCES-linked) — so `readiness --captures` renders it; "
                            "mutually exclusive with --state")
-    p_de.add_argument("--state", default=None, choices=["open"],
+    p_de.add_argument("--state", default=None, type=_decide_state,
                       help="Assert task_state on the new decision in the same invocation — "
                            "a work item/finding is invisible to `readiness` until its "
                            "task_state lands, so mint WORK ITEMs with `--state open`")
@@ -1476,6 +1589,14 @@ def main() -> int:
     p_ck.add_argument("item", help="The work item (node id, or a unique id prefix)")
     p_ck.add_argument("text", help="The check statement")
     p_ck.add_argument("--actor", default=_DEFAULT_ACTOR)
+
+    p_un = sub.add_parser("uncaptured",
+                          help="Audit: .py files in code_libs repos with NO source-journal "
+                               "capture (file-sourced — their edits are unjournaled plain "
+                               "writes); capture each with flip-module + cutover (a6453f70)")
+    p_un.add_argument("--repo", action="append", default=None,
+                      help="Limit to this repo key (repeatable; default: every code_libs repo)")
+    p_un.add_argument("--repos-dir", default=DEFAULT_REPOS)
 
     p_dr = sub.add_parser("display-rule",
                           help="Author/update the graph-carried DisplayRule for a node kind — "
@@ -1845,6 +1966,50 @@ def _read_request(args) -> Dict[str, str]:
         if v not in (None, "", []):
             out[k] = v if isinstance(v, str) else json.dumps(v, default=str)
     return out
+
+
+def _decide_state(value: str) -> str:
+    """`decide --state` validator (build a1a48c70): only `open` mints here. A closing
+    value names the ACTUAL recipe instead of argparse's bare invalid-choice line —
+    the 4/4 miner wall was agents reaching for `decide --state done` when closing an
+    item is an assert."""
+    if value == "open":
+        return value
+    raise argparse.ArgumentTypeError(
+        f"decide only mints task_state=open (got {value!r}). To close or advance an "
+        "item: `assert <item-id> task_state done --evidence <dec-id>` "
+        "(or task_state in_progress) — the assert verb, not a decide flag")
+
+
+def _cli_import_smoke(res: Dict[str, Any]) -> None:
+    """Post-write CLI health probe (build a6453f70, the 11c981b7 / ops.py class).
+
+    A write landing in a package THIS CLI imports at startup can brick every
+    subsequent cg invocation at import time — tests stay green, the next command
+    dies. A fresh-subprocess import right after such a write turns the silent brick
+    into an immediate loud warning carrying the recovery recipe. Probes only the
+    load-bearing repos, so ordinary writes pay nothing."""
+    if not (res or {}).get("written"):
+        return
+    if str(res.get("repo_key") or "") not in {
+            "cjm-context-graph-projection", "cjm-context-graph-layer",
+            "cjm-context-graph-primitives", "cjm-dev-graph-schema"}:
+        return
+    try:
+        probe = subprocess.run([sys.executable, "-c",
+                                "import cjm_context_graph_projection.cli"],
+                               capture_output=True, text=True, timeout=60)
+    except Exception as e:  # a failed probe must never mask the landed write
+        print(f"⚠ CLI import smoke inconclusive ({e})", file=sys.stderr)
+        return
+    if probe.returncode != 0:
+        tail = (probe.stderr or "").strip().splitlines()
+        print("⚠ CLI IMPORT SMOKE FAILED after this write — the NEXT cg invocation "
+              f"will brick at import time ({tail[-1] if tail else 'no stderr'}). "
+              "Recovery (11c981b7): direct-edit the FILE so the CLI imports again, "
+              "then re-land the SAME OLD->NEW through cg-write author — the "
+              "convergent repair the stale-wires guard allows; never flip-module "
+              "for this class.", file=sys.stderr)
 
 
 if __name__ == "__main__":  # runtime-order: must trail every def (python -m executes in slot order)
