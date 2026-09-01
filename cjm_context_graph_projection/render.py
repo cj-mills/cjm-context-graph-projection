@@ -934,6 +934,10 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         if obj.get("kind") == "slice":
             return (f"_sliced from owning slot `{obj.get('owner_id')}` — author edits "
                     f"route there_\n\n{obj.get('text', '')}")
+        if obj.get("kind") == "fallback":
+            # e7b398b2: first-present text slot — readable, not authorable.
+            return (f"_`{obj.get('slot')}` slot (first-present fallback — not an "
+                    f"authorable verbatim slot)_\n\n{obj.get('text', '')}")
         return obj.get("text", "")
     if kind == "list":
         if obj.get("error"):

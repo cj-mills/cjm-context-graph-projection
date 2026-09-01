@@ -288,6 +288,14 @@ async def read_node(
         return {"node_id": node_id, "label": label, "kind": "nested", "text": "",
                 "module_id": p.get("module_id"),
                 "hint": "nested symbol (no own body) — read its enclosing class or module"}
+    # e7b398b2: fall back to the first-present text slot the way `list --full` does
+    # (a Check's `text`, a FactSlot's `description`…) — labelled `fallback` so the
+    # reader knows it is NOT an authorable verbatim slot.
+    for slot in ("statement", "description", "text", "body", "raw"):
+        v = p.get(slot)
+        if v:
+            return {"node_id": node_id, "label": label, "kind": "fallback", "slot": slot,
+                    "text": str(v)}
     return {"error": "node has no readable verbatim content", "node_id": node_id, "label": label}
 
 

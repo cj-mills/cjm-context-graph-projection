@@ -338,3 +338,17 @@ def test_render_read_batch_and_session_messages():
     assert "## Session `2026-08-28_18-02-43` — 1 message(s) · role=user" in out2
     assert "### [user] 2026-08-28T18:03:00Z `m1-xxxx-` _(superseded branch)_" in out2
     assert "\nhello\n" in out2
+
+
+def test_render_read_fallback_slot_is_labelled():
+    """e7b398b2 (miner pilot P-09): a node with no authorable slot delivers its
+    first-present text slot (statement/description/text/body/raw), labelled so the
+    reader knows `author` cannot target it; batch blocks carry the same label."""
+    obj = {"node_id": "c1", "label": "Check", "kind": "fallback", "slot": "text",
+           "text": "GROUND-TRUTH PROBE body"}
+    out = render("read", obj, "human")
+    assert "_`text` slot (first-present fallback — not an authorable verbatim slot)_" in out
+    assert out.endswith("GROUND-TRUTH PROBE body")
+    batch = {"kind": "batch", "count": 1, "errors": 0, "items": [obj]}
+    out2 = render("read", batch, "human")
+    assert "### Check `c1`" in out2 and "first-present fallback" in out2

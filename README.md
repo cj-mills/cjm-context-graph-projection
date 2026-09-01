@@ -120,6 +120,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `alias_index` _function_ — Build the entity alias index + an id->entity lookup (rename-stable subjects).
 - `count_label` _function_ — Count nodes of a label (optionally predicate-filtered) — `NodeQuery(count=True)`.
 - `group_by_slot` _function_ — Group assertion nodes by their `slot_id` property.
+- `label` _function_ — A node's label / kind (typed GraphNode or wire dict) — the sibling of `nid`/`props`.
 - `load_assertions` _function_ — All Assertion nodes.
 - `load_contradicts` _function_ — All CONTRADICTS pairs already recorded (for write idempotency / reporting).
 - `load_edge_pairs` _function_ — All (source, target) pairs for an edge relation type.
@@ -215,10 +216,12 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `edit_message` _function_ — In-place body edit of a Message — the journaled edit-op half of the
 - `mint_pulled_messages` _function_ — Land pulled messages on the spine — the code path live pull AND replay share.
 - `pull_transcript` _function_ — The live pull: derive the mapping, extract the active path, mint the delta.
+- `stale_next_edges` _function_ — The chain re-link plan (finding e358fe97) — pure, so the live pull and
 
 ### `cjm_context_graph_projection.readiness`
 
 - `classify_readiness` _function_ — Pure: partition work-items into done / ready / blocked from authored ground truth.
+- `honored_closable` _function_ — Pure: open items a DONE Decision points at via EVIDENCE_FOR / SUPERSEDES — closable
 - `readiness` _function_ — The derived ready/blocked/done frontier over authored `task_state` + `GATED_BY` edges.
 - `summarize_checks` _function_ — Pure: per-item DoD summary from the checks' own task_states.
 
@@ -256,6 +259,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 ### `cjm_context_graph_projection.rename_ops`
 
 - `rename_symbol` _function_ — Rename a top-level free function/class everywhere it is referenced, graph-driven.
+- `rename_symbols` _function_ — Batch top-level renames in ONE emit set (finding 889b3025).
 - `rewrite_import_for_rename` _function_ — Re-point an importer's `from src_module import old [as a]` at the new name.
 - `scoped_rename` _function_ — Rename references to the module-global `old` -> `new`, scope-aware, by exact position.
 
@@ -272,6 +276,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 
 - `derive_entries` _function_ — Chronological entries with derived `on_active_path` (transcript tip
 - `export_session_markdown` _function_ — Gather the session's message graph and render the .md projection.
+- `read_session_messages` _function_ — A session spine's Message BODIES in chain order — the `read --session` verb.
 - `render_session_markdown` _function_ — The pure renderer: one portable markdown document from derived entries.
 
 ### `cjm_context_graph_projection.seeds`
@@ -308,6 +313,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `notebook_to_py_source` _function_ — Build a plain-`.py` module source from a notebook's EXPORT cells (the flip transform).
 - `read_source_journal` _function_ — Read every `source` op across the rotated SEGMENT FAMILY (one JSON object per
 - `source_check` _function_ — The soak instrument: for each shadow-sourced module, check two things.
+- `uncaptured_modules` _function_ — The uncaptured-module audit (build a6453f70) — the ac3d52f4 recipe as a verb.
 
 ### `cjm_context_graph_projection.structure`
 
@@ -342,6 +348,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `author_section` _function_ — Apply a memory section's verbatim `raw` STATE to the graph — the born-on-graph leg
 - `decide` _function_ — Record a Decision + its `SUPPORTED_BY` premise edges (reasoning substrate).
 - `link` _function_ — Mint a deliberate edge between two EXISTING nodes (heterogeneous interlink).
+- `mint_procedure` _function_ — Upsert a Procedure node by deterministic (method) id — the programmatic value-source
 - `register_session` _function_ — Register/update a timestamp-keyed Session node — the session SPINE (DEC 6124d8bf).
 - `resolve_subject` _function_ — Resolve a subject to an entity id (rename-stable), minting a `term` entity
 - `retract_session` _function_ — RETRACT a Session spine node — the write dual of `register_session`, on
