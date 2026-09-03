@@ -65,9 +65,10 @@ def test_notes_corpus_and_profile_overlay(tmp_path):
     # sibling config, so `ingest-notes` runs with no --notes-corpus on a rebuild.
     (tmp_path / "graph.config.json").write_text(json.dumps(
         {"notes_corpus": "/cfg/posts", "notes_profile": "cfg_profile"}))
-    a = _args(tmp_path / "g.db", notes_corpus=None, profile="quarto_post")
+    a = _args(tmp_path / "g.db", notes_corpus=None, profile=None, emit_root=None)
     _apply_graph_config(a)
     assert a.notes_corpus == "/cfg/posts" and a.profile == "cfg_profile"
+    assert a.emit_root is None                      # key absent -> untouched
     # Explicit flags win
     b = _args(tmp_path / "g.db", notes_corpus="/explicit", profile="mine")
     _apply_graph_config(b)

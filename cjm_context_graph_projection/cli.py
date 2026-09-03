@@ -363,7 +363,7 @@ async def _dispatch(args) -> int:
                 print("error: ingest-notes needs --notes-corpus or a `notes_corpus` key in the "
                       "graph-sibling graph.config.json beside --graph-db-path", file=sys.stderr)
                 return 1
-            nodes, edges = notes_corpus_elements(args.notes_corpus, args.profile)
+            nodes, edges = notes_corpus_elements(args.notes_corpus, args.profile or "quarto_post")
             res = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
             print(f"ingested notes: {res.nodes_added} nodes added / {res.nodes_verified} verified, "
                   f"{res.edges_added} edges added / {res.edges_existing} existing")
@@ -1020,18 +1020,47 @@ async def _dispatch(args) -> int:
             return 1 if res.get("error") else 0
         elif args.command == "new-note":
             content = Path(args.content_file).read_text() if args.content_file else args.content
-            res = await new_note(gx, args.path, content, write=not args.no_write)
+            # Born POST lane (a42c0f97): --slug names the permalink; the file lands as
+            # <emit_root>/<slug>/index.md (emit_root from the flag or the notes db's sibling
+            # config), identity = the slug relative to the emit root, harvest = the profile
+            # (flag, else the config's notes_profile). --path alone = the memory lane as before.
+            slug = corpus_root = None
+            path = args.path
+            if args.slug:
+                if not args.emit_root:
+                    print("error: new-note --slug needs an emit root (--emit-root, or `emit_root` "
+                          "in the graph-sibling graph.config.json)", file=sys.stderr)
+                    return 1
+                slug = args.slug.strip("/")
+                corpus_root = str(Path(args.emit_root).resolve())
+                path = str(Path(corpus_root) / slug / "index.md")
+                if args.path and str(Path(args.path).resolve()) != path:
+                    print(f"error: --path {args.path} conflicts with --slug {slug} "
+                          f"(a born post lands at {path})", file=sys.stderr)
+                    return 1
+                if not args.no_write:
+                    Path(path).parent.mkdir(parents=True, exist_ok=True)
+            elif not path:
+                print("error: new-note needs --path (memory note) or --slug (born post)",
+                      file=sys.stderr)
+                return 1
+            res = await new_note(gx, path, content, write=not args.no_write,
+                                 profile=args.profile, corpus_root=corpus_root, slug=slug)
             print(render("structure", res, args.format))
             # Born on-graph from BIRTH: journal a `new-note` genesis op (actor agent:session,
             # NOT the m3-baseline provenance) capturing the exact written bytes — so the note is
             # journal-sourced immediately (its `.md` is skipped on the next ingest, reconstructed
             # by replay) with no post-hoc m3-baseline needed. Journal the on-disk bytes for
-            # byte-faithful round-trip; dedups on re-run via append_write.
+            # byte-faithful round-trip; dedups on re-run via append_write. A born post's
+            # profile + slug ride the op so replay reproduces the same identity + harvest.
             if args.journal_path and res.get("written") and not res.get("error"):
-                abspath = str(Path(args.path).resolve())
-                append_write(args.journal_path, "new-note",
-                             {"path": abspath, "content": Path(args.path).read_text(),
-                              "actor": "agent:session"})
+                abspath = str(Path(path).resolve())
+                op = {"path": abspath, "content": Path(path).read_text(), "actor": "agent:session"}
+                if args.profile:
+                    op["profile"] = args.profile
+                if slug:
+                    op["slug"] = slug
+                append_write(args.journal_path, "new-note", op)
             return 1 if res.get("error") else 0
         elif args.command == "move":
             res = await move(gx, args.symbol_id, args.target_module_id, write=not args.no_write,
@@ -1263,7 +1292,8 @@ def _apply_graph_config(args) -> None:
                              ("repos_dir", "repos_dir", DEFAULT_REPOS),
                              ("manifests_dir", "manifests_dir", DEFAULT_MANIFESTS),
                              ("notes_corpus", "notes_corpus", None),
-                             ("notes_profile", "profile", "quarto_post")):
+                             ("notes_profile", "profile", None),
+                             ("emit_root", "emit_root", None)):
         if key in cfg and hasattr(args, attr):
             current = getattr(args, attr)
             if (not current) if baked is None else (current == baked):
@@ -1315,9 +1345,9 @@ def main() -> int:
                        help="Root dir of the markdown corpus (every <dir>/index.md becomes a Note). "
                             "Falls back to the `notes_corpus` key of the graph-sibling "
                             "graph.config.json (81a02642: the corpus root is DATA beside the notes db).")
-    p_inn.add_argument("--profile", default="quarto_post",
-                       help="Relationship-harvest profile (default quarto_post; see the markdown core's "
-                            "PROFILES). The sibling config's `notes_profile` key replaces the default.")
+    p_inn.add_argument("--profile", default=None,
+                       help="Relationship-harvest profile (see the markdown core's PROFILES); default = "
+                            "the sibling config's `notes_profile`, else quarto_post.")
 
     p_rp = sub.add_parser("replay", help="Replay the write journal onto the db (needs --journal-path)")
     p_rp.add_argument("--offset", type=int, default=0,
@@ -1760,8 +1790,19 @@ def main() -> int:
     p_asec.add_argument("--no-write", action="store_true", help="Dry run: apply to graph, don't write the .md")
     p_asec.add_argument("--actor", default=_DEFAULT_ACTOR)
 
-    p_nn = sub.add_parser("new-note", help="M2 gradient: create a new memory note, born on-graph")
-    p_nn.add_argument("--path", required=True, help="Where to write the new .md")
+    p_nn = sub.add_parser("new-note",
+                          help="M2 gradient: create a new note, born on-graph — a memory note by "
+                               "--path, or a POST by --slug under the notes graph's emit root (a42c0f97)")
+    p_nn.add_argument("--path", default=None,
+                      help="Where to write the new .md (memory profile, or an explicit location)")
+    p_nn.add_argument("--slug", default=None,
+                      help="The born post's permalink relative to the emit root: lands as "
+                           "<emit_root>/<slug>/index.md, identity = the slug (the notes_corpus_elements convention)")
+    p_nn.add_argument("--profile", default=None,
+                      help="Relationship-harvest profile for the born note (default: the sibling "
+                           "config's notes_profile, else auto-detect from the frontmatter)")
+    p_nn.add_argument("--emit-root", default=None,
+                      help="Where born posts land (default: the sibling config's emit_root)")
     g_nn = p_nn.add_mutually_exclusive_group(required=True)
     g_nn.add_argument("--content", help="The full note text (frontmatter + body)")
     g_nn.add_argument("--content-file", help="Read the full note text from a file")

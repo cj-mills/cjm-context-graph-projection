@@ -129,3 +129,48 @@ def test_decide_capture_asserts_capture_state_and_links_the_ridden_item(tmp_path
     both = _run(*base, "decide", "X", "--state", "open", "--capture", "seed")
     assert both.returncode == 2 and "OR --capture" in both.stderr
     assert len(read_journal(journal)) == before  # refused specs mint nothing
+
+
+def test_new_note_born_post_round_trips_with_ingest_notes(tmp_path):
+    # a42c0f97: a POST born via `new-note --slug` (profile + emit_root from the notes db's
+    # sibling config) lands as <emit_root>/<slug>/index.md with its permalink identity,
+    # journals profile + slug, and the emitted tree RE-INGESTS to identical node/edge ids
+    # (replay-only projection == ingest-notes projection: the round-trip standard).
+    import sqlite3
+    emit = tmp_path / "emit"
+    journal = str(tmp_path / "notes.writes.jsonl")
+    (tmp_path / "graph.config.json").write_text(json.dumps(
+        {"notes_profile": "quarto_post", "emit_root": str(emit), "notes_corpus": str(emit)}))
+    content = ("---\ntitle: \"Born post\"\ndate: 2026-09-03\ncategories: [notes, graph]\n---\n\n"
+               "Lede paragraph.\n\n## First\n\nBody one.\n\n### Nested\n\nBody two.\n")
+    r = _run("--graph-db-path", str(tmp_path / "notes.db"), "--journal-path", journal,
+             "new-note", "--slug", "series/born-post", "--content", content)
+    assert r.returncode == 0, f"new-note dispatch failed: {r.stderr or r.stdout}"
+    assert (emit / "series" / "born-post" / "index.md").read_text() == content
+    ops = read_journal(journal)
+    assert [o["verb"] for o in ops] == ["new-note"]
+    assert ops[0]["args"]["slug"] == "series/born-post"       # nested permalink pinned
+    assert ops[0]["args"]["profile"] == "quarto_post"          # harvest profile rides the op
+
+    def ids(db):
+        con = sqlite3.connect(str(db))
+        try:
+            return (sorted(r[0] for r in con.execute("select id from nodes")),
+                    sorted(r[0] for r in con.execute("select id from edges")),
+                    sorted(r[0] for r in con.execute("select label from nodes")))
+        finally:
+            con.close()
+
+    # Journal-only projection (what a rebuild replays) vs. archive ingest of the emitted tree
+    r2 = _run("--graph-db-path", str(tmp_path / "replay.db"), "--journal-path", journal, "replay")
+    assert r2.returncode == 0, r2.stderr or r2.stdout
+    r3 = _run("--graph-db-path", str(tmp_path / "ingest.db"), "ingest-notes")   # corpus from config
+    assert r3.returncode == 0, r3.stderr or r3.stdout
+    replayed, ingested = ids(tmp_path / "replay.db"), ids(tmp_path / "ingest.db")
+    assert replayed[0] == ingested[0] and replayed[1] == ingested[1]
+    assert "Topic" in replayed[2] and replayed[2].count("Section") == 3   # lede + 2 headings
+    # Under quarto_post a title-less post is refused (the Quarto minimum)
+    r4 = _run("--graph-db-path", str(tmp_path / "notes.db"), "--journal-path", journal,
+              "new-note", "--slug", "untitled", "--content", "---\ndate: 2026-09-03\n---\n\nx\n")
+    assert r4.returncode != 0 and "title" in (r4.stdout + r4.stderr)
+    assert len(read_journal(journal)) == 1

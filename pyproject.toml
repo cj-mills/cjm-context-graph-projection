@@ -19,7 +19,7 @@ dependencies = [
     'cjm-context-graph-layer>=0.0.12',
     'cjm-context-graph-primitives>=0.0.13',
     'cjm-dev-graph-schema>=0.0.13',
-    'cjm-markdown-decompose-core>=0.0.9',
+    'cjm-markdown-decompose-core>=0.0.11',
     'cjm-python-decompose-core>=0.0.6',
     'cjm-notebook-decompose-core>=0.0.4',
 ]

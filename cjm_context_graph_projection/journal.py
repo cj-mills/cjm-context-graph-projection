@@ -145,7 +145,11 @@ async def _apply_op(gx: GraphHandle, op: Dict[str, Any]) -> str:
         # M3 genesis: MINT a whole note (Note + Section nodes) from journaled baseline text,
         # graph-only (extend_graph), so a note no longer read from its `.md` is reconstructed
         # from the journal alone. Idempotent (deterministic ids -> verified no-op on rebuild).
-        await reconstruct_note(gx, a["path"], a["content"])
+        # profile + slug ride the op (a42c0f97): a born POST replays with the same harvest
+        # profile and pinned permalink identity it was minted with; legacy memory ops carry
+        # neither and derive as before.
+        await reconstruct_note(gx, a["path"], a["content"],
+                               profile=a.get("profile"), slug=a.get("slug"))
     elif verb == "decide":
         await decide(gx, a["statement"], actor=a.get("actor", "agent:session"),
                      supports=a.get("supports"), supersedes=a.get("supersedes"),

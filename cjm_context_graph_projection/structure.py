@@ -53,7 +53,10 @@ async def _apply_note_text(
     `write_md` DECOUPLES the file write from the graph apply: journal REPLAY (the journal is the
     source; the `.md` is a generated backup — emit's job) applies to the graph but skips the file
     via `write_md=False`, mirroring `reconstruct_note`/`author_section`'s graph-only posture."""
-    decomposed = note_from_text(path, new_text, corpus_root=str(Path(path).parent), lossless=True)
+    # Identity PINNED to the known slug (a42c0f97): a born post under a nested permalink would
+    # otherwise re-derive a flattened slug from the parent dir and mint every Section id afresh.
+    decomposed = note_from_text(path, new_text, corpus_root=str(Path(path).parent), lossless=True,
+                                slug=slug)
     desired = {s.anchor: s for s in decomposed.sections}
     graph = {str(F.props(w).get("anchor")): (str(F.props(w).get("raw") or ""),
                                              int(F.props(w).get("order") or 0))
@@ -165,21 +168,36 @@ async def new_note(
     content: str,         # The full note text (frontmatter + body)
     *,
     write: bool = True,   # Write the file + apply to the graph (else a parse-only dry-run)
-) -> Dict[str, Any]:  # {slug, sections, written} or {error}
+    profile: Optional[str] = None,      # Relationship-harvest profile (None = auto-detect from the frontmatter)
+    corpus_root: Optional[str] = None,  # Identity root (a born post's emit root); None = the file's parent dir
+    slug: Optional[str] = None,         # Explicit identity (a born post's permalink); None = derive from path + root
+) -> Dict[str, Any]:  # {slug, sections, written, profile} or {error}
     """Create a brand-new note, born on-graph (write the `.md` + ingest it this session).
 
     All nodes are NEW, so a plain `extend_graph` applies (no content-hash-guard issue). Under
     the shadow the file is the source, so a later rebuild re-derives the same note; this just
-    makes it visible now. Dry-run (`write=False`) parses + reports without writing/ingesting."""
+    makes it visible now. Dry-run (`write=False`) parses + reports without writing/ingesting.
+
+    PROFILE-PARAMETERIZED (a42c0f97): a born POST is parsed with the notes graph's `profile`
+    (quarto_post — categories / series / cross-post harvest at birth, so its Topic, Series
+    and REFERENCES edges match an ingested post's), identified by its permalink `slug`
+    relative to the emit root (the `notes_corpus_elements` convention, pinned so nested
+    permalinks never flatten), and REFUSED under quarto_post without a frontmatter `title`
+    (the Quarto minimum). The memory profile keeps the parent-dir identity unchanged."""
     if not content.endswith("\n"):
         content += "\n"
-    note = note_from_text(path, content, corpus_root=str(Path(path).parent), lossless=True)
+    note = note_from_text(path, content, corpus_root=corpus_root or str(Path(path).parent),
+                          profile=profile, lossless=True, slug=slug)
     slug = note.slug
+    if profile == "quarto_post" and not re.search(r"^title:\s*\S", note.frontmatter_raw, re.M):
+        return {"error": f"a quarto_post note needs a frontmatter `title` (born post `{slug}`)",
+                "slug": slug, "written": False}
     existing = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=note_node_id(slug))
     if existing is not None:
         return {"error": f"note `{slug}` already exists (use add-section / author)",
                 "slug": slug, "written": False}
-    res = {"slug": slug, "path": path, "sections": len(note.sections), "written": False}
+    res = {"slug": slug, "path": path, "sections": len(note.sections), "written": False,
+           "profile": profile}
     if write:
         Path(path).write_text(content)
         nodes, edges = corpus_graph_elements([note])
@@ -192,6 +210,9 @@ async def reconstruct_note(
     gx: GraphHandle,
     path: str,            # The note's `.md` path (recorded on the Note for emit/divergence)
     content: str,         # The full note text (frontmatter + body) as the journal captured it
+    *,
+    profile: Optional[str] = None,  # Relationship-harvest profile the note was born with (a42c0f97); None = auto-detect
+    slug: Optional[str] = None,     # Pinned identity (a born post's permalink); None = derive from the parent dir
 ) -> Dict[str, Any]:  # {slug, sections, nodes_added, edges_added}
     """Reconstruct a whole note (Note + ordered Section nodes) FROM JOURNALED text — the M3
     genesis-replay leg of the [[memory-files-retirement-plan]] authority flip.
@@ -203,7 +224,8 @@ async def reconstruct_note(
     every later split/merge/`section` edit traces back to; deterministic ids make a second
     rebuild a verified no-op, and a `section` op replaying before this (the pre-import edits,
     already folded into `content`) is the tolerated no-op the single-pass replay relies on."""
-    note = note_from_text(path, content, corpus_root=str(Path(path).parent), lossless=True)
+    note = note_from_text(path, content, corpus_root=str(Path(path).parent), profile=profile,
+                          lossless=True, slug=slug)
     nodes, edges = corpus_graph_elements([note])
     r = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
     return {"slug": note.slug, "path": path, "sections": len(note.sections),
