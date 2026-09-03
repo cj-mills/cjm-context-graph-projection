@@ -64,6 +64,13 @@ def test_notes_corpus_elements_permalink_identity_and_facets(tmp_path):
     # The notes corpus decomposes bodies into Section nodes (opt-in, posts only).
     assert labels.count(DevNodeKinds.SECTION) >= 1
     assert any(e["relation_type"] == DevRelations.HAS_SECTION for e in edges)
+    # Lossless (24825bd6): every Section carries its heading-inclusive `raw` span + `order`
+    # and the Note carries `frontmatter_raw` — `read` reconstructs the post byte-for-byte.
+    secs = [n for n in nodes if n["label"] == DevNodeKinds.SECTION]
+    assert all(n["properties"].get("raw", "").startswith("# Overview") for n in secs)
+    assert all("order" in n["properties"] for n in secs)
+    assert all(n["properties"].get("frontmatter_raw")
+               for n in nodes if n["label"] == DevNodeKinds.NOTE)
 
 
 def test_cjm_dep_keys_strips_specifiers_and_filters(tmp_path):

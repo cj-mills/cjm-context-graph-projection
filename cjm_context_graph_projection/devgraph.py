@@ -73,10 +73,17 @@ def notes_corpus_elements(
     `profile`, default Quarto blog posts) lighting up Topic/Series/cross-post
     edges. Self-contained — this is the FEDERATION SEAM's first leaf: ingested
     into its OWN `--graph-db-path` (a separate persistent graph), kept distinct
-    from the private dev/planning graph (a public corpus → its own boundary)."""
+    from the private dev/planning graph (a public corpus → its own boundary).
+
+    Decomposed `lossless=True` (2026-09-03, finding 24825bd6): every post Section
+    carries its heading-inclusive verbatim `raw` span + `order`, the pre-first-heading
+    lede is a level-0 `_preamble` Section and the Note carries `frontmatter_raw`, so
+    `read <note>` reconstructs the post byte-for-byte and the within-note sequence is
+    recoverable by traversal — the fidelity the memory corpus has had since M1, and
+    the precondition for carrying the membrane to posts (733d3b94)."""
     root = Path(corpus_root)
     files = sorted(root.rglob("index.md"))
-    notes = [note_from_file(str(p), corpus_root=str(root), profile=profile, with_sections=True)
+    notes = [note_from_file(str(p), corpus_root=str(root), profile=profile, lossless=True)
              for p in files]
     return corpus_graph_elements(notes, note_aliases)
 

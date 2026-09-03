@@ -426,6 +426,16 @@ async def show(
             neighbours.append({"node": node_summary(by_id[tgt]), "relation": rel, "direction": "out"})
         elif tgt == node_id and src in by_id:
             neighbours.append({"node": node_summary(by_id[src]), "relation": rel, "direction": "in"})
+    # 24825bd6: a Note's HAS_SECTION neighbours render in DOCUMENT order (the Section
+    # `order` property) instead of edge-insertion order, so the within-note sequence is
+    # recoverable by traversal; every other neighbour keeps its position.
+    sec_idx = [i for i, n in enumerate(neighbours)
+               if n["relation"] == "HAS_SECTION" and n["direction"] == "out"]
+    if len(sec_idx) > 1:
+        ordered = sorted((neighbours[i] for i in sec_idx),
+                         key=lambda n: int(_props(by_id[n["node"]["id"]]).get("order") or 0))
+        for i, n in zip(sec_idx, ordered):
+            neighbours[i] = n
     facts: Dict[str, List[str]] = {}
     facts_at: Dict[str, float] = {}  # da9ea508 (3): when each active fact was asserted
     supers = await F.load_supersedes(gx)

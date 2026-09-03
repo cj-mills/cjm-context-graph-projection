@@ -357,4 +357,4 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 ## Dependencies
 
 **Depends on:** `cjm-context-graph-layer`, `cjm-context-graph-primitives`, `cjm-dev-graph-schema`, `cjm-markdown-decompose-core`, `cjm-notebook-decompose-core`, `cjm-python-decompose-core`, `cjm-substrate`
-**Used by:** `cjm-graph-workbench-qt`, `cjm-graph-workbench-tui`, `cjm-notebook-decompose-core`, `cjm-session-scratchpad-qt`, `cjm-transcript-correction-tui`
+**Used by:** `cjm-graph-workbench-qt`, `cjm-notebook-decompose-core`, `cjm-session-scratchpad-qt`
