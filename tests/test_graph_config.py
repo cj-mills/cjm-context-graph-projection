@@ -58,3 +58,22 @@ def test_config_keys_absent_leave_args_alone(tmp_path):
     a = _args(tmp_path / "g.db", memory_dir=DEFAULT_MEMORY)
     _apply_graph_config(a)
     assert a.memory_dir == DEFAULT_MEMORY
+
+
+def test_notes_corpus_and_profile_overlay(tmp_path):
+    # 81a02642: the notes graph's corpus root + harvest profile are DATA in its own
+    # sibling config, so `ingest-notes` runs with no --notes-corpus on a rebuild.
+    (tmp_path / "graph.config.json").write_text(json.dumps(
+        {"notes_corpus": "/cfg/posts", "notes_profile": "cfg_profile"}))
+    a = _args(tmp_path / "g.db", notes_corpus=None, profile="quarto_post")
+    _apply_graph_config(a)
+    assert a.notes_corpus == "/cfg/posts" and a.profile == "cfg_profile"
+    # Explicit flags win
+    b = _args(tmp_path / "g.db", notes_corpus="/explicit", profile="mine")
+    _apply_graph_config(b)
+    assert b.notes_corpus == "/explicit" and b.profile == "mine"
+    # The dev graph's config (no notes keys) leaves the attrs alone
+    (tmp_path / "graph.config.json").write_text(json.dumps({"code_libs": ["x"]}))
+    c = _args(tmp_path / "g.db", notes_corpus=None, profile="quarto_post")
+    _apply_graph_config(c)
+    assert c.notes_corpus is None and c.profile == "quarto_post"

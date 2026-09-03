@@ -359,6 +359,10 @@ async def _dispatch(args) -> int:
                 print(f"replayed journal: {rc}")
             return 0
         if args.command == "ingest-notes":
+            if not args.notes_corpus:
+                print("error: ingest-notes needs --notes-corpus or a `notes_corpus` key in the "
+                      "graph-sibling graph.config.json beside --graph-db-path", file=sys.stderr)
+                return 1
             nodes, edges = notes_corpus_elements(args.notes_corpus, args.profile)
             res = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
             print(f"ingested notes: {res.nodes_added} nodes added / {res.nodes_verified} verified, "
@@ -1250,11 +1254,16 @@ def _apply_graph_config(args) -> None:
     cfg = load_graph_config(args.graph_db_path)
     if not cfg:
         return
+    # notes_corpus / notes_profile (81a02642): the notes graph's corpus root + harvest
+    # profile are DATA in ITS sibling config, so `ingest-notes` needs no repeated
+    # --notes-corpus on every rebuild (the wrapper stays a thin lane).
     for key, attr, baked in (("code_libs", "code_lib", None),
                              ("notebook_libs", "notebook_lib", None),
                              ("memory_dir", "memory_dir", DEFAULT_MEMORY),
                              ("repos_dir", "repos_dir", DEFAULT_REPOS),
-                             ("manifests_dir", "manifests_dir", DEFAULT_MANIFESTS)):
+                             ("manifests_dir", "manifests_dir", DEFAULT_MANIFESTS),
+                             ("notes_corpus", "notes_corpus", None),
+                             ("notes_profile", "profile", "quarto_post")):
         if key in cfg and hasattr(args, attr):
             current = getattr(args, attr)
             if (not current) if baked is None else (current == baked):
@@ -1302,10 +1311,13 @@ def main() -> int:
                                 "(separate) --graph-db-path — the federation seam: a "
                                 "second self-contained persistent graph, kept distinct "
                                 "from the private dev/planning graph (a public corpus).")
-    p_inn.add_argument("--notes-corpus", required=True,
-                       help="Root dir of the markdown corpus (every <dir>/index.md becomes a Note).")
+    p_inn.add_argument("--notes-corpus", default=None,
+                       help="Root dir of the markdown corpus (every <dir>/index.md becomes a Note). "
+                            "Falls back to the `notes_corpus` key of the graph-sibling "
+                            "graph.config.json (81a02642: the corpus root is DATA beside the notes db).")
     p_inn.add_argument("--profile", default="quarto_post",
-                       help="Relationship-harvest profile (default quarto_post; see the markdown core's PROFILES).")
+                       help="Relationship-harvest profile (default quarto_post; see the markdown core's "
+                            "PROFILES). The sibling config's `notes_profile` key replaces the default.")
 
     p_rp = sub.add_parser("replay", help="Replay the write journal onto the db (needs --journal-path)")
     p_rp.add_argument("--offset", type=int, default=0,
