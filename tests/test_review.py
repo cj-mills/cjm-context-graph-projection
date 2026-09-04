@@ -9,6 +9,7 @@ import pytest
 
 from cjm_context_graph_primitives.journal import append_op, read_journal
 from cjm_context_graph_projection.render import render
+from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS
 from cjm_context_graph_projection.review import (approvals_of, change_key, classify_text_change,
                                                  walk_upstream)
 
