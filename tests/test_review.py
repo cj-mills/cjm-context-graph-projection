@@ -3,6 +3,9 @@
 import json
 import subprocess
 import sys
+from pathlib import Path
+
+import pytest
 
 from cjm_context_graph_primitives.journal import append_op, read_journal
 from cjm_context_graph_projection.render import render
@@ -80,6 +83,8 @@ def test_render_review_frontier_empty_and_rows():
     assert "1 acknowledged change(s) hidden" in out
 
 
+@pytest.mark.skipif(not (Path(DEFAULT_MANIFESTS) / f"{DEFAULT_GRAPH_ID}.json").exists(),
+                    reason=f"graph capability {DEFAULT_GRAPH_ID!r} not installed at {DEFAULT_MANIFESTS} (CI)")
 def test_cli_review_frontier_chain_empty_then_exact_then_silent_after_ack(tmp_path):
     # Acceptance (730e077e): EMPTY when nothing upstream changed; names EXACTLY the touched
     # chain when one upstream section changes; SILENT after the acknowledgment; and the
