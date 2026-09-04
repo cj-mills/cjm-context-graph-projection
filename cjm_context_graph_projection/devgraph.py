@@ -85,7 +85,26 @@ def notes_corpus_elements(
     files = sorted(root.rglob("index.md"))
     notes = [note_from_file(str(p), corpus_root=str(root), profile=profile, lossless=True)
              for p in files]
-    return corpus_graph_elements(notes, note_aliases)
+    nodes, edges = corpus_graph_elements(notes, note_aliases)
+    return stamp_note_profile(nodes, profile), edges   # the profile is READABLE at edit time (cbde404c)
+
+
+def stamp_note_profile(
+    nodes: List[Dict[str, Any]],  # Node wire dicts (a corpus_graph_elements result)
+    profile: Optional[str],       # The harvest profile the notes were parsed with (None = auto-detected, leave unstamped)
+) -> List[Dict[str, Any]]:  # The same list, each Note carrying `profile`
+    """Record the relationship-harvest profile on every Note wire dict (in place).
+
+    Harvest-on-edit (cbde404c) re-runs the profile's harvesters when a note is edited
+    on-graph, so the profile a note was ingested/born with has to be READABLE off the
+    node — an explicit `quarto_post` corpus would otherwise re-detect from frontmatter
+    alone at edit time. `None` (auto-detected) stamps nothing: detection re-runs the
+    same way it did at ingest."""
+    if profile:
+        for n in nodes:
+            if n.get("label") == DevNodeKinds.NOTE:
+                n.setdefault("properties", {})["profile"] = profile
+    return nodes
 
 
 def _cjm_dep_keys(pyproject: Path) -> List[str]:

@@ -30,7 +30,8 @@ from cjm_markdown_decompose_core.ingest import corpus_graph_elements
 from cjm_markdown_decompose_core.sections import heading_anchor
 
 from . import factlayer as F
-from .authoring import _note_section_wires
+from .authoring import _note_section_wires, reharvest_note_relations
+from .devgraph import stamp_note_profile
 from .runtime import GraphHandle
 
 
@@ -83,6 +84,7 @@ async def _apply_note_text(
     # `.md` write is gated separately by `write_md` (default: follow `write`) so replay can apply
     # graph-only (`write_md=False`) while a live add still refreshes the backup file.
     do_file = write if write_md is None else write_md
+    relations: Dict[str, Any] = {}
     if write:
         for s in updates:
             await graph_task(gx.queue, gx.graph_id, "update_node", node_id=s.id,
@@ -93,10 +95,15 @@ async def _apply_note_text(
         if fm_changed:
             await graph_task(gx.queue, gx.graph_id, "update_node", node_id=F.nid(note_node),
                              properties={"frontmatter_raw": decomposed.frontmatter_raw})
+        # Harvest-on-edit (cbde404c): diff the relation edges the PRIOR graph text implied
+        # against the new text's, so an added/removed link lands/retracts its edge now.
+        prior_text = (str(F.prop(note_node, "frontmatter_raw") or "")
+                      + "".join(raw for raw, _ in sorted(graph.values(), key=lambda t: t[1])))
+        relations = await reharvest_note_relations(gx, note_node, prior_text, new_text)
         if do_file and path:
             Path(path).write_text(new_text)
     return {"slug": slug, "path": path, "added": sorted(added), "updated": sorted(updated),
-            "removed": removed, "frontmatter_changed": fm_changed,
+            "removed": removed, "frontmatter_changed": fm_changed, "relations": relations,
             "written": bool(do_file and path), "emitted_text": new_text}
 
 
@@ -201,6 +208,7 @@ async def new_note(
     if write:
         Path(path).write_text(content)
         nodes, edges = corpus_graph_elements([note])
+        stamp_note_profile(nodes, profile)   # readable at edit time (harvest-on-edit, cbde404c)
         r = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
         res.update(written=True, nodes_added=r.nodes_added, edges_added=r.edges_added)
     return res
@@ -227,6 +235,7 @@ async def reconstruct_note(
     note = note_from_text(path, content, corpus_root=str(Path(path).parent), profile=profile,
                           lossless=True, slug=slug)
     nodes, edges = corpus_graph_elements([note])
+    stamp_note_profile(nodes, profile)   # replay carries the born profile too (cbde404c)
     r = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
     return {"slug": note.slug, "path": path, "sections": len(note.sections),
             "nodes_added": r.nodes_added, "edges_added": r.edges_added}

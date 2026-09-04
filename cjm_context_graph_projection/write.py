@@ -470,7 +470,13 @@ async def author_section(
     the content-hash integrity guard, so the journaled STATE must be applied by mutation (the
     section-divergence probe characterized exactly this). Replay-idempotent: re-applying the
     same raw is a verified no-op. The section MUST already exist — minting a NEW section/note is
-    the deferred M2a gradient; a missing section is reported, never silently created."""
+    the deferred M2a gradient; a missing section is reported, never silently created.
+
+    Harvest-on-edit (cbde404c): a changed raw re-harvests the note's relation edges against
+    its pre-edit text (`reharvest_note_relations`), so a `section` op — live, replayed, or a
+    reconcile absorb — lands/retracts the REFERENCES / TAGGED / IN_SERIES edges its links
+    imply, and a journal-only rebuild converges on ingest's edge set."""
+    from .authoring import _as_wire, _note_section_wires, reharvest_note_relations
     note_id = note_node_id(slug)
     section_id = section_node_id(note_id, anchor)
     existing = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=section_id)
@@ -480,8 +486,23 @@ async def author_section(
     unchanged = str(F.prop(existing, "raw", "")) == raw
     merge = {"raw": raw, "content_hash": SourceRef.compute_hash(raw.encode("utf-8"))}
     await graph_task(gx.queue, gx.graph_id, "update_node", node_id=section_id, properties=merge)
-    return {"slug": slug, "anchor": anchor, "section_id": section_id, "actor": actor,
-            "unchanged": unchanged, "written": True}
+    res: Dict[str, Any] = {"slug": slug, "anchor": anchor, "section_id": section_id,
+                           "actor": actor, "unchanged": unchanged, "written": True}
+    if not unchanged:
+        note_node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=note_id)
+        if note_node is not None:
+            from cjm_markdown_decompose_core.project import note_text_from_graph_nodes
+            wires = await _note_section_wires(gx, note_id)   # post-update: the NEW state
+            note_wire = _as_wire(note_node, DevNodeKinds.NOTE)
+            # The prior text = the same wires with this section's OLD raw swapped back in.
+            prior_wires = [dict(w, properties=dict(w["properties"])) for w in wires]
+            for w in prior_wires:
+                if w["id"] == section_id:
+                    w["properties"]["raw"] = str(F.prop(existing, "raw", ""))
+            res["relations"] = await reharvest_note_relations(
+                gx, note_wire, note_text_from_graph_nodes(note_wire, prior_wires),
+                note_text_from_graph_nodes(note_wire, wires))
+    return res
 
 
 async def register_session(

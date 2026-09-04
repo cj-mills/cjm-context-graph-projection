@@ -37,12 +37,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from cjm_context_graph_layer.grammar import make_edge
-from cjm_context_graph_layer.ops import graph_task
+from cjm_context_graph_layer.ops import extend_graph, graph_task
 from cjm_context_graph_primitives.provenance import SourceRef
-from cjm_context_graph_primitives.query import PropertyPredicate
+from cjm_context_graph_primitives.query import EdgeQuery, PropertyPredicate
 from cjm_dev_graph_schema.nodes import CodeSymbolNode
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
-from cjm_markdown_decompose_core.extract import note_from_file
+from cjm_markdown_decompose_core.extract import note_from_file, note_from_text
+from cjm_markdown_decompose_core.ingest import corpus_graph_elements
 from cjm_markdown_decompose_core.project import note_text_from_graph_nodes
 from cjm_notebook_decompose_core.project import render_notebook
 from cjm_python_decompose_core.emit import emit_module_from_nodes
@@ -207,6 +208,86 @@ async def _note_section_wires(
             for n in await F.load_label_where(
                 gx, DevNodeKinds.SECTION,
                 [PropertyPredicate("note_id", "eq", note_id)])]
+
+
+async def reharvest_note_relations(
+    gx: GraphHandle,
+    note_node: Any,        # The Note graph node (typed or wire) — carries slug / path / profile
+    prior_text: str,       # The note's FULL text before the edit (frontmatter + sections, from the graph)
+    new_text: str,         # The note's FULL text after the edit
+    *,
+    write: bool = True,    # Apply the edge diff (else compute + report only)
+) -> Dict[str, Any]:  # {added: [(relation, target_id)], removed: [...], facets_added, facets_removed}
+    """Re-run the relationship harvest on an EDITED note and apply the edge DIFF (finding cbde404c).
+
+    Ingest and birth harvest a note's relations ONCE — `[[wiki-links]]` and cross-post links
+    (REFERENCES), categories (TAGGED -> Topic), series links (IN_SERIES -> Series) — but the
+    edit verbs (`author` on a Section, `author_section`, `add_section`) only rewrote the slot,
+    so a link added on-graph minted no edge until a rebuild re-ingested the file, and a removed
+    link's edge lingered. This closes the gap AT the edit: harvest the note's relation edges
+    from its text BEFORE and AFTER the edit (the same `note_from_text` + `corpus_graph_elements`
+    path ingest uses, with the note's born `profile` — `None` auto-detects — and the confirmed
+    alias map), and apply exactly the difference: extend the new edges (+ any Topic / Series
+    facet a new edge targets), retract the stale ones, and drop a facet the retraction left
+    unreferenced. Diffing prior-vs-new (not graph-vs-new) means a DELIBERATE `link` the content
+    never produced is never touched. The edges are DERIVED, never journaled: replay re-runs the
+    edit verb and re-derives them, so a journal-only rebuild converges on the same edge set an
+    archive ingest of the emitted file produces (the round-trip standard)."""
+    relation_kinds = (DevRelations.REFERENCES, DevRelations.TAGGED, DevRelations.IN_SERIES)
+    facet_labels = (DevNodeKinds.TOPIC, DevNodeKinds.SERIES)
+    slug = str(F.prop(note_node, "slug") or "")
+    path = str(F.prop(note_node, "path") or "")
+    profile = F.prop(note_node, "profile") or None
+
+    def _elements(text: str, aliases: Optional[Dict[str, str]],
+                  ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+        note = note_from_text(path, text, corpus_root=str(Path(path).parent), profile=profile,
+                              lossless=True, slug=slug)
+        nodes, edges = corpus_graph_elements([note], aliases)
+        rel = {e["id"]: e for e in edges
+               if e["relation_type"] in relation_kinds and e["source_id"] == note.id}
+        facets = {n["id"]: n for n in nodes if n["label"] in facet_labels}
+        return rel, facets
+
+    # Cheap path first: harvest WITHOUT the alias map (it only remaps targets, so equal raw
+    # edge sets stay equal mapped) — every replayed `section` op passes through here, and
+    # `note_alias_map` reads the whole assertion layer, so it is loaded only when links moved.
+    prior_rel, _prior_facets = _elements(prior_text, None)
+    new_rel, new_facets = _elements(new_text, None)
+    if set(prior_rel) != set(new_rel):
+        aliases = await F.note_alias_map(gx)
+        if aliases:
+            prior_rel, _prior_facets = _elements(prior_text, aliases)
+            new_rel, new_facets = _elements(new_text, aliases)
+    added = [e for eid, e in new_rel.items() if eid not in prior_rel]
+    removed = [e for eid, e in prior_rel.items() if eid not in new_rel]
+    facet_nodes = [new_facets[e["target_id"]] for e in added if e["target_id"] in new_facets]
+    res: Dict[str, Any] = {
+        "added": [(e["relation_type"], e["target_id"]) for e in added],
+        "removed": [(e["relation_type"], e["target_id"]) for e in removed],
+        "facets_added": [n["id"] for n in facet_nodes], "facets_removed": [],
+    }
+    if not write or not (added or removed):
+        return res
+    if added:
+        await extend_graph(gx.queue, gx.graph_id, facet_nodes, added)
+    if removed:
+        await graph_task(gx.queue, gx.graph_id, "delete_edges",
+                         edge_ids=[e["id"] for e in removed])
+        # A Topic / Series the retraction left with no edge at all would survive only until
+        # the next rebuild (ingest never mints an unreferenced facet) — drop it now so the
+        # live graph matches what a rebuild produces.
+        for e in removed:
+            tid = e["target_id"]
+            if e["relation_type"] not in (DevRelations.TAGGED, DevRelations.IN_SERIES):
+                continue
+            q = EdgeQuery(target_ids=[tid], project=["id"], limit=1)
+            r = await graph_task(gx.queue, gx.graph_id, "query_edges", query=q.to_dict())
+            if not (r.rows or []):
+                await graph_task(gx.queue, gx.graph_id, "delete_nodes", node_ids=[tid],
+                                 cascade=True)
+                res["facets_removed"].append(tid)
+    return res
 
 
 async def read_node(
@@ -542,6 +623,9 @@ async def author(
     else:
         wires = await _module_region_wires(gx, container_id)
     pre_emitted = emit_module_from_nodes(wires) if artifact == "module" else None
+    # The note's text BEFORE the edit — the relation re-harvest (cbde404c) diffs against it.
+    prior_note_text = (note_text_from_graph_nodes(_as_wire(container, DevNodeKinds.NOTE), wires)
+                       if artifact == "note" else None)
     for w in wires:
         if w["id"] == node_id:
             w["properties"][slot] = new_text
@@ -653,6 +737,11 @@ async def author(
         if module_bindings_merged is not None:
             await graph_task(gx.queue, gx.graph_id, "update_node", node_id=container_id,
                              properties={"import_bindings": module_bindings_merged})
+        if artifact == "note" and prior_note_text is not None and new_text != current:
+            # Harvest-on-edit (cbde404c): a link the edit added/removed lands/retracts its
+            # REFERENCES / TAGGED / IN_SERIES edge NOW, not at the next rebuild.
+            result["relations"] = await reharvest_note_relations(gx, container, prior_note_text,
+                                                                  emitted)
         result["written"] = True
     return result
 
