@@ -57,6 +57,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `add_text` _function_ — Mint a NEW CodeText region (imports/constants/docstring/`__all__`) into a module, then emit.
 - `author` _function_ — Author a node's verbatim-text slot, then emit its canonical artifact to disk.
 - `emit_artifact` _function_ — Emit a container's canonical artifact FROM THE GRAPH (graph -> .py / .ipynb / .md).
+- `emit_post` _function_ — Emit a born post to the PUBLIC website clone — GATED on publish_state=published.
 - `file_section_raws` _function_ — Each of a note's sections' `raw` span as the FILE currently decomposes (the other
 - `graph_section_raws` _function_ — Each of a note's sections' on-graph `raw` span, keyed by anchor (the divergence/
 - `read_node` _function_ — Deliver a node's verbatim CONTENT — the read DUAL of `author`/`emit`.
@@ -356,5 +357,5 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 
 ## Dependencies
 
-**Depends on:** `cjm-context-graph-layer`, `cjm-context-graph-primitives`, `cjm-dev-graph-schema`, `cjm-markdown-decompose-core`, `cjm-notebook-decompose-core`, `cjm-python-decompose-core`, `cjm-substrate`
+**Depends on:** `cjm-context-graph-layer`, `cjm-context-graph-primitives`, `cjm-dev-graph-schema`, `cjm-harness-transcripts`, `cjm-markdown-decompose-core`, `cjm-notebook-decompose-core`, `cjm-python-decompose-core`, `cjm-substrate`
 **Used by:** `cjm-graph-workbench-qt`, `cjm-notebook-decompose-core`, `cjm-session-scratchpad-qt`
