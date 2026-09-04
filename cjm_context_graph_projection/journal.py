@@ -34,7 +34,7 @@ from .lens import lens_node_id, set_lens
 from .runtime import GraphHandle
 from .structure import add_section, reconstruct_note
 from .write import (add_check, alias, assert_value, author_section, decide, link, mint_procedure,
-                    register_session, retract_session, unlink)
+                    mint_proposal, register_session, retract_session, unlink)
 
 # The provenance actor stamped on the M3 one-time genesis import (a per-note `new-note` op
 # capturing the pre-cutover baseline). The lineage floor every later edit traces back to.
@@ -63,10 +63,12 @@ M3_BASELINE_ACTOR = "import:m3-baseline"
 # deterministic per-method id — journal-first for the b744b28e class (the oracle's mint was
 # db-direct and every rebuild dropped it, taking its `version` facts along); last op wins
 # on replay, like display-rule.
+# `propose` = a triage Proposal (bb015d12): the agent's drafted section for a stale
+# deliverable, re-minted verbatim from its journaled args (deterministic id).
 JOURNAL_VERBS = ("decide", "alias", "assert", "link", "unlink", "section", "new-note",
                  "add-section", "display-rule", "set-lens", "check", "session",
                  "retract-session", "pull-transcript", "mint-messages", "edit-message",
-                 "derive-message", "procedure")
+                 "derive-message", "procedure", "propose")
 
 
 def m3_baseline_import(
@@ -254,6 +256,14 @@ async def _apply_op(gx: GraphHandle, op: Dict[str, Any]) -> str:
         await mint_procedure(gx, a["method"], a["name"],
                              actor=a.get("actor", "programmatic"),
                              root_kind=a.get("root_kind", "asserted"))
+    elif verb == "propose":
+        # Triage proposal (bb015d12): re-mint the agent's draft from the journaled args
+        # VERBATIM (deterministic id over deliverable/section/key -> a verified no-op on
+        # rebuild); the confirm lands as ordinary `section` + `assert` ops after it.
+        await mint_proposal(gx, a["deliverable_id"], a["section_id"], a["key"], a["raw"],
+                            slug=a.get("slug", ""), anchor=a.get("anchor", ""),
+                            upstream_ids=a.get("upstream_ids") or [], summary=a.get("summary", ""),
+                            approval=a.get("approval"), actor=a.get("actor", "agent:session"))
     else:
         return ""
     return verb
@@ -357,6 +367,8 @@ def touched_node_ids(
     elif verb == "check":
         if a.get("item_id"):
             out.append(a["item_id"])
+    elif verb == "propose":
+        out.extend(r for r in (a.get("deliverable_id"), a.get("section_id")) if r)
     elif verb == "alias":
         if a.get("canonical"):
             out.append(note_node_id(a["canonical"]))

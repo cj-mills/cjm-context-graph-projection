@@ -42,6 +42,7 @@ from .onboarding import project_onboarding
 from .oracle import run_version_oracle
 from .projection import (explore, full_graph_view, get_schema, grep, locate, relevant, show, state,
                          subgraph_view)
+from .propose import propose_updates
 from .prose_refs import prose_refs
 from .readiness import readiness
 from .readme import project_readme
@@ -62,8 +63,8 @@ from .structure import add_section, new_note
 from .viz import project_viz
 from .workbench import anchor_lead_view, portfolio_view, session_feed
 from .worklist import dangling_reference_sources, worklist
-from .write import (add_check, alias, assert_value, decide, link, register_session, retract_session,
-                    unlink)
+from .write import (add_check, alias, assert_value, confirm_proposal, decide, link,
+                    register_session, retract_session, unlink)
 
 DEFAULT_MEMORY = ("/home/innom-dt/.claude/projects/"
                   "-mnt-SN850X-8TB-EXT4-Projects-GitHub-cj-mills-cjm-substrate/memory")
@@ -170,7 +171,7 @@ ID_REFS: Dict[str, tuple] = {
     "delete-module": ("module_id",), "rename-symbol": ("symbol_id",),
     "flip-module": ("repo_key",), "cutover": ("repo_key",),
     "emit-artifact": ("repo_key",), "emit-post": ("note_id",),
-    "review-frontier": ("subject",),
+    "review-frontier": ("subject",), "propose": ("subject",), "confirm-proposal": ("proposal",),
 }
 
 
@@ -918,6 +919,58 @@ async def _dispatch(args) -> int:
                              {"source_id": res["source_id"], "target_id": res["target_id"],
                               "relation": res["relation"], "actor": args.actor})
             return 1 if res.get("error") else 0
+        elif args.command == "propose":
+            # Triage proposals (bb015d12): the frontier's verification substrate (writes +
+            # source journals) rides the same flags; the subject resolves as review-frontier's.
+            jp = [p for p in (args.journal_path, args.source_journal_path) if p]
+            subj = args.subject
+            if subj and len(subj) >= 6 and all(c in "0123456789abcdef-" for c in subj):
+                from .projection import ambiguity_error, resolve_node_ref
+                r = await resolve_node_ref(gx, subj)
+                if "candidates" in r:
+                    print(ambiguity_error(subj, r["candidates"]), file=sys.stderr)
+                    return 1
+                node = r.get("node")
+                if node is None:
+                    print(f"error: no node `{subj}` — `locate` the deliverable first", file=sys.stderr)
+                    return 1
+                subj = node.get("id") if isinstance(node, dict) else getattr(node, "id", subj)
+            res = await propose_updates(gx, jp, subject=subj, depth=args.depth, actor=args.actor,
+                                        write=not args.no_write)
+            print(render("propose", res, args.format))
+            # One `propose` op per NEW draft, carrying the exact mint args (replay re-lands
+            # the same node); an existing proposal (re-run) journals nothing.
+            if args.journal_path and not args.no_write:
+                for p in res.get("proposals", []):
+                    if p.get("written") and not p.get("existing"):
+                        append_write(args.journal_path, "propose", p["args"])
+            return 0
+        elif args.command == "confirm-proposal":
+            res = await confirm_proposal(gx, args.proposal, actor=args.actor)
+            print(render("confirm-proposal", res, args.format))
+            if res.get("error"):
+                return 1
+            # The confirmation is two ordinary journaled ops: the section STATE the draft
+            # applied (skipped when already applied) and the re-approval assert with its
+            # bound hash — exactly what `author` and `assert` journal at this seam.
+            if args.journal_path:
+                so = res["section_op"]
+                if not (res.get("section") or {}).get("unchanged"):
+                    append_write(args.journal_path, "section",
+                                 {"slug": so["slug"], "anchor": so["anchor"], "raw": so["raw"],
+                                  "actor": args.actor})
+                ap = res.get("approval") or {}
+                if ap and not ap.get("error"):
+                    append_write(args.journal_path, "assert",
+                                 {"subject": res["deliverable_id"], "predicate": res["approval_predicate"],
+                                  "value": res["approval_value"], "actor": args.actor,
+                                  "evidence": [res["proposal_id"]], "supersede": None,
+                                  "subject_content_hash": ap.get("subject_content_hash")})
+            # The graph is the source; refresh the deliverable's emitted .md (the backup).
+            em = await emit_artifact(gx, res["deliverable_id"], write=True)
+            if em.get("error"):
+                print(f"⚠ emit: {em['error']}", file=sys.stderr)
+            return 0
         elif args.command == "check":
             res = await add_check(gx, args.item, args.text, actor=args.actor)
             print(render("check", res, args.format))
@@ -1525,6 +1578,28 @@ def main() -> int:
     p_rf.add_argument("--depth", type=int, default=3, help="Upstream walk depth (default 3)")
     p_rf.add_argument("--all", action="store_true",
                       help="List acknowledged changes too (default: counted, hidden)")
+
+    p_pp = sub.add_parser("propose",
+                          help="Triage proposals (bb015d12): for each stale review-frontier row, draft "
+                               "the update from the changed upstream — first slice: re-render a "
+                               "referenced CodeSymbol's fenced code block from its live body — as a "
+                               "Proposal node BESIDE the approved content (journaled `propose` op); "
+                               "confirm with `confirm-proposal <id>`, reject with `assert <d> "
+                               "review_verdict <key>`; needs --journal-path + --source-journal-path")
+    p_pp.add_argument("subject", nargs="?", default=None,
+                      help="Restrict to one deliverable (id prefix) or a label substring")
+    p_pp.add_argument("--depth", type=int, default=3, help="Upstream walk depth (default 3)")
+    p_pp.add_argument("--no-write", action="store_true",
+                      help="Dry run: report what would be drafted, mint nothing")
+    p_pp.add_argument("--actor", default=_DEFAULT_ACTOR)
+
+    p_cp = sub.add_parser("confirm-proposal",
+                          help="Apply a proposal's drafted section to its deliverable (a journaled "
+                               "`section` op) and re-assert the approval it answers — the confirmation "
+                               "IS the re-approval, bound to the new content hash (design 40622922 (2)); "
+                               "the emitted .md is refreshed")
+    p_cp.add_argument("proposal", help="The Proposal node id (or a unique id prefix)")
+    p_cp.add_argument("--actor", default=_DEFAULT_ACTOR)
 
     p_rg = sub.add_parser("register-drift",
                           help="Reconcile each <value>-register hub's REFERENCES cache against "

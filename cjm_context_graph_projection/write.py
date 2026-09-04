@@ -505,6 +505,101 @@ async def author_section(
     return res
 
 
+async def mint_proposal(
+    gx: GraphHandle,
+    deliverable_id: str,        # The stale deliverable (a Note carrying the approval)
+    section_id: str,            # The ONE Section of it the draft rewrites
+    key: str,                   # The review-frontier change KEY the draft answers (`<upstream 8>@<hash 12>`)
+    raw: str,                   # The drafted section `raw` (heading-inclusive, verbatim) — lands BESIDE the approved content
+    *,
+    slug: str,                  # The deliverable's slug (what `author_section` addresses at confirm)
+    anchor: str,                # The target section's anchor
+    upstream_ids: List[str],    # The upstream nodes the draft drew on -> DERIVED_FROM edges
+    summary: str = "",          # One line on what the draft did (rendered on the frontier row)
+    approval: Optional[Dict[str, str]] = None,  # {predicate, value} of the stale approval (confirm re-asserts it)
+    actor: str = "agent:session",  # Who drafted it (the agent, by design)
+) -> Dict[str, Any]:  # {proposal_id, deliverable_id, section_id, key, existing, written}
+    """Mint a PROPOSAL — an agent-drafted update for ONE section of a stale deliverable
+    (work item bb015d12, the automation half of design 40622922 (6)).
+
+    The draft never touches the approved content: it is its own node (label `Proposal`,
+    projection-local for this first slice — schema promotion when the shape settles)
+    carrying the full proposed `raw`, a `PROPOSES_FOR` edge to the target Section,
+    `DERIVED_FROM` edges to the upstream nodes it drew on, and an `answers_change` fact
+    naming the change key so the frontier row can point at it. Identity is deterministic
+    over (deliverable, section, key): the same change re-proposed is a verified no-op
+    (`existing`), and a NEW upstream hash is a new key — a new proposal. Replayed from its
+    journaled args verbatim (the journal alone reconstructs the draft)."""
+    pid = derive_node_id("proposal", deliverable_id, section_id, key)
+    existing = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=pid)
+    ap = approval or {}
+    props: Dict[str, Any] = {
+        "title": f"PROPOSAL: update `{anchor}` of {slug} for {key}",
+        "deliverable_id": deliverable_id, "section_id": section_id, "key": key,
+        "slug": slug, "anchor": anchor, "raw": raw, "summary": summary, "actor": actor,
+        "approval_predicate": ap.get("predicate", ""), "approval_value": ap.get("value", ""),
+        "upstream_ids": list(upstream_ids), "root_kind": "derived",
+    }
+    node = {"id": pid, "label": PROPOSAL_LABEL, "properties": props, "sources": []}
+    edges = [make_edge(pid, section_id, "PROPOSES_FOR")]
+    edges += [make_edge(pid, u, DevRelations.DERIVED_FROM) for u in upstream_ids]
+    await extend_graph(gx.queue, gx.graph_id, [node], edges)
+    fact = await assert_value(gx, pid, "answers_change", key, actor=actor)
+    return {"proposal_id": pid, "deliverable_id": deliverable_id, "section_id": section_id,
+            "key": key, "slug": slug, "anchor": anchor, "summary": summary,
+            "existing": existing is not None, "assertion_id": fact.get("assertion_id"),
+            "written": True}
+
+
+async def confirm_proposal(
+    gx: GraphHandle,
+    proposal: str,                 # The Proposal node (id, or a unique id prefix)
+    *,
+    actor: str = "user:cli",       # Who confirmed (the human — confirmation IS the re-approval)
+) -> Dict[str, Any]:  # {proposal_id, deliverable_id, section, approval, section_op, written} or {error}
+    """CONFIRM a proposal: apply its drafted section raw to the deliverable, then re-assert
+    the stale approval on the NEW content (work item bb015d12 (b)).
+
+    The propose/confirm shape the correction vertical uses, on deliverables: the agent
+    drafted beside the approved content, the human's confirmation is ONE act that (1)
+    lands the draft as a journaled `section` STATE (`author_section` — harvest-on-edit
+    keeps its links live) and (2) re-asserts the approval `publish_state` value the
+    proposal recorded, which by design 40622922 (2) binds to the new content hash and
+    SUPERSEDES the stale approval — the change the proposal answered is no longer
+    upstream of an older approval, so the frontier row clears by derivation. Idempotent:
+    a draft already applied re-lands as an unchanged section and a same-hash re-assert
+    is a no-op. Rejection is not here — it is the ordinary `review_verdict` ack of the
+    same key. The CLI journals the two ops (section + assert) exactly as `author` and
+    `assert` do, and refreshes the emitted `.md`."""
+    res = await resolve_node_ref(gx, proposal)
+    if "candidates" in res:
+        return {"error": ambiguity_error(proposal, res["candidates"]), "proposal": proposal,
+                "written": False}
+    node = res.get("node")
+    if node is None:
+        return {"error": f"no proposal `{proposal}`", "proposal": proposal, "written": False}
+    from .authoring import _label_of
+    if _label_of(node) != PROPOSAL_LABEL:
+        return {"error": f"`{proposal}` is a {_label_of(node)}, not a Proposal",
+                "proposal": proposal, "written": False}
+    p = F.props(node)
+    pid, deliverable_id = F.nid(node), str(p.get("deliverable_id") or "")
+    slug, anchor, raw = str(p.get("slug") or ""), str(p.get("anchor") or ""), str(p.get("raw") or "")
+    section = await author_section(gx, slug, anchor, raw, actor=actor)
+    if section.get("error"):
+        return {"error": section["error"], "proposal_id": pid, "written": False}
+    pred = str(p.get("approval_predicate") or P.PUBLISH_STATE)
+    value = str(p.get("approval_value") or "")
+    approval: Dict[str, Any] = {}
+    if value:
+        approval = await assert_value(gx, deliverable_id, pred, value, actor=actor, evidence=[pid])
+    return {"proposal_id": pid, "deliverable_id": deliverable_id, "key": p.get("key"),
+            "section": section,
+            "section_op": {"slug": slug, "anchor": anchor, "raw": raw, "actor": actor},
+            "approval": approval, "approval_predicate": pred, "approval_value": value,
+            "written": True}
+
+
 async def register_session(
     gx: GraphHandle,
     key: str,           # Stable session key (the start-time timestamp, e.g. 2026-07-08_10-58-13)
@@ -670,3 +765,6 @@ async def _diagnose_supersede_miss(
                 f"`{p.get('value')}`) — this write targets slot `{slot_id}`; "
                 f"re-check the subject (aliases can resolve two spellings apart)")
     return f"`{token}` did not resolve against this slot's assertions"
+
+
+PROPOSAL_LABEL = "Proposal"  # Proposal node kind (bb015d12) — projection-local for the first slice; schema promotion when the shape settles

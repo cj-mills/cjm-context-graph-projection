@@ -339,6 +339,13 @@ async def review_frontier(
                 link_births[key] = max(link_births.get(key, 0.0), row["ts"])
     verified = bool([p for p in (journal_paths or []) if p])
 
+    # Drafted proposals (bb015d12): (deliverable, change key) -> Proposal id, so a stale row
+    # points at the draft that answers it and `propose` never re-drafts the same change.
+    from .write import PROPOSAL_LABEL
+    proposals: Dict[Tuple[str, str], str] = {}
+    for pn in await F.load_label(gx, PROPOSAL_LABEL):
+        proposals[(str(F.prop(pn, "deliverable_id") or ""), str(F.prop(pn, "key") or ""))] = F.nid(pn)
+
     walks: Dict[str, Dict[str, List[Dict[str, str]]]] = {}
     for ap in approvals:
         d = ap["subject_id"]
@@ -378,7 +385,7 @@ async def review_frontier(
             key = change_key(uid, token)
             changes.append({"upstream": _ref(uid), "path": [{**h, "label": _label(h["id"])} for h in path],
                             "class": cls, "detail": detail, "at": at, "key": key,
-                            "acknowledged": key in acked})
+                            "acknowledged": key in acked, "proposal": proposals.get((d, key))})
 
         # self: the deliverable's own content moved off the approved hash (demotion by derivation).
         if ap["bound_hash"]:

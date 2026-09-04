@@ -273,6 +273,45 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         return (f"**unlinked** `{obj.get('source_id')}` —_{obj.get('relation')}_→ "
                 f"`{obj.get('target_id')}` — edge {outcome}\n"
                 f"`edge {obj.get('edge_id')}` (retraction journaled; replay converges without it)")
+    if kind == "propose":
+        # Triage proposals (bb015d12): what was drafted, what was skipped and why.
+        c = obj.get("counts", {})
+        lines = ["## Triage proposals",
+                 f"_stale {c.get('stale', 0)} · proposed {c.get('proposed', 0)} · skipped {c.get('skipped', 0)}_"
+                 + ("  (dry run — nothing minted)" if any(p.get("dry_run") for p in obj.get("proposals", [])) else ""),
+                 ""]
+        for p in obj.get("proposals", []):
+            a, d, u = p.get("args", {}), p.get("deliverable", {}), p.get("upstream", {})
+            pid = str(p.get("proposal_id") or "")[:8] or "(dry)"
+            tag = " (already existed)" if p.get("existing") else ""
+            lines.append(f"📝 **{_short(d.get('label'), 70)}** `{(d.get('id') or '')[:8]}` — section `{a.get('anchor')}` "
+                         f"← **{_short(u.get('label'), 50)}** `{(u.get('id') or '')[:8]}`: proposal `{pid}`{tag}")
+            lines.append(f"    {a.get('summary')}")
+            if p.get("proposal_id"):
+                lines.append(f"    confirm: `confirm-proposal {pid}` · reject: `assert {(d.get('id') or '')[:8]} "
+                             f"review_verdict {a.get('key')}` · read: `read {pid}`")
+        for s in obj.get("skipped", []):
+            lines.append(f"  - skipped `{(s.get('deliverable') or '')[:8]}` ← `{(s.get('upstream') or '')[:8]}` "
+                         f"[{s.get('class')}]: {s.get('reason')}")
+        if not obj.get("proposals") and not obj.get("skipped"):
+            lines.append("_(nothing to propose — the review frontier is empty)_")
+        return "\n".join(lines)
+    if kind == "confirm-proposal":
+        if obj.get("error"):
+            return f"⚠ {obj['error']}"
+        sec, ap = obj.get("section", {}), obj.get("approval", {})
+        state = "unchanged (already applied)" if sec.get("unchanged") else "applied"
+        rel = sec.get("relations") or {}
+        rel_note = (f"; relations +{len(rel.get('added', []))}/−{len(rel.get('removed', []))}"
+                    if rel.get("added") or rel.get("removed") else "")
+        lines = [f"**confirmed** proposal `{str(obj.get('proposal_id') or '')[:8]}` → section `{sec.get('anchor')}` "
+                 f"of `{sec.get('slug')}` {state}{rel_note}"]
+        if ap:
+            lines.append(f"re-approved: `{obj.get('approval_predicate')}={obj.get('approval_value')}` on "
+                         f"`{str(obj.get('deliverable_id') or '')[:8]}` (bound "
+                         f"{str(ap.get('subject_content_hash') or '').split(':')[-1][:12] or 'no hash'}; "
+                         f"superseded {len(ap.get('superseded') or [])})")
+        return "\n".join(lines)
     if kind == "check":
         if obj.get("error"):
             return f"⚠ {obj['error']}"
@@ -424,6 +463,11 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                 elif not ch.get("acknowledged"):
                     lines.append(f"    ack: `assert {did} review_verdict {ch.get('key')}`  · or update "
                                  f"the deliverable and re-assert {ap.get('predicate')} {ap.get('value')}")
+                    if ch.get("proposal"):
+                        # bb015d12: an agent-drafted update sits beside the approved content
+                        lines.append(f"    📝 proposal `{str(ch['proposal'])[:8]}` drafted — confirm: "
+                                     f"`confirm-proposal {str(ch['proposal'])[:8]}` (applies the draft + "
+                                     f"re-asserts {ap.get('predicate')} {ap.get('value')}) · reject: the ack above")
             if r.get("acknowledged") and not (obj.get("view") or {}).get("all"):
                 lines.append(f"  _({r['acknowledged']} acknowledged change(s) hidden — `--all` shows them)_")
         return "\n".join(lines)
