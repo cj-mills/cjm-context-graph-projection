@@ -530,7 +530,10 @@ async def _dispatch(args) -> int:
                 append_write(args.journal_path, "assert",
                              {"subject": args.subject, "predicate": args.predicate,
                               "value": args.value, "actor": args.actor,
-                              "evidence": args.evidence, "supersede": args.supersede})
+                              "evidence": args.evidence, "supersede": args.supersede,
+                              # the bound content hash rides the op (design 40622922): replay
+                              # re-lands the SAME approval, never one recomputed post hoc
+                              "subject_content_hash": res.get("subject_content_hash")})
             return 1 if res.get("error") else (2 if res.get("conflict") else 0)
         elif args.command == "alias":
             actor = f"agent:session:{args.session}" if args.session else args.actor
@@ -1075,7 +1078,8 @@ async def _dispatch(args) -> int:
                     append_write(args.journal_path, "assert",
                                  {"subject": res["note_id"], "predicate": "publish_state",
                                   "value": "draft", "actor": _DEFAULT_ACTOR,
-                                  "evidence": None, "supersede": False})
+                                  "evidence": None, "supersede": False,
+                                  "subject_content_hash": st.get("subject_content_hash")})
             return 1 if res.get("error") else 0
         elif args.command == "emit-post":
             # The outward leg of draft-at-birth (793f025e; item 6eba8815): refuses anything

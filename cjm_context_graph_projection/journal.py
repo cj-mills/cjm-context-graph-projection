@@ -162,10 +162,13 @@ async def _apply_op(gx: GraphHandle, op: Dict[str, Any]) -> str:
         # property-level verb-time stamp in the schema — without the override a
         # rebuild re-stamps every assertion to rebuild time. Pre-ts records fall
         # back to the verb's now() default. Oracle refreshes keep last_verified.
+        # subject_content_hash rides the op too (design 40622922): replay carries the SAME
+        # bound hash the live write recorded, never one recomputed from post-hoc content.
         await assert_value(gx, a["subject"], a["predicate"], a["value"],
                            actor=a.get("actor", "agent:session"),
                            evidence=a.get("evidence"), supersede=a.get("supersede"),
-                           asserted_at=op.get("ts"), method=a.get("method"))
+                           asserted_at=op.get("ts"), method=a.get("method"),
+                           subject_content_hash=a.get("subject_content_hash"))
     elif verb == "link":
         await link(gx, a["source_id"], a["target_id"], a["relation"],
                    actor=a.get("actor", "agent:session"))

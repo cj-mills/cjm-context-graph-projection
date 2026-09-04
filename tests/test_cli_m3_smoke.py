@@ -218,6 +218,28 @@ def test_born_post_is_draft_at_birth_and_emit_post_gates_on_published(tmp_path):
     r = run_emit()                                                # published -> lands
     assert r.returncode == 0, r.stderr or r.stdout
     assert landed.read_text() == content == (emit / "gate-post" / "index.md").read_text()
+    # APPROVAL BINDS TO CONTENT (design 40622922): the published op journaled the hash it
+    # approved; an edit after publication demotes BY DERIVATION (nothing written) and the
+    # emit refuses until a person re-asserts published — which supersedes the stale approval.
+    pub_ops = [o for o in read_journal(journal) if o["verb"] == "assert"
+               and o["args"]["value"] == "published"]
+    assert len(pub_ops) == 1 and pub_ops[0]["args"]["subject_content_hash"]
+    r = _run("--graph-db-path", db, "--journal-path", journal, "add-section", "gate-post",
+             "--content", "## Later\n\nAdded after publication.\n")
+    assert r.returncode == 0, r.stderr or r.stdout
+    landed.unlink()
+    r = run_emit()                                                # edited -> refused
+    assert r.returncode != 0 and "changed since approval" in (r.stdout + r.stderr)
+    assert not landed.exists()
+    r = _run("--graph-db-path", db, "--journal-path", journal,
+             "assert", note_id, "publish_state", "published")   # re-approval of NEW content
+    assert r.returncode == 0, r.stderr or r.stdout
+    r = run_emit()                                                # re-published -> lands
+    assert r.returncode == 0, r.stderr or r.stdout
+    assert "## Later" in landed.read_text() and landed.read_text() == (emit / "gate-post" / "index.md").read_text()
+    pub_ops = [o for o in read_journal(journal) if o["verb"] == "assert"
+               and o["args"]["value"] == "published"]
+    assert len(pub_ops) == 2 and pub_ops[0]["args"]["subject_content_hash"] != pub_ops[1]["args"]["subject_content_hash"]
     # The publish chain is journaled: a replay-only projection still emits
     r = _run("--graph-db-path", str(tmp_path / "replay.db"), "--journal-path", journal, "replay")
     assert r.returncode == 0, r.stderr or r.stdout

@@ -347,6 +347,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `alias` _function_ — Confirm a drifted link slug as an alias OF a real note (the worklist payoff).
 - `assert_value` _function_ — Write one value to a `(subject, predicate)` slot, recording any conflict.
 - `author_section` _function_ — Apply a memory section's verbatim `raw` STATE to the graph — the born-on-graph leg
+- `content_hash_of` _function_ — The content an approval binds to (design 40622922): a Note hashes as its lossless
 - `decide` _function_ — Record a Decision + its `SUPPORTED_BY` premise edges (reasoning substrate).
 - `link` _function_ — Mint a deliberate edge between two EXISTING nodes (heterogeneous interlink).
 - `mint_procedure` _function_ — Upsert a Procedure node by deterministic (method) id — the programmatic value-source

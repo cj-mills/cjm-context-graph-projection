@@ -85,6 +85,38 @@ async def resolve_subject(
     return {"subject_id": ent.id, "subject_label": subject, "created_node": ent.to_graph_node()}
 
 
+async def content_hash_of(
+    gx: GraphHandle,
+    subject_id: str,     # The assertion's resolved subject node id
+    subject_label: str,  # Its label (kind)
+) -> Optional[str]:  # The subject's LIVE content hash, or None for non-content kinds
+    """The content an approval binds to (design 40622922): a Note hashes as its lossless
+    reconstruction (frontmatter_raw + ordered section raws — the same bytes `read`/emit
+    deliver), a Section as its `raw` span, a code symbol as its `body`, a CodeText as its
+    `text`. Any other kind (a Decision, an Entity, a Session…) has no content to bind —
+    None, and the assertion stays identified by (slot, value, actor) as before."""
+    node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=subject_id)
+    if node is None:
+        return None
+    # resolve_subject's `subject_label` is the slot's DISPLAY label (name/title), not the
+    # kind — read the kind off the node itself (bit on first run: every Note hashed None).
+    from .authoring import _as_wire, _label_of, _note_section_wires
+    kind = _label_of(node)
+    if kind == DevNodeKinds.NOTE:
+        from cjm_markdown_decompose_core.project import note_text_from_graph_nodes
+        secs = await _note_section_wires(gx, subject_id)
+        if not secs and not F.prop(node, "frontmatter_raw"):
+            return None
+        text = note_text_from_graph_nodes(_as_wire(node, DevNodeKinds.NOTE), secs)
+        return SourceRef.compute_hash(text.encode("utf-8"))
+    slot = {DevNodeKinds.SECTION: "raw", DevNodeKinds.CODE_SYMBOL: "body",
+            DevNodeKinds.CODE_TEXT: "text"}.get(kind)
+    if not slot:
+        return None
+    val = F.prop(node, slot)
+    return SourceRef.compute_hash(str(val).encode("utf-8")) if val else None
+
+
 def _match_supersede_targets(
     targets: List[str],            # Caller-named ids, unique id PREFIXES, or values to supersede
     slot_assertions: List[Any],    # Existing assertions in the slot
@@ -135,6 +167,7 @@ async def assert_value(
     supersede: Optional[List[str]] = None, # Prior assertion ids OR values this claim supersedes
     asserted_at: Optional[float] = None,   # Override the timestamp (oracle uses last_verified semantics)
     method: Optional[str] = None,          # Derivation method (oracle/programmatic)
+    subject_content_hash: Optional[str] = None,  # The subject's content hash this claim binds to (design 40622922); None = compute live for content-bearing subjects (replay passes the journaled one)
 ) -> Dict[str, Any]:  # The write result (incl. any conflict, warn-record-flag)
     """Write one value to a `(subject, predicate)` slot, recording any conflict.
 
@@ -153,10 +186,15 @@ async def assert_value(
                 "value": value, "written": False}
     subject_id, subject_label, created = r["subject_id"], r["subject_label"], r["created_node"]
 
+    # Approval binds to content (design 40622922): a claim about a content-bearing subject
+    # records the subject's LIVE content hash (replay passes the journaled one instead).
+    if subject_content_hash is None:
+        subject_content_hash = await content_hash_of(gx, subject_id, subject_label)
     slot = FactSlotNode(subject_id=subject_id, predicate=predicate, subject_label=subject_label)
     assertion = AssertionNode(slot_id=slot.id, value=value, actor=actor, predicate=predicate,
                               subject_id=subject_id, asserted_at=asserted_at, method=method,
-                              last_verified=(asserted_at if method else None))
+                              last_verified=(asserted_at if method else None),
+                              subject_content_hash=subject_content_hash or None)
 
     # Existing state of the slot BEFORE this write.
     all_assertions = await F.load_assertions(gx)
@@ -190,6 +228,18 @@ async def assert_value(
                 # New value is older than an existing active one -> born superseded.
                 edges.append(make_edge(old_id, assertion.id, DevRelations.SUPERSEDES))
                 born_superseded = True
+
+    # Approval binds to content (design 40622922): re-asserting the SAME value over CHANGED
+    # content is a new claim (the hash is in its identity) that supersedes the stale approval
+    # of that value; same value on unchanged content is the idempotent no-op it always was.
+    if assertion.subject_content_hash:
+        for old in active_existing:
+            old_id = F.nid(old)
+            if (old_id != assertion.id and old_id not in superseded_ids
+                    and P.canonical_value(predicate, F.prop(old, "value", "")) == assertion.canonical
+                    and F.prop(old, "subject_content_hash") != assertion.subject_content_hash):
+                edges.append(assertion.supersedes_edge(old_id))
+                superseded_ids.append(old_id)
 
     # Explicit supersede targets (ids, unique prefixes, or values) — resolved on
     # THIS slot, and REFUSED LOUDLY on any miss (41449193): a supersede that lands
@@ -249,6 +299,7 @@ async def assert_value(
 
     return {
         "subject": subject, "subject_id": subject_id, "slot_id": slot.id,
+        "subject_content_hash": assertion.subject_content_hash,
         "predicate": predicate, "value": value, "actor": actor,
         "assertion_id": assertion.id, "created_subject": created is not None,
         "nodes_added": res.nodes_added, "edges_added": res.edges_added,

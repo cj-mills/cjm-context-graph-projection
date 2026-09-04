@@ -1351,8 +1351,22 @@ async def emit_post(
                 "written": False}
     secs = await _note_section_wires(gx, nid)
     text = note_text_from_graph_nodes(_as_wire(node, DevNodeKinds.NOTE), secs)
+    # APPROVAL BINDS TO CONTENT (design 40622922): the published assertion carries the
+    # reconstruction hash it approved; an edit after publication demotes BY DERIVATION —
+    # nothing is written, the hashes simply no longer match — and re-publishing is a fresh
+    # human assertion. An approval with no bound hash never gates an emit.
+    live_hash = SourceRef.compute_hash(text.encode("utf-8"))
+    bound = str(F.prop(active[0], "subject_content_hash") or "")
+    if bound != live_hash:
+        why = ("carries no bound content hash" if not bound
+               else f"approved content {bound[:12]} but the post now reads {live_hash[:12]}")
+        return {"error": f"post `{slug}` is published but its approval {why} — the content "
+                         "changed since approval: re-review in staging and re-assert "
+                         "publish_state published",
+                "node_id": nid, "slug": slug, "publish_state": "published", "path": target,
+                "approved_hash": bound, "live_hash": live_hash, "written": False}
     if write:
         Path(target).parent.mkdir(parents=True, exist_ok=True)
         Path(target).write_text(text)
     return {"node_id": nid, "slug": slug, "publish_state": "published", "path": target,
-            "written": write, "bytes": len(text.encode("utf-8"))}
+            "written": write, "bytes": len(text.encode("utf-8")), "content_hash": live_hash}
