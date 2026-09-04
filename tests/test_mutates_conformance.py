@@ -32,9 +32,13 @@ def test_no_direct_file_mutation_outside_the_seam():
     # in place; journal-then-rewrite order), and the authoring verbs' enumerated
     # TRANSITIONAL bare-path/note branches (source_journal_path=None, writes-journal
     # domain). structure.py (memory notes) rides the writes-journal domain entirely.
+    # emit_post (6eba8815) is a DELIVERABLE projection in the writes-journal domain, the
+    # same class as structure.py's note writes: the file is a deterministic function of
+    # graph state gated by the journaled publish_state fact, so it carries no source
+    # journal event of its own (a rebuild + re-emit reproduces it byte-for-byte).
     allowed = {"journaled_emit", "emit_source_artifact", "cutover_module",
                "absorb_authored_text", "author", "add_symbol", "add_text",
-               "emit_artifact"}
+               "emit_artifact", "emit_post"}
     pkg = Path(cli_mod.__file__).parent
     offenders = []
     for name in ("authoring", "refactor_ops", "module_ops", "rename_ops", "source_state"):

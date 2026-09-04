@@ -196,8 +196,8 @@ async def new_note(
     if existing is not None:
         return {"error": f"note `{slug}` already exists (use add-section / author)",
                 "slug": slug, "written": False}
-    res = {"slug": slug, "path": path, "sections": len(note.sections), "written": False,
-           "profile": profile}
+    res = {"slug": slug, "note_id": note.id, "path": path, "sections": len(note.sections),
+           "written": False, "profile": profile}
     if write:
         Path(path).write_text(content)
         nodes, edges = corpus_graph_elements([note])

@@ -21,7 +21,7 @@ from typing import Any, Dict, Optional
 from cjm_context_graph_layer.ops import extend_graph
 from cjm_context_graph_primitives.journal import append_write, read_journal
 
-from .authoring import add_symbol, author, emit_artifact, read_node, read_slot
+from .authoring import add_symbol, author, emit_artifact, emit_post, read_node, read_slot
 from .code_edges import orphaned_edges
 from .cohesion import cohesion
 from .config import load_graph_config
@@ -168,7 +168,7 @@ ID_REFS: Dict[str, tuple] = {
     "regroup": ("symbol_ids",), "rename-module": ("module_id",),
     "delete-module": ("module_id",), "rename-symbol": ("symbol_id",),
     "flip-module": ("repo_key",), "cutover": ("repo_key",),
-    "emit-artifact": ("repo_key",),
+    "emit-artifact": ("repo_key",), "emit-post": ("note_id",),
 }
 
 
@@ -1061,6 +1061,33 @@ async def _dispatch(args) -> int:
                 if slug:
                     op["slug"] = slug
                 append_write(args.journal_path, "new-note", op)
+            # DRAFT AT BIRTH (user ruling 793f025e): a born POST is a public-facing
+            # deliverable, so it carries publish_state=draft from the SAME invocation that
+            # minted it — never a public-facing node without a publish state. Promotion is a
+            # human assertion (draft < reviewed < published, ordered so it auto-supersedes)
+            # and the website emit (`emit-post`) gates on `published`. The memory lane
+            # (--path) is private planning and carries no publish state.
+            if slug and res.get("written") and not res.get("error"):
+                st = await assert_value(gx, res["note_id"], "publish_state", "draft",
+                                        actor=_DEFAULT_ACTOR)
+                print(render("assert", st, args.format))
+                if args.journal_path and not st.get("error"):
+                    append_write(args.journal_path, "assert",
+                                 {"subject": res["note_id"], "predicate": "publish_state",
+                                  "value": "draft", "actor": _DEFAULT_ACTOR,
+                                  "evidence": None, "supersede": False})
+            return 1 if res.get("error") else 0
+        elif args.command == "emit-post":
+            # The outward leg of draft-at-birth (793f025e; item 6eba8815): refuses anything
+            # but a single active publish_state=published, then writes the lossless graph
+            # reconstruction to <website_root>/posts/<slug>/index.md. Not journaled — the
+            # publish_state fact is the truth; this projection is deterministic from it.
+            if not args.website_root:
+                print("error: emit-post needs --website-root (or `website_root` in the "
+                      "graph-sibling graph.config.json)", file=sys.stderr)
+                return 1
+            res = await emit_post(gx, args.note_id, args.website_root, write=not args.no_write)
+            print(render("structure", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "move":
             res = await move(gx, args.symbol_id, args.target_module_id, write=not args.no_write,
@@ -1293,7 +1320,8 @@ def _apply_graph_config(args) -> None:
                              ("manifests_dir", "manifests_dir", DEFAULT_MANIFESTS),
                              ("notes_corpus", "notes_corpus", None),
                              ("notes_profile", "profile", None),
-                             ("emit_root", "emit_root", None)):
+                             ("emit_root", "emit_root", None),
+                             ("website_root", "website_root", None)):
         if key in cfg and hasattr(args, attr):
             current = getattr(args, attr)
             if (not current) if baked is None else (current == baked):
@@ -1803,6 +1831,16 @@ def main() -> int:
                            "config's notes_profile, else auto-detect from the frontmatter)")
     p_nn.add_argument("--emit-root", default=None,
                       help="Where born posts land (default: the sibling config's emit_root)")
+
+    p_ep = sub.add_parser("emit-post",
+                          help="Emit a born post to the PUBLIC website clone — GATED on a single active "
+                               "publish_state=published (ruling 793f025e; item 6eba8815)")
+    p_ep.add_argument("note_id", help="The born post's Note id (or unique prefix)")
+    p_ep.add_argument("--website-root", default=None,
+                      help="The website clone root (default: the sibling config's website_root); "
+                           "the post lands at <root>/posts/<slug>/index.md")
+    p_ep.add_argument("--no-write", action="store_true",
+                      help="Report the gate verdict + target path without writing")
     g_nn = p_nn.add_mutually_exclusive_group(required=True)
     g_nn.add_argument("--content", help="The full note text (frontmatter + body)")
     g_nn.add_argument("--content-file", help="Read the full note text from a file")

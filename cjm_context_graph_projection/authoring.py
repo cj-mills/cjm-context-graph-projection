@@ -1310,3 +1310,49 @@ async def _route_container_edit(
         err += (f" — closest is `{best[1]['id'][:8]}` ({best[1]['label']} "
                 f"{_name(best[1])}):\n{best[2]}")
     return {"error": err, "node_id": nid, "written": False}
+
+
+async def emit_post(
+    gx: GraphHandle,
+    note_id: str,          # The born post's Note id (or unique prefix)
+    website_root: str,     # The website clone root; the post lands at <root>/posts/<slug>/index.md
+    *,
+    write: bool = True,    # Write the file (else report the gate verdict + target only)
+) -> Dict[str, Any]:  # {node_id, slug, publish_state, path, written} or {error}
+    """Emit a born post to the PUBLIC website clone — GATED on publish_state=published.
+
+    The outward leg of the draft-at-birth ruling (793f025e) on the posts lane (item 6eba8815):
+    a deliverable born on-graph carries publish_state=draft from its minting invocation,
+    promotion is a human assertion, and this verb refuses anything but a single active
+    `published` — so no agent verb can push content to the site by minting it. The emitted
+    bytes are the lossless graph reconstruction (frontmatter_raw + ordered section raws),
+    identical to the staging file: enrichment lives beside the note as edges and facts and
+    never enters the .md. Not journaled — the publish_state fact is the durable truth and this
+    projection is deterministic from it (re-run after a rebuild reproduces the same file)."""
+    res = await resolve_node_ref(gx, note_id)
+    if "candidates" in res:
+        return {"error": ambiguity_error(note_id, res["candidates"]), "node_id": note_id}
+    node = res.get("node")
+    if node is None or _label_of(node) != DevNodeKinds.NOTE:
+        return {"error": f"no Note `{note_id}`", "node_id": note_id}
+    nid = F.nid(node) or note_id
+    slug = str(F.prop(node, "slug") or "")
+    slot = [a for a in await F.load_assertions(gx)
+            if F.prop(a, "subject_id") == nid and F.prop(a, "predicate") == "publish_state"]
+    active = F.active_assertions(slot, await F.load_supersedes(gx))
+    states = sorted({str(F.prop(a, "value") or "") for a in active})
+    target = str(Path(website_root) / "posts" / slug / "index.md")
+    if states != ["published"]:
+        shown = "/".join(states) if states else "ABSENT"
+        return {"error": f"post `{slug}` is not published (publish_state={shown}) — the website "
+                         "emit is gated on a single active publish_state=published (ruling "
+                         "793f025e); promote with `assert <note> publish_state published`",
+                "node_id": nid, "slug": slug, "publish_state": states, "path": target,
+                "written": False}
+    secs = await _note_section_wires(gx, nid)
+    text = note_text_from_graph_nodes(_as_wire(node, DevNodeKinds.NOTE), secs)
+    if write:
+        Path(target).parent.mkdir(parents=True, exist_ok=True)
+        Path(target).write_text(text)
+    return {"node_id": nid, "slug": slug, "publish_state": "published", "path": target,
+            "written": write, "bytes": len(text.encode("utf-8"))}
