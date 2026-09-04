@@ -388,6 +388,45 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             for a in c.get("assertions", []):
                 lines.append(f"    - _{a.get('value')}_ (actor {a.get('actor')}) `{a.get('assertion_id')}`")
         return "\n".join(lines)
+    if kind == "review-frontier":
+        # The triage worklist (730e077e): one row per STALE approved deliverable, each
+        # change with its class, chain path and the ack / re-approval recipe — the
+        # propose/confirm shape (nothing here writes; the recipes are the confirm).
+        c = obj.get("counts", {})
+        did = ""
+        lines = ["## Review frontier",
+                 f"_approvals {c.get('approvals', 0)} · stale {c.get('stale', 0)} · changes "
+                 f"{c.get('changes', 0)} (acknowledged {c.get('acknowledged', 0)}) · unverifiable "
+                 f"{c.get('unverifiable', 0)}_  (staleness is DERIVED, never stored — design 40622922)", ""]
+        rows = obj.get("stale", [])
+        if not rows:
+            lines.append("_(nothing stale — no approved deliverable has an unacknowledged upstream change)_")
+            return "\n".join(lines)
+        for r in rows:
+            d, ap = r.get("deliverable", {}), r.get("approval", {})
+            did = (d.get("id") or "")[:8]
+            bound = ap.get("bound_hash")
+            lines.append(f"⚠ **{_short(d.get('label'), 90)}** `{did}` — {ap.get('predicate')}="
+                         f"{ap.get('value')} by {ap.get('actor')} @ {_fmt_ts(ap.get('asserted_at'))}"
+                         + (f" (bound {str(bound).split(':')[-1][:12]})" if bound else " (no bound hash)"))
+            for ch in r.get("changes", []):
+                u = ch.get("upstream", {})
+                mark = "✔ " if ch.get("acknowledged") else ""
+                lines.append(f"  - {mark}[{ch.get('class')}] **{_short(u.get('label'), 70)}** "
+                             f"`{(u.get('id') or '')[:8]}` _{u.get('kind')}_ — {ch.get('detail')}")
+                path = ch.get("path") or []
+                if path:
+                    chain = " → ".join(f"{h.get('relation')} → `{(h.get('id') or '')[:8]}`" for h in path)
+                    lines.append(f"    chain: `{did}` → {chain}")
+                if ch.get("class") == "self":
+                    lines.append(f"    fix: re-review, then `assert {did} {ap.get('predicate')} "
+                                 f"{ap.get('value')}` (re-approval of the new content)")
+                elif not ch.get("acknowledged"):
+                    lines.append(f"    ack: `assert {did} review_verdict {ch.get('key')}`  · or update "
+                                 f"the deliverable and re-assert {ap.get('predicate')} {ap.get('value')}")
+            if r.get("acknowledged") and not (obj.get("view") or {}).get("all"):
+                lines.append(f"  _({r['acknowledged']} acknowledged change(s) hidden — `--all` shows them)_")
+        return "\n".join(lines)
     if kind == "readiness":
         c = obj.get("counts", {})
         extra = ""

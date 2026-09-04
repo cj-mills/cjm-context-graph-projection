@@ -38,6 +38,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - **`cjm_context_graph_projection.registers`** — Register drift-check: each hub note's member-cache vs the active `role` assertions.
 - **`cjm_context_graph_projection.rename_ops`** — Symbol `rename` — the Ext-B increment: scoped identifier substitution INTO bodies.
 - **`cjm_context_graph_projection.render`** — Render projection results for a consumer: agent (JSON) or human (markdown).
+- **`cjm_context_graph_projection.review`** — The review frontier: which APPROVED deliverables have stale upstream — derived, never stored.
 - **`cjm_context_graph_projection.runtime`** — Open a context graph for reading/writing (domain-neutral runtime wiring).
 - **`cjm_context_graph_projection.scratchpad_export`** — Scratchpad session .md exporter — the projection lens (increment iv of the
 - **`cjm_context_graph_projection.seeds`** — Hand-seeded load-bearing slots + the rename-stable repo-key machinery.
@@ -267,6 +268,14 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 ### `cjm_context_graph_projection.render`
 
 - `render` _function_ — Render a projection result in the requested format.
+
+### `cjm_context_graph_projection.review`
+
+- `approvals_of` _function_ — Pure: the ACTIVE approval-class assertions (the roots the frontier walks from).
+- `change_key` _function_ — The change KEY an acknowledgment binds to: `<upstream 8>@<token 12>` (a hash token
+- `classify_text_change` _function_ — Pure, revert-aware: compare the live content against its approval-time baseline.
+- `review_frontier` _function_ — The derived review frontier: approved deliverables whose upstream changed since approval.
+- `walk_upstream` _function_ — Pure: BFS upstream from the deliverable's components along the dependency edges.
 
 ### `cjm_context_graph_projection.runtime`
 

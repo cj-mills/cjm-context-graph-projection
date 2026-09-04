@@ -576,13 +576,17 @@ def _segment_touch_rows(seg: str) -> List[Dict[str, Any]]:
     if hit and hit[0] == key:
         return hit[1]
     rows: List[Dict[str, Any]] = []
-    for line in p.read_text().splitlines():
+    for i, line in enumerate(p.read_text().splitlines()):
         line = line.strip()
         if not line:
             continue
         op = json.loads(line)
         a = op.get("args") or {}
         verb = op.get("verb") or "?"
+        # (seg, line) lets a consumer re-read ONE op's payload on demand (the review
+        # frontier's baseline compare, 730e077e); `source_op` is a source snapshot's
+        # per-symbol record (node_id/op/slot) and `relation` a link/unlink's edge type —
+        # both tiny, both needed to attribute a touch without re-parsing the family.
         rows.append({"verb": verb,
                      "ts": float(op.get("ts") or 0.0),
                      "session": op.get("session"),
@@ -590,7 +594,11 @@ def _segment_touch_rows(seg: str) -> List[Dict[str, Any]]:
                      "actor": a.get("actor"),
                      "session_key": a.get("key") if verb == "session" else None,
                      "started_at": a.get("started_at") if verb == "session" else None,
-                     "refs": touched_node_ids(op)})
+                     "refs": touched_node_ids(op),
+                     "seg": seg, "line": i,
+                     "source_op": (op.get("op") if verb == "source" and isinstance(op.get("op"), dict)
+                                   else None),
+                     "relation": a.get("relation") if verb in ("link", "unlink") else None})
     _TOUCH_ROWS_CACHE[seg] = (key, rows)
     return rows
 

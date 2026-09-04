@@ -52,6 +52,7 @@ from .refactor_ops import move
 from .registers import register_drift
 from .rename_ops import rename_symbol, rename_symbols
 from .render import render as _render_base
+from .review import review_frontier
 from .runtime import DEFAULT_MANIFESTS, open_graph
 from .seeds import repo_dir_name
 from .serve import serve_graphs
@@ -169,6 +170,7 @@ ID_REFS: Dict[str, tuple] = {
     "delete-module": ("module_id",), "rename-symbol": ("symbol_id",),
     "flip-module": ("repo_key",), "cutover": ("repo_key",),
     "emit-artifact": ("repo_key",), "emit-post": ("note_id",),
+    "review-frontier": ("subject",),
 }
 
 
@@ -460,6 +462,29 @@ async def _dispatch(args) -> int:
                                   limit=args.limit, offset=args.offset,
                                   anchor=args.anchor, where=args.where)
             print(render("readiness", res, args.format))
+        elif args.command == "review-frontier":
+            # Derived invalidation over dependency chains (730e077e): journals are the
+            # content-verification substrate (writes = notes/sections, source = code);
+            # without them the frontier still reports assertion + self changes.
+            jp = [p for p in (args.journal_path, args.source_journal_path) if p]
+            # b73e7688 ID_REFS conformance: an id-shaped subject resolves through the shared
+            # seam (unique prefix -> full id; ambiguity fails loud); anything else is a
+            # label substring, as readiness takes its scope.
+            subj = args.subject
+            if subj and len(subj) >= 6 and all(c in "0123456789abcdef-" for c in subj):
+                from .projection import ambiguity_error, resolve_node_ref
+                r = await resolve_node_ref(gx, subj)
+                if "candidates" in r:
+                    print(ambiguity_error(subj, r["candidates"]), file=sys.stderr)
+                    return 1
+                node = r.get("node")
+                if node is None:
+                    print(f"error: no node `{subj}` — `locate` the deliverable first", file=sys.stderr)
+                    return 1
+                subj = node.get("id") if isinstance(node, dict) else getattr(node, "id", subj)
+            res = await review_frontier(gx, jp, subject=subj, depth=args.depth,
+                                        include_acked=args.all)
+            print(render("review-frontier", res, args.format))
         elif args.command == "register-drift":
             print(render("register-drift", await register_drift(gx), args.format))
         elif args.command == "prose-refs":
@@ -1488,6 +1513,18 @@ def main() -> int:
     p_rd.add_argument("--where", action="append", metavar="PRED=VALUE",
                       help="Active-fact filter on items (repeatable, ANDed — e.g. "
                            "priority=awaiting-user)")
+
+    p_rf = sub.add_parser("review-frontier",
+                          help="Derived review frontier: approved deliverables (publish_state >= "
+                               "reviewed) whose upstream — DERIVED_FROM / DEPENDS_ON / REFERENCES / "
+                               "SHAPES chains — changed since approval; change classes + chain path "
+                               "+ ack recipe (assert <d> review_verdict <key>); needs --journal-path "
+                               "and --source-journal-path to verify content (design 40622922)")
+    p_rf.add_argument("subject", nargs="?", default=None,
+                      help="Restrict to one deliverable (id prefix) or a label substring")
+    p_rf.add_argument("--depth", type=int, default=3, help="Upstream walk depth (default 3)")
+    p_rf.add_argument("--all", action="store_true",
+                      help="List acknowledged changes too (default: counted, hidden)")
 
     p_rg = sub.add_parser("register-drift",
                           help="Reconcile each <value>-register hub's REFERENCES cache against "
