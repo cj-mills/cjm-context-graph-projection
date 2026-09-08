@@ -174,6 +174,7 @@ ID_REFS: Dict[str, tuple] = {
     "emit-artifact": ("repo_key",), "emit-post": ("note_id",),
     "review-frontier": ("subject",), "propose": ("subject",), "confirm-proposal": ("proposal",),
     "link-audit": ("note",),
+    "notes-retract": ("point",), "notes-check": ("point",),
 }
 
 
@@ -1003,6 +1004,9 @@ async def _dispatch(args) -> int:
             if em.get("error"):
                 print(f"⚠ emit: {em['error']}", file=sys.stderr)
             return 0
+        elif str(args.command).startswith("notes-"):
+            # The pure-notes lane (ruling a7262fe7, item fdafeed9): its own dispatcher.
+            return await _notes_lane_command(args, gx)
         elif args.command == "check":
             res = await add_check(gx, args.item, args.text, actor=args.actor)
             print(render("check", res, args.format))
@@ -1440,6 +1444,305 @@ def _apply_graph_config(args) -> None:
             current = getattr(args, attr)
             if (not current) if baked is None else (current == baked):
                 setattr(args, attr, cfg[key])
+
+
+def _notes_lane_root(args: argparse.Namespace) -> Path:
+    """Where the lane's packs + proposal sets live: `--out-dir`, else `<journal dir>/purenotes`
+    (the PRIVATE repo beside the notes journal — inference output is provenance, never public)."""
+    if getattr(args, "out_dir", None):
+        return Path(args.out_dir).expanduser()
+    if args.journal_path:
+        return Path(args.journal_path).expanduser().resolve().parent / "purenotes"
+    return Path("purenotes")
+
+
+def _read_rows_file(path: Path) -> list:
+    """A proposer's output: JSONL rows or one JSON array; blank lines + code-fence lines skipped."""
+    text = path.read_text()
+    stripped = text.strip()
+    if stripped.startswith("["):
+        data = json.loads(stripped)
+        if not isinstance(data, list):
+            raise SystemExit(f"{path}: expected a JSON array of rows")
+        return data
+    rows = []
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith("```"):
+            continue
+        rows.append(json.loads(s))
+    return rows
+
+
+async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
+    """The pure-notes lane's verbs (a7262fe7): type profile, pack, ingest, accept, retract,
+    coverage, overlap, check, render. Writes journal exactly what replay needs."""
+    from cjm_dev_graph_schema.identity import note_node_id
+    from .purenotes import (PURE_NOTES_KEY, accept_point, build_notes_pack, load_deliverable_type,
+                            load_notes_propsets, load_points, mint_deliverable_type,
+                            note_deliverable_type, observe_segments, overlapping_points, pick_propset,
+                            point_check, point_coverage, proposals_from_point_rows, read_source_unit,
+                            render_notes, render_notes_pack, resolve_sibling_source, retract_point,
+                            validate_point_rows, write_notes_propset)
+    from .write import assert_value
+    siblings = sibling_graphs(load_graph_config(args.graph_db_path))
+
+    def _sibling_key(explicit: Optional[str]) -> Optional[str]:
+        if explicit:
+            if explicit not in siblings:
+                print(f"error: no sibling graph `{explicit}` in this graph's config "
+                      f"(keys: {sorted(siblings) or 'none'})", file=sys.stderr)
+                return None
+            return explicit
+        if len(siblings) == 1:
+            return next(iter(siblings))
+        print(f"error: pass --sibling <key> (config `sibling_graphs` keys: {sorted(siblings) or 'none'})",
+              file=sys.stderr)
+        return None
+
+    cmd = args.command
+    if cmd == "notes-type":
+        overrides: Dict[str, Any] = {}
+        if args.policy_file:
+            overrides = json.loads(Path(args.policy_file).expanduser().read_text())
+        res = await mint_deliverable_type(
+            gx, args.key, title=str(overrides.get("title") or args.title or ""),
+            description=str(overrides.get("description") or ""),
+            information_policy=overrides.get("information_policy"),
+            presentation_policy=overrides.get("presentation_policy"),
+            production_procedure=overrides.get("production_procedure"), actor=args.actor)
+        print(render("notes-type", res, args.format))
+        if args.journal_path and res.get("written"):
+            append_write(args.journal_path, "deliverable-type", res["args"])
+        return 0
+    if cmd == "notes-pack":
+        key = _sibling_key(args.sibling)
+        if not key:
+            return 1
+        tprops = await load_deliverable_type(gx, args.type)
+        if tprops is None:
+            print(f"error: deliverable type `{args.type}` is not minted — run `notes-type {args.type}` first",
+                  file=sys.stderr)
+            return 1
+        try:
+            async with open_graph(siblings[key], args.manifests_dir, readonly=True) as sg:
+                src = await resolve_sibling_source(sg, args.source)
+                if src.get("error"):
+                    print(f"error: {src['error']}", file=sys.stderr)
+                    return 1
+                unit = await read_source_unit(sg, src["source_id"], skeleton=args.skeleton)
+        except RuntimeError as e:
+            print(f"error: sibling graph `{key}` unavailable: {e}", file=sys.stderr)
+            return 1
+        if unit.get("error"):
+            print(f"error: {unit['error']}", file=sys.stderr)
+            return 1
+        window = tuple(args.window) if args.window else None
+        pack = build_notes_pack(unit, tprops, window=window)
+        pack["source"]["graph"] = key
+        pack["digest"] = pack["digest"]  # digest excludes the graph key by construction (source block hashed before)
+        out_dir = _notes_lane_root(args) / "packs"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        json_path, md_path = out_dir / f"{pack['pack_id']}.json", out_dir / f"{pack['pack_id']}.md"
+        json_path.write_text(json.dumps(pack, indent=2, ensure_ascii=False))
+        md_path.write_text(render_notes_pack(pack))
+        print(render("notes-pack", {"pack_id": pack["pack_id"], "source": pack["source"],
+                                    "lines": len(pack["segments"]), "headers": len(pack["headers"]),
+                                    "quote_spans": len(pack["quote_spans"]), "json_path": str(json_path),
+                                    "md_path": str(md_path)}, args.format))
+        return 0
+    if cmd == "notes-ingest":
+        pack = json.loads(Path(args.pack).expanduser().read_text())
+        try:
+            rows = validate_point_rows(_read_rows_file(Path(args.rows).expanduser()), pack)
+        except (ValueError, json.JSONDecodeError) as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        proposals = proposals_from_point_rows(rows, pack)
+        res = write_notes_propset(pack, proposals, out_root=_notes_lane_root(args) / "proposals",
+                                  proposer={"kind": args.proposer_kind, "name": args.proposer,
+                                            "model": args.model})
+        print(render("notes-ingest", res, args.format))
+        return 0
+    if cmd == "notes-accept":
+        root = _notes_lane_root(args) / "proposals"
+        chosen = pick_propset(load_notes_propsets(root), args.set)
+        if chosen is None:
+            print(f"error: no proposal set under {root}" + (f" matching `{args.set}`" if args.set else ""),
+                  file=sys.stderr)
+            return 1
+        manifest, proposals = chosen["manifest"], chosen["proposals"]
+        set_id = str(manifest.get("proposal_set_id") or "")
+        source = dict(manifest.get("source") or {})
+        key = _sibling_key(args.sibling or source.get("graph"))
+        if not key:
+            return 1
+        note_id = note_node_id(args.slug)
+        have = {str(p.get("key")) for p in await load_points(gx, note_id)}
+        pending = [p for p in proposals if p["proposal_id"] not in have]
+        if args.list or not (args.accept or args.accept_all):
+            print(render("notes-accept", {"slug": args.slug, "set_id": set_id, "listing": pending,
+                                          "accepted_before": len(proposals) - len(pending)}, args.format))
+            return 0
+        picked: list = []
+        skipped: list = []
+        if args.accept_all:
+            picked = list(pending)
+        else:
+            for tok in args.accept:
+                hits = [p for p in pending if p["proposal_id"].startswith(tok)]
+                if len(hits) == 1:
+                    picked.append(hits[0])
+                elif not hits:
+                    done = [p for p in proposals if p["proposal_id"].startswith(tok)]
+                    skipped.append({"proposal_id": tok, "reason": "already accepted" if done else "no pending proposal matches"})
+                else:
+                    skipped.append({"proposal_id": tok, "reason": f"ambiguous ({len(hits)} match)"})
+        if args.text and len(picked) != 1:
+            print("error: --text applies to exactly ONE --accept", file=sys.stderr)
+            return 1
+        type_fact = None
+        tkey = await note_deliverable_type(gx, note_id)
+        if tkey is None:
+            st = await assert_value(gx, note_id, "deliverable_type", args.type, actor=args.actor)
+            if st.get("error"):
+                print(f"error: {st['error']}", file=sys.stderr)
+                return 1
+            type_fact = args.type
+            if args.journal_path:
+                append_write(args.journal_path, "assert",
+                             {"subject": note_id, "predicate": "deliverable_type", "value": args.type,
+                              "actor": args.actor, "evidence": None, "supersede": None,
+                              "subject_content_hash": st.get("subject_content_hash")})
+        accepted: list = []
+        unit = {"graph": key, "source_id": source.get("source_id"), "title": source.get("title"),
+                "skeleton_hash": source.get("skeleton_hash"), "work_structure": source.get("work_structure")}
+        try:
+            async with open_graph(siblings[key], args.manifests_dir, readonly=True) as sg:
+                for p in picked:
+                    obs = await observe_segments(key, p["segment_ids"], siblings, args.manifests_dir, handle=sg)
+                    if obs.get("error"):
+                        skipped.append({"proposal_id": p["proposal_id"], "reason": obs["error"]})
+                        continue
+                    point = {"key": p["proposal_id"], "kind": p["kind"], "text": args.text or p["text"],
+                             "lead": p.get("lead") or "", "attribution": p.get("attribution") or "",
+                             "data": p.get("data") or {}, "ordinal": int(p.get("from_i") or 0),
+                             "heading": p.get("heading") or "", "heading_index": int(p.get("heading_index") or 0),
+                             "segment_ids": list(p["segment_ids"]), "start_time": p.get("start_time"),
+                             "end_time": p.get("end_time"), "unit": unit}
+                    res = await accept_point(gx, args.slug, point, observations=obs["observations"],
+                                             actor=args.actor, proposal_set_id=set_id)
+                    if res.get("error"):
+                        print(f"error: {res['error']}", file=sys.stderr)
+                        return 1
+                    accepted.append(res)
+                    if args.journal_path and (not res.get("existing") or res.get("changed")):
+                        append_write(args.journal_path, "accept-point", res["args"])
+        except RuntimeError as e:
+            print(f"error: sibling graph `{key}` unavailable: {e}", file=sys.stderr)
+            return 1
+        print(render("notes-accept", {"slug": args.slug, "set_id": set_id, "accepted": accepted,
+                                      "skipped": skipped, "type_fact": type_fact}, args.format))
+        return 0
+    if cmd == "notes-retract":
+        res = await retract_point(gx, args.point, actor=args.actor)
+        print(render("notes-retract", res, args.format))
+        if res.get("error"):
+            return 1
+        if args.journal_path and res.get("deleted"):
+            append_write(args.journal_path, "retract-point", res["args"])
+        return 0
+    if cmd == "notes-coverage":
+        res = await point_coverage(gx, args.slug, siblings=siblings, graph_key=args.sibling,
+                                   skeleton=args.skeleton, manifests_dir=args.manifests_dir)
+        print(render("notes-coverage", res, args.format))
+        return 1 if res.get("error") else 0
+    if cmd == "notes-overlap":
+        points = await load_points(gx, note_node_id(args.slug))
+        print(render("notes-overlap", {"slug": args.slug, "points": len(points),
+                                       "pairs": overlapping_points(points)}, args.format))
+        return 0
+    if cmd == "notes-check":
+        res = await point_check(gx, args.point, siblings=siblings, manifests_dir=args.manifests_dir)
+        print(render("notes-check", res, args.format))
+        return 1 if res.get("error") else 0
+    if cmd == "notes-render":
+        res = await render_notes(gx, args.slug, rendering=args.rendering, write_md=not args.no_write,
+                                 actor=args.actor)
+        print(render("notes-render", res, args.format))
+        if res.get("error"):
+            return 1
+        if args.journal_path and not args.no_write:
+            append_write(args.journal_path, "render-notes", res["args"])
+        return 0
+    print(f"error: unknown notes verb {cmd}", file=sys.stderr)
+    return 2
+
+
+def _add_notes_lane_parsers(sub) -> None:
+    """Register the pure-notes lane's subcommands (a7262fe7)."""
+    p = sub.add_parser("notes-type", help="Mint/upsert a deliverable TYPE profile as graph data "
+                                          "(journaled `deliverable-type`); `pure-notes` carries its defaults")
+    p.add_argument("key", help="The type slug (e.g. pure-notes)")
+    p.add_argument("--title", default=None)
+    p.add_argument("--policy-file", default=None,
+                   help="JSON with any of title / description / information_policy / presentation_policy / production_procedure")
+    p.add_argument("--actor", default=_DEFAULT_ACTOR)
+
+    p = sub.add_parser("notes-pack", help="Read one source UNIT from a sibling graph per the type's stratum "
+                                          "query and write the proposer's pack (json + markdown brief)")
+    p.add_argument("--source", required=True, help="Source id / unique prefix, or a title substring (in the sibling)")
+    p.add_argument("--type", default="pure-notes", help="The deliverable type whose information policy applies")
+    p.add_argument("--sibling", default=None, help="Sibling graph key (default: the sole `sibling_graphs` key)")
+    p.add_argument("--skeleton", default=None, help="Spine selector: 'legacy' or a skeleton-hash prefix (auto refuses when several coexist)")
+    p.add_argument("--window", nargs=2, type=float, default=None, metavar=("START", "END"),
+                   help="Source-seconds window (default: the whole unit)")
+    p.add_argument("--out-dir", default=None, help="Lane root (default: <journal dir>/purenotes)")
+
+    p = sub.add_parser("notes-ingest", help="Validate a proposer's point rows against their pack and write a "
+                                            "PROPOSAL SET (durable inference output; no graph write)")
+    p.add_argument("--pack", required=True, help="The pack json the proposer read")
+    p.add_argument("--rows", required=True, help="The proposer's JSONL rows (or a JSON array)")
+    p.add_argument("--proposer", required=True, help="Proposer name recorded as provenance")
+    p.add_argument("--proposer-kind", default="claude-code-subagent")
+    p.add_argument("--model", default=None)
+    p.add_argument("--out-dir", default=None, help="Lane root (default: <journal dir>/purenotes)")
+
+    p = sub.add_parser("notes-accept", help="The human confirm: list a set's pending points, or accept them — "
+                                            "each accept mints a Point + segment References + HAS_POINT + "
+                                            "DERIVED_FROM in one journaled `accept-point` op")
+    p.add_argument("--slug", required=True, help="The deliverable Note's slug (born with new-note --slug)")
+    p.add_argument("--set", default=None, help="Proposal-set id/prefix (default: the newest)")
+    p.add_argument("--list", action="store_true", help="List pending proposals (the default when nothing is accepted)")
+    p.add_argument("--accept", action="append", default=None, metavar="PROPOSAL", help="Accept one pending proposal by id prefix (repeatable)")
+    p.add_argument("--accept-all", action="store_true", help="Accept EVERY pending proposal in the set")
+    p.add_argument("--text", default=None, help="Edit-on-accept: replace the ONE accepted point's text")
+    p.add_argument("--type", default="pure-notes", help="Type asserted on the Note when it has none yet")
+    p.add_argument("--sibling", default=None, help="Sibling graph key (default: the set's, else the sole key)")
+    p.add_argument("--out-dir", default=None, help="Lane root (default: <journal dir>/purenotes)")
+    p.add_argument("--actor", default=os.environ.get("CJM_ACTOR") or "user:cli")
+
+    p = sub.add_parser("notes-retract", help="Retract an accepted point (node + edges; journaled compensating op)")
+    p.add_argument("point", help="The Point id (or unique prefix)")
+    p.add_argument("--actor", default=os.environ.get("CJM_ACTOR") or "user:cli")
+
+    p = sub.add_parser("notes-coverage", help="Review: the unit's content runs no accepted point derives from")
+    p.add_argument("--slug", required=True)
+    p.add_argument("--sibling", default=None)
+    p.add_argument("--skeleton", default=None)
+
+    p = sub.add_parser("notes-overlap", help="Review: pairs of points whose segment runs intersect (same-kind = duplication flag)")
+    p.add_argument("--slug", required=True)
+
+    p = sub.add_parser("notes-check", help="Review: one point beside its segments' LIVE text in the sibling (fidelity spot-check)")
+    p.add_argument("point", help="The Point id (or unique prefix)")
+
+    p = sub.add_parser("notes-render", help="Derive the Note's body (OUTLINE + EXPANDED) from its Points: Sections "
+                                            "re-derived, staging .md rewritten, journaled `render-notes`")
+    p.add_argument("--slug", required=True)
+    p.add_argument("--rendering", choices=("outline", "expanded", "both"), default="both")
+    p.add_argument("--no-write", action="store_true", help="Apply to the graph only; don't write the .md")
+    p.add_argument("--actor", default=_DEFAULT_ACTOR)
 
 
 def main() -> int:
@@ -2012,6 +2315,8 @@ def main() -> int:
     g_nn.add_argument("--content", help="The full note text (frontmatter + body)")
     g_nn.add_argument("--content-file", help="Read the full note text from a file")
     p_nn.add_argument("--no-write", action="store_true", help="Dry run: parse + report, don't write/ingest")
+
+    _add_notes_lane_parsers(sub)   # the pure-notes lane (a7262fe7): notes-type … notes-render
 
     p_rc = sub.add_parser("reconcile-memory",
                           help="M2b soak: report (dry-run) or --absorb out-of-band .md section drift")

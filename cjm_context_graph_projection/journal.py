@@ -65,10 +65,16 @@ M3_BASELINE_ACTOR = "import:m3-baseline"
 # on replay, like display-rule.
 # `propose` = a triage Proposal (bb015d12): the agent's drafted section for a stale
 # deliverable, re-minted verbatim from its journaled args (deterministic id).
+# `deliverable-type` / `accept-point` / `retract-point` / `render-notes` = the pure-notes lane
+# (ruling a7262fe7, item fdafeed9): the type profile upserts by slug (last op wins); an accept
+# carries the point AND its segment observations so replay never opens the sibling graph; a
+# retract is the compensating op; a render replays GRAPH-ONLY and re-derives the same Sections
+# from the same Points (the body is a function of the substance, never journaled as text).
 JOURNAL_VERBS = ("decide", "alias", "assert", "link", "unlink", "section", "new-note",
                  "add-section", "display-rule", "set-lens", "check", "session",
                  "retract-session", "pull-transcript", "mint-messages", "edit-message",
-                 "derive-message", "procedure", "propose")
+                 "derive-message", "procedure", "propose",
+                 "deliverable-type", "accept-point", "retract-point", "render-notes")
 
 
 def m3_baseline_import(
@@ -267,6 +273,33 @@ async def _apply_op(gx: GraphHandle, op: Dict[str, Any]) -> str:
                             slug=a.get("slug", ""), anchor=a.get("anchor", ""),
                             upstream_ids=a.get("upstream_ids") or [], summary=a.get("summary", ""),
                             approval=a.get("approval"), actor=a.get("actor", "agent:session"))
+    elif verb == "deliverable-type":
+        # The type profile as data (a7262fe7): upsert by slug, last op wins.
+        from .purenotes import mint_deliverable_type
+        await mint_deliverable_type(gx, a["key"], title=a.get("title", ""),
+                                    description=a.get("description", ""),
+                                    information_policy=a.get("information_policy"),
+                                    presentation_policy=a.get("presentation_policy"),
+                                    production_procedure=a.get("production_procedure"),
+                                    actor=a.get("actor", "agent:session"))
+    elif verb == "accept-point":
+        # Substance (a7262fe7): re-land the Point + its References from the journaled
+        # observations — self-contained; the sibling graph is never opened on replay.
+        from .purenotes import accept_point
+        await accept_point(gx, a["slug"], a["point"], observations=a.get("observations") or [],
+                           actor=a.get("actor", "user:cli"),
+                           proposal_set_id=a.get("proposal_set_id", ""))
+    elif verb == "retract-point":
+        # The compensating op: replayed after the accept it undoes; missing = tolerated no-op.
+        from .purenotes import retract_point
+        await retract_point(gx, a["point_id"], actor=a.get("actor", "user:cli"))
+    elif verb == "render-notes":
+        # The body is a FUNCTION of the Points: replay re-derives the same Sections graph-only
+        # (write_md=False — the staging file is emit's job), landing after the accepts in
+        # append order.
+        from .purenotes import render_notes
+        await render_notes(gx, a["slug"], rendering=a.get("rendering", "both"), write_md=False,
+                           actor=a.get("actor", "agent:session"))
     else:
         return ""
     return verb
@@ -397,6 +430,22 @@ def touched_node_ids(
     elif verb == "procedure":
         if a.get("method"):
             out.append(derive_node_id("procedure", a["method"]))
+    elif verb == "deliverable-type":
+        if a.get("key"):
+            out.append(derive_node_id("deliverable_type", a["key"]))
+    elif verb == "accept-point":
+        if a.get("slug"):
+            nid = note_node_id(a["slug"])
+            out.append(nid)
+            key = (a.get("point") or {}).get("key")
+            if key:
+                out.append(derive_node_id("point", nid, str(key)))
+    elif verb == "retract-point":
+        if a.get("point_id"):
+            out.append(a["point_id"])
+    elif verb == "render-notes":
+        if a.get("slug"):
+            out.append(note_node_id(a["slug"]))
     elif a.get("repo_key") and a.get("module_path"):
         out.append(code_module_node_id(a["repo_key"], a["module_path"]))
     return out

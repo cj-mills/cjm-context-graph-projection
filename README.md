@@ -31,6 +31,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - **`cjm_context_graph_projection.propose`** — Triage proposals: an agent DRAFTS the update for a stale deliverable (work item bb015d12).
 - **`cjm_context_graph_projection.prose_refs`** — Prose-ref drift: id-shaped tokens in asserted prose vs the edge layer.
 - **`cjm_context_graph_projection.pull_transcript`** — The transcript pull verb: harness-transcript messages onto the session spine.
+- **`cjm_context_graph_projection.purenotes`** — The pure-notes lane (ruling a7262fe7; work item fdafeed9): a typed deliverable whose
 - **`cjm_context_graph_projection.readiness`** — The readiness frontier: which work-items are READY vs BLOCKED — derived, never stored.
 - **`cjm_context_graph_projection.readme`** — README-as-projection (v1, STRUCTURAL-ONLY): generate a repo's README FROM THE GRAPH.
 - **`cjm_context_graph_projection.reads`** — The content-access READS ledger: which nodes each read delivered into context.
@@ -240,6 +241,35 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `mint_pulled_messages` _function_ — Land pulled messages on the spine — the code path live pull AND replay share.
 - `pull_transcript` _function_ — The live pull: derive the mapping, extract the active path, mint the delta.
 - `stale_next_edges` _function_ — The chain re-link plan (finding e358fe97) — pure, so the live pull and
+
+### `cjm_context_graph_projection.purenotes`
+
+- `accept_point` _function_ — Land ONE accepted point: the Point node, its segment References (from observations —
+- `build_notes_pack` _function_ — Apply the type's INFORMATION POLICY (a stratum query) to the unit and number what a
+- `choose_spine` _function_ — Pick the SKELETON spine to read (the correction core's `spine_where_for` rule, pure):
+- `coverage_gaps` _function_ — Pure: the unreferenced-lines query — every content line the type includes that no
+- `load_deliverable_type` _function_ — Read a DeliverableType profile off the graph (None = `notes-type <key>` first).
+- `load_notes_propsets` _function_ — Every notes proposal set under `root` (optionally for one source), newest first.
+- `load_points` _function_ — A Note's Points, in source order (start_time, then pack ordinal, then key).
+- `mint_deliverable_type` _function_ — UPSERT a DeliverableType by slug (the display-rule pattern: last journaled op wins).
+- `note_deliverable_type` _function_ — The Note's bound type slug (the active `deliverable_type` fact).
+- `observe_segments` _function_ — Observe each segment in the sibling READ-ONLY (label + properties hash + title) — the
+- `overlapping_points` _function_ — Pure: the duplication candidates — two points deriving from a shared segment. A
+- `pack_digest` _function_ — Digest the READ content (source binding + numbered lines + headers) — what a proposal
+- `pick_propset` _function_ — Choose a proposal set: newest by default, else the unique id/prefix match.
+- `point_check` _function_ — The CHECK review: one point beside its segments' LIVE text from the sibling — the
+- `point_coverage` _function_ — The COVERAGE review: re-read the unit per the Note's type policy and list the content
+- `point_from_args` _function_ — The op-args -> PointNode mapping the live accept AND replay share.
+- `proposals_from_point_rows` _function_ — Resolve validated rows to proposal rows: a minted proposal id (the point's future
+- `pure_notes_type` _function_ — The pure-notes profile as data: information policy = a stratum query, presentation
+- `read_source_unit` _function_ — Read one source unit: the EFFECTIVE spine (layer-0 + applied corrections, via the
+- `render_notes` _function_ — Derive the Note's body from its Points and APPLY it: the authored frontmatter + preamble
+- `render_notes_pack` _function_ — Render a pack as the brief a proposer reads: the unit, the kind slate, the headers
+- `render_points` _function_ — Render the body from the Points — deterministic, so a replayed `render-notes` derives
+- `resolve_sibling_source` _function_ — Resolve a Source in the sibling graph: id prefix first (the shared seam), then a
+- `retract_point` _function_ — Retract a point: delete the node (its edges cascade). The compensating op of accept —
+- `validate_point_rows` _function_ — Validate + normalize proposer rows against their pack — loud on the first bad row.
+- `write_notes_propset` _function_ — Write one notes proposal set: `<out_root>/<set_id>/manifest.json` + `proposals.jsonl`
 
 ### `cjm_context_graph_projection.readiness`
 

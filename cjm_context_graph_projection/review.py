@@ -351,6 +351,10 @@ async def review_frontier(
     sections_of: Dict[str, List[str]] = {}
     for n, s in await F.load_edge_pairs(gx, DevRelations.HAS_SECTION):
         sections_of.setdefault(n, []).append(s)
+    # A typed deliverable's Points are components too (a7262fe7): their DERIVED_FROM edges to
+    # the segment References are the Note's provenance, so the walk starts from them as well.
+    for n, p in await F.load_edge_pairs(gx, DevRelations.HAS_POINT):
+        sections_of.setdefault(n, []).append(p)
 
     # Active assertions per subject (the governing-fact change source) + acknowledgments.
     acks: Dict[str, Set[str]] = {}

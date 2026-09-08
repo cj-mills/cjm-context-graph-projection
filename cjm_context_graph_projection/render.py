@@ -305,6 +305,9 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         if not obj.get("proposals") and not obj.get("skipped"):
             lines.append("_(nothing to propose — the review frontier is empty)_")
         return "\n".join(lines)
+    if kind in ("notes-type", "notes-pack", "notes-ingest", "notes-accept", "notes-retract",
+                "notes-coverage", "notes-overlap", "notes-check", "notes-render"):
+        return _render_notes_lane(kind, obj)
     if kind == "confirm-proposal":
         if obj.get("error"):
             return f"⚠ {obj['error']}"
@@ -1378,3 +1381,102 @@ def _render_feed(obj: Dict[str, Any]) -> str:
             lines.append(f"- {miss}**{title}**{label} — ×{card.get('touches', 0)} ({verbs}) "
                          f"{_fmt_ts(card.get('first_ts'))} → {_fmt_ts(card.get('last_ts'))}")
     return "\n".join(lines)
+
+
+def _render_notes_lane(kind: str, obj: Dict[str, Any]) -> str:
+    """The pure-notes lane's human renderings (a7262fe7): terse receipts for the writes, the
+    review reads as scannable lists (coverage gaps / overlap pairs / one point beside its
+    segments), never prose."""
+    if obj.get("error"):
+        return f"⚠ {obj['error']}"
+    if kind == "notes-type":
+        return (f"**{obj.get('state')}** deliverable type `{obj.get('key')}` → `{obj.get('type_id')}`\n"
+                f"  information policy: {json.dumps((obj.get('args') or {}).get('information_policy') or {}, sort_keys=True)}")
+    if kind == "notes-pack":
+        src = obj.get("source") or {}
+        return (f"**pack** `{obj.get('pack_id')}` — {src.get('title') or src.get('source_id')} · "
+                f"{obj.get('lines')} content lines · {obj.get('headers')} headers · {obj.get('quote_spans')} quote spans\n"
+                f"  json  {obj.get('json_path')}\n  brief {obj.get('md_path')}\n"
+                f"  next: hand the brief to a proposer, then `notes-ingest --pack {obj.get('json_path')} --rows <jsonl> --proposer <name>`")
+    if kind == "notes-ingest":
+        c = obj.get("counts") or {}
+        return (f"**proposal set** `{obj.get('set_id')}` — {obj.get('proposals')} point(s): "
+                + (" · ".join(f"{k}×{v}" for k, v in sorted(c.items())) or "none")
+                + f"\n  {obj.get('manifest_path')}\n  next: `notes-accept --slug <post> --set {str(obj.get('set_id') or '')[:20]} --list`")
+    if kind == "notes-accept":
+        lines = [f"## notes-accept — `{obj.get('slug')}` · set `{str(obj.get('set_id') or '')[-12:]}`"]
+        if obj.get("listing") is not None:
+            pend = obj.get("listing") or []
+            lines.append(f"_{len(pend)} pending · {obj.get('accepted_before', 0)} already accepted_")
+            for p in pend:
+                lead = f"**{p.get('lead')}** — " if p.get("lead") else ""
+                lines.append(f"- `{str(p.get('proposal_id') or '')[:8]}` [{p.get('kind')}] lines {p.get('from_i')}–{p.get('to_i')}"
+                             + (f" · under _{p.get('heading')}_" if p.get("heading") else "")
+                             + f"\n    {lead}{_short(p.get('text'), 200)}")
+            if pend:
+                lines.append("accept: `--accept <id prefix>` (repeatable) · `--accept-all` · edit text on accept: `--accept <id> --text \"…\"`")
+            return "\n".join(lines)
+        acc = obj.get("accepted") or []
+        lines.append(f"_accepted {len(acc)} · skipped {len(obj.get('skipped') or [])}_")
+        for a in acc:
+            tag = " (re-accept, no-op)" if a.get("existing") else ""
+            lines.append(f"- ✓ `{str(a.get('point_id') or '')[:8]}` [{a.get('kind')}] {_short(a.get('text'), 120)}{tag}"
+                         f" · refs {len(a.get('references') or [])}")
+        for s in obj.get("skipped") or []:
+            lines.append(f"- ✗ `{str(s.get('proposal_id') or '')[:8]}`: {s.get('reason')}")
+        if obj.get("type_fact"):
+            lines.append(f"deliverable_type asserted: `{obj['type_fact']}`")
+        return "\n".join(lines)
+    if kind == "notes-retract":
+        state = "retracted (node + edges deleted)" if obj.get("deleted") else "already absent (no-op)"
+        return f"**retract-point** `{str(obj.get('point_id') or '')[:8]}` — {state}"
+    if kind == "notes-coverage":
+        gaps = obj.get("gaps") or []
+        lines = [f"## Coverage — `{obj.get('slug')}` ({obj.get('type')})",
+                 f"_{obj.get('points')} points · {obj.get('covered_lines')} of {obj.get('total_lines')} content lines covered · "
+                 f"{len(gaps)} gap run(s)_"]
+        for g in gaps:
+            lines.append(f"- lines {g['from_i']}–{g['to_i']} ({_short(_fmt_span(g.get('start'), g.get('end')), 20)}, {g['lines']} line(s)): "
+                         f"{_short(g.get('text'), 220)}")
+        if not gaps:
+            lines.append("_(every included line derives at least one point)_")
+        return "\n".join(lines)
+    if kind == "notes-overlap":
+        pairs = obj.get("pairs") or []
+        lines = [f"## Overlap — `{obj.get('slug')}`", f"_{obj.get('points')} points · {len(pairs)} overlapping pair(s)"
+                 f" · {sum(1 for p in pairs if p.get('same_kind'))} same-kind_"]
+        for p in pairs:
+            flag = "⚠ " if p.get("same_kind") else ""
+            lines.append(f"- {flag}`{p['a']['id'][:8]}` [{p['a'].get('kind')}] {_short(p['a'].get('text'), 70)}  ×  "
+                         f"`{p['b']['id'][:8]}` [{p['b'].get('kind')}] {_short(p['b'].get('text'), 70)} — {len(p.get('shared') or [])} shared segment(s)")
+        if not pairs:
+            lines.append("_(no two points share a segment)_")
+        return "\n".join(lines)
+    if kind == "notes-check":
+        p = obj.get("point") or {}
+        lines = [f"## Check — `{str(p.get('id') or '')[:8]}` [{p.get('kind')}]" + (f" under _{p.get('heading')}_" if p.get("heading") else ""),
+                 f"**{p.get('lead')}** — {p.get('text')}" if p.get("lead") else str(p.get("text") or ""), "",
+                 "**Segments (live, from the sibling):**"]
+        for s in obj.get("segments") or []:
+            if s.get("gone"):
+                lines.append(f"- `{s['id'][:8]}` — GONE from the sibling")
+                continue
+            mark = " ⚠ moved since observation" if s.get("moved") else ""
+            lines.append(f"- `{s['id'][:8]}` {_fmt_span(s.get('start'), s.get('end'))} — {s.get('text')}{mark}")
+        return "\n".join(lines)
+    if kind == "notes-render":
+        status = "written" if obj.get("written") else "graph-only"
+        return (f"**rendered** `{obj.get('slug')}` ({obj.get('rendering')}) from {obj.get('points')} point(s) — "
+                f"+{len(obj.get('added') or [])} ~{len(obj.get('updated') or [])} −{len(obj.get('removed_applied') or [])} section(s) · "
+                f"{status} → `{obj.get('path')}`")
+    return json.dumps(obj, indent=2, default=str)
+
+
+def _fmt_span(start: Any, end: Any) -> str:  # mm:ss–mm:ss for source-second spans
+    def one(v: Any) -> str:
+        try:
+            m, s = divmod(max(0.0, float(v)), 60.0)
+            return f"{int(m):02d}:{int(s):02d}"
+        except (TypeError, ValueError):
+            return "--:--"
+    return f"{one(start)}–{one(end)}"
