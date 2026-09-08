@@ -13,10 +13,13 @@ import pytest
 
 from cjm_context_graph_layer.ops import extend_graph, graph_task
 from cjm_context_graph_primitives.journal import read_journal
-from cjm_context_graph_projection.purenotes import (build_notes_pack, choose_spine, coverage_gaps,
-                                                    overlapping_points, proposals_from_point_rows,
-                                                    pure_notes_type, render_notes_pack, render_points,
-                                                    validate_point_rows)
+from cjm_context_graph_primitives.query import EdgeQuery
+from cjm_context_graph_projection.purenotes import (_time_link, build_notes_pack, choose_spine,
+                                                    coverage_gaps, derive_frontmatter,
+                                                    derived_description, overlapping_points,
+                                                    proposals_from_point_rows, pure_notes_type,
+                                                    render_notes_pack, render_points,
+                                                    unit_title_header, validate_point_rows)
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
 
 _HAVE_GRAPH = (Path(DEFAULT_MANIFESTS) / f"{DEFAULT_GRAPH_ID}.json").exists()
@@ -97,16 +100,36 @@ def test_validate_rows_and_resolve_proposals():
     assert props[1]["segment_ids"] == ["s4", "s5"] and props[1]["start_time"] == 7.0 and props[1]["end_time"] == 9.5
     assert props[0]["heading_index"] == 1 and props[1]["heading_index"] == 2
     assert len({p["proposal_id"] for p in props}) == 3 and props[0]["evidence"]["digest"] == pack["digest"]
+    top = {"kind": "claim", "from_i": 3, "to_i": 3, "text": "Subjects in isolation."}
     for bad, msg in ((
             [{"kind": "Claim!", "from_i": 0, "to_i": 0, "text": "x"}], "kebab-case"),
             ([{"kind": "claim", "from_i": 0, "to_i": 9, "text": "x"}], "outside the pack"),
             ([{"kind": "claim", "from_i": 0, "to_i": 1, "text": "x"}], "crosses a header"),
             ([{"kind": "claim", "from_i": 0, "to_i": 0, "text": "  "}], "empty"),
             ([{"kind": "comparison", "from_i": 0, "to_i": 0, "text": "x"}], "columns"),
-            ([{"kind": "sequence", "from_i": 0, "to_i": 0, "text": "x", "data": {}}], "items")):
+            ([{"kind": "sequence", "from_i": 0, "to_i": 0, "text": "x", "data": {}}], "items"),
+            # e1fd4d64 (I): a lead is bolded IN PLACE, so it must appear in the text (definition exempt)
+            ([{"kind": "claim", "from_i": 0, "to_i": 0, "text": "Quit in 1991.", "lead": "Gatto"}], "does not appear"),
+            # e1fd4d64 (H): parent = an EARLIER, top-level, same-header row
+            ([{"kind": "claim", "from_i": 3, "to_i": 3, "text": "x", "parent": 0}], "EARLIER"),
+            ([top, {"kind": "claim", "from_i": 3, "to_i": 3, "text": "y", "parent": 0},
+              {"kind": "claim", "from_i": 3, "to_i": 3, "text": "z", "parent": 1}], "one level"),
+            ([{"kind": "claim", "from_i": 0, "to_i": 0, "text": "x"},
+              {"kind": "claim", "from_i": 3, "to_i": 3, "text": "y", "parent": 0}], "another header")):
         with pytest.raises(ValueError) as ei:
             validate_point_rows(bad, pack)
         assert msg in str(ei.value)
+    assert validate_point_rows([{"kind": "definition", "from_i": 0, "to_i": 0, "text": "Quit in 1991.", "lead": "Gatto"}], pack)[0]["lead"] == "Gatto"
+    lenient = validate_point_rows([{"kind": "claim", "from_i": 0, "to_i": 0, "text": "Quit in 1991.", "lead": "Gatto"}], pack, lenient_leads=True)
+    assert lenient[0]["lead"] == ""
+    # a nested row resolves to the parent's proposal id and sorts DIRECTLY after its parent
+    nested = validate_point_rows([{"kind": "claim", "from_i": 1, "to_i": 2, "text": "Confusion quote."},
+                                  top,
+                                  {"kind": "example", "from_i": 3, "to_i": 3, "text": "Trig never meets a house.", "parent": 1},
+                                  {"kind": "claim", "from_i": 3, "to_i": 3, "text": "Another top."}], pack)
+    props = proposals_from_point_rows(nested, pack)
+    assert [p["text"] for p in props] == ["Confusion quote.", "Subjects in isolation.", "Trig never meets a house.", "Another top."]
+    assert props[2]["parent_key"] == props[1]["proposal_id"] and props[1]["parent_key"] == "" and props[3]["parent_key"] == ""
 
 
 def _points():
@@ -125,21 +148,103 @@ def _points():
     ]
 
 
-def test_render_points_outline_and_expanded_are_deterministic_and_typed():
-    both = render_points(_points())
-    assert both == render_points(_points())
-    assert both.startswith("## At a glance\n\n**Chapter 1**\n\n- [**Gatto** — Quit in 1991.](#pt-aaaaaaaa)\n")
-    assert "- [**Gatto**: “I teach confusion.”](#pt-bbbbbbbb)" in both            # a quotation scans as who + opening words
-    assert "## Chapter 1\n\n- []{#pt-aaaaaaaa} **Gatto** — Quit in 1991. (00:02–00:05)\n" in both
-    assert "[]{#pt-bbbbbbbb}\n\n> I teach confusion.\n> — Gatto (00:07–00:09)\n" in both      # quotation block
-    assert "1. []{#pt-cccccccc} Assess models. (00:09–00:10)\n2. []{#pt-dddddddd} Copy them. (00:10–00:12)\n" in both  # steps = ONE list
-    assert "| Period | Nation |\n|---|---|\n| 1870s | France |\n| later | Germany |" in both          # comparison = table
+def _glyph(key8):
+    return f"[§](#pt-{key8}){{#pt-{key8} .pt-anchor}}"
+
+
+def test_render_expanded_is_the_public_post_glyph_anchors_no_outline_no_audiobook_spans():
+    """Ruling e1fd4d64: the default rendering is EXPANDED (the outline is the review view, (E));
+    every point carries a visible permalink glyph that IS its anchor (F); a source with no public
+    time-addressable URL renders no spans (D); typed kinds keep their shapes (a7262fe7)."""
+    out = render_points(_points())
+    assert out == render_points(_points())
+    assert out.startswith(f"## Chapter 1\n\n- **Gatto** — Quit in 1991. {_glyph('aaaaaaaa')}\n")   # a legacy lead the text lacks: prefix fallback
+    assert "At a glance" not in out and "(00:" not in out and "[]{#" not in out
+    assert f"> I teach confusion.\n> — Gatto {_glyph('bbbbbbbb')}\n" in out                       # quotation block
+    assert f"1. Assess models. {_glyph('cccccccc')}\n2. Copy them. {_glyph('dddddddd')}\n" in out   # steps = ONE list
+    assert f"- **Advisors** by period. {_glyph('eeeeeeee')}\n\n  | Period | Nation |\n  |---|---|\n  | 1870s | France |\n  | later | Germany |" in out  # comparison = table INSIDE its item; lead bolded in place
+    assert "**" not in out.replace("**Gatto**", "").replace("**Advisors**", "")                     # lead term is the ONLY emphasis
+    assert render_points([]) == ""
     outline = render_points(_points(), rendering="outline")
-    assert "## At a glance" in outline and "#pt-" not in outline and "(00:" not in outline      # no anchors/timestamps in a bare outline
-    expanded = render_points(_points(), rendering="expanded")
-    assert "At a glance" not in expanded and expanded.startswith("## Chapter 1")
-    assert "**" not in expanded.replace("**Gatto**", "").replace("**Advisors**", "")            # lead term is the ONLY emphasis
-    assert render_points([]) == "## At a glance\n"
+    assert outline.startswith("## At a glance\n\n**Chapter 1**\n\n- **Gatto** — Quit in 1991.\n")
+    assert "- **Gatto**: “I teach confusion.”" in outline and "#pt-" not in outline              # a quotation scans as who + opening words
+    both = render_points(_points(), rendering="both")
+    assert "- [**Gatto** — Quit in 1991.](#pt-aaaaaaaa)" in both and "## Chapter 1\n" in both
+
+
+def test_render_timestamps_policy_always_addressable_never():
+    """e1fd4d64 (D): spans render ALWAYS on request, only as LINKS when the unit carries a public
+    time-addressable URL under the default `addressable`, never on `never`."""
+    assert "- **Gatto** — Quit in 1991. (00:02–00:05) [§]" in render_points(_points(), timestamps="always")
+    pts = _points()
+    for p in pts:
+        p["unit"] = {"public_url": "https://www.youtube.com/watch?v=abc"}
+    addressable = render_points(pts)
+    assert "Quit in 1991. [(00:02–00:05)](https://www.youtube.com/watch?v=abc&t=2s) [§]" in addressable
+    assert "> — Gatto [(00:07–00:09)](https://www.youtube.com/watch?v=abc&t=7s) [§]" in addressable
+    assert "(00:" not in render_points(pts, timestamps="never")
+    assert _time_link("https://youtu.be/abc", 65.9) == "https://youtu.be/abc?t=65"
+    assert _time_link("https://pod.example/ep1.mp3", 5) == "https://pod.example/ep1.mp3#t=5"
+
+
+def test_render_lead_in_place_definition_keeps_the_glossary_shape():
+    """e1fd4d64 (I): a lead is bolded where it occurs in the text; only `definition` prefixes."""
+    base = {"heading": "Lesson 7", "heading_index": 1, "segment_ids": ["s1"], "start_time": 1.0, "end_time": 2.0}
+    pts = [{"id": "p1", "key": "11111111", "kind": "claim", "ordinal": 0, "lead": "troublemakers",
+            "text": "Kids labeled Troublemakers for asking hard questions.", **base},
+           {"id": "p2", "key": "22222222", "kind": "definition", "ordinal": 1, "lead": "Budget",
+            "text": "A plan for money not yet spent.", **base}]
+    out = render_points(pts)
+    assert f"- Kids labeled **Troublemakers** for asking hard questions. {_glyph('11111111')}\n" in out   # case kept, bolded in place
+    assert f"- **Budget** — A plan for money not yet spent. {_glyph('22222222')}\n" in out
+    assert render_points(pts, rendering="outline").startswith("## At a glance\n\n**Lesson 7**\n\n- Kids labeled **Troublemakers**")
+
+
+def test_render_one_level_nesting_and_unit_title_header_suppression_and_derived_frontmatter():
+    """e1fd4d64 (H): a child renders as a sub-item under its parent (quotation inline); an orphan
+    (parent retracted) stays top-level. (C): the first header restating the unit's own title is
+    not a section. (A)+(B): title and description are derived from the same data."""
+    unit = {"title": "04 - 1. Seven Dangerous Lessons Taught in Schools",
+            "work_structure": {"kind": "chapter", "part": 1, "part_title": "School", "chapter": 1,
+                               "title": "Seven Dangerous Lessons Taught in Schools"}}
+    l1 = {"heading": "Lesson 1. Confusion", "heading_index": 2, "unit": unit}
+    part = {"heading": "Part 1. School. Chapter 1. Seven Dangerous Lessons Taught in Schools.", "heading_index": 1, "unit": unit}
+    pts = [
+        {"id": "a", "key": "aaaa0001", "kind": "claim", "text": "Gatto quit.", "ordinal": 0, "segment_ids": ["s0"],
+         "start_time": 0.0, "end_time": 1.0, **part},
+        {"id": "a2", "key": "aaaa0002", "kind": "claim", "text": "Denounced the system.", "ordinal": 1, "segment_ids": ["s0b"],
+         "start_time": 1.0, "end_time": 1.5, "parent_key": "aaaa0001", **part},   # same suppressed header: ONE group, still nested
+        {"id": "b", "key": "bbbb0001", "kind": "claim", "text": "Subjects taught in isolation.", "ordinal": 1,
+         "segment_ids": ["s1"], "start_time": 2.0, "end_time": 3.0, **l1},
+        {"id": "c", "key": "cccc0001", "kind": "example", "text": "Trigonometry never meets a house plan.", "ordinal": 2,
+         "segment_ids": ["s2"], "start_time": 3.0, "end_time": 4.0, "parent_key": "bbbb0001", **l1},
+        {"id": "d", "key": "dddd0001", "kind": "quotation", "text": "I teach confusion.", "attribution": "Gatto",
+         "ordinal": 3, "segment_ids": ["s3"], "start_time": 4.0, "end_time": 5.0, "parent_key": "bbbb0001", **l1},
+        {"id": "e", "key": "eeee0001", "kind": "claim", "text": "Orphan.", "ordinal": 4, "segment_ids": ["s4"],
+         "start_time": 6.0, "end_time": 7.0, "parent_key": "gone0000", **l1},
+    ]
+    out = render_points(pts)
+    assert out.startswith(f"- Gatto quit. {_glyph('aaaa0001')}\n  - Denounced the system. {_glyph('aaaa0002')}\n\n"
+                          "## Lesson 1. Confusion\n\n")   # the unit's own title is no section; its points stay one nested group
+    assert "Part 1" not in out
+    assert (f"- Subjects taught in isolation. {_glyph('bbbb0001')}\n"
+            f"  - Trigonometry never meets a house plan. {_glyph('cccc0001')}\n"
+            f"  - “I teach confusion.” — Gatto {_glyph('dddd0001')}\n"
+            f"- Orphan. {_glyph('eeee0001')}\n") in out
+    both = render_points(pts, rendering="both")
+    assert "- [Subjects taught in isolation.](#pt-bbbb0001)\n  - [Trigonometry never meets a house plan.](#pt-cccc0001)\n" in both
+    assert unit_title_header("Chapter 1. Seven Dangerous Lessons Taught in Schools.", unit)
+    assert unit_title_header("Part 1. School. Chapter 1. Seven dangerous lessons taught in schools", unit)
+    assert not unit_title_header("Lesson 1. Confusion", unit) and not unit_title_header("", unit)
+    desc = "Seven Dangerous Lessons Taught in Schools: Lesson 1. Confusion. What the chapter says, in source order, without added commentary."
+    assert derived_description(pts) == desc and derived_description([]) == ""
+    fm = '---\ntitle: "The Learning Game, Chapter 1 — notes"\ndate: 2026-09-07\ncategories: [book]\n---\n'
+    policy = {"title": "unit-title", "description": "derived"}
+    d = derive_frontmatter(fm, pts, policy)
+    assert d == ('---\ntitle: "Seven Dangerous Lessons Taught in Schools"\n'
+                 f'description: "{desc}"\ndate: 2026-09-07\ncategories: [book]\n---\n')
+    assert derive_frontmatter(d, pts, policy) == d                       # idempotent over derived lines
+    assert derive_frontmatter(fm, pts, {}) == fm and derive_frontmatter(fm, [], policy) == fm
 
 
 def test_coverage_gaps_and_overlap_pairs():
@@ -241,10 +346,10 @@ def test_cli_pure_notes_lane_end_to_end_and_replay(tmp_path):
     # (4) a proposer's rows -> a proposal set; a bad row refuses loudly
     rows = tmp_path / "rows.jsonl"
     rows.write_text("\n".join(json.dumps(x) for x in [
-        {"kind": "claim", "from_i": 0, "to_i": 0, "text": "Quit teaching in 1991.", "lead": "Gatto"},
+        {"kind": "claim", "from_i": 0, "to_i": 0, "text": "Gatto quit teaching in 1991.", "lead": "Gatto"},
         {"kind": "quotation", "from_i": 1, "to_i": 2, "text": "I teach confusion.", "attribution": "Gatto"},
         {"kind": "claim", "from_i": 3, "to_i": 3, "text": "Subjects taught in isolation."},
-        {"kind": "claim", "from_i": 3, "to_i": 4, "text": "Isolation → no coherent picture.", "lead": "Consequence"},
+        {"kind": "claim", "from_i": 3, "to_i": 4, "text": "Isolation → no coherent picture.", "lead": "coherent", "parent": 2},
     ]) + "\n")
     r = _run(*base, "notes-ingest", "--pack", str(pack_json), "--rows", str(rows), "--proposer", "test")
     assert r.returncode == 0 and "4 point(s)" in r.stdout, r.stderr or r.stdout
@@ -253,10 +358,10 @@ def test_cli_pure_notes_lane_end_to_end_and_replay(tmp_path):
     r = _run(*base, "notes-ingest", "--pack", str(pack_json), "--rows", str(bad), "--proposer", "test")
     assert r.returncode == 1 and "crosses a header" in r.stderr
 
-    # (5) accept: list first, then all — Points + References + edges, one journaled op each,
-    #     the deliverable_type fact asserted on first accept
+    # (5) accept: list first, then all — Points + References + edges (ELABORATES for the nested
+    #     child), one journaled op each, the deliverable_type fact asserted on first accept
     r = _run(*base, "notes-accept", "--slug", "the-learning-game/ch01")
-    assert r.returncode == 0 and "4 pending" in r.stdout and "[quotation]" in r.stdout, r.stderr or r.stdout
+    assert r.returncode == 0 and "4 pending" in r.stdout and "[quotation]" in r.stdout and "↳" in r.stdout, r.stderr or r.stdout
     r = _run(*base, "notes-accept", "--slug", "the-learning-game/ch01", "--accept-all")
     assert r.returncode == 0 and "accepted 4" in r.stdout and "deliverable_type asserted: `pure-notes`" in r.stdout, r.stderr or r.stdout
     ops = [o for o in read_journal(pj) if o["verb"] == "accept-point"]
@@ -264,6 +369,14 @@ def test_cli_pure_notes_lane_end_to_end_and_replay(tmp_path):
     assert all(len(o["args"]["observations"]) == len(o["args"]["point"]["segment_ids"]) for o in ops)
     assert ops[1]["args"]["point"]["kind"] == "quotation" and ops[1]["args"]["observations"][0]["graph"] == "tx"
     assert ops[0]["args"]["point"]["unit"]["source_id"] == "src-1" and ops[0]["args"]["point"]["heading"] == "Chapter 1. Seven dangerous lessons."
+    assert ops[3]["args"]["point"]["parent_key"] == ops[2]["args"]["point"]["key"]      # the child rides its parent's key
+
+    async def _elaborates(db):
+        async with open_graph(db) as g:
+            res = await graph_task(g.queue, g.graph_id, "query_edges",
+                                   query=EdgeQuery(relation_type="ELABORATES", project=[]).to_dict())
+            return len(res.rows or [])
+    assert asyncio.run(_elaborates(pdb)) == 1
     r = _run("--graph-db-path", pdb, "--format", "agent", "list", "--label", "Point")
     points = json.loads(r.stdout)
     assert points.get("total", len(points.get("items", []))) == 4 or len(points.get("nodes", [])) == 4
@@ -285,13 +398,20 @@ def test_cli_pure_notes_lane_end_to_end_and_replay(tmp_path):
     r = _run(*base, "notes-check", point_id[:8])
     assert r.returncode == 0 and "Quote. I teach confusion." in r.stdout and "moved" not in r.stdout, r.stderr or r.stdout
 
-    # (7) render: Sections DERIVED from the Points; frontmatter + preamble kept; staging file written
+    # (7) render: Sections DERIVED from the Points; the type-owned frontmatter lines (title =
+    #     the unit title, description derived) re-derived, the rest + the preamble kept; the
+    #     header restating the unit's title suppressed; the child nested; no audiobook spans
     r = _run(*base, "notes-render", "--slug", "the-learning-game/ch01")
     assert r.returncode == 0 and "from 4 point(s)" in r.stdout, r.stderr or r.stdout
     staged = (pri_dir / "staging" / "the-learning-game" / "ch01" / "index.md").read_text()
-    assert staged.startswith("---\ntitle: \"The Learning Game, Chapter 1\"") and "Pure notes born on the graph." in staged
-    assert "## At a glance" in staged and "## Chapter 1. Seven dangerous lessons" in staged and "## Lesson 1. Confusion" in staged
-    assert "> I teach confusion.\n> — Gatto (00:07–00:09)" in staged and f"#pt-{quote_pid[:8]}" in staged
+    assert staged.startswith('---\ntitle: "Seven Dangerous Lessons"\ndescription: "Seven Dangerous Lessons: Lesson 1. Confusion. '
+                             'What the chapter says, in source order, without added commentary."\ndate: 2026-09-07\n'), staged[:300]
+    assert "Pure notes born on the graph." in staged
+    assert "At a glance" not in staged and "## Chapter 1" not in staged and "## Lesson 1. Confusion" in staged
+    assert staged.index("**Gatto** quit teaching in 1991.") < staged.index("## Lesson 1. Confusion")   # the opening points stand before the first section
+    assert f"> I teach confusion.\n> — Gatto [§](#pt-{quote_pid[:8]}){{#pt-{quote_pid[:8]} .pt-anchor}}\n" in staged
+    assert "(00:" not in staged
+    assert "- Subjects taught in isolation. [§]" in staged and "\n  - Isolation → no **coherent** picture. [§]" in staged
     r = _run("--graph-db-path", pdb, "read", note_id)
     assert r.stdout == staged                                     # the graph reconstruction IS the file
     live_text = r.stdout
@@ -336,3 +456,19 @@ def test_cli_pure_notes_lane_end_to_end_and_replay(tmp_path):
     r = _run("--graph-db-path", rdb, "--format", "agent", "locate", "pure-notes")
     assert any(m.get("label") == "DeliverableType" for m in json.loads(r.stdout)["matches"])
     assert live_text != staged2   # the retract really changed the body (sanity on the equality checks above)
+    assert asyncio.run(_elaborates(rdb)) == 1      # the nesting edge replays from the accept op alone
+
+    # (11) the re-drive's clean slate: retract EVERY point (children first), render drops the
+    #      body, and a second replay converges on the empty deliverable
+    r = _run(*base, "notes-retract", "--slug", "the-learning-game/ch01", "--all")
+    assert r.returncode == 0 and "retract-point ×3" in r.stdout, r.stderr or r.stdout
+    assert len([o for o in read_journal(pj) if o["verb"] == "retract-point"]) == 4
+    r = _run(*base, "notes-render", "--slug", "the-learning-game/ch01")
+    assert "from 0 point(s)" in r.stdout
+    staged3 = (pri_dir / "staging" / "the-learning-game" / "ch01" / "index.md").read_text()
+    assert "## Lesson 1" not in staged3 and "Pure notes born on the graph." in staged3
+    rep2 = tmp_path / "rep2"; rep2.mkdir()
+    r = _run("--graph-db-path", str(rep2 / "rep.db"), "--journal-path", pj, "replay")
+    assert r.returncode == 0, r.stderr or r.stdout
+    r = _run("--graph-db-path", str(rep2 / "rep.db"), "read", note_id)
+    assert r.stdout == staged3

@@ -298,8 +298,9 @@ async def _apply_op(gx: GraphHandle, op: Dict[str, Any]) -> str:
         # (write_md=False — the staging file is emit's job), landing after the accepts in
         # append order.
         from .purenotes import render_notes
-        await render_notes(gx, a["slug"], rendering=a.get("rendering", "both"), write_md=False,
-                           actor=a.get("actor", "agent:session"))
+        await render_notes(gx, a["slug"], rendering=a.get("rendering", "both"),
+                           timestamps=a.get("timestamps", "always"),   # pre-e1fd4d64 ops rendered every span
+                           write_md=False, actor=a.get("actor", "agent:session"))
     else:
         return ""
     return verb

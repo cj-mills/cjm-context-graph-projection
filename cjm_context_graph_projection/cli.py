@@ -1482,8 +1482,8 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
                             load_notes_propsets, load_points, mint_deliverable_type,
                             note_deliverable_type, observe_segments, overlapping_points, pick_propset,
                             point_check, point_coverage, proposals_from_point_rows, read_source_unit,
-                            render_notes, render_notes_pack, resolve_sibling_source, retract_point,
-                            validate_point_rows, write_notes_propset)
+                            render_notes, render_notes_pack, resolve_sibling_source, retract_note_points,
+                            retract_point, validate_point_rows, write_notes_propset)
     from .write import assert_value
     siblings = sibling_graphs(load_graph_config(args.graph_db_path))
 
@@ -1554,7 +1554,8 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
     if cmd == "notes-ingest":
         pack = json.loads(Path(args.pack).expanduser().read_text())
         try:
-            rows = validate_point_rows(_read_rows_file(Path(args.rows).expanduser()), pack)
+            rows = validate_point_rows(_read_rows_file(Path(args.rows).expanduser()), pack,
+                                       lenient_leads=bool(args.lenient))
         except (ValueError, json.JSONDecodeError) as e:
             print(f"error: {e}", file=sys.stderr)
             return 1
@@ -1617,6 +1618,8 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
         accepted: list = []
         unit = {"graph": key, "source_id": source.get("source_id"), "title": source.get("title"),
                 "skeleton_hash": source.get("skeleton_hash"), "work_structure": source.get("work_structure")}
+        if source.get("public_url"):
+            unit["public_url"] = source["public_url"]   # addressable source: the rendering links its spans (e1fd4d64 (D))
         try:
             async with open_graph(siblings[key], args.manifests_dir, readonly=True) as sg:
                 for p in picked:
@@ -1629,9 +1632,13 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
                              "data": p.get("data") or {}, "ordinal": int(p.get("from_i") or 0),
                              "heading": p.get("heading") or "", "heading_index": int(p.get("heading_index") or 0),
                              "segment_ids": list(p["segment_ids"]), "start_time": p.get("start_time"),
-                             "end_time": p.get("end_time"), "unit": unit}
+                             "end_time": p.get("end_time"), "unit": unit,
+                             "parent_key": p.get("parent_key") or ""}
                     res = await accept_point(gx, args.slug, point, observations=obs["observations"],
                                              actor=args.actor, proposal_set_id=set_id)
+                    if res.get("error") and res.get("skippable"):
+                        skipped.append({"proposal_id": p["proposal_id"], "reason": res["error"]})
+                        continue
                     if res.get("error"):
                         print(f"error: {res['error']}", file=sys.stderr)
                         return 1
@@ -1645,6 +1652,19 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
                                       "skipped": skipped, "type_fact": type_fact}, args.format))
         return 0
     if cmd == "notes-retract":
+        if args.all:
+            if not args.slug:
+                print("error: --all needs --slug <post>", file=sys.stderr)
+                return 1
+            res = await retract_note_points(gx, args.slug, actor=args.actor)
+            for r in res.get("retracted") or []:
+                if args.journal_path and r.get("deleted"):
+                    append_write(args.journal_path, "retract-point", r["args"])
+            print(render("notes-retract-all", res, args.format))
+            return 1 if res.get("error") else 0
+        if not args.point:
+            print("error: give a point id (or --slug <post> --all)", file=sys.stderr)
+            return 1
         res = await retract_point(gx, args.point, actor=args.actor)
         print(render("notes-retract", res, args.format))
         if res.get("error"):
@@ -1667,8 +1687,8 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
         print(render("notes-check", res, args.format))
         return 1 if res.get("error") else 0
     if cmd == "notes-render":
-        res = await render_notes(gx, args.slug, rendering=args.rendering, write_md=not args.no_write,
-                                 actor=args.actor)
+        res = await render_notes(gx, args.slug, rendering=args.rendering, timestamps=args.timestamps,
+                                 write_md=not args.no_write, actor=args.actor)
         print(render("notes-render", res, args.format))
         if res.get("error"):
             return 1
@@ -1706,6 +1726,8 @@ def _add_notes_lane_parsers(sub) -> None:
     p.add_argument("--proposer", required=True, help="Proposer name recorded as provenance")
     p.add_argument("--proposer-kind", default="claude-code-subagent")
     p.add_argument("--model", default=None)
+    p.add_argument("--lenient", action="store_true",
+                   help="Drop (instead of refuse) a lead the row's text does not contain")
     p.add_argument("--out-dir", default=None, help="Lane root (default: <journal dir>/purenotes)")
 
     p = sub.add_parser("notes-accept", help="The human confirm: list a set's pending points, or accept them — "
@@ -1722,8 +1744,11 @@ def _add_notes_lane_parsers(sub) -> None:
     p.add_argument("--out-dir", default=None, help="Lane root (default: <journal dir>/purenotes)")
     p.add_argument("--actor", default=os.environ.get("CJM_ACTOR") or "user:cli")
 
-    p = sub.add_parser("notes-retract", help="Retract an accepted point (node + edges; journaled compensating op)")
-    p.add_argument("point", help="The Point id (or unique prefix)")
+    p = sub.add_parser("notes-retract", help="Retract an accepted point (node + edges; journaled compensating op), "
+                                             "or EVERY point of a post with --slug <post> --all (the re-drive's clean slate)")
+    p.add_argument("point", nargs="?", default=None, help="The Point id (or unique prefix)")
+    p.add_argument("--slug", default=None, help="With --all: the post whose points are all retracted")
+    p.add_argument("--all", action="store_true", help="Retract every point of --slug (children before parents)")
     p.add_argument("--actor", default=os.environ.get("CJM_ACTOR") or "user:cli")
 
     p = sub.add_parser("notes-coverage", help="Review: the unit's content runs no accepted point derives from")
@@ -1737,10 +1762,13 @@ def _add_notes_lane_parsers(sub) -> None:
     p = sub.add_parser("notes-check", help="Review: one point beside its segments' LIVE text in the sibling (fidelity spot-check)")
     p.add_argument("point", help="The Point id (or unique prefix)")
 
-    p = sub.add_parser("notes-render", help="Derive the Note's body (OUTLINE + EXPANDED) from its Points: Sections "
-                                            "re-derived, staging .md rewritten, journaled `render-notes`")
+    p = sub.add_parser("notes-render", help="Derive the Note's body from its Points (EXPANDED = the public post; "
+                                            "OUTLINE = the review view): title/description re-derived per the type, "
+                                            "Sections re-derived, staging .md rewritten, journaled `render-notes`")
     p.add_argument("--slug", required=True)
-    p.add_argument("--rendering", choices=("outline", "expanded", "both"), default="both")
+    p.add_argument("--rendering", choices=("outline", "expanded", "both"), default="expanded")
+    p.add_argument("--timestamps", choices=("always", "addressable", "never"), default="addressable",
+                   help="Source spans: always | only when the Source has a public time-addressable URL (as links) | never")
     p.add_argument("--no-write", action="store_true", help="Apply to the graph only; don't write the .md")
     p.add_argument("--actor", default=_DEFAULT_ACTOR)
 

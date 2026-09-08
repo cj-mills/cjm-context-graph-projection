@@ -79,27 +79,35 @@ def pure_notes_type(
         },
         presentation_policy={
             "renderings": {
-                "outline": {"role": "scan + review", "line": "one per point", "headings": "derived",
+                "outline": {"role": "review + work page (never the public post — ruling e1fd4d64 (E))",
+                            "line": "one per point", "headings": "derived",
                             "emphasis": "lead-term-only", "timestamps": False},
-                "expanded": {"role": "reference", "quotations": "block", "timestamps": True,
-                             "anchor": "pt-<key8>", "emphasis": "lead-term-only",
+                "expanded": {"role": "the public post (reference)", "quotations": "block",
+                             "timestamps": "when-addressable",   # e1fd4d64 (D): only a Source with a public time-addressable URL renders spans, as LINKS
+                             "anchor": "pt-<key8> + visible permalink glyph (.pt-anchor)",
+                             "emphasis": "lead-in-place (definition: Term — text)",
+                             "nesting": 1,                        # e1fd4d64 (H): a child point renders as a sub-item under its parent
                              "comparison": "table", "step": "ordered-list", "sequence": "ordered-list"},
             },
+            "public": "expanded",                     # what emit-post carries
+            "frontmatter": {"title": "unit-title",    # e1fd4d64 (B): the chapter title alone; the work page is the series link
+                            "description": "derived"},  # e1fd4d64 (A): the unit's headings + the type clause, never authored
             "kinds": dict(POINT_KIND_GLOSSES),
-            "emphasis": "lead-term-only",
+            "emphasis": "lead-in-place",
             "section_length_target": None,
-            "tone": "formal; fragments by default; no hedging the source did not hedge; no first person; "
-                    "no meta-commentary; digits and symbols",
-            "structure": "source order (the addressing layer); headings from the structure map + apparatus strata",
-            "unit": "one emitted post per chapter unit; the series link carries the work",
+            "tone": "formal; fragments by default; compressed, never the transcript's sentences; no hedging the "
+                    "source did not hedge; no first person; no meta-commentary; digits and symbols",
+            "structure": "source order (the addressing layer); headings from the structure map + apparatus strata; "
+                         "the first apparatus header restating the unit's own identity is the title, not a section",
+            "unit": "one emitted post per chapter unit; title = the unit title; the work page is the series link",
         },
         production_procedure=[
             "notes-pack: read the unit's effective spine + strata per the information policy; write the pack",
-            "proposer: draft Points with segment runs (kind/from_i/to_i/text/lead) from the pack",
+            "proposer: draft Points with segment runs (kind/from_i/to_i/text/lead/parent) from the pack — compressed, nested one level",
             "notes-ingest: validate rows against the pack; write the proposal set",
             "notes-accept: human confirms per point; each accept = Point + References + edges, journaled",
             "notes-coverage / notes-overlap / notes-check: the graph-read review; notes-retract undoes",
-            "notes-render: derive OUTLINE + EXPANDED from the Points; Sections + staging file follow",
+            "notes-render: derive the EXPANDED body (the public post; OUTLINE = review) + the type-owned frontmatter from the Points; Sections + staging file follow",
         ],
         actor=actor,
     )
@@ -277,8 +285,12 @@ async def read_source_unit(
                  "end": (float(s.end_time) if s.end_time is not None else None)}
                 for s in eff if (s.text or "").strip()]
     sp = dict(F.props(src))
+    # A public, time-addressable URL (YouTube / a podcast player) makes the source ADDRESSABLE:
+    # only then does the public rendering carry timestamps, as links (ruling e1fd4d64 (D)).
+    public_url = str(sp.get("public_url") or sp.get("url") or "").strip()
     return {"source": {"source_id": source_id, "title": str(sp.get("title") or ""),
-                       "work_structure": sp.get("work_structure"), "skeleton_hash": chosen},
+                       "work_structure": sp.get("work_structure"), "skeleton_hash": chosen,
+                       **({"public_url": public_url} if public_url else {})},
             "skeleton_hash": chosen, "segments": segments, "strata": strata,
             "spines": {(h or "legacy"): n for h, n in groups.items()}}
 
@@ -394,19 +406,56 @@ Write ONE JSON object per line (JSONL). Each row proposes ONE point over a run o
 consecutive pack lines:
 
     {"kind": "<kind>", "from_i": <int>, "to_i": <int>, "text": "<telegraphic statement>",
-     "lead": "<optional lead term>", "attribution": "<quotation only: who is quoted>",
+     "lead": "<optional: a term the text CONTAINS>",
+     "parent": <optional: the 0-based ROW NUMBER of the point this one elaborates>,
+     "attribution": "<quotation only: who is quoted>",
      "data": {<comparison: "columns": [...], "rows": [[...], ...] | sequence: "items": [{"when": "...", "what": "..."}]}}
 
+* You are COMPRESSING, not transcribing. Every point keeps the lines it derives from and is
+  checked beside them afterwards, so a tight rewrite cannot drift — copying the
+  transcript's sentences is the failure mode. Write the statement a reader returning to
+  these notes would want to find: usually SEVERAL lines compressed into one telegraphic
+  fragment, never one point per transcript line, never the speaker's rhetorical setup.
+* Register: fragments by default; drop articles, connectives, hedges the source did not
+  make, and framing ("what if…", "the thing is…", "I want to talk about…"); keep the
+  source's own terms and its precision (digits, symbols, units); no first person, no
+  meta-commentary, no interpretation, no restating one fact under two kinds.
+  `quotation` text is VERBATIM.
+
+  Before / after:
+    lines: "So the reason the bridge failed, and this is the part most people get wrong, is
+            that the engineers assumed the wind load would be static. It wasn't. It oscillated."
+    weak:  "The reason the bridge failed is that the engineers assumed the wind load would be
+            static, but it oscillated"                      (the transcript's sentence, trimmed)
+    good:  "Bridge failure — wind load assumed static; it oscillated"
+    lines: "I want to talk about three things today. First, budgets. A budget is really just a
+            plan for money you haven't spent yet. Most people think of it as a restriction."
+    weak:  three rows, one per line, including the announcement of three things
+    good:  ONE row: {"kind": "definition", "lead": "Budget",
+                     "text": "A plan for money not yet spent — not a restriction"}
 * `kind`: a kind from the slate above, or a NEW kebab-case kind when none fits (say so in
-  the text's lead). Every statement the source makes that a reader returning to these
-  notes would want is a point; nothing outside the lines below may enter a point.
-* `text`: what the source says, in ITS framing — fragments by default, digits and symbols,
-  no hedging the source did not hedge, no first person, no meta-commentary, no
-  interpretation, no restating one fact under two kinds. `quotation` text is VERBATIM.
+  the text's lead). Use the STRUCTURED kinds whenever the content has that shape — a table
+  or a numbered series is the reader's scan aid, a row of prose is not:
+    comparison  {"kind": "comparison", "from_i": 40, "to_i": 44, "text": "Static vs dynamic load models",
+                 "data": {"columns": ["", "Static model", "Dynamic model"],
+                          "rows": [["Assumes", "constant wind pressure", "oscillating pressure"],
+                                   ["Predicts", "a stable deck", "resonance"]]}}
+    sequence    {"kind": "sequence", "from_i": 3, "to_i": 9, "text": "The bridge's last year",
+                 "data": {"items": [{"when": "July", "what": "opened to traffic"},
+                                    {"when": "autumn", "what": "deck oscillation filmed"},
+                                    {"when": "November", "what": "collapse in a 40 mph wind"}]}}
+    step        one row per step of a procedure the source lays out (consecutive rows)
+* `parent` (ONE level of nesting): when a point elaborates, exemplifies, qualifies, or
+  gives the consequence of an EARLIER point in the same section, name that point's row
+  number (0-based, counting the rows you have written so far); it renders as a sub-item
+  under the parent. A parent never has a parent. Use it — a claim with its consequences
+  and its example beneath it reads as a tree, not a wall of equal bullets.
 * `from_i`/`to_i`: inclusive pack line numbers (the `[i]` prefixes) the point derives from —
   the smallest run that contains the statement. Two points may share lines; one point
   never spans a header.
-* `lead`: the term the reader's eye keys on (a name, a concept); the only emphasis applied.
+* `lead`: the term the reader's eye keys on (a name, a concept). It MUST appear in the
+  text — it is bolded IN PLACE, never prefixed. Only for `definition` does the lead stand
+  apart as the term defined.
 
 Rows only — no prose before or after, no code fences.
 """
@@ -427,10 +476,12 @@ def render_notes_pack(pack: Dict[str, Any]) -> str:  # The proposer brief (markd
         f"{len(pack.get('segments') or [])} content lines · {len(pack.get('headers') or [])} headers · "
         f"{len(pack.get('quote_spans') or [])} quote spans · digest `{pack.get('digest', '')[-12:]}`", "",
         "## Task", "",
-        "Read the numbered lines below and propose POINTS: the smallest statements attributable to",
-        "the source without interpretation, in source order, each over the run of lines it derives",
-        "from. Everything below is main-topic content already (excluded strata are gone); `[H]` rows",
-        "are the section headers the notes will render under — never make a point of a header.", "",
+        "Read the numbered lines below and propose POINTS: what the source says, COMPRESSED into",
+        "telegraphic statements a reader would scan for, in source order, each over the run of lines",
+        "it derives from. Everything below is main-topic content already (excluded strata are gone);",
+        "`[H]` rows are the section headers the notes will render under — never make a point of a",
+        "header. Nest with `parent` where a point elaborates an earlier one; use the structured kinds",
+        "where the content has that shape.", "",
         "## Kinds", "",
     ]
     for k in pack.get("kinds") or []:
@@ -465,10 +516,15 @@ def _is_kind_token(value: str) -> bool:
 def validate_point_rows(
     rows: List[Dict[str, Any]],  # Raw proposer output rows (parsed JSONL)
     pack: Dict[str, Any],        # The pack the rows reference
-) -> List[Dict[str, Any]]:  # Normalized rows (kind/from_i/to_i/text/lead/attribution/data)
+    *,
+    lenient_leads: bool = False, # Drop (never refuse) a lead the text does not contain; the CLI's --lenient
+) -> List[Dict[str, Any]]:  # Normalized rows (kind/from_i/to_i/text/lead/parent/attribution/data)
     """Validate + normalize proposer rows against their pack — loud on the first bad row.
     Enforces the contract: kind token, in-range inclusive run, non-empty text, a run that
-    never crosses a header, `comparison` carries columns+rows, `sequence` carries items."""
+    never crosses a header, `comparison` carries columns+rows, `sequence` carries items,
+    a `lead` the text CONTAINS (bolded in place — ruling e1fd4d64 (I); `definition` exempt),
+    and `parent` = an EARLIER row under the same header that is itself top-level (ONE level
+    of nesting — e1fd4d64 (H))."""
     segs = pack.get("segments") or []
     n = len(segs)
     out: List[Dict[str, Any]] = []
@@ -494,8 +550,25 @@ def validate_point_rows(
             raise ValueError(f"row {k}: a comparison needs data.columns and data.rows")
         if kind == "sequence" and not data.get("items"):
             raise ValueError(f"row {k}: a sequence needs data.items")
-        out.append({"kind": kind, "from_i": fi, "to_i": ti, "text": text,
-                    "lead": str(raw.get("lead") or "").strip(),
+        lead = str(raw.get("lead") or "").strip()
+        if lead and kind != "definition" and lead.lower() not in text.lower():
+            if not lenient_leads:
+                raise ValueError(f"row {k}: lead {lead!r} does not appear in the text (a lead is bolded IN PLACE; "
+                                 f"only `definition` may carry a lead the text lacks) — fix the row or ingest --lenient")
+            lead = ""
+        parent: Optional[int] = None
+        if raw.get("parent") is not None:
+            try:
+                parent = int(raw.get("parent"))
+            except (TypeError, ValueError):
+                raise ValueError(f"row {k}: parent must be a 0-based row number")
+            if not (0 <= parent < k - 1):
+                raise ValueError(f"row {k}: parent {parent} is not an EARLIER row (0..{k - 2})")
+            if out[parent].get("parent") is not None:
+                raise ValueError(f"row {k}: parent row {parent} is itself nested — one level only")
+            if segs[out[parent]["from_i"]]["h"] != segs[fi]["h"]:
+                raise ValueError(f"row {k}: parent row {parent} is under another header")
+        out.append({"kind": kind, "from_i": fi, "to_i": ti, "text": text, "lead": lead, "parent": parent,
                     "attribution": str(raw.get("attribution") or "").strip(),
                     "data": data})
     return out
@@ -516,6 +589,7 @@ def proposals_from_point_rows(
         starts = [s["start"] for s in run if s.get("start") is not None]
         ends = [s["end"] for s in run if s.get("end") is not None]
         h = int(run[0]["h"])
+        parent_row = r.get("parent")
         out.append({
             "proposal_id": str(uuid.uuid4()),
             "kind": r["kind"], "text": r["text"], "lead": r["lead"],
@@ -526,10 +600,21 @@ def proposals_from_point_rows(
             "end_time": (round(max(ends), 3) if ends else None),
             "heading": (headers[h - 1]["text"] if h > 0 and h - 1 < len(headers) else ""),
             "heading_index": h,
+            # ONE level of nesting (e1fd4d64 (H)): the parent's proposal id becomes the point's
+            # `parent_key` at accept (validated as an earlier, top-level, same-header row).
+            "parent_key": (out[parent_row]["proposal_id"] if parent_row is not None else ""),
             "evidence": {"pack_id": pack.get("pack_id"), "digest": pack.get("digest"),
                          "from_i": r["from_i"], "to_i": r["to_i"]},
         })
-    out.sort(key=lambda p: (p["from_i"], p["to_i"]))
+    # Source order, with every child DIRECTLY after its parent's group so an in-order accept
+    # never meets a child before its parent.
+    pos = {p["proposal_id"]: i for i, p in enumerate(out)}   # row position breaks ties between tops on the same lines
+    by_id = {p["proposal_id"]: p for p in out}
+
+    def _key(p: Dict[str, Any]) -> Tuple[int, int, int, int, int, int]:
+        top = by_id.get(p["parent_key"]) or p
+        return (top["from_i"], top["to_i"], pos[top["proposal_id"]], 1 if p["parent_key"] else 0, p["from_i"], p["to_i"])
+    out.sort(key=_key)
     return out
 
 
@@ -622,7 +707,7 @@ def point_from_args(
                      segment_ids=list(p.get("segment_ids") or []),
                      start_time=p.get("start_time"), end_time=p.get("end_time"),
                      attribution=str(p.get("attribution") or ""), data=dict(p.get("data") or {}),
-                     unit=dict(p.get("unit") or {}), actor=actor)
+                     unit=dict(p.get("unit") or {}), parent_key=str(p.get("parent_key") or ""), actor=actor)
 
 
 async def observe_segments(
@@ -679,13 +764,24 @@ async def accept_point(
     if len(observations) != len(point.get("segment_ids") or []):
         return {"error": "observations must match segment_ids one-to-one", "slug": slug, "written": False}
     node = point_from_args(note_id, point, actor=str(point.get("actor") or actor))
+    if node.parent_key:
+        # ONE level of nesting: the parent must already stand (accept order = the set's order,
+        # children after their parent); a missing parent is a SKIP the caller reports, not a
+        # dangling edge.
+        parent = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=node.parent_id)
+        if parent is None:
+            return {"error": f"parent point `{node.parent_key[:8]}` is not accepted yet (accept it first)",
+                    "skippable": True, "slug": slug, "written": False}
+        if str(F.prop(parent, "parent_key") or ""):
+            return {"error": f"parent point `{node.parent_key[:8]}` is itself nested — one level only",
+                    "skippable": True, "slug": slug, "written": False}
     existing = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=node.id)
     nodes: List[Dict[str, Any]] = [] if existing is not None else [node.to_graph_node()]
     changed = False
     if existing is not None:
         new_props = node.to_graph_node()["properties"]
         changed = any(F.prop(existing, k) != new_props.get(k)
-                      for k in ("text", "kind", "lead", "attribution", "heading", "data"))
+                      for k in ("text", "kind", "lead", "attribution", "heading", "data", "parent_key"))
         if changed:
             # A re-accept with edited content (the human's edit-on-accept) lands as a property
             # update — same id, the journal carries the new state, last op wins on replay.
@@ -701,6 +797,9 @@ async def accept_point(
         elif F.prop(have, "observed_hash") != ref.observed_hash:
             await graph_task(gx.queue, gx.graph_id, "update_node", node_id=ref.id, properties=wire["properties"])
     edges = [node.has_point_edge()] + node.derived_from_edges(ref_ids)
+    nest = node.elaborates_edge()
+    if nest is not None:
+        edges.append(nest)
     res = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
     args = {"slug": slug, "point": {**point, "key": node.key}, "observations": list(observations),
             "actor": actor, "proposal_set_id": proposal_set_id}
@@ -733,6 +832,26 @@ async def retract_point(
     await graph_task(gx.queue, gx.graph_id, "delete_nodes", node_ids=[pid], cascade=True)
     return {"point_id": pid, "note_id": note_id, "key": key, "deleted": True, "written": True,
             "args": {"point_id": pid, "slug": "", "key": key, "actor": actor}}
+
+
+async def retract_note_points(
+    gx: GraphHandle,
+    slug: str,                      # The deliverable Note's slug
+    *,
+    actor: str = "user:cli",
+) -> Dict[str, Any]:  # {slug, retracted: [retract results], written}
+    """Retract EVERY point of a Note (the re-drive's clean slate — ruling e1fd4d64 (5)): one
+    `retract_point` per point, children before parents so no ELABORATES edge ever dangles;
+    the caller journals one `retract-point` op per result (replay-identical to singles)."""
+    points = await load_points(gx, note_node_id(slug))
+    order = sorted(points, key=lambda p: (0 if p.get("parent_key") else 1, _sort_key(p)))
+    out: List[Dict[str, Any]] = []
+    for p in order:
+        r = await retract_point(gx, p["id"], actor=actor)
+        if r.get("error"):
+            return {"error": r["error"], "slug": slug, "retracted": out, "written": bool(out)}
+        out.append(r)
+    return {"slug": slug, "retracted": out, "written": bool(out)}
 
 
 # --------------------------------------------------------------------------------------
@@ -898,15 +1017,59 @@ def _anchor(p: Dict[str, Any]) -> str:  # the stable per-point anchor id
     return "pt-" + str(p.get("key") or "")[:8]
 
 
-def _span(p: Dict[str, Any]) -> str:  # (mm:ss–mm:ss) when the point carries times
-    if p.get("start_time") is None:
+ANCHOR_GLYPH = "§"   # the visible permalink mark a reader copies (ruling e1fd4d64 (F)); styled by .pt-anchor
+BODY_MARKER = "<!-- pure-notes: rendered body follows; everything above is authored -->"   # invisible in HTML + Typora
+
+
+def _anchor_link(p: Dict[str, Any]) -> str:  # "[§](#pt-x){#pt-x .pt-anchor}" — the id AND a visible permalink
+    a = _anchor(p)
+    return f"[{ANCHOR_GLYPH}](#{a}){{#{a} .pt-anchor}}"
+
+
+def _time_link(url: str, start: float) -> str:  # a public URL addressed at `start` seconds
+    """YouTube takes `t=<s>s` (watch: as a query param; youtu.be: `?t=`); anything else gets
+    the media-fragment `#t=<s>` the audio/video elements honour."""
+    s = int(max(0.0, float(start)))
+    if "youtube.com/" in url:
+        return f"{url}{'&' if '?' in url else '?'}t={s}s"
+    if "youtu.be/" in url:
+        return f"{url}{'&' if '?' in url else '?'}t={s}"
+    return f"{url}#t={s}"
+
+
+def _span(p: Dict[str, Any], timestamps: str = "addressable") -> str:  # " (mm:ss–mm:ss)" | " [(mm:ss–mm:ss)](url)" | ""
+    """The source span: `always` = plain; `addressable` = ONLY when the unit carries a public
+    time-addressable URL, rendered as a LINK into it (ruling e1fd4d64 (D) — an audiobook span
+    resolves against nobody else's file split); `never` = none. Review verbs show spans
+    regardless — this governs the rendered post."""
+    if p.get("start_time") is None or timestamps == "never":
         return ""
-    return f" ({_fmt_ts(p.get('start_time'))}–{_fmt_ts(p.get('end_time'))})"
+    text = f"({_fmt_ts(p.get('start_time'))}–{_fmt_ts(p.get('end_time'))})"
+    if timestamps == "always":
+        return " " + text
+    url = str((p.get("unit") or {}).get("public_url") or "").strip()
+    if not url:
+        return ""
+    return f" [{text}]({_time_link(url, float(p.get('start_time') or 0.0))})"
 
 
-def _lead_text(p: Dict[str, Any]) -> str:  # "**Lead** — text" | "text"
+def _bold_in_place(text: str, lead: str) -> str:  # bold the FIRST occurrence of `lead` inside `text` (case-insensitive)
+    i = text.lower().find(lead.lower())
+    if i < 0:
+        return ""
+    return text[:i] + "**" + text[i:i + len(lead)] + "**" + text[i + len(lead):]
+
+
+def _lead_text(p: Dict[str, Any]) -> str:  # definition: "**Term** — text"; else the lead bolded IN PLACE
+    """Ruling e1fd4d64 (I): a prefixed lead that restates a term already in the text adds
+    nothing — bold the term where it occurs. `definition` keeps the glossary shape (the term,
+    then what it means); a lead the text lacks (legacy rows) falls back to the prefix."""
     lead, text = str(p.get("lead") or "").strip(), str(p.get("text") or "").strip()
-    return f"**{lead}** — {text}" if lead else text
+    if not lead:
+        return text
+    if str(p.get("kind")) == "definition":
+        return f"**{lead}** — {text}"
+    return _bold_in_place(text, lead) or f"**{lead}** — {text}"
 
 
 OUTLINE_QUOTE_WORDS = 12   # a quotation's outline line = attribution + its first words (the scan view abbreviates)
@@ -927,40 +1090,110 @@ def _heading_text(h: str) -> str:  # a read-aloud header as a heading (no traili
     return h.strip().rstrip(".").strip()
 
 
-def _render_table(data: Dict[str, Any]) -> List[str]:
+def _norm(s: str) -> str:  # heading comparison form: lowercase, no trailing period, collapsed spaces
+    return " ".join(str(s or "").lower().replace("’", "'").split()).rstrip(".").strip()
+
+
+def unit_title_header(heading: str, unit: Dict[str, Any]) -> bool:  # does this header restate the unit's own identity?
+    """Ruling e1fd4d64 (C): the first read-aloud header of a chapter file is the chapter's own
+    title ('Part 1. School. Chapter 1. …'), one level UP the structure map — it is the unit's
+    TITLE, not a section. True when the header contains the structure map's unit title (or
+    the Source title's tail after its file prefix)."""
+    h = _norm(heading)
+    if not h:
+        return False
+    ws = dict((unit or {}).get("work_structure") or {})
+    title = _norm(ws.get("title") or "")
+    if title and title in h:
+        return True
+    src_title = _norm((unit or {}).get("title") or "")
+    # "04 - 1. Seven Dangerous Lessons…" -> "seven dangerous lessons…"
+    tail = re.sub(r"^[\d\s\-–—.:]+", "", src_title).strip()
+    return bool(tail) and tail in h
+
+
+def _render_table(data: Dict[str, Any], indent: str = "") -> List[str]:
     cols = [str(c) for c in (data.get("columns") or [])]
     rows = data.get("rows") or []
     if not cols:
         return []
-    out = ["| " + " | ".join(cols) + " |", "|" + "|".join(["---"] * len(cols)) + "|"]
+    out = [indent + "| " + " | ".join(cols) + " |", indent + "|" + "|".join(["---"] * len(cols)) + "|"]
     for r in rows:
         cells = [str(c) for c in (r if isinstance(r, (list, tuple)) else [r])]
         cells += [""] * (len(cols) - len(cells))
-        out.append("| " + " | ".join(cells[:len(cols)]) + " |")
+        out.append(indent + "| " + " | ".join(cells[:len(cols)]) + " |")
     return out
+
+
+def _sequence_items(p: Dict[str, Any], indent: str) -> List[str]:  # the ordered items of a `sequence`
+    out: List[str] = []
+    for n, it in enumerate((p.get("data") or {}).get("items") or [], start=1):
+        when = str((it or {}).get("when") or "").strip() if isinstance(it, dict) else ""
+        what = str((it or {}).get("what") or it or "").strip() if isinstance(it, dict) else str(it)
+        out.append(f"{indent}{n}. " + (f"**{when}** — {what}" if when else what))
+    return out
+
+
+def _child_lines(c: Dict[str, Any], timestamps: str, indent: str = "  ") -> List[str]:  # a nested point as a sub-item
+    """ONE level of nesting (e1fd4d64 (H)): a child renders as a sub-item under its parent —
+    quotation inline (“…” — who), sequence as a nested ordered list, comparison as an
+    indented table, everything else as one sub-bullet."""
+    kind = str(c.get("kind") or "claim")
+    tail = f"{_span(c, timestamps)} {_anchor_link(c)}"
+    if kind == "quotation":
+        who = str(c.get("attribution") or "").strip()
+        return [f"{indent}- “{str(c.get('text') or '').strip()}”" + (f" — {who}" if who else "") + tail]
+    if kind == "sequence":
+        return [f"{indent}- {_lead_text(c)}{tail}"] + _sequence_items(c, indent + "  ")
+    if kind == "comparison":
+        return [f"{indent}- {_lead_text(c)}{tail}", ""] + _render_table(dict(c.get("data") or {}), indent + "  ") + [""]
+    return [f"{indent}- {_lead_text(c)}{tail}"]
+
+
+def nest_points(
+    points: List[Dict[str, Any]],  # load_points output (source order)
+) -> List[Tuple[Dict[str, Any], List[Dict[str, Any]]]]:  # [(top-level point, [its children in source order])]
+    """Group ONE level: a point whose `parent_key` names a present point nests under it;
+    an orphaned child (parent retracted) renders top-level, never disappears."""
+    keys = {str(p.get("key")): p for p in points}
+    kids: Dict[str, List[Dict[str, Any]]] = {}
+    tops: List[Dict[str, Any]] = []
+    for p in points:
+        pk = str(p.get("parent_key") or "")
+        if pk and pk in keys and pk != str(p.get("key")):
+            kids.setdefault(pk, []).append(p)
+        else:
+            tops.append(p)
+    return [(t, kids.get(str(t.get("key")), [])) for t in tops]
 
 
 def render_points(
     points: List[Dict[str, Any]],   # load_points output (source order)
     *,
-    rendering: str = "both",        # "outline" | "expanded" | "both"
+    rendering: str = "expanded",    # "outline" | "expanded" | "both"
+    timestamps: str = "addressable",  # "always" | "addressable" | "never" (see _span)
     outline_title: str = "At a glance",
-    body_title: str = "Notes",      # Heading used when the unit has no section headers
+    body_title: str = "Notes",      # Heading used when the unit has no section headers at all
 ) -> str:  # The body markdown (after the preamble)
     """Render the body from the Points — deterministic, so a replayed `render-notes` derives
-    the same Sections. OUTLINE: one line per point (lead bold, linked to its anchor), under
-    the derived headings. EXPANDED: under the same headings, each point with its anchor and
-    timestamps; `quotation` as a block with attribution; consecutive `step`s as ONE ordered
-    list; `sequence` as an ordered list of its items; `comparison` as a table. No emphasis
-    beyond the lead term; no section length target."""
+    the same Sections. EXPANDED (the public post): under the derived headings — the first
+    header that restates the unit's own title is suppressed (e1fd4d64 (C)) — each top-level
+    point with its permalink glyph, its children as sub-items, spans only when the source is
+    addressable; `quotation` as a block with attribution; consecutive `step`s as ONE ordered
+    list; `sequence` as an ordered list; `comparison` as a table; the lead bolded in place.
+    OUTLINE (review / the work page): one line per point under the same headings."""
     pts = sorted(points, key=_sort_key)
+    unit = dict((pts[0].get("unit") or {}) if pts else {})
     groups: List[Tuple[str, List[Dict[str, Any]]]] = []
     for p in pts:
         h = str(p.get("heading") or "")
+        if unit_title_header(h, unit):
+            h = ""   # the unit's own title, not a section — wherever it occurs, so its points stay ONE group
         if groups and groups[-1][0] == h:
             groups[-1][1].append(p)
         else:
             groups.append((h, [p]))
+    any_heading = any(h for h, _ in groups)
     lines: List[str] = []
     want_outline = rendering in ("outline", "both")
     want_expanded = rendering in ("expanded", "both")
@@ -970,23 +1203,32 @@ def render_points(
         for h, ps in groups:
             if h:
                 lines += [f"**{_heading_text(h)}**", ""]
-            for p in ps:
-                lines.append(f"- [{_outline_text(p)}](#{_anchor(p)})" if want_expanded else f"- {_outline_text(p)}")
+            for top, kids in nest_points(ps):
+                for depth, p in [(0, top)] + [(1, k) for k in kids]:
+                    ind = "  " * depth
+                    lines.append(f"{ind}- [{_outline_text(p)}](#{_anchor(p)})" if want_expanded
+                                 else f"{ind}- {_outline_text(p)}")
             lines.append("")
 
     if want_expanded:
         for h, ps in groups:
-            lines += [f"## {_heading_text(h) if h else body_title}", ""]
+            if h:
+                lines += [f"## {_heading_text(h)}", ""]
+            elif not any_heading:
+                lines += [f"## {body_title}", ""]
+            nested = nest_points(ps)
             i = 0
-            while i < len(ps):
-                p = ps[i]
+            while i < len(nested):
+                p, kids = nested[i]
                 kind = str(p.get("kind") or "claim")
-                a = _anchor(p)
+                tail = f"{_span(p, timestamps)} {_anchor_link(p)}"
                 if kind == "step":
                     n = 1
-                    while i < len(ps) and str(ps[i].get("kind")) == "step":
-                        q = ps[i]
-                        lines.append(f"{n}. []{{#{_anchor(q)}}} {_lead_text(q)}{_span(q)}")
+                    while i < len(nested) and str(nested[i][0].get("kind")) == "step":
+                        q, qkids = nested[i]
+                        lines.append(f"{n}. {_lead_text(q)}{_span(q, timestamps)} {_anchor_link(q)}")
+                        for k in qkids:
+                            lines += _child_lines(k, timestamps, indent="    ")
                         n += 1
                         i += 1
                     lines.append("")
@@ -994,47 +1236,125 @@ def render_points(
                 if kind == "quotation":
                     who = str(p.get("attribution") or "").strip()
                     text = str(p.get("text") or "").strip()
-                    lines.append(f"[]{{#{a}}}")
-                    lines.append("")
                     lines.append(f"> {text}")
-                    tail = (f"— {who}" if who else "").strip()
-                    lines.append(f">" + (f" {tail}" if tail else "") + _span(p))
+                    lines.append(">" + (f" — {who}" if who else "") + tail)
                     lines.append("")
+                    if kids:
+                        for k in kids:
+                            lines += _child_lines(k, timestamps, indent="")
+                        lines.append("")
                 elif kind == "comparison":
-                    lines.append(f"[]{{#{a}}} {_lead_text(p)}{_span(p)}")
+                    # The table lives INSIDE the item (its children nest beneath) — the blank line
+                    # Pandoc needs before the table makes the list "loose"; the stylesheet collapses
+                    # that spacing (`li > p`), which beats a standalone block whose children would
+                    # sit at the same depth as the next top-level points.
+                    lines.append(f"- {_lead_text(p)}{tail}")
                     lines.append("")
-                    lines += _render_table(dict(p.get("data") or {}))
+                    lines += _render_table(dict(p.get("data") or {}), "  ")
                     lines.append("")
+                    for k in kids:
+                        lines += _child_lines(k, timestamps)
+                    if kids:
+                        lines.append("")
                 elif kind == "sequence":
-                    lines.append(f"[]{{#{a}}} {_lead_text(p)}{_span(p)}")
-                    lines.append("")
-                    for n, it in enumerate((p.get("data") or {}).get("items") or [], start=1):
-                        when = str((it or {}).get("when") or "").strip() if isinstance(it, dict) else ""
-                        what = str((it or {}).get("what") or it or "").strip() if isinstance(it, dict) else str(it)
-                        lines.append(f"{n}. " + (f"**{when}** — {what}" if when else what))
+                    lines.append(f"- {_lead_text(p)}{tail}")
+                    lines += _sequence_items(p, "  ")
+                    for k in kids:
+                        lines += _child_lines(k, timestamps)
                     lines.append("")
                 else:
-                    lines.append(f"- []{{#{a}}} {_lead_text(p)}{_span(p)}")
+                    lines.append(f"- {_lead_text(p)}{tail}")
+                    for k in kids:
+                        lines += _child_lines(k, timestamps)
                     # run the plain kinds together as one list
-                    if i + 1 >= len(ps) or str(ps[i + 1].get("kind")) in ("step", "quotation", "comparison", "sequence"):
+                    if i + 1 >= len(nested) or str(nested[i + 1][0].get("kind")) in ("step", "quotation", "comparison", "sequence"):
                         lines.append("")
                 i += 1
     text = "\n".join(lines).rstrip("\n") + "\n"
-    return text
+    return text if text.strip() else ""
+
+
+def derived_description(
+    points: List[Dict[str, Any]],  # load_points output
+) -> str:  # The frontmatter description a reader can use (e1fd4d64 (A)), "" when nothing to derive
+    """What the unit CONTAINS, from data the rendering already uses: the work (when the
+    structure map names it), the unit title, its section headings in order, and the type's
+    one distinguishing clause. Never the lane's vocabulary (strata, graph, file numbers)."""
+    pts = sorted(points, key=_sort_key)
+    if not pts:
+        return ""
+    unit = dict(pts[0].get("unit") or {})
+    ws = dict(unit.get("work_structure") or {})
+    title = str(ws.get("title") or "").strip()
+    kind = str(ws.get("kind") or "source").strip() or "source"
+    heads: List[str] = []
+    for p in pts:
+        h = _heading_text(str(p.get("heading") or ""))
+        if h and h not in heads and not (not heads and unit_title_header(h, unit)):
+            heads.append(h)
+    work = str(ws.get("work") or "").strip()
+    lead = (f"{work} — " if work else "") + (title or "Notes")
+    body = (": " + " · ".join(heads)) if heads else ""
+    return f"{lead}{body}. What the {kind} says, in source order, without added commentary."
+
+
+def derive_frontmatter(
+    fm_raw: str,                    # The authored frontmatter block ("---\\n…\\n---\\n")
+    points: List[Dict[str, Any]],   # load_points output
+    policy: Dict[str, Any],         # presentation_policy["frontmatter"] ({"title": "unit-title", "description": "derived"})
+) -> str:  # The frontmatter with the policy-owned lines replaced (or inserted after title)
+    """Ruling e1fd4d64 (A)+(B): the type may OWN the title (the unit title alone) and the
+    description (derived) — the rest of the authored frontmatter (date, categories, …)
+    stays. Idempotent: a re-derive over derived lines yields the same bytes."""
+    if not fm_raw.startswith("---") or not points:
+        return fm_raw
+    pts = sorted(points, key=_sort_key)
+    unit = dict(pts[0].get("unit") or {})
+    ws = dict(unit.get("work_structure") or {})
+    want: Dict[str, str] = {}
+    if policy.get("title") == "unit-title" and str(ws.get("title") or "").strip():
+        want["title"] = str(ws.get("title")).strip()
+    if policy.get("description") == "derived":
+        d = derived_description(points)
+        if d:
+            want["description"] = d
+    if not want:
+        return fm_raw
+    lines = fm_raw.split("\n")
+    end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
+    if end is None:
+        return fm_raw
+    seen: set = set()
+    out: List[str] = [lines[0]]
+    for ln in lines[1:end]:
+        key = ln.split(":", 1)[0].strip() if ":" in ln and not ln.startswith((" ", "\t", "-")) else ""
+        if key in want:
+            out.append(f"{key}: {json.dumps(want[key], ensure_ascii=False)}")
+            seen.add(key)
+        else:
+            out.append(ln)
+    for key in ("title", "description"):
+        if key in want and key not in seen:
+            at = next((i for i, l in enumerate(out) if l.startswith("title:")), 0) + 1 if key == "description" else 1
+            out.insert(at, f"{key}: {json.dumps(want[key], ensure_ascii=False)}")
+    return "\n".join(out + lines[end:])
 
 
 async def render_notes(
     gx: GraphHandle,
     slug: str,                          # The deliverable Note's slug
     *,
-    rendering: str = "both",            # "outline" | "expanded" | "both"
+    rendering: str = "expanded",        # "outline" | "expanded" | "both" (the public post = expanded)
+    timestamps: str = "addressable",    # "always" | "addressable" | "never"
     write_md: bool = True,              # Write the staging `.md` (replay passes False)
     actor: str = "agent:session",
 ) -> Dict[str, Any]:  # {slug, points, added, updated, removed, written, text} | {error}
-    """Derive the Note's body from its Points and APPLY it: the authored frontmatter + preamble
-    stay, everything after is re-derived, the diff lands as Section adds/updates, and Sections
-    the rendering no longer produces are deleted (render owns the body). The staging file is
-    rewritten from the same text. Idempotent: the same Points render the same bytes."""
+    """Derive the Note's body from its Points and APPLY it: the authored preamble stays, the
+    frontmatter's type-owned lines (title / description) are re-derived per the type's
+    presentation policy, everything after is re-derived, the diff lands as Section
+    adds/updates, and Sections the rendering no longer produces are deleted (render owns the
+    body). The staging file is rewritten from the same text. Idempotent: the same Points
+    render the same bytes."""
     from .authoring import _note_section_wires
     from .structure import _apply_note_text
     note_id = note_node_id(slug)
@@ -1043,17 +1363,26 @@ async def render_notes(
         return {"error": f"no note `{slug}`", "slug": slug, "written": False}
     if rendering not in ("outline", "expanded", "both"):
         return {"error": f"rendering must be outline | expanded | both, got {rendering!r}", "written": False}
+    if timestamps not in ("always", "addressable", "never"):
+        return {"error": f"timestamps must be always | addressable | never, got {timestamps!r}", "written": False}
     points = await load_points(gx, note_id)
     wires = await _note_section_wires(gx, note_id)
     pre = ""
     for w in wires:
         if str(F.props(w).get("anchor")) == "_preamble":
             pre = str(F.props(w).get("raw") or "")
-    fm = str(F.prop(note, "frontmatter_raw") or "")
-    body = render_points(points, rendering=rendering)
+    # Heading-less opening points (the unit's title header is suppressed — e1fd4d64 (C)) decompose
+    # into the SAME `_preamble` Section as the authored preamble; the marker is the boundary a
+    # re-render splits at, so the authored part never accretes rendered lines.
+    pre = pre.split(BODY_MARKER, 1)[0]
+    tkey = await note_deliverable_type(gx, note_id) or PURE_NOTES_KEY
+    tprops = await load_deliverable_type(gx, tkey) or {}
+    fm_policy = dict((tprops.get("presentation_policy") or {}).get("frontmatter") or {})
+    fm = derive_frontmatter(str(F.prop(note, "frontmatter_raw") or ""), points, fm_policy)
+    body = render_points(points, rendering=rendering, timestamps=timestamps)
     if pre and not pre.endswith("\n\n"):
         pre = pre.rstrip("\n") + "\n\n"
-    new_text = fm + pre + body
+    new_text = fm + pre + BODY_MARKER + "\n\n" + body
     path = str(F.prop(note, "path") or "")
     res = await _apply_note_text(gx, note, slug, new_text, path, write=True, write_md=write_md)
     removed = list(res.get("removed") or [])
@@ -1067,9 +1396,10 @@ async def render_notes(
     # duplicate of the first render and a rebuild would stop at the stale body. A true no-op
     # re-render (same points) still dedups.
     digest = hashlib.sha256(json.dumps(
-        [[p.get("key"), p.get("kind"), p.get("text"), p.get("lead"), p.get("heading"), p.get("data")]
+        [[p.get("key"), p.get("kind"), p.get("text"), p.get("lead"), p.get("heading"), p.get("data"),
+          p.get("parent_key")]
          for p in points], sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")).hexdigest()
-    res.update(points=len(points), rendering=rendering, text=new_text,
-               args={"slug": slug, "rendering": rendering, "actor": actor,
+    res.update(points=len(points), rendering=rendering, timestamps=timestamps, text=new_text,
+               args={"slug": slug, "rendering": rendering, "timestamps": timestamps, "actor": actor,
                      "substance": f"sha256:{digest}"})
     return res

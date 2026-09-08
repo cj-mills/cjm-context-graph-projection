@@ -305,7 +305,7 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         if not obj.get("proposals") and not obj.get("skipped"):
             lines.append("_(nothing to propose — the review frontier is empty)_")
         return "\n".join(lines)
-    if kind in ("notes-type", "notes-pack", "notes-ingest", "notes-accept", "notes-retract",
+    if kind in ("notes-type", "notes-pack", "notes-ingest", "notes-accept", "notes-retract", "notes-retract-all",
                 "notes-coverage", "notes-overlap", "notes-check", "notes-render"):
         return _render_notes_lane(kind, obj)
     if kind == "confirm-proposal":
@@ -1410,8 +1410,10 @@ def _render_notes_lane(kind: str, obj: Dict[str, Any]) -> str:
             lines.append(f"_{len(pend)} pending · {obj.get('accepted_before', 0)} already accepted_")
             for p in pend:
                 lead = f"**{p.get('lead')}** — " if p.get("lead") else ""
-                lines.append(f"- `{str(p.get('proposal_id') or '')[:8]}` [{p.get('kind')}] lines {p.get('from_i')}–{p.get('to_i')}"
+                nest = "  ↳ " if p.get("parent_key") else ""
+                lines.append(f"- {nest}`{str(p.get('proposal_id') or '')[:8]}` [{p.get('kind')}] lines {p.get('from_i')}–{p.get('to_i')}"
                              + (f" · under _{p.get('heading')}_" if p.get("heading") else "")
+                             + (f" · elaborates `{str(p.get('parent_key'))[:8]}`" if p.get("parent_key") else "")
                              + f"\n    {lead}{_short(p.get('text'), 200)}")
             if pend:
                 lines.append("accept: `--accept <id prefix>` (repeatable) · `--accept-all` · edit text on accept: `--accept <id> --text \"…\"`")
@@ -1430,6 +1432,10 @@ def _render_notes_lane(kind: str, obj: Dict[str, Any]) -> str:
     if kind == "notes-retract":
         state = "retracted (node + edges deleted)" if obj.get("deleted") else "already absent (no-op)"
         return f"**retract-point** `{str(obj.get('point_id') or '')[:8]}` — {state}"
+    if kind == "notes-retract-all":
+        done = obj.get("retracted") or []
+        return (f"**retract-point ×{len(done)}** — every point of `{obj.get('slug')}` retracted "
+                f"(one journaled op each; render to drop the body)")
     if kind == "notes-coverage":
         gaps = obj.get("gaps") or []
         lines = [f"## Coverage — `{obj.get('slug')}` ({obj.get('type')})",
