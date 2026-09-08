@@ -471,6 +471,49 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             if r.get("acknowledged") and not (obj.get("view") or {}).get("all"):
                 lines.append(f"  _({r['acknowledged']} acknowledged change(s) hidden — `--all` shows them)_")
         return "\n".join(lines)
+    if kind == "link-audit":
+        # The link-liveness worklist (finding 5761f954): one row per external URL that is
+        # not plainly ok, worst first — offsite (a hop left the registrable domain: the
+        # hijack signature), dead, moved — with the redirect chain as evidence, the notes
+        # that carry it, and the Wayback bracket when asked. Nothing here writes: a born
+        # note's fix is `author`, an archive post's fix is a source edit + re-ingest.
+        c = obj.get("counts", {})
+        lines = ["## Link audit",
+                 f"_notes {c.get('notes', 0)} · links {c.get('links', 0)} · probed {c.get('probed', 0)} · "
+                 f"ok {c.get('ok', 0)} · moved {c.get('moved', 0)} · offsite {c.get('offsite', 0)} · "
+                 f"dead {c.get('dead', 0)}_  (liveness is DERIVED at probe time, never stored)", ""]
+        if obj.get("skipped"):
+            lines.append(f"_{obj['skipped']} link(s) not probed (--limit)_")
+        rows = obj.get("rows", [])
+        if not rows:
+            lines.append("_(every probed link answers at its own address)_")
+            return "\n".join(lines)
+        icon = {"offsite": "🚩 OFFSITE", "dead": "💀 DEAD", "moved": "↪ MOVED", "ok": "✅ ok"}
+        for r in rows:
+            code = r.get("final_code")
+            tail = f"{code}" if code is not None else (r.get("error") or "no answer")
+            head = f"- {icon.get(r['state'], r['state'])} <{r['url']}>"
+            if r.get("hops"):
+                head += f" → <{r.get('final_url')}> ({tail}, {r['hops']} hop(s))"
+            else:
+                head += f" ({tail})"
+            lines.append(head)
+            if r["state"] == "offsite" and r.get("chain"):
+                lines.append("    chain: " + " → ".join(f"{u} [{c}]" for u, c in r["chain"]))
+            wb = r.get("wayback")
+            if wb:
+                lg, fb = wb.get("last_good"), wb.get("first_bad")
+                fmt = lambda ts: f"{ts[:4]}-{ts[4:6]}-{ts[6:8]}" if ts else None  # noqa: E731
+                if wb.get("error"):
+                    lines.append(f"    wayback: {wb['error']}")
+                elif lg:
+                    lines.append(f"    wayback: last good {fmt(lg)} · first bad {fmt(fb) or 'not captured yet'} "
+                                 f"({wb.get('captures')} captures)")
+                else:
+                    lines.append(f"    wayback: never captured as 200 ({wb.get('captures')} captures)")
+            for n in r.get("notes", []):
+                lines.append(f"    carried by `{n.get('slug') or n.get('id')}` — {n.get('title', '')[:70]}")
+        return "\n".join(lines)
     if kind == "readiness":
         c = obj.get("counts", {})
         extra = ""

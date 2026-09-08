@@ -36,6 +36,7 @@ from .hybrid_page import HYBRID_HTML
 from .journal import (journal_sourced_note_paths, journal_window_view, M3_BASELINE_ACTOR,
                       m3_baseline_import, replay_journal)
 from .lens import apply_lens, set_lens
+from .linkaudit import link_audit
 from .listing import list_graph
 from .module_ops import delete_module, flip_notebook_to_py, new_module, regroup, rename_module
 from .onboarding import project_onboarding
@@ -172,6 +173,7 @@ ID_REFS: Dict[str, tuple] = {
     "flip-module": ("repo_key",), "cutover": ("repo_key",),
     "emit-artifact": ("repo_key",), "emit-post": ("note_id",),
     "review-frontier": ("subject",), "propose": ("subject",), "confirm-proposal": ("proposal",),
+    "link-audit": ("note",),
 }
 
 
@@ -486,6 +488,24 @@ async def _dispatch(args) -> int:
             res = await review_frontier(gx, jp, subject=subj, depth=args.depth,
                                         include_acked=args.all)
             print(render("review-frontier", res, args.format))
+        elif args.command == "link-audit":
+            # External-link liveness (5761f954): read-only; an id-shaped note resolves
+            # through the shared seam like review-frontier's subject, else substring.
+            subj = args.note
+            if subj and len(subj) >= 6 and all(c in "0123456789abcdef-" for c in subj):
+                from .projection import ambiguity_error, resolve_node_ref
+                r = await resolve_node_ref(gx, subj)
+                if "candidates" in r:
+                    print(ambiguity_error(subj, r["candidates"]), file=sys.stderr)
+                    return 1
+                node = r.get("node")
+                if node is None:
+                    print(f"error: no node `{subj}` — `locate` the note first", file=sys.stderr)
+                    return 1
+                subj = node.get("id") if isinstance(node, dict) else getattr(node, "id", subj)
+            res = await link_audit(gx, note=subj, timeout=args.timeout, workers=args.workers,
+                                   wayback=args.wayback, include_ok=args.all, limit=args.limit)
+            print(render("link-audit", res, args.format))
         elif args.command == "register-drift":
             print(render("register-drift", await register_drift(gx), args.format))
         elif args.command == "prose-refs":
@@ -1578,6 +1598,21 @@ def main() -> int:
     p_rf.add_argument("--depth", type=int, default=3, help="Upstream walk depth (default 3)")
     p_rf.add_argument("--all", action="store_true",
                       help="List acknowledged changes too (default: counted, hidden)")
+
+    p_la = sub.add_parser("link-audit",
+                          help="Derived link-liveness worklist (finding 5761f954): every external "
+                               "URL the notes carry, probed hop by hop and classified ok / moved / "
+                               "offsite (a hop left the registrable domain — the hijack signature) "
+                               "/ dead, worst first, with the carrying notes; --wayback brackets "
+                               "each bad link's rot against the Wayback CDX index")
+    p_la.add_argument("note", nargs="?", default=None,
+                      help="Restrict to one note (id prefix) or a slug / title substring")
+    p_la.add_argument("--timeout", type=float, default=10.0, help="Per-hop probe timeout, seconds (default 10)")
+    p_la.add_argument("--workers", type=int, default=8, help="Concurrent probes (default 8)")
+    p_la.add_argument("--wayback", action="store_true",
+                      help="Ask the Wayback CDX index for each non-ok link's last-good / first-bad capture")
+    p_la.add_argument("--all", action="store_true", help="List the ok rows too (default: counted only)")
+    p_la.add_argument("--limit", type=int, default=None, help="Probe at most N distinct URLs (a sizing run)")
 
     p_pp = sub.add_parser("propose",
                           help="Triage proposals (bb015d12): for each stale review-frontier row, draft "
