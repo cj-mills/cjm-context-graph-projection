@@ -172,8 +172,11 @@ async def _apply_op(gx: GraphHandle, op: Dict[str, Any]) -> str:
                            asserted_at=op.get("ts"), method=a.get("method"),
                            subject_content_hash=a.get("subject_content_hash"))
     elif verb == "link":
+        # A cross-graph link (0154f5e4) carries its OBSERVATION: replay rebuilds the
+        # Reference stand-in from the journaled hash/label/title — the sibling graph is
+        # never opened on a rebuild, so a rebuild is reproducible with the sibling absent.
         await link(gx, a["source_id"], a["target_id"], a["relation"],
-                   actor=a.get("actor", "agent:session"))
+                   actor=a.get("actor", "agent:session"), observation=a.get("observation"))
     elif verb == "unlink":
         # Edge retraction (2f1d9382): replayed in append order AFTER the link it
         # retracts, so a rebuild converges with the edge absent. A missing edge

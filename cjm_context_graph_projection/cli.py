@@ -24,7 +24,7 @@ from cjm_context_graph_primitives.journal import append_write, read_journal
 from .authoring import add_symbol, author, emit_artifact, emit_post, read_node, read_slot
 from .code_edges import orphaned_edges
 from .cohesion import cohesion
-from .config import load_graph_config
+from .config import load_graph_config, sibling_graphs
 from .contradictions import contradictions
 from .conventions import conventions
 from .devgraph import build_dev_graph_elements, notes_corpus_elements
@@ -485,8 +485,12 @@ async def _dispatch(args) -> int:
                     print(f"error: no node `{subj}` — `locate` the deliverable first", file=sys.stderr)
                     return 1
                 subj = node.get("id") if isinstance(node, dict) else getattr(node, "id", subj)
+            # Cross-graph references (0154f5e4) are verified against the sibling graphs
+            # this graph's config names — opened read-only, by the Reference's key.
             res = await review_frontier(gx, jp, subject=subj, depth=args.depth,
-                                        include_acked=args.all)
+                                        include_acked=args.all,
+                                        siblings=sibling_graphs(load_graph_config(args.graph_db_path)),
+                                        manifests_dir=args.manifests_dir)
             print(render("review-frontier", res, args.format))
         elif args.command == "link-audit":
             # External-link liveness (5761f954): read-only; an id-shaped note resolves
@@ -898,18 +902,26 @@ async def _dispatch(args) -> int:
             print(render("oracle", res, args.format))
             return 0
         elif args.command == "link":
-            res = await link(gx, args.source_id, args.target_id, args.relation, actor=args.actor)
+            # A `<graph key>:<id>` target routes into the sibling graph named by this
+            # graph's config (0154f5e4) — observed read-only, landed as a Reference.
+            res = await link(gx, args.source_id, args.target_id, args.relation, actor=args.actor,
+                             siblings=sibling_graphs(load_graph_config(args.graph_db_path)),
+                             manifests_dir=args.manifests_dir)
             print(render("link", res, args.format))
-            if args.journal_path and res.get("written"):
+            if args.journal_path and res.get("written") and not res.get("noop"):
                 # Endpoint labels are AUDIT-ONLY (replay ignores them): they are what
                 # lets the orphaned-edge detector propose a remap after a code rename
                 # deletes the deterministic old id. Journal the RESOLVED ids (a prefix
-                # resolves against TODAY's db; replay must land on the same nodes).
-                append_write(args.journal_path, "link",
-                             {"source_id": res["source_id"], "target_id": res["target_id"],
-                              "relation": args.relation, "actor": args.actor,
-                              "source_label": res.get("source_label"),
-                              "target_label": res.get("target_label")})
+                # resolves against TODAY's db; replay must land on the same nodes). A
+                # cross-graph link journals its OBSERVATION too — replay rebuilds the
+                # Reference from it, never from the sibling.
+                op = {"source_id": res["source_id"], "target_id": res["target_id"],
+                      "relation": args.relation, "actor": args.actor,
+                      "source_label": res.get("source_label"),
+                      "target_label": res.get("target_label")}
+                if res.get("observation"):
+                    op["observation"] = res["observation"]
+                append_write(args.journal_path, "link", op)
             return 1 if res.get("error") else 0
         elif args.command == "unlink":
             if args.journal_path and not args.force:
@@ -1894,10 +1906,14 @@ def main() -> int:
     p_or.add_argument("--repos-dir", default=DEFAULT_REPOS)
     p_or.add_argument("--only", action="append", help="Restrict to a repo key/name (repeatable)")
 
-    p_ln = sub.add_parser("link", help="Mint a deliberate edge between two existing nodes")
+    p_ln = sub.add_parser("link", help="Mint a deliberate edge between two existing nodes — or to a "
+                                       "node in a SIBLING graph (`<graph key>:<id>`, 0154f5e4)")
     p_ln.add_argument("source_id", help="Source node id (must exist)")
     p_ln.add_argument("relation", help="Edge relation (free string; e.g. IMPLEMENTED_BY)")
-    p_ln.add_argument("target_id", help="Target node id (must exist)")
+    p_ln.add_argument("target_id", help="Target node id (must exist) — or `<graph key>:<id>` naming a "
+                                        "node in a sibling graph from this graph's config "
+                                        "`sibling_graphs`: observed read-only, landed as a local "
+                                        "Reference the edge points at (re-link = re-observe)")
     p_ln.add_argument("--actor", default=_DEFAULT_ACTOR)
 
     p_ul = sub.add_parser("unlink",

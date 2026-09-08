@@ -22,11 +22,13 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - **`cjm_context_graph_projection.hybrid_page`** — The HYBRID graph explorer client — GPU physics canvas + DOM overlay (check-in 1233ab46).
 - **`cjm_context_graph_projection.journal`** — The write journal: the durable, replayable source of truth for born-on-graph writes.
 - **`cjm_context_graph_projection.lens`** — Lenses: graph-carried, parameterized views (DEC `f1b02b95` — tier 2 of the
+- **`cjm_context_graph_projection.linkaudit`** — Link liveness audit — the derived worklist for the EXTERNAL links a note carries
 - **`cjm_context_graph_projection.listing`** — Structured enumeration: every node of a LABEL / assertion of a PREDICATE / edge of a RELATION.
 - **`cjm_context_graph_projection.module_ops`** — Module-edit ops — create / rename / delete / regroup a module as graph edge ops.
 - **`cjm_context_graph_projection.onboarding`** — Project the MEMORY onboarding surface from the graph's ASSERTED lead structure.
 - **`cjm_context_graph_projection.oracle`** — The version oracle: a programmatic Procedure that keeps `version` slots fresh.
 - **`cjm_context_graph_projection.projection`** — The projection core: schema / show / relevance / state over a context graph.
+- **`cjm_context_graph_projection.propose`** — Triage proposals: an agent DRAFTS the update for a stale deliverable (work item bb015d12).
 - **`cjm_context_graph_projection.prose_refs`** — Prose-ref drift: id-shaped tokens in asserted prose vs the edge layer.
 - **`cjm_context_graph_projection.pull_transcript`** — The transcript pull verb: harness-transcript messages onto the session spine.
 - **`cjm_context_graph_projection.readiness`** — The readiness frontier: which work-items are READY vs BLOCKED — derived, never stored.
@@ -63,6 +65,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `graph_section_raws` _function_ — Each of a note's sections' on-graph `raw` span, keyed by anchor (the divergence/
 - `read_node` _function_ — Deliver a node's verbatim CONTENT — the read DUAL of `author`/`emit`.
 - `read_slot` _function_ — Read a node's current verbatim-slot text (the `--editor` pop / preview input).
+- `reharvest_note_relations` _function_ — Re-run the relationship harvest on an EDITED note and apply the edge DIFF (finding cbde404c).
 - `section_divergence` _function_ — Read-only: detect, at SECTION grain, where a note's `.md` has drifted from the graph.
 
 ### `cjm_context_graph_projection.cli`
@@ -83,6 +86,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 ### `cjm_context_graph_projection.config`
 
 - `load_graph_config` _function_ — Read the graph-sibling config. Absent = {} (fallback to DEFAULT_*);
+- `sibling_graphs` _function_ — The `sibling_graphs` registry as DATA: which other graphs a `<key>:<id>` reference
 
 ### `cjm_context_graph_projection.contradictions`
 
@@ -104,6 +108,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `repo_map_elements` _function_ — One repo Entity per cjm-* repo (RENAME-STABLE keys) + DEPENDS_ON from pyproject.
 - `resolve_corpus_code_edges` _function_ — Resolve CALLS/IMPORTS edges ACROSS the whole code + notebook corpus.
 - `resolve_test_edges` _function_ — Resolve TESTS edges across the corpus (the code<->test link).
+- `stamp_note_profile` _function_ — Record the relationship-harvest profile on every Note wire dict (in place).
 - `test_elements` _function_ — Decompose each repo's pytest / manual test files into code nodes + edges.
 
 ### `cjm_context_graph_projection.display`
@@ -163,6 +168,16 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `set_lens` _function_ — Author/update a graph-carried Lens (journaled upsert-by-slug).
 - `validate_lens_spec` _function_ — Parse-validate a lens spec against the v1 shape; a bad spec NEVER lands.
 
+### `cjm_context_graph_projection.linkaudit`
+
+- `bracket_from_cdx` _function_ — Bracket the rot from a Wayback capture list: the last capture that answered
+- `classify_link` _function_ — Classify a probe: a hop leaving the registrable domain is `offsite` (the hijack
+- `extract_external_links` _function_ — Pull the external URLs out of markdown text.
+- `link_audit` _function_ — The audit: enumerate Notes (frontmatter + every Section's raw), extract the
+- `probe_url` _function_ — Fetch a URL following redirects ONE HOP AT A TIME (GET with a browser-like
+- `registrable_domain` _function_ — The registrable (owner-level) domain of a URL — the unit a hijack crosses.
+- `wayback_bracket` _function_ — Ask the Wayback CDX index for the URL's capture history and bracket the rot.
+
 ### `cjm_context_graph_projection.listing`
 
 - `list_graph` _function_ — Enumerate one CLASS of the graph: nodes by label / assertions by predicate / edges
@@ -203,6 +218,12 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `show` _function_ — One node in full, with its immediate neighbours + the relation to each.
 - `state` _function_ — Graph overview (no subject) or a subject's effective view (`show`).
 - `subgraph_view` _function_ — The BULK read verb: a node SET -> nodes + interconnecting edges, batched.
+
+### `cjm_context_graph_projection.propose`
+
+- `draft_code_block_update` _function_ — Pure: re-render the fenced code block that carries `name`'s body from the live body.
+- `propose_updates` _function_ — Draft a proposal for every actionable, unacknowledged, not-yet-proposed change on the
+- `symbol_baseline_body` _function_ — The approval-time body: the module's last `source` snapshot at/before T (else the
 
 ### `cjm_context_graph_projection.prose_refs`
 
@@ -273,7 +294,9 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 
 - `approvals_of` _function_ — Pure: the ACTIVE approval-class assertions (the roots the frontier walks from).
 - `change_key` _function_ — The change KEY an acknowledgment binds to: `<upstream 8>@<token 12>` (a hash token
+- `classify_reference_change` _function_ — Pure: a foreign node changed when its live hash is not the observed one; a foreign
 - `classify_text_change` _function_ — Pure, revert-aware: compare the live content against its approval-time baseline.
+- `reference_baseline` _function_ — Pure: the observation an approval at T saw — the last journaled observation at or
 - `review_frontier` _function_ — The derived review frontier: approved deliverables whose upstream changed since approval.
 - `walk_upstream` _function_ — Pure: BFS upstream from the deliverable's components along the dependency edges.
 
@@ -356,10 +379,13 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `alias` _function_ — Confirm a drifted link slug as an alias OF a real note (the worklist payoff).
 - `assert_value` _function_ — Write one value to a `(subject, predicate)` slot, recording any conflict.
 - `author_section` _function_ — Apply a memory section's verbatim `raw` STATE to the graph — the born-on-graph leg
+- `confirm_proposal` _function_ — CONFIRM a proposal: apply its drafted section raw to the deliverable, then re-assert
 - `content_hash_of` _function_ — The content an approval binds to (design 40622922): a Note hashes as its lossless
 - `decide` _function_ — Record a Decision + its `SUPPORTED_BY` premise edges (reasoning substrate).
 - `link` _function_ — Mint a deliberate edge between two EXISTING nodes (heterogeneous interlink).
 - `mint_procedure` _function_ — Upsert a Procedure node by deterministic (method) id — the programmatic value-source
+- `mint_proposal` _function_ — Mint a PROPOSAL — an agent-drafted update for ONE section of a stale deliverable
+- `observe_foreign` _function_ — Open the sibling graph READ-ONLY, resolve the foreign node, and take the observation.
 - `register_session` _function_ — Register/update a timestamp-keyed Session node — the session SPINE (DEC 6124d8bf).
 - `resolve_subject` _function_ — Resolve a subject to an entity id (rename-stable), minting a `term` entity
 - `retract_session` _function_ — RETRACT a Session spine node — the write dual of `register_session`, on

@@ -263,9 +263,18 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
     if kind == "link":
         if obj.get("error"):
             return f"⚠ {obj['error']}"
-        return (f"**linked** `{obj.get('source_id')}` —_{obj.get('relation')}_→ "
-                f"`{obj.get('target_id')}` (actor {obj.get('actor')})\n"
-                f"`edge {obj.get('edge_id')}`")
+        out = (f"**linked** `{obj.get('source_id')}` —_{obj.get('relation')}_→ "
+               f"`{obj.get('target_id')}` (actor {obj.get('actor')})\n"
+               f"`edge {obj.get('edge_id')}`")
+        obs = obj.get("observation")
+        if obs:
+            # Cross-graph reference (0154f5e4): say what was observed in the sibling.
+            h = str(obs.get("observed_hash") or "").split(":")[-1][:12]
+            state = ("re-observed (foreign node moved — stand-in refreshed)" if obj.get("reobserved")
+                     else "reference minted" if obj.get("reference_added") else "reference unchanged")
+            out += (f"\n↳ Reference → `{obs.get('graph')}:{obs.get('foreign_id')}` "
+                    f"_{obs.get('foreign_label')}_ — {obs.get('title')} · observed `{h}` · {state}")
+        return out
     if kind == "unlink":
         if obj.get("error"):
             return f"⚠ {obj['error']}"

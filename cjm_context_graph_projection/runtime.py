@@ -34,19 +34,28 @@ async def open_graph(
     graph_db_path: str,                       # Explicit sqlite db path (no convenience default-repoint)
     manifests_dir: str = DEFAULT_MANIFESTS,   # Dir holding the graph-storage capability manifest
     graph_id: str = DEFAULT_GRAPH_ID,         # Capability instance id
+    readonly: bool = False,                   # Open the db read-only (a SIBLING graph a cross-graph reference observes — never written)
 ) -> AsyncIterator[GraphHandle]:  # The live graph handle
     """Load the graph-storage capability on `graph_db_path` and yield a started handle.
 
     The db path is taken verbatim and explicit on purpose (dev `.cjm/` locations
     are scaffolding, not a final corpus endpoint — keeping it explicit avoids
-    false assumptions forward). Cleans up the queue + capability on exit."""
+    false assumptions forward). Cleans up the queue + capability on exit.
+    `readonly` rides the store's SG-41 mode (URI `mode=ro`: any write raises at the
+    SQLite layer, and the db must pre-exist) — the guarantee the cross-graph seam
+    (0154f5e4) rests on: a sibling graph is observed, never written."""
     manager = CapabilityManager(search_paths=[Path(manifests_dir)])
     manager.discover_manifests()
     by_name = {m.name: m for m in manager.discovered}
     if graph_id not in by_name:
         raise RuntimeError(f"graph capability {graph_id!r} not found in {manifests_dir} "
                            f"(discovered: {sorted(by_name)})")
-    if not manager.load_capability(by_name[graph_id], config={"db_path": str(graph_db_path)}):
+    config = {"db_path": str(graph_db_path)}
+    if readonly:
+        if not Path(graph_db_path).exists():
+            raise RuntimeError(f"read-only graph must pre-exist: {graph_db_path}")
+        config["readonly"] = True
+    if not manager.load_capability(by_name[graph_id], config=config):
         raise RuntimeError(f"failed to load {graph_id} on {graph_db_path}")
     if hasattr(manager, "set_observability_class"):
         # Graph ops are AMBIENT work (DEC 8bf656c0): compute-light and

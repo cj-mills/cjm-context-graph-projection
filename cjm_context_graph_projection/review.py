@@ -24,6 +24,15 @@ hash — the emit-post demotion, re-approval is the only cure), `content` (a fid
 edit), `cosmetic` (whitespace-only), `structure` (a section/symbol added), `assertion`
 (a fact on the upstream node changed), `dependency-added` (a new edge since approval).
 
+CROSS-GRAPH UPSTREAM (0154f5e4): a `Reference` node stands in for a node in a SIBLING
+graph (a stratum in the transcription db a born post derives from). Its content is what
+the sibling holds NOW: the projector opens the sibling read-only (by the Reference's
+graph key, from this graph's config `sibling_graphs`) and compares the foreign node's
+live hash against the OBSERVATION the approval saw — the last journaled `link`
+observation at or before the approval (the journal is the baseline here too; the
+sibling has none we can read). A sibling that is not configured or cannot be opened
+leaves the Reference `unverifiable`, never silently unchanged.
+
 ACKNOWLEDGMENT: a reviewer's considered "no update needed" is an assertion on D —
 predicate `review_verdict`, value = the change KEY (`<upstream id prefix>@<content hash
 prefix>`, or `@assertion:<id>` / `@edge:<relation>` for the non-content classes). It
@@ -35,16 +44,19 @@ recipe; nothing here writes.
 
 import json
 import re
+from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from cjm_context_graph_layer.ops import graph_task
 from cjm_dev_graph_schema import predicates as P
+from cjm_dev_graph_schema.nodes import foreign_content_hash
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 
 from . import factlayer as F
 from .display import annotate_display, node_title
 from .journal import journal_touch_rows
-from .runtime import GraphHandle
+from .runtime import DEFAULT_MANIFESTS, GraphHandle, open_graph
 
 # The dependency edge classes the walk follows (design 40622922 (1)). `SHAPES` is the
 # decision->code relation `link` mints under rule 6baa030a — a free relation string,
@@ -55,7 +67,7 @@ DEPENDENCY_RELATIONS: Tuple[str, ...] = (DevRelations.DERIVED_FROM, DevRelations
 # Kinds whose content the projector can verify against the journals (the content-bearing
 # kinds `content_hash_of` binds) — anything else changes only by assertion or by edge.
 _CONTENT_KINDS = (DevNodeKinds.NOTE, DevNodeKinds.SECTION, DevNodeKinds.CODE_SYMBOL,
-                  DevNodeKinds.CODE_TEXT, DevNodeKinds.CODE_MODULE)
+                  DevNodeKinds.CODE_TEXT, DevNodeKinds.CODE_MODULE, DevNodeKinds.REFERENCE)
 # Kinds whose assertion changes count as a governing-fact change (a Session's title or a
 # Message's provenance facts are not what a deliverable depends on).
 _ASSERTION_KINDS = _CONTENT_KINDS + (DevNodeKinds.DECISION, DevNodeKinds.ENTITY,
@@ -160,6 +172,34 @@ def change_key(
     if not (tok.startswith("assertion:") or tok.startswith("edge:") or tok.startswith("ts:")):
         tok = tok[:12]
     return f"{upstream_id[:8]}@{tok}"
+
+
+def reference_baseline(
+    observations: List[Tuple[float, str]],  # Journaled (ts, observed_hash) for one Reference, any order
+    after_ts: float,                        # The approval time T
+    stored_hash: str,                       # The Reference node's live `observed_hash` (the no-journal fallback)
+) -> Tuple[str, str]:  # (baseline hash, provenance note)
+    """Pure: the observation an approval at T saw — the last journaled observation at or
+    before T; else the first after it (the same first-capture fallback the code path
+    uses); else the node's stored hash (no journal = the stand-in's own record)."""
+    obs = sorted((o for o in observations if o[1]), key=lambda o: o[0])
+    before = [o for o in obs if o[0] <= after_ts]
+    if before:
+        return before[-1][1], "observation " + _fmt_ts(before[-1][0])
+    if obs:
+        return obs[0][1], "first observation after approval " + _fmt_ts(obs[0][0])
+    return stored_hash, "stored observation"
+
+
+def classify_reference_change(
+    live_hash: Optional[str],  # The foreign node's live hash (None = the node is gone from the sibling)
+    baseline_hash: str,        # What the approval observed
+) -> Optional[str]:  # None = unchanged · CLASS_CONTENT (moved, or gone)
+    """Pure: a foreign node changed when its live hash is not the observed one; a foreign
+    node that no longer resolves is a content change too (the derivation's ground is gone)."""
+    if live_hash is None:
+        return CLASS_CONTENT
+    return None if live_hash == baseline_hash else CLASS_CONTENT
 
 
 def _journal_op(seg: str, line_no: int) -> Dict[str, Any]:
@@ -279,6 +319,8 @@ async def review_frontier(
     include_acked: bool = False,     # List acknowledged changes too (default: counted, hidden)
     assertions: Optional[List[Any]] = None,  # Preloaded Assertion nodes (one load per VIEW)
     supers: Optional[Any] = None,            # Preloaded supersedes, same reason
+    siblings: Optional[Dict[str, str]] = None,   # {graph key: db path} — the sibling graphs References may name (config `sibling_graphs`)
+    manifests_dir: str = DEFAULT_MANIFESTS,      # For opening a sibling read-only
 ) -> Dict[str, Any]:  # {stale: [rows], counts: {approvals, stale, changes, acknowledged, unverifiable}, view}
     """The derived review frontier: approved deliverables whose upstream changed since approval.
 
@@ -295,7 +337,8 @@ async def review_frontier(
     supers = supers if supers is not None else await F.load_supersedes(gx)
     approvals = approvals_of(assertions, supers)
     view: Dict[str, Any] = {"subject": subject, "depth": depth, "all": include_acked,
-                            "journals": list(journal_paths or [])}
+                            "journals": list(journal_paths or []),
+                            "siblings": sorted(siblings or {})}
     counts = {"approvals": len(approvals), "stale": 0, "changes": 0, "acknowledged": 0,
               "unverifiable": 0}
     if not approvals:
@@ -374,60 +417,108 @@ async def review_frontier(
             hash_cache[nid] = await content_hash_of(gx, nid, "")
         return hash_cache[nid]
 
-    for ap in approvals:
-        d, t = ap["subject_id"], ap["asserted_at"]
-        if subject_l is not None and not (d.startswith(subject_l) or subject_l in _label(d).lower()):
-            continue
-        changes: List[Dict[str, Any]] = []
-        acked = acks.get(d, set())
+    # Sibling graphs open LAZILY, read-only, once per key, for the life of this call;
+    # a key with no config / an unopenable db marks its References unverifiable.
+    stack = AsyncExitStack()
+    sibling_handles: Dict[str, Optional[GraphHandle]] = {}
 
-        def _add(uid: str, path: List[Dict[str, str]], cls: str, detail: str, token: str, at: float) -> None:
-            key = change_key(uid, token)
-            changes.append({"upstream": _ref(uid), "path": [{**h, "label": _label(h["id"])} for h in path],
-                            "class": cls, "detail": detail, "at": at, "key": key,
-                            "acknowledged": key in acked, "proposal": proposals.get((d, key))})
-
-        # self: the deliverable's own content moved off the approved hash (demotion by derivation).
-        if ap["bound_hash"]:
-            live = await _live_hash(d)
-            if live and live != ap["bound_hash"]:
-                _add(d, [], CLASS_SELF,
-                     f"approved {ap['bound_hash'].split(':')[-1][:12]}, now {live.split(':')[-1][:12]} — re-approval is the only cure",
-                     live, t)
-
-        for uid, path in walks[d].items():
-            node = nodes.get(uid)
-            if node is None:
-                continue
-            kind = str(F.label(node) or "")
-            cls, detail, unverifiable = _content_change(node, kind, t, rows_by_ref, sections_of, verified)
-            if unverifiable:
-                counts["unverifiable"] += 1
-            if cls:
-                live = await _live_hash(uid)
-                _add(uid, path, cls, detail, live or f"ts:{int(t)}", t)
-            for a in active_on.get(uid, []):
-                if a["ts"] > t and kind in _ASSERTION_KINDS:
-                    _add(uid, path, CLASS_ASSERTION, f"{a['predicate']}={a['value'][:60]} asserted {_fmt_ts(a['ts'])}",
-                         f"assertion:{(a['id'] or '')[:8]}", a["ts"])
+    async def _sibling(key: str) -> Optional[GraphHandle]:
+        if key not in sibling_handles:
+            path = (siblings or {}).get(key)
+            handle: Optional[GraphHandle] = None
             if path:
-                src = path[-2]["id"] if len(path) > 1 else d
-                born = link_births.get((src, uid, path[-1]["relation"]))
-                if born is not None and born > t:
-                    live = await _live_hash(uid)
-                    _add(uid, path, CLASS_DEPENDENCY, f"{path[-1]['relation']} linked {_fmt_ts(born)}",
-                         live or f"edge:{path[-1]['relation']}", born)
+                try:
+                    handle = await stack.enter_async_context(open_graph(path, manifests_dir, readonly=True))
+                except RuntimeError:
+                    handle = None
+            sibling_handles[key] = handle
+        return sibling_handles[key]
 
-        n_ack = sum(1 for c in changes if c["acknowledged"])
-        counts["changes"] += len(changes)
-        counts["acknowledged"] += n_ack
-        shown = changes if include_acked else [c for c in changes if not c["acknowledged"]]
-        if not shown:
-            continue
-        counts["stale"] += 1
-        stale.append({"deliverable": _ref(d),
-                      "approval": {k: ap[k] for k in ("assertion_id", "predicate", "value", "asserted_at",
-                                                      "bound_hash", "actor")},
-                      "changes": sorted(shown, key=lambda c: (c["class"] != CLASS_SELF, -c["at"])),
-                      "acknowledged": n_ack})
+    async def _foreign_live_hash(ref_node: Any) -> Optional[str]:  # "" = unverifiable · None = gone · hash
+        key, fid = str(F.prop(ref_node, "graph") or ""), str(F.prop(ref_node, "foreign_id") or "")
+        sg = await _sibling(key)
+        if sg is None or not fid:
+            return ""
+        node = await graph_task(sg.queue, sg.graph_id, "get_node", node_id=fid)
+        if node is None:
+            return None
+        wire = node if isinstance(node, dict) else {"id": fid, "label": getattr(node, "label", ""),
+                                                    "properties": getattr(node, "properties", {}) or {}}
+        return foreign_content_hash(wire)
+
+    async with stack:
+        for ap in approvals:
+            d, t = ap["subject_id"], ap["asserted_at"]
+            if subject_l is not None and not (d.startswith(subject_l) or subject_l in _label(d).lower()):
+                continue
+            changes: List[Dict[str, Any]] = []
+            acked = acks.get(d, set())
+
+            def _add(uid: str, path: List[Dict[str, str]], cls: str, detail: str, token: str, at: float) -> None:
+                key = change_key(uid, token)
+                changes.append({"upstream": _ref(uid), "path": [{**h, "label": _label(h["id"])} for h in path],
+                                "class": cls, "detail": detail, "at": at, "key": key,
+                                "acknowledged": key in acked, "proposal": proposals.get((d, key))})
+
+            # self: the deliverable's own content moved off the approved hash (demotion by derivation).
+            if ap["bound_hash"]:
+                live = await _live_hash(d)
+                if live and live != ap["bound_hash"]:
+                    _add(d, [], CLASS_SELF,
+                         f"approved {ap['bound_hash'].split(':')[-1][:12]}, now {live.split(':')[-1][:12]} — re-approval is the only cure",
+                         live, t)
+
+            for uid, path in walks[d].items():
+                node = nodes.get(uid)
+                if node is None:
+                    continue
+                kind = str(F.label(node) or "")
+                if kind == DevNodeKinds.REFERENCE:
+                    # Cross-graph upstream: the sibling's live content vs the observation at T.
+                    live_h = await _foreign_live_hash(node)
+                    if live_h == "":
+                        counts["unverifiable"] += 1
+                        continue
+                    obs = [(r["ts"], str(((_journal_op(r["seg"], r["line"]).get("args") or {})
+                                          .get("observation") or {}).get("observed_hash") or ""))
+                           for r in rows_by_ref.get(uid, []) if r["verb"] == "link"]
+                    base, note = reference_baseline(obs, t, str(F.prop(node, "observed_hash") or ""))
+                    cls = classify_reference_change(live_h, base)
+                    if cls:
+                        where = f"`{F.prop(node, 'graph')}:{str(F.prop(node, 'foreign_id') or '')[:8]}`"
+                        detail = (f"foreign {F.prop(node, 'foreign_label')} {where} is GONE from the sibling"
+                                  if live_h is None else
+                                  f"foreign {F.prop(node, 'foreign_label')} {where} changed since {note}")
+                        _add(uid, path, cls, detail, live_h or f"ts:{int(t)}", t)
+                    continue
+                cls, detail, unverifiable = _content_change(node, kind, t, rows_by_ref, sections_of, verified)
+                if unverifiable:
+                    counts["unverifiable"] += 1
+                if cls:
+                    live = await _live_hash(uid)
+                    _add(uid, path, cls, detail, live or f"ts:{int(t)}", t)
+                for a in active_on.get(uid, []):
+                    if a["ts"] > t and kind in _ASSERTION_KINDS:
+                        _add(uid, path, CLASS_ASSERTION, f"{a['predicate']}={a['value'][:60]} asserted {_fmt_ts(a['ts'])}",
+                             f"assertion:{(a['id'] or '')[:8]}", a["ts"])
+                if path:
+                    src = path[-2]["id"] if len(path) > 1 else d
+                    born = link_births.get((src, uid, path[-1]["relation"]))
+                    if born is not None and born > t:
+                        live = await _live_hash(uid)
+                        _add(uid, path, CLASS_DEPENDENCY, f"{path[-1]['relation']} linked {_fmt_ts(born)}",
+                             live or f"edge:{path[-1]['relation']}", born)
+
+            n_ack = sum(1 for c in changes if c["acknowledged"])
+            counts["changes"] += len(changes)
+            counts["acknowledged"] += n_ack
+            shown = changes if include_acked else [c for c in changes if not c["acknowledged"]]
+            if not shown:
+                continue
+            counts["stale"] += 1
+            stale.append({"deliverable": _ref(d),
+                          "approval": {k: ap[k] for k in ("assertion_id", "predicate", "value", "asserted_at",
+                                                          "bound_hash", "actor")},
+                          "changes": sorted(shown, key=lambda c: (c["class"] != CLASS_SELF, -c["at"])),
+                          "acknowledged": n_ack})
     return {"stale": stale, "counts": counts, "view": view}

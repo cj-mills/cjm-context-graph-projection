@@ -25,12 +25,12 @@ from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.aliases import resolve_subject_id
 from cjm_dev_graph_schema.identity import note_node_id, section_node_id
 from cjm_dev_graph_schema.nodes import (AssertionNode, CheckNode, DecisionNode, EntityNode,
-                                        FactSlotNode, SessionNode)
+                                        FactSlotNode, parse_foreign_ref, ReferenceNode, SessionNode)
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 
 from . import factlayer as F
 from .projection import ambiguity_error, resolve_node_ref
-from .runtime import GraphHandle
+from .runtime import DEFAULT_MANIFESTS, GraphHandle, open_graph
 
 # A subject shaped like a PARTIAL node id (hex+dashes, >=6 chars) but NOT a full
 # UUID. Gates the never-mint rule: an unresolved PREFIX is a typo'd reference (the
@@ -368,13 +368,48 @@ async def decide(
             "nodes_added": res.nodes_added, "edges_added": res.edges_added}
 
 
+async def observe_foreign(
+    graph_key: str,     # The sibling graph's config key
+    foreign_ref: str,   # The node id in that graph — full, or a unique id prefix
+    siblings: Dict[str, str],                 # {graph key: db path} — the addressing graph's `sibling_graphs`
+    manifests_dir: str = DEFAULT_MANIFESTS,   # Where the graph-storage capability manifest lives
+) -> Dict[str, Any]:  # {reference: ReferenceNode} | {error}
+    """Open the sibling graph READ-ONLY, resolve the foreign node, and take the observation.
+
+    The one place the write path touches another graph — and it only reads: the
+    Reference carries the foreign label, a display title and the content hash over the
+    foreign node's label + properties as of now (`ReferenceNode.observe`). An unknown key
+    or an unresolvable id refuses loudly (a reference to nothing is not a reference)."""
+    path = siblings.get(graph_key)
+    if not path:
+        return {"error": f"no sibling graph `{graph_key}` in this graph's config "
+                         f"(`sibling_graphs` keys: {sorted(siblings) or 'none'})"}
+    try:
+        async with open_graph(path, manifests_dir, readonly=True) as sg:
+            res = await resolve_node_ref(sg, foreign_ref)
+            if "candidates" in res:
+                return {"error": ambiguity_error(f"{graph_key}:{foreign_ref}", res["candidates"])}
+            node = res.get("node")
+            if node is None:
+                return {"error": f"no node `{foreign_ref}` in sibling graph `{graph_key}` ({path})"}
+            wire = node if isinstance(node, dict) else {
+                "id": getattr(node, "id", ""), "label": getattr(node, "label", ""),
+                "properties": getattr(node, "properties", {}) or {}}
+            return {"reference": ReferenceNode.observe(graph_key, wire, observed_at=PROVENANCE_TS.get())}
+    except RuntimeError as e:  # the db is absent / the capability failed to load
+        return {"error": f"sibling graph `{graph_key}` unavailable: {e}"}
+
+
 async def link(
     gx: GraphHandle,
     source_id: str,    # The source node: full id, or a unique id prefix (must already exist)
-    target_id: str,    # The target node: full id, or a unique id prefix (must already exist)
+    target_id: str,    # The target node: full id / unique prefix (must exist) — or `<graph key>:<foreign id>` (0154f5e4)
     relation: str,     # The edge relation (any string; the grammar is open by design)
     *,
     actor: str = "agent:session",  # Who asserted the link (recorded on the edge, not its identity)
+    siblings: Optional[Dict[str, str]] = None,        # {graph key: db path} for a foreign target (the config's `sibling_graphs`)
+    observation: Optional[Dict[str, Any]] = None,     # REPLAY: the journaled observation — the Reference is rebuilt from it, no sibling opened
+    manifests_dir: str = DEFAULT_MANIFESTS,           # For opening the sibling read-only
 ) -> Dict[str, Any]:  # The write result (incl. error when an endpoint is missing/ambiguous)
     """Mint a deliberate edge between two EXISTING nodes (heterogeneous interlink).
 
@@ -387,31 +422,83 @@ async def link(
     every other id-taking verb (unique prefix ok; ambiguity is a loud error, never a
     guess — the 66fffba6 asymmetry fix). The result carries the RESOLVED ids (what
     the journal must record); the edge id is deterministic from (source, relation,
-    target), so re-linking is a no-op."""
+    target), so re-linking is a no-op.
+
+    CROSS-GRAPH TARGET (0154f5e4): a target written `<graph key>:<id>` names a node in
+    a sibling graph (the config's `sibling_graphs`). The store cannot hold an edge to a
+    foreign id, so the edge lands on a local `Reference` node — minted here from a
+    read-only OBSERVATION of the foreign node (label, title, content hash, time). The
+    observation is returned for the journal; replay passes it back as `observation`
+    and rebuilds the Reference without opening the sibling (the foreign graph is never
+    written, never needed for a rebuild). Re-linking an existing Reference RE-OBSERVES:
+    a moved hash updates the node in place (the journal carries the new observation)."""
     src_res = await resolve_node_ref(gx, source_id)
-    tgt_res = await resolve_node_ref(gx, target_id)
-    for ref, res in ((source_id, src_res), (target_id, tgt_res)):
-        if "candidates" in res:
-            return {"error": ambiguity_error(ref, res["candidates"]), "source_id": source_id,
-                    "target_id": target_id, "relation": relation, "written": False}
-    src, tgt = src_res.get("node"), tgt_res.get("node")
-    missing = [ref for ref, node in ((source_id, src), (target_id, tgt)) if node is None]
-    if missing:
-        return {"error": f"missing node(s): {missing}", "source_id": source_id,
+    if "candidates" in src_res:
+        return {"error": ambiguity_error(source_id, src_res["candidates"]), "source_id": source_id,
                 "target_id": target_id, "relation": relation, "written": False}
-    source_id, target_id = F.nid(src), F.nid(tgt)  # the RESOLVED endpoint ids
+    src = src_res.get("node")
+    if src is None:
+        return {"error": f"missing node(s): {[source_id]}", "source_id": source_id,
+                "target_id": target_id, "relation": relation, "written": False}
+    source_id = F.nid(src)
 
     def _label(node: Any) -> str:
         p = F.props(node)
         return str(p.get("display_title") or p.get("title") or p.get("name")
                    or p.get("statement") or "")[:120]
 
+    reference: Optional[ReferenceNode] = None
+    if observation:
+        reference = ReferenceNode.from_observation(observation)
+    else:
+        foreign = parse_foreign_ref(target_id)
+        if foreign:
+            obs = await observe_foreign(foreign[0], foreign[1], siblings or {}, manifests_dir)
+            if obs.get("error"):
+                return {"error": obs["error"], "source_id": source_id, "target_id": target_id,
+                        "relation": relation, "written": False}
+            reference = obs["reference"]
+
+    nodes: List[Dict[str, Any]] = []
+    reobserved = False
+    if reference is not None:
+        target_id = reference.id
+        wire = reference.to_graph_node()
+        existing = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=target_id)
+        if existing is None:
+            nodes.append(wire)
+        elif F.prop(existing, "observed_hash") != reference.observed_hash:
+            # Re-observation: the foreign node moved since the last look — refresh the
+            # stand-in in place (extend_graph verifies, never updates, a present node).
+            await graph_task(gx.queue, gx.graph_id, "update_node", node_id=target_id,
+                             properties=wire["properties"])
+            reobserved = True
+        tgt: Any = wire
+    else:
+        tgt_res = await resolve_node_ref(gx, target_id)
+        if "candidates" in tgt_res:
+            return {"error": ambiguity_error(target_id, tgt_res["candidates"]), "source_id": source_id,
+                    "target_id": target_id, "relation": relation, "written": False}
+        tgt = tgt_res.get("node")
+        if tgt is None:
+            return {"error": f"missing node(s): {[target_id]}", "source_id": source_id,
+                    "target_id": target_id, "relation": relation, "written": False}
+        target_id = F.nid(tgt)  # the RESOLVED endpoint id
+
     edge = make_edge(source_id, target_id, relation, properties={"actor": actor})
-    res = await extend_graph(gx.queue, gx.graph_id, [], [edge])
-    return {"source_id": source_id, "target_id": target_id, "relation": relation,
-            "actor": actor, "edge_id": edge["id"], "edges_added": res.edges_added,
-            "source_label": _label(src), "target_label": _label(tgt),
-            "written": True}
+    res = await extend_graph(gx.queue, gx.graph_id, nodes, [edge])
+    out = {"source_id": source_id, "target_id": target_id, "relation": relation,
+           "actor": actor, "edge_id": edge["id"], "edges_added": res.edges_added,
+           "source_label": _label(src), "target_label": _label(tgt),
+           "written": True}
+    if reference is not None:
+        out["observation"] = reference.observation()
+        out["reference_added"] = res.nodes_added
+        out["reobserved"] = reobserved
+        # An unchanged re-link is a verified no-op: nothing to journal (a fresh observed_at
+        # alone would defeat append_write's dedup and pile identical observations up).
+        out["noop"] = not (res.nodes_added or res.edges_added or reobserved)
+    return out
 
 
 async def add_check(
