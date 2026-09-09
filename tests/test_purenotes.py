@@ -110,6 +110,8 @@ def test_validate_rows_and_resolve_proposals():
             ([{"kind": "comparison", "from_i": 0, "to_i": 0, "text": "x"}], "columns"),
             # e1fd4d64 (I): a lead is bolded IN PLACE, so it must appear in the text (definition exempt)
             ([{"kind": "claim", "from_i": 0, "to_i": 0, "text": "Quit in 1991.", "lead": "Gatto"}], "does not appear"),
+            # 5625b74e (2): at most ONE arrow per point — the ch. 2 page chained them
+            ([{"kind": "claim", "from_i": 0, "to_i": 0, "text": "Gatto → quit → 1991."}], "at most ONE"),
             # e1fd4d64 (H): parent = an EARLIER, top-level, same-header row
             ([{"kind": "claim", "from_i": 3, "to_i": 3, "text": "x", "parent": 0}], "EARLIER"),
             ([top, {"kind": "claim", "from_i": 3, "to_i": 3, "text": "y", "parent": 0},
@@ -502,6 +504,33 @@ def test_cli_pure_notes_lane_end_to_end_and_replay(tmp_path):
     # a re-render with nothing changed lands no new op (identical args dedup)
     _run(*base, "notes-render", "--slug", "the-learning-game/ch01")
     assert len([o for o in read_journal(pj) if o["verb"] == "render-notes"]) == 1
+
+    # (7b) the per-point repair (ruling 5625b74e): text / parent edited IN PLACE — same node, same
+    #      anchor; ingest's arrow + lead contracts hold on the edit; a parent change rewires
+    #      ELABORATES; each real change journals one `edit-point`; a no-change edit journals nothing
+    child_key = ops[3]["args"]["point"]["key"]
+    r = _run("--graph-db-path", pdb, "--format", "agent", "locate", child_key[:8])
+    child_id = [m for m in json.loads(r.stdout)["matches"] if m.get("label") == "Point"][0]["id"]
+    r = _run(*base, "notes-edit", child_id[:8], "--text", "Isolation → no coherent picture → despair.")
+    assert r.returncode == 1 and "at most ONE" in r.stdout + r.stderr
+    r = _run(*base, "notes-edit", child_id[:8], "--text", "Isolation = no coherent picture.")
+    assert r.returncode == 0 and "text changed (journaled)" in r.stdout, r.stderr or r.stdout
+    r = _run(*base, "notes-edit", child_id[:8], "--parent", "none")
+    assert r.returncode == 0 and "parent_key changed" in r.stdout, r.stderr or r.stdout
+    assert asyncio.run(_elaborates(pdb)) == 0
+    r = _run(*base, "notes-edit", child_id[:8], "--parent", ops[2]["args"]["point"]["key"])
+    assert r.returncode == 0, r.stderr or r.stdout
+    assert asyncio.run(_elaborates(pdb)) == 1
+    r = _run(*base, "notes-edit", child_id[:8], "--text", "Isolation = no coherent picture.")
+    assert r.returncode == 0 and "nothing changed" in r.stdout
+    assert len([o for o in read_journal(pj) if o["verb"] == "edit-point"]) == 3
+    r = _run(*base, "notes-render", "--slug", "the-learning-game/ch01")
+    assert r.returncode == 0, r.stderr or r.stdout
+    staged = (pri_dir / "staging" / "the-learning-game" / "ch01" / "index.md").read_text()
+    assert "\n  - Isolation = no **coherent** picture. [§]" in staged and f"#pt-{child_key[:8]}" in staged
+    assert "→" not in staged.split("---\n", 2)[2]
+    live_text = _run("--graph-db-path", pdb, "read", note_id).stdout
+    assert live_text == staged
 
     # (8) frontier: approve; a segment edit IN THE SIBLING surfaces through Point -> Reference
     r = _run(*base, "assert", note_id, "publish_state", "published")

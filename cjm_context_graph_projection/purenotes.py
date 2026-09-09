@@ -18,11 +18,14 @@ The lane, in the filter lane's propose/accept shape:
     notes-ingest  -> validate a proposer's rows against the pack, write a PROPOSAL SET (no graph write)
     notes-accept  -> mint Points (+ References + HAS_POINT + DERIVED_FROM) — one journaled op per point
     notes-coverage / notes-overlap / notes-check / notes-retract   -> the review verbs
+    notes-edit    -> edit an accepted point IN PLACE (text / lead / parent; journaled `edit-point`) —
+                     the per-point repair (ruling 5625b74e), never a re-propose for one row
     notes-render  -> derive the body from the Points, apply as Sections, write the staging file
 
 Journal shape: `deliverable-type` upserts (last op wins), `accept-point` carries the point AND
 its segment observations (replay never opens the sibling), `retract-point` is the compensating
-op, `render-notes` replays graph-only and re-derives the same Sections from the same Points.
+op, `edit-point` re-applies a field set (text / lead / parent_key) to the standing point, and
+`render-notes` replays graph-only and re-derives the same Sections from the same Points.
 """
 
 import hashlib
@@ -38,7 +41,7 @@ from cjm_context_graph_primitives.query import EdgeQuery, NodeQuery, OrderBy, Pr
 from cjm_dev_graph_schema.identity import note_node_id, point_node_id
 from cjm_dev_graph_schema.nodes import (DeliverableTypeNode, POINT_KIND_GLOSSES, PointNode,
                                         ReferenceNode)
-from cjm_dev_graph_schema.vocab import DevNodeKinds
+from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 
 from . import factlayer as F
 from .runtime import DEFAULT_MANIFESTS, GraphHandle, open_graph
@@ -423,7 +426,9 @@ consecutive pack lines:
   make, and framing ("what if…", "the thing is…", "I want to talk about…"); keep the
   source's own terms and its precision (digits, symbols, units); no first person, no
   meta-commentary, no interpretation, no restating one fact under two kinds.
-  `quotation` text is VERBATIM.
+  `quotation` text is VERBATIM. A PURPOSE clause keeps its verb — compress "so that they
+  would never suffer such a defeat again" to "so as never to suffer such a defeat again",
+  never to "never such a defeat again", which reads as an outcome instead of an intent.
 
   Before / after:
     lines: "So the reason the bridge failed, and this is the part most people get wrong, is
@@ -473,8 +478,10 @@ consecutive pack lines:
   `**Term** — gloss`), so never open a definition's text with the term itself.
 * Names: where the source speaks as "I", name the author by surname (the Work line
   above); never "the author". Symbols, a small fixed palette a general reader parses
-  without decoding: `→` for consequence or result, `vs` for contrast, `≈` and `≠` only
-  where the source makes that relation. Nothing else.
+  without decoding: `→` ONLY where the source asserts cause and effect, at most ONE per
+  point and never chained — a trigger and its response, or one thing becoming another,
+  is said in words; `=` where the source equates two things; `vs` for contrast; `≈` and
+  `≠` only where the source makes that relation. Nothing else.
 
 Rows only — no prose before or after, no code fences.
 """
@@ -584,6 +591,11 @@ def validate_point_rows(
                 raise ValueError(f"row {k}: lead {lead!r} does not appear in the text (a lead is bolded IN PLACE; "
                                  f"only `definition` may carry a lead the text lacks) — fix the row or ingest --lenient")
             lead = ""
+        if text.count("→") > 1:
+            # Ruling 5625b74e (2): one arrow per point, cause-and-effect only — the ch. 2 page carried
+            # 12 arrows doing three jobs and chaining inside rows; the rest is said in words.
+            raise ValueError(f"row {k}: {text.count('→')} arrows — at most ONE `→` per point (cause and effect "
+                             f"only); say a trigger-and-response or a becoming in words")
         parent: Optional[int] = None
         if raw.get("parent") is not None:
             try:
@@ -913,6 +925,112 @@ async def retract_note_points(
             return {"error": r["error"], "slug": slug, "retracted": out, "written": bool(out)}
         out.append(r)
     return {"slug": slug, "retracted": out, "written": bool(out)}
+
+
+async def edit_point(
+    gx: GraphHandle,
+    point_ref: str,                     # The Point id (or unique prefix)
+    *,
+    text: Optional[str] = None,         # New statement text (None = keep)
+    lead: Optional[str] = None,         # New lead term ("" clears; None = keep)
+    parent: Optional[str] = None,       # New parent: a Point key, id or prefix in the same Note; "" = top level; None = keep
+    actor: str = "user:cli",
+) -> Dict[str, Any]:  # {point_id, note_id, key, changed: {field: [old, new]}, args, written} | {error}
+    """Edit an accepted point IN PLACE — the per-point repair the ch. 2 staging read demanded
+    (ruling 5625b74e; the lane gap named in b542896b (b) and 5fdeb80c): text, lead, parent.
+    Identity is (note, key), so the node, its `pt-` anchor and its References all stand; a
+    parent change rewires the ELABORATES edge under the accept-time rules (same Note, an
+    accepted parent, depth two at most — a point with children cannot become a grandchild —
+    and never a descendant of the point itself). The lead and arrow contracts of ingest hold
+    on the edited text. Journaled as `edit-point` with the FIELD SET applied; replay re-applies
+    it after the accept it edits (a missing point is a tolerated no-op — the accept may have
+    been retracted later in the journal). Unchanged fields land nothing."""
+    from .projection import ambiguity_error, resolve_node_ref
+    r = await resolve_node_ref(gx, point_ref)
+    if "candidates" in r:
+        return {"error": ambiguity_error(point_ref, r["candidates"]), "written": False}
+    node = r.get("node")
+    if node is None:
+        return {"point_id": point_ref, "missing": True, "changed": {}, "written": False,
+                "args": {"point_id": point_ref, "fields": {}, "actor": actor}}
+    if F.label(node) != DevNodeKinds.POINT:
+        return {"error": f"`{point_ref}` is a {F.label(node)}, not a Point", "written": False}
+    pid, note_id, key = F.nid(node), str(F.prop(node, "note_id") or ""), str(F.prop(node, "key") or "")
+    cur = {k: F.prop(node, k) for k in ("text", "kind", "lead", "attribution", "heading", "heading_index",
+                                        "segment_ids", "start_time", "end_time", "data", "unit",
+                                        "parent_key", "ordinal", "actor")}
+    fields: Dict[str, Any] = {}
+    if text is not None:
+        if not text.strip():
+            return {"error": "text may not be empty (retract the point instead)", "written": False}
+        if text.strip() != str(cur.get("text") or ""):
+            fields["text"] = text.strip()
+    if lead is not None and lead.strip() != str(cur.get("lead") or ""):
+        fields["lead"] = lead.strip()
+    new_text = str(fields.get("text", cur.get("text") or ""))
+    new_lead = str(fields.get("lead", cur.get("lead") or ""))
+    if new_lead and str(cur.get("kind")) != "definition" and new_lead.lower() not in new_text.lower():
+        return {"error": f"lead {new_lead!r} does not appear in the text (a lead is bolded IN PLACE — "
+                         f"e1fd4d64 (I); only `definition` may carry a lead the text lacks)", "written": False}
+    if new_text.count("→") > 1:
+        return {"error": f"{new_text.count('→')} arrows — at most ONE `→` per point (ruling 5625b74e); "
+                         f"say the rest in words", "written": False}
+    old_parent_key = str(cur.get("parent_key") or "")
+    if parent is not None:
+        new_parent_key = ""
+        if parent != "":
+            # A key first (what the journal carries), then an id / prefix (what a reader holds).
+            pnode = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=point_node_id(note_id, parent))
+            if pnode is None:
+                pr = await resolve_node_ref(gx, parent)
+                if "candidates" in pr:
+                    return {"error": ambiguity_error(parent, pr["candidates"]), "written": False}
+                pnode = pr.get("node")
+            if pnode is None or F.label(pnode) != DevNodeKinds.POINT:
+                return {"error": f"parent `{parent}` is not an accepted Point", "written": False}
+            if str(F.prop(pnode, "note_id") or "") != note_id:
+                return {"error": f"parent `{parent[:8]}` belongs to another deliverable", "written": False}
+            if F.nid(pnode) == pid:
+                return {"error": "a point cannot elaborate itself", "written": False}
+            new_parent_key = str(F.prop(pnode, "key") or "")
+            # Depth: the parent's ancestry decides the point's depth; its own children ride along.
+            gp_key = str(F.prop(pnode, "parent_key") or "")
+            if gp_key:
+                gp = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=point_node_id(note_id, gp_key))
+                if gp is not None and str(F.prop(gp, "parent_key") or ""):
+                    return {"error": f"parent `{new_parent_key[:8]}` is already a grandchild — two levels at most",
+                            "written": False}
+                if gp_key == key:
+                    return {"error": f"parent `{new_parent_key[:8]}` is this point's own child (cycle)", "written": False}
+            siblings = await load_points(gx, note_id)
+            children = [p for p in siblings if str(p.get("parent_key") or "") == key]
+            if gp_key and children:
+                return {"error": f"`{key[:8]}` has {len(children)} child point(s) — under `{new_parent_key[:8]}` they would "
+                                 f"sit at depth three; re-parent them first", "written": False}
+            if any(str(p.get("parent_key") or "") == key and str(p.get("key")) == new_parent_key for p in siblings):
+                return {"error": f"parent `{new_parent_key[:8]}` is this point's own child (cycle)", "written": False}
+        if new_parent_key != old_parent_key:
+            fields["parent_key"] = new_parent_key
+    if not fields:
+        return {"point_id": pid, "note_id": note_id, "key": key, "changed": {}, "written": False,
+                "args": {"point_id": pid, "key": key, "fields": {}, "actor": actor}}
+    merged = {**{k: v for k, v in cur.items() if v is not None}, **fields, "key": key}
+    pn = point_from_args(note_id, merged, actor=str(cur.get("actor") or actor))
+    props = pn.to_graph_node()["properties"]
+    props.update(fields)   # update_node MERGES: a cleared lead / parent_key lands as "" explicitly, never by absence
+    await graph_task(gx.queue, gx.graph_id, "update_node", node_id=pid, properties=props)
+    if "parent_key" in fields:
+        q = EdgeQuery(source_ids=[pid], relation_type=DevRelations.ELABORATES, project=["id"])
+        res = await graph_task(gx.queue, gx.graph_id, "query_edges", query=q.to_dict())
+        old_edges = [row["id"] for row in (res.rows or []) if row.get("id")]
+        if old_edges:
+            await graph_task(gx.queue, gx.graph_id, "delete_edges", edge_ids=old_edges)
+        nest = pn.elaborates_edge()
+        if nest is not None:
+            await extend_graph(gx.queue, gx.graph_id, [], [nest])
+    changed = {k: [cur.get(k) if cur.get(k) is not None else "", v] for k, v in fields.items()}
+    return {"point_id": pid, "note_id": note_id, "key": key, "changed": changed, "text": pn.text, "written": True,
+            "args": {"point_id": pid, "key": key, "fields": dict(fields), "actor": actor}}
 
 
 # --------------------------------------------------------------------------------------

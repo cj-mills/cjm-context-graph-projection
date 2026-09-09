@@ -174,7 +174,7 @@ ID_REFS: Dict[str, tuple] = {
     "emit-artifact": ("repo_key",), "emit-post": ("note_id",),
     "review-frontier": ("subject",), "propose": ("subject",), "confirm-proposal": ("proposal",),
     "link-audit": ("note",),
-    "notes-retract": ("point",), "notes-check": ("point",),
+    "notes-retract": ("point",), "notes-check": ("point",), "notes-edit": ("point",),
 }
 
 
@@ -1686,6 +1686,19 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
         res = await point_check(gx, args.point, siblings=siblings, manifests_dir=args.manifests_dir)
         print(render("notes-check", res, args.format))
         return 1 if res.get("error") else 0
+    if cmd == "notes-edit":
+        if args.text is None and args.lead is None and args.parent is None:
+            print("error: give at least one of --text / --lead / --parent", file=sys.stderr)
+            return 1
+        from .purenotes import edit_point
+        res = await edit_point(gx, args.point, text=args.text, lead=args.lead,
+                               parent=("" if args.parent == "none" else args.parent), actor=args.actor)
+        print(render("notes-edit", res, args.format))
+        if res.get("error"):
+            return 1
+        if args.journal_path and res.get("written"):
+            append_write(args.journal_path, "edit-point", res["args"])
+        return 0
     if cmd == "notes-render":
         res = await render_notes(gx, args.slug, rendering=args.rendering, timestamps=args.timestamps,
                                  write_md=not args.no_write, actor=args.actor)
@@ -1749,6 +1762,16 @@ def _add_notes_lane_parsers(sub) -> None:
     p.add_argument("point", nargs="?", default=None, help="The Point id (or unique prefix)")
     p.add_argument("--slug", default=None, help="With --all: the post whose points are all retracted")
     p.add_argument("--all", action="store_true", help="Retract every point of --slug (children before parents)")
+    p.add_argument("--actor", default=os.environ.get("CJM_ACTOR") or "user:cli")
+
+    p = sub.add_parser("notes-edit", help="Edit an accepted point IN PLACE — text / lead / parent (same node, same "
+                                          "anchor; ingest's lead + arrow contracts hold; journaled `edit-point`). "
+                                          "Then `notes-render` to re-derive the page")
+    p.add_argument("point", help="The Point id (or unique prefix)")
+    p.add_argument("--text", default=None, help="The new statement text")
+    p.add_argument("--lead", default=None, help="The new lead term ('' clears it)")
+    p.add_argument("--parent", default=None,
+                   help="The point this one elaborates: a Point key, id or prefix in the same post; `none` = top level")
     p.add_argument("--actor", default=os.environ.get("CJM_ACTOR") or "user:cli")
 
     p = sub.add_parser("notes-coverage", help="Review: the unit's content runs no accepted point derives from")

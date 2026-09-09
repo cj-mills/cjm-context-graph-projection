@@ -306,7 +306,7 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             lines.append("_(nothing to propose — the review frontier is empty)_")
         return "\n".join(lines)
     if kind in ("notes-type", "notes-pack", "notes-ingest", "notes-accept", "notes-retract", "notes-retract-all",
-                "notes-coverage", "notes-overlap", "notes-check", "notes-render"):
+                "notes-coverage", "notes-overlap", "notes-check", "notes-edit", "notes-render"):
         return _render_notes_lane(kind, obj)
     if kind == "confirm-proposal":
         if obj.get("error"):
@@ -1432,6 +1432,17 @@ def _render_notes_lane(kind: str, obj: Dict[str, Any]) -> str:
     if kind == "notes-retract":
         state = "retracted (node + edges deleted)" if obj.get("deleted") else "already absent (no-op)"
         return f"**retract-point** `{str(obj.get('point_id') or '')[:8]}` — {state}"
+    if kind == "notes-edit":
+        if obj.get("missing"):
+            return f"**edit-point** `{str(obj.get('point_id') or '')[:8]}` — no such point (no-op)"
+        changed = obj.get("changed") or {}
+        if not changed:
+            return f"**edit-point** `{str(obj.get('point_id') or '')[:8]}` — nothing changed (no op journaled)"
+        lines = [f"**edit-point** `{str(obj.get('point_id') or '')[:8]}` — {', '.join(sorted(changed))} changed (journaled)"]
+        for k, (old, new) in changed.items():
+            lines.append(f"  {k}: {_short(str(old) or '∅', 70)} → {_short(str(new) or '∅', 70)}")
+        lines.append("  next: `notes-render --slug <post>` to re-derive the page")
+        return "\n".join(lines)
     if kind == "notes-retract-all":
         done = obj.get("retracted") or []
         return (f"**retract-point ×{len(done)}** — every point of `{obj.get('slug')}` retracted "

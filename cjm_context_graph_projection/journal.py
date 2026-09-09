@@ -74,7 +74,7 @@ JOURNAL_VERBS = ("decide", "alias", "assert", "link", "unlink", "section", "new-
                  "add-section", "display-rule", "set-lens", "check", "session",
                  "retract-session", "pull-transcript", "mint-messages", "edit-message",
                  "derive-message", "procedure", "propose",
-                 "deliverable-type", "accept-point", "retract-point", "render-notes")
+                 "deliverable-type", "accept-point", "retract-point", "edit-point", "render-notes")
 
 
 def m3_baseline_import(
@@ -293,6 +293,13 @@ async def _apply_op(gx: GraphHandle, op: Dict[str, Any]) -> str:
         # The compensating op: replayed after the accept it undoes; missing = tolerated no-op.
         from .purenotes import retract_point
         await retract_point(gx, a["point_id"], actor=a.get("actor", "user:cli"))
+    elif verb == "edit-point":
+        # The per-point repair (5625b74e): re-apply the journaled FIELD SET to the standing
+        # point; a point retracted later in the journal is a tolerated no-op.
+        from .purenotes import edit_point
+        f = a.get("fields") or {}
+        await edit_point(gx, a["point_id"], text=f.get("text"), lead=f.get("lead"),
+                         parent=f.get("parent_key"), actor=a.get("actor", "user:cli"))
     elif verb == "render-notes":
         # The body is a FUNCTION of the Points: replay re-derives the same Sections graph-only
         # (write_md=False — the staging file is emit's job), landing after the accepts in
@@ -441,7 +448,7 @@ def touched_node_ids(
             key = (a.get("point") or {}).get("key")
             if key:
                 out.append(derive_node_id("point", nid, str(key)))
-    elif verb == "retract-point":
+    elif verb in ("retract-point", "edit-point"):
         if a.get("point_id"):
             out.append(a["point_id"])
     elif verb == "render-notes":
