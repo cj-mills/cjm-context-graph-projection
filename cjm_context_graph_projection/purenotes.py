@@ -1234,61 +1234,63 @@ def _tail(p: Dict[str, Any], timestamps: str) -> str:  # " (span) [§](#pt-x){�
 
 def _render_node(
     node: Dict[str, Any],   # {"p", "kids"} from build_point_tree
-    depth: int,             # 0 = top level; the bullet indent is two spaces per level
+    indent: str,            # the item's own indent ("" at top level); children indent to the item's CONTENT column
     timestamps: str,
 ) -> List[str]:  # markdown lines for the point and its subtree
-    """One point as a list item at `depth`, its children beneath it. Block kinds keep their
+    """One point as a list item at `indent`, its children beneath it. Block kinds keep their
     shapes at every depth: a `quotation` is a `>` block (blank-line-separated, indented to
     the item's content column — ruling (5)); a `sequence` lists its `event` children as an
     ordered list (legacy `data.items` still renders); a `comparison` carries its table inside
-    the item; everything else is a bullet whose lead is bolded in place."""
+    the item; everything else is a bullet whose lead is bolded in place. Indents are the
+    CONTENT column of the enclosing item ("- " = 2, "1. " = 3), the only way Pandoc keeps a
+    nested block inside the item."""
     p, kids = node["p"], node["kids"]
     kind = str(p.get("kind") or "claim")
-    ind = "  " * depth
+    sub = indent + "  "          # content column of a "- " item
     out: List[str] = []
     if kind == "quotation":
         who = str(p.get("attribution") or "").strip()
         text = str(p.get("text") or "").strip()
-        if depth:
+        if indent:
             out.append("")
-        out.append(f"{ind}> {text}")
-        out.append(f"{ind}>" + (f" — {who}" if who else "") + _tail(p, timestamps))
+        out.append(f"{indent}> {text}")
+        out.append(f"{indent}>" + (f" — {who}" if who else "") + _tail(p, timestamps))
         out.append("")
         for k in kids:
-            out += _render_node(k, depth, timestamps)   # a quotation's support sits at the quotation's own depth
+            out += _render_node(k, indent, timestamps)   # a quotation's support sits at the quotation's own indent
         return out
     if kind == "sequence":
-        out.append(f"{ind}- {_lead_text(p)}{_tail(p, timestamps)}")
+        out.append(f"{indent}- {_lead_text(p)}{_tail(p, timestamps)}")
         events = [k for k in kids if str(k["p"].get("kind")) == "event"]
         others = [k for k in kids if str(k["p"].get("kind")) != "event"]
         n = 1
         for ev in events:
             q = ev["p"]
             when = str((q.get("data") or {}).get("when") or "").strip()
-            out.append(f"{ind}  {n}. " + (f"**{when}** — " if when else "") + f"{_lead_text(q)}{_tail(q, timestamps)}")
+            out.append(f"{sub}{n}. " + (f"**{when}** — " if when else "") + f"{_lead_text(q)}{_tail(q, timestamps)}")
             for g in ev["kids"]:
-                out += _render_node(g, depth + 2, timestamps)   # under an ordered item: two levels of indent
+                out += _render_node(g, sub + "   ", timestamps)   # the ordered item's content column
             n += 1
         if not events:
-            out += _sequence_items(p, ind + "  ")
+            out += _sequence_items(p, sub)
         for k in others:
-            out += _render_node(k, depth + 1, timestamps)
+            out += _render_node(k, sub, timestamps)
         return out
     if kind == "comparison":
-        out.append(f"{ind}- {_lead_text(p)}{_tail(p, timestamps)}")
+        out.append(f"{indent}- {_lead_text(p)}{_tail(p, timestamps)}")
         out.append("")
-        out += _render_table(dict(p.get("data") or {}), ind + "  ")
+        out += _render_table(dict(p.get("data") or {}), sub)
         out.append("")
         for k in kids:
-            out += _render_node(k, depth + 1, timestamps)
+            out += _render_node(k, sub, timestamps)
         return out
     if kind == "event":
         when = str((p.get("data") or {}).get("when") or "").strip()
-        out.append(f"{ind}- " + (f"**{when}** — " if when else "") + f"{_lead_text(p)}{_tail(p, timestamps)}")
+        out.append(f"{indent}- " + (f"**{when}** — " if when else "") + f"{_lead_text(p)}{_tail(p, timestamps)}")
     else:
-        out.append(f"{ind}- {_lead_text(p)}{_tail(p, timestamps)}")
+        out.append(f"{indent}- {_lead_text(p)}{_tail(p, timestamps)}")
     for k in kids:
-        out += _render_node(k, depth + 1, timestamps)
+        out += _render_node(k, sub, timestamps)
     return out
 
 
@@ -1355,12 +1357,12 @@ def render_points(
                         q = tree[i]["p"]
                         lines.append(f"{n}. {_lead_text(q)}{_tail(q, timestamps)}")
                         for k in tree[i]["kids"]:
-                            lines += ["   " + ln if ln else ln for ln in _render_node(k, 0, timestamps)]
+                            lines += _render_node(k, "   ", timestamps)   # the "1. " content column
                         n += 1
                         i += 1
                     lines.append("")
                     continue
-                lines += _render_node(node, 0, timestamps)
+                lines += _render_node(node, "", timestamps)
                 nxt = str(tree[i + 1]["p"].get("kind")) if i + 1 < len(tree) else None
                 if kind != "quotation" and (nxt is None or nxt in block_kinds):
                     lines.append("")   # close the bullet run before a block or the section end

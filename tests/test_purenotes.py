@@ -290,7 +290,7 @@ def test_render_depth_two_events_synopsis_source_card_and_short_title():
     out = render_points(pts)
     assert out == (f"- **Gatto**'s break with the system {_glyph('seq00001')}\n"
                    f"  1. **1991** — Wall Street Journal article: he quits {_glyph('evt00001')}\n"
-                   f"    - Announcement shook many {_glyph('cla00001')}\n"
+                   f"     - Announcement shook many {_glyph('cla00001')}\n"
                    f"  2. **months later** — publishes Dumbing Us Down {_glyph('evt00002')}\n"
                    f"  - Not part of the series {_glyph('cla00002')}\n")
     assert "seven lessons diagnose" not in out                                  # the synopsis never renders in the body
