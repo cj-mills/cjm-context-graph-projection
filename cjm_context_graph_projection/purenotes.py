@@ -35,7 +35,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from cjm_context_graph_layer.ops import extend_graph, graph_task
 from cjm_context_graph_primitives.query import EdgeQuery, NodeQuery, OrderBy, PropertyPredicate
-from cjm_dev_graph_schema.identity import note_node_id
+from cjm_dev_graph_schema.identity import note_node_id, point_node_id
 from cjm_dev_graph_schema.nodes import (DeliverableTypeNode, POINT_KIND_GLOSSES, PointNode,
                                         ReferenceNode)
 from cjm_dev_graph_schema.vocab import DevNodeKinds
@@ -86,12 +86,15 @@ def pure_notes_type(
                              "timestamps": "when-addressable",   # e1fd4d64 (D): only a Source with a public time-addressable URL renders spans, as LINKS
                              "anchor": "pt-<key8> + visible permalink glyph (.pt-anchor)",
                              "emphasis": "lead-in-place (definition: Term — text)",
-                             "nesting": 1,                        # e1fd4d64 (H): a child point renders as a sub-item under its parent
-                             "comparison": "table", "step": "ordered-list", "sequence": "ordered-list"},
+                             "nesting": 2,                        # second-read ruling (4): depth two; a sequence's events are child points
+                             "comparison": "table", "step": "ordered-list",
+                             "sequence": "ordered-list of its `event` children (support nests under each event)",
+                             "quotation_in_items": "block (a `>` block inside the item — ruling (5))"},
             },
             "public": "expanded",                     # what emit-post carries
-            "frontmatter": {"title": "unit-title",    # e1fd4d64 (B): the chapter title alone; the work page is the series link
-                            "description": "derived"},  # e1fd4d64 (A): the unit's headings + the type clause, never authored
+            "frontmatter": {"title": "work-unit-notes",   # second-read ruling (1): the SHORT shape — "<work>, Ch. n notes"
+                            "description": "synopsis"},   # ruling (2): the accepted `synopsis` point; derived headings only as fallback
+            "source_card": True,                      # ruling (1): a derived callout under the title — work, author, unit, the paraphrase rule
             "kinds": dict(POINT_KIND_GLOSSES),
             "emphasis": "lead-in-place",
             "section_length_target": None,
@@ -103,7 +106,7 @@ def pure_notes_type(
         },
         production_procedure=[
             "notes-pack: read the unit's effective spine + strata per the information policy; write the pack",
-            "proposer: draft Points with segment runs (kind/from_i/to_i/text/lead/parent) from the pack — compressed, nested one level",
+            "proposer: draft Points with segment runs (kind/from_i/to_i/text/lead/parent) from the pack — compressed, nested up to two levels, one synopsis last",
             "notes-ingest: validate rows against the pack; write the proposal set",
             "notes-accept: human confirms per point; each accept = Point + References + edges, journaled",
             "notes-coverage / notes-overlap / notes-check: the graph-read review; notes-retract undoes",
@@ -440,22 +443,37 @@ consecutive pack lines:
                  "data": {"columns": ["", "Static model", "Dynamic model"],
                           "rows": [["Assumes", "constant wind pressure", "oscillating pressure"],
                                    ["Predicts", "a stable deck", "resonance"]]}}
-    sequence    {"kind": "sequence", "from_i": 3, "to_i": 9, "text": "The bridge's last year",
-                 "data": {"items": [{"when": "July", "what": "opened to traffic"},
-                                    {"when": "autumn", "what": "deck oscillation filmed"},
-                                    {"when": "November", "what": "collapse in a 40 mph wind"}]}}
+                A comparison's children ADD what the table does not hold; an example that
+                fits a row belongs IN the table, never restated as a bullet beneath it.
+    sequence    a PARENT row naming the series, then one `event` row per item with
+                `parent` pointing at it and `data.when`; an event's own support nests
+                beneath the event (that is what the second level is for):
+                {"kind": "sequence", "from_i": 3, "to_i": 9, "text": "The bridge's last year"}
+                {"kind": "event", "from_i": 3, "to_i": 4, "text": "opened to traffic", "parent": 0, "data": {"when": "July"}}
+                {"kind": "event", "from_i": 5, "to_i": 9, "text": "collapse in a 40 mph wind", "parent": 0, "data": {"when": "November"}}
+                {"kind": "claim", "from_i": 7, "to_i": 9, "text": "Deck had oscillated for weeks", "parent": 2}
     step        one row per step of a procedure the source lays out (consecutive rows)
-* `parent` (ONE level of nesting): when a point elaborates, exemplifies, qualifies, or
-  gives the consequence of an EARLIER point in the same section, name that point's row
-  number (0-based, counting the rows you have written so far); it renders as a sub-item
-  under the parent. A parent never has a parent. Use it — a claim with its consequences
-  and its example beneath it reads as a tree, not a wall of equal bullets.
+* `parent` (nesting, at most TWO levels deep): when a point elaborates, exemplifies,
+  qualifies, or gives the consequence of an EARLIER point in the same section, name that
+  point's row number (0-based, counting the rows you have written so far); it renders as
+  a sub-item under the parent. A child may itself have children (an event's support, an
+  example's detail); a grandchild may not. Use it — a claim with its consequences and
+  its example beneath it reads as a tree, not a wall of equal bullets.
+* `synopsis` — write ONE such row LAST, after everything else, spanning the whole unit
+  (`from_i` 0 to the last line; the only row allowed to cross headers): one or two
+  sentences, under 30 words, on what the unit ARGUES — its claim and its move, in the
+  work's own terms. Never a list of the section headings. It becomes the post's
+  description, so a reader decides from it whether to open the notes.
 * `from_i`/`to_i`: inclusive pack line numbers (the `[i]` prefixes) the point derives from —
   the smallest run that contains the statement. Two points may share lines; one point
-  never spans a header.
+  never spans a header (except the synopsis).
 * `lead`: the term the reader's eye keys on (a name, a concept). It MUST appear in the
   text — it is bolded IN PLACE, never prefixed. Only for `definition` does the lead stand
   apart as the term defined.
+* Names: where the source speaks as "I", name the author by surname (the Work line
+  above); never "the author". Symbols, a small fixed palette a general reader parses
+  without decoding: `→` for consequence or result, `vs` for contrast, `≈` and `≠` only
+  where the source makes that relation. Nothing else.
 
 Rows only — no prose before or after, no code fences.
 """
@@ -468,10 +486,15 @@ def render_notes_pack(pack: Dict[str, Any]) -> str:  # The proposer brief (markd
     src = pack.get("source") or {}
     ws = src.get("work_structure") or {}
     unit_bits = [f"{k}: {ws[k]}" for k in ("kind", "part", "part_title", "chapter", "title") if ws.get(k)]
+    work = dict(ws.get("work") or {})
+    work_line = (f"Work: **{work.get('title')}**" + (f" by {work.get('author')}" if work.get("author") else "")
+                 + (f" (narrated by {work.get('narrator')})" if work.get("narrator") and work.get("narrator") != work.get("author") else "")
+                 + " — name the author by surname where the source says \"I\"; never write \"the author\".")
     lines: List[str] = [
         f"# Notes pack `{pack.get('pack_id')}` — type `{pack.get('type')}`", "",
         f"Source: **{src.get('title') or src.get('source_id')}**  (`{src.get('source_id')}`; "
         f"spine `{(src.get('skeleton_hash') or 'legacy')[-12:]}`)",
+        *([work_line] if work.get("title") else []),
         ("Unit: " + " · ".join(unit_bits)) if unit_bits else "Unit: (no structure map on this source)",
         f"{len(pack.get('segments') or [])} content lines · {len(pack.get('headers') or [])} headers · "
         f"{len(pack.get('quote_spans') or [])} quote spans · digest `{pack.get('digest', '')[-12:]}`", "",
@@ -540,7 +563,13 @@ def validate_point_rows(
             raise ValueError(f"row {k}: from_i/to_i must be integers")
         if not (0 <= fi <= ti < n):
             raise ValueError(f"row {k}: run {fi}..{ti} outside the pack (0..{n - 1}) or inverted")
-        if segs[fi]["h"] != segs[ti]["h"]:
+        if kind == "synopsis":
+            # The ONE unit-spanning row (second-read ruling (2)): exempt from the header rule.
+            if (fi, ti) != (0, n - 1):
+                raise ValueError(f"row {k}: a synopsis spans the whole unit (from_i 0, to_i {n - 1})")
+            if any(r["kind"] == "synopsis" for r in out):
+                raise ValueError(f"row {k}: a second synopsis — one per unit")
+        elif segs[fi]["h"] != segs[ti]["h"]:
             raise ValueError(f"row {k}: run {fi}..{ti} crosses a header (a point never spans sections)")
         text = str(raw.get("text") or "").strip()
         if not text:
@@ -548,8 +577,6 @@ def validate_point_rows(
         data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
         if kind == "comparison" and not (data.get("columns") and data.get("rows")):
             raise ValueError(f"row {k}: a comparison needs data.columns and data.rows")
-        if kind == "sequence" and not data.get("items"):
-            raise ValueError(f"row {k}: a sequence needs data.items")
         lead = str(raw.get("lead") or "").strip()
         if lead and kind != "definition" and lead.lower() not in text.lower():
             if not lenient_leads:
@@ -564,10 +591,21 @@ def validate_point_rows(
                 raise ValueError(f"row {k}: parent must be a 0-based row number")
             if not (0 <= parent < k - 1):
                 raise ValueError(f"row {k}: parent {parent} is not an EARLIER row (0..{k - 2})")
-            if out[parent].get("parent") is not None:
-                raise ValueError(f"row {k}: parent row {parent} is itself nested — one level only")
+            if kind == "synopsis":
+                raise ValueError(f"row {k}: a synopsis is never nested")
+            gp = out[parent].get("parent")
+            if gp is not None and out[gp].get("parent") is not None:
+                raise ValueError(f"row {k}: parent row {parent} is already a grandchild — two levels at most")
             if segs[out[parent]["from_i"]]["h"] != segs[fi]["h"]:
                 raise ValueError(f"row {k}: parent row {parent} is under another header")
+        if kind == "event":
+            # An event is one item of a sequence, as a CHILD point (second-read ruling (4)).
+            if parent is None or out[parent]["kind"] != "sequence":
+                raise ValueError(f"row {k}: an event's parent must be a `sequence` row")
+            if not str(data.get("when") or "").strip():
+                raise ValueError(f"row {k}: an event needs data.when")
+        if kind == "sequence" and not data.get("items"):
+            data = dict(data)   # items arrive as `event` children now; legacy data.items still renders
         out.append({"kind": kind, "from_i": fi, "to_i": ti, "text": text, "lead": lead, "parent": parent,
                     "attribution": str(raw.get("attribution") or "").strip(),
                     "data": data})
@@ -606,14 +644,25 @@ def proposals_from_point_rows(
             "evidence": {"pack_id": pack.get("pack_id"), "digest": pack.get("digest"),
                          "from_i": r["from_i"], "to_i": r["to_i"]},
         })
-    # Source order, with every child DIRECTLY after its parent's group so an in-order accept
-    # never meets a child before its parent.
+    # Source order, with every descendant DIRECTLY after its ancestors so an in-order accept
+    # never meets a child before its parent; the synopsis (unit-spanning) sorts last.
     pos = {p["proposal_id"]: i for i, p in enumerate(out)}   # row position breaks ties between tops on the same lines
     by_id = {p["proposal_id"]: p for p in out}
 
-    def _key(p: Dict[str, Any]) -> Tuple[int, int, int, int, int, int]:
-        top = by_id.get(p["parent_key"]) or p
-        return (top["from_i"], top["to_i"], pos[top["proposal_id"]], 1 if p["parent_key"] else 0, p["from_i"], p["to_i"])
+    def _path(p: Dict[str, Any]) -> List[int]:  # row positions root -> … -> p
+        chain: List[int] = []
+        cur: Optional[Dict[str, Any]] = p
+        while cur is not None and len(chain) < 8:
+            chain.append(pos[cur["proposal_id"]])
+            cur = by_id.get(cur["parent_key"]) if cur["parent_key"] else None
+        return chain[::-1]
+
+    rows_in_order = list(out)   # list.sort empties the list while it runs — index the snapshot
+
+    def _key(p: Dict[str, Any]) -> Tuple[int, int, int, List[int]]:
+        path = _path(p)
+        root = rows_in_order[path[0]]
+        return (1 if p["kind"] == "synopsis" else 0, root["from_i"], root["to_i"], path)
     out.sort(key=_key)
     return out
 
@@ -772,9 +821,12 @@ async def accept_point(
         if parent is None:
             return {"error": f"parent point `{node.parent_key[:8]}` is not accepted yet (accept it first)",
                     "skippable": True, "slug": slug, "written": False}
-        if str(F.prop(parent, "parent_key") or ""):
-            return {"error": f"parent point `{node.parent_key[:8]}` is itself nested — one level only",
-                    "skippable": True, "slug": slug, "written": False}
+        gp_key = str(F.prop(parent, "parent_key") or "")
+        if gp_key:
+            gp = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=point_node_id(note_id, gp_key))
+            if gp is not None and str(F.prop(gp, "parent_key") or ""):
+                return {"error": f"parent point `{node.parent_key[:8]}` is already a grandchild — two levels at most",
+                        "skippable": True, "slug": slug, "written": False}
     existing = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=node.id)
     nodes: List[Dict[str, Any]] = [] if existing is not None else [node.to_graph_node()]
     changed = False
@@ -844,7 +896,15 @@ async def retract_note_points(
     `retract_point` per point, children before parents so no ELABORATES edge ever dangles;
     the caller journals one `retract-point` op per result (replay-identical to singles)."""
     points = await load_points(gx, note_node_id(slug))
-    order = sorted(points, key=lambda p: (0 if p.get("parent_key") else 1, _sort_key(p)))
+    keys = {str(p.get("key")): p for p in points}
+
+    def _depth(p: Dict[str, Any]) -> int:
+        d, cur = 0, p
+        while cur is not None and str(cur.get("parent_key") or "") in keys and d < 8:
+            cur = keys[str(cur.get("parent_key"))]
+            d += 1
+        return d
+    order = sorted(points, key=lambda p: (-_depth(p), _sort_key(p)))   # deepest first
     out: List[Dict[str, Any]] = []
     for p in order:
         r = await retract_point(gx, p["id"], actor=actor)
@@ -884,6 +944,7 @@ def overlapping_points(
     """Pure: the duplication candidates — two points deriving from a shared segment. A
     `quotation` beside a `claim` over the same run is expected; two claims are the flag."""
     out: List[Dict[str, Any]] = []
+    points = [p for p in points if str(p.get("kind")) != "synopsis"]   # the unit-spanning synopsis overlaps everything by design
     for i, a in enumerate(points):
         sa = set(a.get("segment_ids") or [])
         for b in points[i + 1:]:
@@ -905,6 +966,8 @@ def coverage_gaps(
     as a graph read)."""
     covered: set = set()
     for p in points:
+        if str(p.get("kind")) == "synopsis":
+            continue   # spans the unit by design; it never counts as coverage
         covered.update(p.get("segment_ids") or [])
     gaps: List[Dict[str, Any]] = []
     run: List[Dict[str, Any]] = []
@@ -957,7 +1020,8 @@ async def point_coverage(
         return {"error": read["error"], "slug": slug}
     pack = build_notes_pack(read, tprops)
     gaps = coverage_gaps(pack["segments"], points)
-    covered = sum(1 for r in pack["segments"] if any(r["id"] in (p.get("segment_ids") or []) for p in points))
+    body_points = [p for p in points if str(p.get("kind")) != "synopsis"]
+    covered = sum(1 for r in pack["segments"] if any(r["id"] in (p.get("segment_ids") or []) for p in body_points))
     return {"slug": slug, "note_id": note_id, "type": tkey, "points": len(points),
             "covered_lines": covered, "total_lines": len(pack["segments"]), "gaps": gaps}
 
@@ -1134,37 +1198,98 @@ def _sequence_items(p: Dict[str, Any], indent: str) -> List[str]:  # the ordered
     return out
 
 
-def _child_lines(c: Dict[str, Any], timestamps: str, indent: str = "  ") -> List[str]:  # a nested point as a sub-item
-    """ONE level of nesting (e1fd4d64 (H)): a child renders as a sub-item under its parent —
-    quotation inline (“…” — who), sequence as a nested ordered list, comparison as an
-    indented table, everything else as one sub-bullet."""
-    kind = str(c.get("kind") or "claim")
-    tail = f"{_span(c, timestamps)} {_anchor_link(c)}"
-    if kind == "quotation":
-        who = str(c.get("attribution") or "").strip()
-        return [f"{indent}- “{str(c.get('text') or '').strip()}”" + (f" — {who}" if who else "") + tail]
-    if kind == "sequence":
-        return [f"{indent}- {_lead_text(c)}{tail}"] + _sequence_items(c, indent + "  ")
-    if kind == "comparison":
-        return [f"{indent}- {_lead_text(c)}{tail}", ""] + _render_table(dict(c.get("data") or {}), indent + "  ") + [""]
-    return [f"{indent}- {_lead_text(c)}{tail}"]
-
-
-def nest_points(
+def build_point_tree(
     points: List[Dict[str, Any]],  # load_points output (source order)
-) -> List[Tuple[Dict[str, Any], List[Dict[str, Any]]]]:  # [(top-level point, [its children in source order])]
-    """Group ONE level: a point whose `parent_key` names a present point nests under it;
-    an orphaned child (parent retracted) renders top-level, never disappears."""
+) -> List[Dict[str, Any]]:  # [{"p": point, "kids": [{"p", "kids"}…]}] — roots in source order, kids in source order
+    """Nest by `parent_key` (second-read ruling (4): depth TWO in practice, the tree is generic).
+    A point whose parent is absent (retracted) renders as a root, never disappears; a cycle
+    cannot form (a parent is always an earlier accepted point) but is guarded anyway."""
     keys = {str(p.get("key")): p for p in points}
     kids: Dict[str, List[Dict[str, Any]]] = {}
-    tops: List[Dict[str, Any]] = []
+    roots: List[Dict[str, Any]] = []
     for p in points:
         pk = str(p.get("parent_key") or "")
         if pk and pk in keys and pk != str(p.get("key")):
             kids.setdefault(pk, []).append(p)
         else:
-            tops.append(p)
-    return [(t, kids.get(str(t.get("key")), [])) for t in tops]
+            roots.append(p)
+
+    def _node(p: Dict[str, Any], seen: set) -> Dict[str, Any]:
+        k = str(p.get("key"))
+        seen = seen | {k}
+        return {"p": p, "kids": [_node(c, seen) for c in kids.get(k, []) if str(c.get("key")) not in seen]}
+    return [_node(r, set()) for r in roots]
+
+
+def nest_points(
+    points: List[Dict[str, Any]],  # load_points output (source order)
+) -> List[Tuple[Dict[str, Any], List[Dict[str, Any]]]]:  # [(root point, [its direct children])] — the one-level view
+    """The one-level view of `build_point_tree` (kept for callers that only need parent -> children)."""
+    return [(n["p"], [c["p"] for c in n["kids"]]) for n in build_point_tree(points)]
+
+
+def _tail(p: Dict[str, Any], timestamps: str) -> str:  # " (span) [§](#pt-x){…}"
+    return f"{_span(p, timestamps)} {_anchor_link(p)}"
+
+
+def _render_node(
+    node: Dict[str, Any],   # {"p", "kids"} from build_point_tree
+    depth: int,             # 0 = top level; the bullet indent is two spaces per level
+    timestamps: str,
+) -> List[str]:  # markdown lines for the point and its subtree
+    """One point as a list item at `depth`, its children beneath it. Block kinds keep their
+    shapes at every depth: a `quotation` is a `>` block (blank-line-separated, indented to
+    the item's content column — ruling (5)); a `sequence` lists its `event` children as an
+    ordered list (legacy `data.items` still renders); a `comparison` carries its table inside
+    the item; everything else is a bullet whose lead is bolded in place."""
+    p, kids = node["p"], node["kids"]
+    kind = str(p.get("kind") or "claim")
+    ind = "  " * depth
+    out: List[str] = []
+    if kind == "quotation":
+        who = str(p.get("attribution") or "").strip()
+        text = str(p.get("text") or "").strip()
+        if depth:
+            out.append("")
+        out.append(f"{ind}> {text}")
+        out.append(f"{ind}>" + (f" — {who}" if who else "") + _tail(p, timestamps))
+        out.append("")
+        for k in kids:
+            out += _render_node(k, depth, timestamps)   # a quotation's support sits at the quotation's own depth
+        return out
+    if kind == "sequence":
+        out.append(f"{ind}- {_lead_text(p)}{_tail(p, timestamps)}")
+        events = [k for k in kids if str(k["p"].get("kind")) == "event"]
+        others = [k for k in kids if str(k["p"].get("kind")) != "event"]
+        n = 1
+        for ev in events:
+            q = ev["p"]
+            when = str((q.get("data") or {}).get("when") or "").strip()
+            out.append(f"{ind}  {n}. " + (f"**{when}** — " if when else "") + f"{_lead_text(q)}{_tail(q, timestamps)}")
+            for g in ev["kids"]:
+                out += _render_node(g, depth + 2, timestamps)   # under an ordered item: two levels of indent
+            n += 1
+        if not events:
+            out += _sequence_items(p, ind + "  ")
+        for k in others:
+            out += _render_node(k, depth + 1, timestamps)
+        return out
+    if kind == "comparison":
+        out.append(f"{ind}- {_lead_text(p)}{_tail(p, timestamps)}")
+        out.append("")
+        out += _render_table(dict(p.get("data") or {}), ind + "  ")
+        out.append("")
+        for k in kids:
+            out += _render_node(k, depth + 1, timestamps)
+        return out
+    if kind == "event":
+        when = str((p.get("data") or {}).get("when") or "").strip()
+        out.append(f"{ind}- " + (f"**{when}** — " if when else "") + f"{_lead_text(p)}{_tail(p, timestamps)}")
+    else:
+        out.append(f"{ind}- {_lead_text(p)}{_tail(p, timestamps)}")
+    for k in kids:
+        out += _render_node(k, depth + 1, timestamps)
+    return out
 
 
 def render_points(
@@ -1173,16 +1298,15 @@ def render_points(
     rendering: str = "expanded",    # "outline" | "expanded" | "both"
     timestamps: str = "addressable",  # "always" | "addressable" | "never" (see _span)
     outline_title: str = "At a glance",
-    body_title: str = "Notes",      # Heading used when the unit has no section headers at all
 ) -> str:  # The body markdown (after the preamble)
     """Render the body from the Points — deterministic, so a replayed `render-notes` derives
-    the same Sections. EXPANDED (the public post): under the derived headings — the first
-    header that restates the unit's own title is suppressed (e1fd4d64 (C)) — each top-level
-    point with its permalink glyph, its children as sub-items, spans only when the source is
-    addressable; `quotation` as a block with attribution; consecutive `step`s as ONE ordered
-    list; `sequence` as an ordered list; `comparison` as a table; the lead bolded in place.
-    OUTLINE (review / the work page): one line per point under the same headings."""
-    pts = sorted(points, key=_sort_key)
+    the same Sections. EXPANDED (the public post): under the derived headings — a header
+    that restates the unit's own title is suppressed (e1fd4d64 (C)) — each root point with
+    its permalink glyph and its subtree (depth two in practice), spans only when the source
+    is addressable; block kinds keep their shapes at every depth; consecutive top-level
+    `step`s are ONE ordered list; the `synopsis` never renders in the body (it is the
+    description). OUTLINE (review / the work page): one line per point, same headings."""
+    pts = [p for p in sorted(points, key=_sort_key) if str(p.get("kind")) != "synopsis"]
     unit = dict((pts[0].get("unit") or {}) if pts else {})
     groups: List[Tuple[str, List[Dict[str, Any]]]] = []
     for p in pts:
@@ -1193,7 +1317,6 @@ def render_points(
             groups[-1][1].append(p)
         else:
             groups.append((h, [p]))
-    any_heading = any(h for h, _ in groups)
     lines: List[str] = []
     want_outline = rendering in ("outline", "both")
     want_expanded = rendering in ("expanded", "both")
@@ -1203,75 +1326,88 @@ def render_points(
         for h, ps in groups:
             if h:
                 lines += [f"**{_heading_text(h)}**", ""]
-            for top, kids in nest_points(ps):
-                for depth, p in [(0, top)] + [(1, k) for k in kids]:
-                    ind = "  " * depth
-                    lines.append(f"{ind}- [{_outline_text(p)}](#{_anchor(p)})" if want_expanded
-                                 else f"{ind}- {_outline_text(p)}")
+
+            def _walk(node: Dict[str, Any], depth: int) -> None:
+                q = node["p"]
+                ind = "  " * depth
+                lines.append(f"{ind}- [{_outline_text(q)}](#{_anchor(q)})" if want_expanded else f"{ind}- {_outline_text(q)}")
+                for k in node["kids"]:
+                    _walk(k, depth + 1)
+            for n in build_point_tree(ps):
+                _walk(n, 0)
             lines.append("")
 
     if want_expanded:
+        block_kinds = ("step", "quotation")
         for h, ps in groups:
             if h:
                 lines += [f"## {_heading_text(h)}", ""]
-            elif not any_heading:
-                lines += [f"## {body_title}", ""]
-            nested = nest_points(ps)
+            # a unit with no section headers renders its points with no heading at all (a lone
+            # "## Notes" says nothing to a reader; the source card already names the unit)
+            tree = build_point_tree(ps)
             i = 0
-            while i < len(nested):
-                p, kids = nested[i]
-                kind = str(p.get("kind") or "claim")
-                tail = f"{_span(p, timestamps)} {_anchor_link(p)}"
+            while i < len(tree):
+                node = tree[i]
+                kind = str(node["p"].get("kind") or "claim")
                 if kind == "step":
                     n = 1
-                    while i < len(nested) and str(nested[i][0].get("kind")) == "step":
-                        q, qkids = nested[i]
-                        lines.append(f"{n}. {_lead_text(q)}{_span(q, timestamps)} {_anchor_link(q)}")
-                        for k in qkids:
-                            lines += _child_lines(k, timestamps, indent="    ")
+                    while i < len(tree) and str(tree[i]["p"].get("kind")) == "step":
+                        q = tree[i]["p"]
+                        lines.append(f"{n}. {_lead_text(q)}{_tail(q, timestamps)}")
+                        for k in tree[i]["kids"]:
+                            lines += ["   " + ln if ln else ln for ln in _render_node(k, 0, timestamps)]
                         n += 1
                         i += 1
                     lines.append("")
                     continue
-                if kind == "quotation":
-                    who = str(p.get("attribution") or "").strip()
-                    text = str(p.get("text") or "").strip()
-                    lines.append(f"> {text}")
-                    lines.append(">" + (f" — {who}" if who else "") + tail)
-                    lines.append("")
-                    if kids:
-                        for k in kids:
-                            lines += _child_lines(k, timestamps, indent="")
-                        lines.append("")
-                elif kind == "comparison":
-                    # The table lives INSIDE the item (its children nest beneath) — the blank line
-                    # Pandoc needs before the table makes the list "loose"; the stylesheet collapses
-                    # that spacing (`li > p`), which beats a standalone block whose children would
-                    # sit at the same depth as the next top-level points.
-                    lines.append(f"- {_lead_text(p)}{tail}")
-                    lines.append("")
-                    lines += _render_table(dict(p.get("data") or {}), "  ")
-                    lines.append("")
-                    for k in kids:
-                        lines += _child_lines(k, timestamps)
-                    if kids:
-                        lines.append("")
-                elif kind == "sequence":
-                    lines.append(f"- {_lead_text(p)}{tail}")
-                    lines += _sequence_items(p, "  ")
-                    for k in kids:
-                        lines += _child_lines(k, timestamps)
-                    lines.append("")
-                else:
-                    lines.append(f"- {_lead_text(p)}{tail}")
-                    for k in kids:
-                        lines += _child_lines(k, timestamps)
-                    # run the plain kinds together as one list
-                    if i + 1 >= len(nested) or str(nested[i + 1][0].get("kind")) in ("step", "quotation", "comparison", "sequence"):
-                        lines.append("")
+                lines += _render_node(node, 0, timestamps)
+                nxt = str(tree[i + 1]["p"].get("kind")) if i + 1 < len(tree) else None
+                if kind != "quotation" and (nxt is None or nxt in block_kinds):
+                    lines.append("")   # close the bullet run before a block or the section end
                 i += 1
     text = "\n".join(lines).rstrip("\n") + "\n"
     return text if text.strip() else ""
+
+
+def synopsis_of(
+    points: List[Dict[str, Any]],  # load_points output
+) -> str:  # The accepted `synopsis` point's text ("" when none)
+    for p in sorted(points, key=_sort_key):
+        if str(p.get("kind")) == "synopsis":
+            return str(p.get("text") or "").strip()
+    return ""
+
+
+def unit_label(unit: Dict[str, Any]) -> str:  # "Ch. 1" | "Part 2" | the unit title | ""
+    """The short unit handle the title carries (second-read ruling (1): the short shape)."""
+    ws = dict((unit or {}).get("work_structure") or {})
+    if ws.get("kind") == "chapter" and ws.get("chapter") is not None:
+        return f"Ch. {ws.get('chapter')}"
+    return str(ws.get("title") or "").strip()
+
+
+def render_source_card(
+    unit: Dict[str, Any],  # A point's `unit` (carries work_structure incl. `work`)
+) -> str:  # A Quarto callout naming the work, author, and unit; "" without work metadata
+    """The reader-facing provenance (second-read ruling (1)): a derived one-line callout under
+    the title so the post is never mistaken for the source — the work, its author, the
+    part/chapter, and the paraphrase/verbatim rule. Nothing of the lane's vocabulary."""
+    ws = dict((unit or {}).get("work_structure") or {})
+    work = dict(ws.get("work") or {})
+    if not work.get("title"):
+        return ""
+    who = f" by {work['author']}" if work.get("author") else ""
+    where_bits: List[str] = []
+    if ws.get("part") is not None:
+        where_bits.append(f"Part {ws['part']}" + (f" ({ws['part_title']})" if ws.get("part_title") else ""))
+    if ws.get("kind") == "chapter" and ws.get("chapter") is not None:
+        where_bits.append(f"Chapter {ws['chapter']}")
+    where = " · ".join(where_bits)
+    title = str(ws.get("title") or "").strip()
+    place = (f" — {where}" if where else "") + (f", *{title}*" if title else "")
+    return ("::: {.callout-note appearance=\"simple\" icon=false}\n"
+            f"Notes on **{work['title']}**{who}{place}. The points paraphrase the {ws.get('kind') or 'source'} "
+            "in its own order; only the quotations are verbatim.\n:::\n")
 
 
 def derived_description(
@@ -1292,29 +1428,42 @@ def derived_description(
         h = _heading_text(str(p.get("heading") or ""))
         if h and h not in heads and not (not heads and unit_title_header(h, unit)):
             heads.append(h)
-    work = str(ws.get("work") or "").strip()
+    work = str((ws.get("work") or {}).get("title") or "").strip() if isinstance(ws.get("work"), dict) else ""
     lead = (f"{work} — " if work else "") + (title or "Notes")
     body = (": " + " · ".join(heads)) if heads else ""
-    return f"{lead}{body}. What the {kind} says, in source order, without added commentary."
+    return f"{lead}{body}. What the {kind} says, in its own order, without added commentary."
 
 
 def derive_frontmatter(
     fm_raw: str,                    # The authored frontmatter block ("---\\n…\\n---\\n")
     points: List[Dict[str, Any]],   # load_points output
-    policy: Dict[str, Any],         # presentation_policy["frontmatter"] ({"title": "unit-title", "description": "derived"})
+    policy: Dict[str, Any],         # presentation_policy["frontmatter"] ({"title": "work-unit-notes" | "unit-title", "description": "synopsis" | "derived"})
+    *,
+    synopsis: str = "",             # The accepted synopsis point's text (policy "synopsis"; derived headings as fallback)
 ) -> str:  # The frontmatter with the policy-owned lines replaced (or inserted after title)
-    """Ruling e1fd4d64 (A)+(B): the type may OWN the title (the unit title alone) and the
-    description (derived) — the rest of the authored frontmatter (date, categories, …)
-    stays. Idempotent: a re-derive over derived lines yields the same bytes."""
+    """The type may OWN the title and the description — the rest of the authored frontmatter
+    (date, categories, …) stays. Title `work-unit-notes` (second-read ruling (1), the short
+    shape) = "<work>, Ch. n notes", falling back to the unit title without work metadata;
+    `unit-title` = the unit title alone. Description `synopsis` = the accepted synopsis
+    point (ruling (2)), falling back to the derived headings; `derived` = the headings.
+    Idempotent: a re-derive over derived lines yields the same bytes."""
     if not fm_raw.startswith("---") or not points:
         return fm_raw
     pts = sorted(points, key=_sort_key)
     unit = dict(pts[0].get("unit") or {})
     ws = dict(unit.get("work_structure") or {})
+    work = dict(ws.get("work") or {}) if isinstance(ws.get("work"), dict) else {}
     want: Dict[str, str] = {}
-    if policy.get("title") == "unit-title" and str(ws.get("title") or "").strip():
+    tpol = policy.get("title")
+    if tpol == "work-unit-notes" and str(work.get("title") or "").strip():
+        lab = unit_label(unit)
+        want["title"] = f"{work['title']}, {lab} notes" if lab else f"{work['title']} notes"
+    elif tpol in ("unit-title", "work-unit-notes") and str(ws.get("title") or "").strip():
         want["title"] = str(ws.get("title")).strip()
-    if policy.get("description") == "derived":
+    dpol = policy.get("description")
+    if dpol == "synopsis" and synopsis.strip():
+        want["description"] = synopsis.strip()
+    elif dpol in ("derived", "synopsis"):
         d = derived_description(points)
         if d:
             want["description"] = d
@@ -1377,12 +1526,19 @@ async def render_notes(
     pre = pre.split(BODY_MARKER, 1)[0]
     tkey = await note_deliverable_type(gx, note_id) or PURE_NOTES_KEY
     tprops = await load_deliverable_type(gx, tkey) or {}
-    fm_policy = dict((tprops.get("presentation_policy") or {}).get("frontmatter") or {})
-    fm = derive_frontmatter(str(F.prop(note, "frontmatter_raw") or ""), points, fm_policy)
+    ppol = dict(tprops.get("presentation_policy") or {})
+    fm_policy = dict(ppol.get("frontmatter") or {})
+    syn = synopsis_of(points)
+    fm = derive_frontmatter(str(F.prop(note, "frontmatter_raw") or ""), points, fm_policy, synopsis=syn)
+    card = ""
+    if ppol.get("source_card", True) and points:
+        # The reader-facing provenance (second-read ruling (1)) — derived from the unit's work
+        # metadata, rendered above the body, never authored.
+        card = render_source_card(dict(sorted(points, key=_sort_key)[0].get("unit") or {}))
     body = render_points(points, rendering=rendering, timestamps=timestamps)
     if pre and not pre.endswith("\n\n"):
         pre = pre.rstrip("\n") + "\n\n"
-    new_text = fm + pre + BODY_MARKER + "\n\n" + body
+    new_text = fm + pre + BODY_MARKER + "\n\n" + (card + "\n" if card else "") + body
     path = str(F.prop(note, "path") or "")
     res = await _apply_note_text(gx, note, slug, new_text, path, write=True, write_md=write_md)
     removed = list(res.get("removed") or [])

@@ -14,11 +14,12 @@ import pytest
 from cjm_context_graph_layer.ops import extend_graph, graph_task
 from cjm_context_graph_primitives.journal import read_journal
 from cjm_context_graph_primitives.query import EdgeQuery
-from cjm_context_graph_projection.purenotes import (_time_link, build_notes_pack, choose_spine,
-                                                    coverage_gaps, derive_frontmatter,
+from cjm_context_graph_projection.purenotes import (_time_link, build_notes_pack, build_point_tree,
+                                                    choose_spine, coverage_gaps, derive_frontmatter,
                                                     derived_description, overlapping_points,
                                                     proposals_from_point_rows, pure_notes_type,
                                                     render_notes_pack, render_points,
+                                                    render_source_card, synopsis_of, unit_label,
                                                     unit_title_header, validate_point_rows)
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
 
@@ -107,15 +108,22 @@ def test_validate_rows_and_resolve_proposals():
             ([{"kind": "claim", "from_i": 0, "to_i": 1, "text": "x"}], "crosses a header"),
             ([{"kind": "claim", "from_i": 0, "to_i": 0, "text": "  "}], "empty"),
             ([{"kind": "comparison", "from_i": 0, "to_i": 0, "text": "x"}], "columns"),
-            ([{"kind": "sequence", "from_i": 0, "to_i": 0, "text": "x", "data": {}}], "items"),
             # e1fd4d64 (I): a lead is bolded IN PLACE, so it must appear in the text (definition exempt)
             ([{"kind": "claim", "from_i": 0, "to_i": 0, "text": "Quit in 1991.", "lead": "Gatto"}], "does not appear"),
             # e1fd4d64 (H): parent = an EARLIER, top-level, same-header row
             ([{"kind": "claim", "from_i": 3, "to_i": 3, "text": "x", "parent": 0}], "EARLIER"),
             ([top, {"kind": "claim", "from_i": 3, "to_i": 3, "text": "y", "parent": 0},
-              {"kind": "claim", "from_i": 3, "to_i": 3, "text": "z", "parent": 1}], "one level"),
+              {"kind": "claim", "from_i": 3, "to_i": 3, "text": "z", "parent": 1},
+              {"kind": "claim", "from_i": 3, "to_i": 3, "text": "w", "parent": 2}], "two levels"),
             ([{"kind": "claim", "from_i": 0, "to_i": 0, "text": "x"},
-              {"kind": "claim", "from_i": 3, "to_i": 3, "text": "y", "parent": 0}], "another header")):
+              {"kind": "claim", "from_i": 3, "to_i": 3, "text": "y", "parent": 0}], "another header"),
+            # second-read ruling: an event is a sequence's child with a `when`; one unit-spanning synopsis
+            ([top, {"kind": "event", "from_i": 3, "to_i": 3, "text": "e", "parent": 0, "data": {"when": "1991"}}], "`sequence`"),
+            ([{"kind": "sequence", "from_i": 3, "to_i": 3, "text": "s"},
+              {"kind": "event", "from_i": 3, "to_i": 3, "text": "e", "parent": 0}], "data.when"),
+            ([{"kind": "synopsis", "from_i": 0, "to_i": 2, "text": "s"}], "spans the whole unit"),
+            ([{"kind": "synopsis", "from_i": 0, "to_i": 3, "text": "s"},
+              {"kind": "synopsis", "from_i": 0, "to_i": 3, "text": "t"}], "second synopsis")):
         with pytest.raises(ValueError) as ei:
             validate_point_rows(bad, pack)
         assert msg in str(ei.value)
@@ -130,6 +138,15 @@ def test_validate_rows_and_resolve_proposals():
     props = proposals_from_point_rows(nested, pack)
     assert [p["text"] for p in props] == ["Confusion quote.", "Subjects in isolation.", "Trig never meets a house.", "Another top."]
     assert props[2]["parent_key"] == props[1]["proposal_id"] and props[1]["parent_key"] == "" and props[3]["parent_key"] == ""
+    # depth two: a sequence, its events, an event's support — and the synopsis sorts LAST whatever its lines
+    deep = validate_point_rows([{"kind": "synopsis", "from_i": 0, "to_i": 3, "text": "Gatto quit; confusion taught."},
+                                {"kind": "sequence", "from_i": 3, "to_i": 3, "text": "Gatto's exit"},
+                                {"kind": "event", "from_i": 3, "to_i": 3, "text": "quits", "parent": 1, "data": {"when": "1991"}},
+                                {"kind": "claim", "from_i": 3, "to_i": 3, "text": "Article shook many", "parent": 2},
+                                {"kind": "claim", "from_i": 1, "to_i": 2, "text": "Earlier top."}], pack)
+    props = proposals_from_point_rows(deep, pack)
+    assert [p["text"] for p in props] == ["Earlier top.", "Gatto's exit", "quits", "Article shook many", "Gatto quit; confusion taught."]
+    assert props[3]["parent_key"] == props[2]["proposal_id"] and props[2]["parent_key"] == props[1]["proposal_id"]
 
 
 def _points():
@@ -229,14 +246,14 @@ def test_render_one_level_nesting_and_unit_title_header_suppression_and_derived_
     assert "Part 1" not in out
     assert (f"- Subjects taught in isolation. {_glyph('bbbb0001')}\n"
             f"  - Trigonometry never meets a house plan. {_glyph('cccc0001')}\n"
-            f"  - “I teach confusion.” — Gatto {_glyph('dddd0001')}\n"
+            f"\n  > I teach confusion.\n  > — Gatto {_glyph('dddd0001')}\n\n"      # a child quotation keeps the block form (ruling (5))
             f"- Orphan. {_glyph('eeee0001')}\n") in out
     both = render_points(pts, rendering="both")
     assert "- [Subjects taught in isolation.](#pt-bbbb0001)\n  - [Trigonometry never meets a house plan.](#pt-cccc0001)\n" in both
     assert unit_title_header("Chapter 1. Seven Dangerous Lessons Taught in Schools.", unit)
     assert unit_title_header("Part 1. School. Chapter 1. Seven dangerous lessons taught in schools", unit)
     assert not unit_title_header("Lesson 1. Confusion", unit) and not unit_title_header("", unit)
-    desc = "Seven Dangerous Lessons Taught in Schools: Lesson 1. Confusion. What the chapter says, in source order, without added commentary."
+    desc = "Seven Dangerous Lessons Taught in Schools: Lesson 1. Confusion. What the chapter says, in its own order, without added commentary."
     assert derived_description(pts) == desc and derived_description([]) == ""
     fm = '---\ntitle: "The Learning Game, Chapter 1 — notes"\ndate: 2026-09-07\ncategories: [book]\n---\n'
     policy = {"title": "unit-title", "description": "derived"}
@@ -245,6 +262,60 @@ def test_render_one_level_nesting_and_unit_title_header_suppression_and_derived_
                  f'description: "{desc}"\ndate: 2026-09-07\ncategories: [book]\n---\n')
     assert derive_frontmatter(d, pts, policy) == d                       # idempotent over derived lines
     assert derive_frontmatter(fm, pts, {}) == fm and derive_frontmatter(fm, [], policy) == fm
+
+
+def test_render_depth_two_events_synopsis_source_card_and_short_title():
+    """Second-read ruling: depth two (an event's support under the event), a sequence's items
+    as `event` children, the synopsis out of the body and into the description, the source
+    card from the work metadata, the short title shape."""
+    unit = {"title": "04 - 1. Seven Dangerous Lessons Taught in Schools",
+            "work_structure": {"kind": "chapter", "part": 1, "part_title": "School", "chapter": 1,
+                               "title": "Seven Dangerous Lessons Taught in Schools",
+                               "work": {"title": "The Learning Game", "author": "Ana Lorena Fábrega"}}}
+    base = {"heading": "Part 1. School. Chapter 1. Seven Dangerous Lessons Taught in Schools.", "heading_index": 1, "unit": unit}
+    pts = [
+        {"id": "s", "key": "seq00001", "kind": "sequence", "text": "Gatto's break with the system", "lead": "Gatto",
+         "ordinal": 0, "segment_ids": ["s0"], "start_time": 0.0, "end_time": 9.0, **base},
+        {"id": "e1", "key": "evt00001", "kind": "event", "text": "Wall Street Journal article: he quits", "ordinal": 1,
+         "segment_ids": ["s1"], "start_time": 1.0, "end_time": 3.0, "parent_key": "seq00001", "data": {"when": "1991"}, **base},
+        {"id": "c", "key": "cla00001", "kind": "claim", "text": "Announcement shook many", "ordinal": 2,
+         "segment_ids": ["s2"], "start_time": 2.0, "end_time": 3.0, "parent_key": "evt00001", **base},
+        {"id": "e2", "key": "evt00002", "kind": "event", "text": "publishes Dumbing Us Down", "ordinal": 3,
+         "segment_ids": ["s3"], "start_time": 4.0, "end_time": 5.0, "parent_key": "seq00001", "data": {"when": "months later"}, **base},
+        {"id": "x", "key": "cla00002", "kind": "claim", "text": "Not part of the series", "ordinal": 4,
+         "segment_ids": ["s4"], "start_time": 6.0, "end_time": 7.0, "parent_key": "seq00001", **base},
+        {"id": "y", "key": "syn00001", "kind": "synopsis", "text": "Gatto's seven lessons diagnose what school teaches by design.",
+         "ordinal": 5, "segment_ids": ["s0", "s1", "s2", "s3", "s4"], "start_time": 0.0, "end_time": 9.0, **base},
+    ]
+    out = render_points(pts)
+    assert out == (f"- **Gatto**'s break with the system {_glyph('seq00001')}\n"
+                   f"  1. **1991** — Wall Street Journal article: he quits {_glyph('evt00001')}\n"
+                   f"    - Announcement shook many {_glyph('cla00001')}\n"
+                   f"  2. **months later** — publishes Dumbing Us Down {_glyph('evt00002')}\n"
+                   f"  - Not part of the series {_glyph('cla00002')}\n")
+    assert "seven lessons diagnose" not in out                                  # the synopsis never renders in the body
+    assert synopsis_of(pts) == "Gatto's seven lessons diagnose what school teaches by design."
+    tree = build_point_tree(pts)
+    assert [n["p"]["key"] for n in tree] == ["seq00001", "syn00001"]
+    assert [c["p"]["key"] for c in tree[0]["kids"]] == ["evt00001", "evt00002", "cla00002"]
+    assert tree[0]["kids"][0]["kids"][0]["p"]["key"] == "cla00001"
+    assert unit_label(unit) == "Ch. 1" and unit_label({"work_structure": {"kind": "front-matter", "title": "Foreword"}}) == "Foreword"
+    card = render_source_card(unit)
+    assert card == ("::: {.callout-note appearance=\"simple\" icon=false}\n"
+                    "Notes on **The Learning Game** by Ana Lorena Fábrega — Part 1 (School) · Chapter 1, "
+                    "*Seven Dangerous Lessons Taught in Schools*. The points paraphrase the chapter in its own order; "
+                    "only the quotations are verbatim.\n:::\n")
+    assert render_source_card({"work_structure": {"kind": "chapter", "title": "x"}}) == ""       # no work metadata: no card
+    fm = '---\ntitle: "old"\ndate: 2026-09-08\n---\n'
+    policy = {"title": "work-unit-notes", "description": "synopsis"}
+    d = derive_frontmatter(fm, pts, policy, synopsis=synopsis_of(pts))
+    assert d == ('---\ntitle: "The Learning Game, Ch. 1 notes"\n'
+                 'description: "Gatto\'s seven lessons diagnose what school teaches by design."\ndate: 2026-09-08\n---\n')
+    # without a synopsis the description falls back to the derived headings; without work metadata the title falls back
+    d2 = derive_frontmatter(fm, pts, policy)
+    assert 'description: "The Learning Game — Seven Dangerous Lessons Taught in Schools. What the chapter says, in its own order' in d2
+    bare = [dict(p, unit={"work_structure": {"kind": "chapter", "chapter": 1, "title": "Seven Dangerous Lessons"}}) for p in pts]
+    assert derive_frontmatter(fm, bare, policy).startswith('---\ntitle: "Seven Dangerous Lessons"\n')
 
 
 def test_coverage_gaps_and_overlap_pairs():
@@ -270,7 +341,8 @@ def _build_sibling(sdb: str):
             nodes = [{"id": "src-1", "label": "Source", "sources": [],
                       "properties": {"title": "The Learning Game — 04 - 1. Seven Dangerous Lessons",
                                      "work_structure": {"kind": "chapter", "part": 1, "chapter": 1,
-                                                        "title": "Seven Dangerous Lessons"}}}]
+                                                        "title": "Seven Dangerous Lessons",
+                                                        "work": {"title": "The Learning Game", "author": "Ana Lorena Fábrega"}}}}]
             for i, (t, a, b) in enumerate([("Chapter 1. Seven dangerous lessons.", 0.0, 2.0),
                                            ("Gatto quit teaching in 1991.", 2.0, 5.0),
                                            ("By the way my mic is bad.", 5.0, 6.0),
@@ -341,7 +413,8 @@ def test_cli_pure_notes_lane_end_to_end_and_replay(tmp_path):
     assert [h["text"] for h in pack["headers"]] == ["Chapter 1. Seven dangerous lessons.", "Lesson 1. Confusion."]
     assert pack["quote_spans"] == [{"stratum_id": "cor-q", "from_i": 1, "to_i": 2}]
     assert pack["source"]["graph"] == "tx" and pack["source"]["work_structure"]["chapter"] == 1
-    assert "[H] Lesson 1. Confusion." in pack_json.with_suffix(".md").read_text()
+    brief = pack_json.with_suffix(".md").read_text()
+    assert "[H] Lesson 1. Confusion." in brief and "Work: **The Learning Game** by Ana Lorena Fábrega" in brief
 
     # (4) a proposer's rows -> a proposal set; a bad row refuses loudly
     rows = tmp_path / "rows.jsonl"
@@ -350,9 +423,10 @@ def test_cli_pure_notes_lane_end_to_end_and_replay(tmp_path):
         {"kind": "quotation", "from_i": 1, "to_i": 2, "text": "I teach confusion.", "attribution": "Gatto"},
         {"kind": "claim", "from_i": 3, "to_i": 3, "text": "Subjects taught in isolation."},
         {"kind": "claim", "from_i": 3, "to_i": 4, "text": "Isolation → no coherent picture.", "lead": "coherent", "parent": 2},
+        {"kind": "synopsis", "from_i": 0, "to_i": 4, "text": "Gatto quit in 1991; school teaches confusion by isolating subjects."},
     ]) + "\n")
     r = _run(*base, "notes-ingest", "--pack", str(pack_json), "--rows", str(rows), "--proposer", "test")
-    assert r.returncode == 0 and "4 point(s)" in r.stdout, r.stderr or r.stdout
+    assert r.returncode == 0 and "5 point(s)" in r.stdout, r.stderr or r.stdout
     bad = tmp_path / "bad.jsonl"
     bad.write_text(json.dumps({"kind": "claim", "from_i": 0, "to_i": 1, "text": "x"}) + "\n")
     r = _run(*base, "notes-ingest", "--pack", str(pack_json), "--rows", str(bad), "--proposer", "test")
@@ -361,11 +435,11 @@ def test_cli_pure_notes_lane_end_to_end_and_replay(tmp_path):
     # (5) accept: list first, then all — Points + References + edges (ELABORATES for the nested
     #     child), one journaled op each, the deliverable_type fact asserted on first accept
     r = _run(*base, "notes-accept", "--slug", "the-learning-game/ch01")
-    assert r.returncode == 0 and "4 pending" in r.stdout and "[quotation]" in r.stdout and "↳" in r.stdout, r.stderr or r.stdout
+    assert r.returncode == 0 and "5 pending" in r.stdout and "[quotation]" in r.stdout and "↳" in r.stdout, r.stderr or r.stdout
     r = _run(*base, "notes-accept", "--slug", "the-learning-game/ch01", "--accept-all")
-    assert r.returncode == 0 and "accepted 4" in r.stdout and "deliverable_type asserted: `pure-notes`" in r.stdout, r.stderr or r.stdout
+    assert r.returncode == 0 and "accepted 5" in r.stdout and "deliverable_type asserted: `pure-notes`" in r.stdout, r.stderr or r.stdout
     ops = [o for o in read_journal(pj) if o["verb"] == "accept-point"]
-    assert len(ops) == 4
+    assert len(ops) == 5 and ops[4]["args"]["point"]["kind"] == "synopsis"
     assert all(len(o["args"]["observations"]) == len(o["args"]["point"]["segment_ids"]) for o in ops)
     assert ops[1]["args"]["point"]["kind"] == "quotation" and ops[1]["args"]["observations"][0]["graph"] == "tx"
     assert ops[0]["args"]["point"]["unit"]["source_id"] == "src-1" and ops[0]["args"]["point"]["heading"] == "Chapter 1. Seven dangerous lessons."
@@ -379,11 +453,11 @@ def test_cli_pure_notes_lane_end_to_end_and_replay(tmp_path):
     assert asyncio.run(_elaborates(pdb)) == 1
     r = _run("--graph-db-path", pdb, "--format", "agent", "list", "--label", "Point")
     points = json.loads(r.stdout)
-    assert points.get("total", len(points.get("items", []))) == 4 or len(points.get("nodes", [])) == 4
+    assert points.get("total", len(points.get("items", []))) == 5 or len(points.get("nodes", [])) == 5
     # re-accepting is a no-op that journals nothing
     r = _run(*base, "notes-accept", "--slug", "the-learning-game/ch01", "--accept-all")
     assert "0 pending" in r.stdout or "accepted 0" in r.stdout
-    assert len([o for o in read_journal(pj) if o["verb"] == "accept-point"]) == 4
+    assert len([o for o in read_journal(pj) if o["verb"] == "accept-point"]) == 5
 
     # (6) the review reads: overlap flags the two same-kind claims on line 3; coverage is complete
     r = _run(*base, "notes-overlap", "--slug", "the-learning-game/ch01")
@@ -402,11 +476,14 @@ def test_cli_pure_notes_lane_end_to_end_and_replay(tmp_path):
     #     the unit title, description derived) re-derived, the rest + the preamble kept; the
     #     header restating the unit's title suppressed; the child nested; no audiobook spans
     r = _run(*base, "notes-render", "--slug", "the-learning-game/ch01")
-    assert r.returncode == 0 and "from 4 point(s)" in r.stdout, r.stderr or r.stdout
+    assert r.returncode == 0 and "from 5 point(s)" in r.stdout, r.stderr or r.stdout
     staged = (pri_dir / "staging" / "the-learning-game" / "ch01" / "index.md").read_text()
-    assert staged.startswith('---\ntitle: "Seven Dangerous Lessons"\ndescription: "Seven Dangerous Lessons: Lesson 1. Confusion. '
-                             'What the chapter says, in source order, without added commentary."\ndate: 2026-09-07\n'), staged[:300]
+    assert staged.startswith('---\ntitle: "The Learning Game, Ch. 1 notes"\ndescription: "Gatto quit in 1991; school teaches '
+                             'confusion by isolating subjects."\ndate: 2026-09-07\n'), staged[:300]
     assert "Pure notes born on the graph." in staged
+    assert ("Notes on **The Learning Game** by Ana Lorena Fábrega — Part 1 · Chapter 1, *Seven Dangerous Lessons*. "
+            "The points paraphrase the chapter in its own order; only the quotations are verbatim.") in staged
+    assert "isolating subjects" not in staged.split("---\n", 2)[2]         # the synopsis is not body content
     assert "At a glance" not in staged and "## Chapter 1" not in staged and "## Lesson 1. Confusion" in staged
     assert staged.index("**Gatto** quit teaching in 1991.") < staged.index("## Lesson 1. Confusion")   # the opening points stand before the first section
     assert f"> I teach confusion.\n> — Gatto [§](#pt-{quote_pid[:8]}){{#pt-{quote_pid[:8]} .pt-anchor}}\n" in staged
@@ -435,7 +512,7 @@ def test_cli_pure_notes_lane_end_to_end_and_replay(tmp_path):
     r = _run(*base, "notes-retract", point_id[:8])
     assert r.returncode == 0 and "retracted" in r.stdout, r.stderr or r.stdout
     r = _run(*base, "notes-render", "--slug", "the-learning-game/ch01")
-    assert "from 3 point(s)" in r.stdout
+    assert "from 4 point(s)" in r.stdout
     staged2 = (pri_dir / "staging" / "the-learning-game" / "ch01" / "index.md").read_text()
     assert "I teach confusion." not in staged2 and "## Lesson 1. Confusion" in staged2
     r = _run("--graph-db-path", pdb, "read", note_id)
@@ -452,7 +529,7 @@ def test_cli_pure_notes_lane_end_to_end_and_replay(tmp_path):
     r = _run("--graph-db-path", rdb, "--format", "agent", "list", "--label", "Point")
     body = json.loads(r.stdout)
     n = body.get("total") if isinstance(body.get("total"), int) else len(body.get("nodes") or body.get("items") or [])
-    assert n == 3
+    assert n == 4
     r = _run("--graph-db-path", rdb, "--format", "agent", "locate", "pure-notes")
     assert any(m.get("label") == "DeliverableType" for m in json.loads(r.stdout)["matches"])
     assert live_text != staged2   # the retract really changed the body (sanity on the equality checks above)
@@ -461,8 +538,8 @@ def test_cli_pure_notes_lane_end_to_end_and_replay(tmp_path):
     # (11) the re-drive's clean slate: retract EVERY point (children first), render drops the
     #      body, and a second replay converges on the empty deliverable
     r = _run(*base, "notes-retract", "--slug", "the-learning-game/ch01", "--all")
-    assert r.returncode == 0 and "retract-point ×3" in r.stdout, r.stderr or r.stdout
-    assert len([o for o in read_journal(pj) if o["verb"] == "retract-point"]) == 4
+    assert r.returncode == 0 and "retract-point ×4" in r.stdout, r.stderr or r.stdout
+    assert len([o for o in read_journal(pj) if o["verb"] == "retract-point"]) == 5
     r = _run(*base, "notes-render", "--slug", "the-learning-game/ch01")
     assert "from 0 point(s)" in r.stdout
     staged3 = (pri_dir / "staging" / "the-learning-game" / "ch01" / "index.md").read_text()
