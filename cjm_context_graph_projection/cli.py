@@ -1699,6 +1699,16 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
         if args.journal_path and res.get("written"):
             append_write(args.journal_path, "edit-point", res["args"])
         return 0
+    if cmd == "notes-rehead":
+        from .purenotes import rehead_points
+        pack = json.loads(Path(args.pack).expanduser().read_text())
+        res = await rehead_points(gx, args.slug, pack, actor=args.actor)
+        print(render("notes-rehead", res, args.format))
+        if args.journal_path:
+            for r in res.get("results") or []:
+                if r.get("written"):
+                    append_write(args.journal_path, "edit-point", r["args"])
+        return 1 if res.get("error") else 0
     if cmd == "notes-render":
         res = await render_notes(gx, args.slug, rendering=args.rendering, timestamps=args.timestamps,
                                  write_md=not args.no_write, actor=args.actor)
@@ -1772,6 +1782,13 @@ def _add_notes_lane_parsers(sub) -> None:
     p.add_argument("--lead", default=None, help="The new lead term ('' clears it)")
     p.add_argument("--parent", default=None,
                    help="The point this one elaborates: a Point key, id or prefix in the same post; `none` = top level")
+    p.add_argument("--actor", default=os.environ.get("CJM_ACTOR") or "user:cli")
+
+    p = sub.add_parser("notes-rehead", help="Re-derive every point's section heading from a FRESH pack over the "
+                                            "same unit (after a header reclassification upstream, ruling b398d73f) — "
+                                            "one journaled edit-point per changed point, every anchor kept; then notes-render")
+    p.add_argument("--slug", required=True)
+    p.add_argument("--pack", required=True, help="The fresh notes pack json (notes-pack output over the same source)")
     p.add_argument("--actor", default=os.environ.get("CJM_ACTOR") or "user:cli")
 
     p = sub.add_parser("notes-coverage", help="Review: the unit's content runs no accepted point derives from")

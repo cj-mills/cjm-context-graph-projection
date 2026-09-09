@@ -246,12 +246,17 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 
 - `accept_point` _function_ — Land ONE accepted point: the Point node, its segment References (from observations —
 - `build_notes_pack` _function_ — Apply the type's INFORMATION POLICY (a stratum query) to the unit and number what a
+- `build_point_tree` _function_ — Nest by `parent_key` (second-read ruling (4): depth TWO in practice, the tree is generic).
 - `choose_spine` _function_ — Pick the SKELETON spine to read (the correction core's `spine_where_for` rule, pure):
 - `coverage_gaps` _function_ — Pure: the unreferenced-lines query — every content line the type includes that no
+- `derive_frontmatter` _function_ — The type may OWN the title and the description — the rest of the authored frontmatter
+- `derived_description` _function_ — What the unit CONTAINS, from data the rendering already uses: the work (when the
+- `edit_point` _function_ — Edit an accepted point IN PLACE — the per-point repair the ch. 2 staging read demanded
 - `load_deliverable_type` _function_ — Read a DeliverableType profile off the graph (None = `notes-type <key>` first).
 - `load_notes_propsets` _function_ — Every notes proposal set under `root` (optionally for one source), newest first.
 - `load_points` _function_ — A Note's Points, in source order (start_time, then pack ordinal, then key).
 - `mint_deliverable_type` _function_ — UPSERT a DeliverableType by slug (the display-rule pattern: last journaled op wins).
+- `nest_points` _function_ — The one-level view of `build_point_tree` (kept for callers that only need parent -> children).
 - `note_deliverable_type` _function_ — The Note's bound type slug (the active `deliverable_type` fact).
 - `observe_segments` _function_ — Observe each segment in the sibling READ-ONLY (label + properties hash + title) — the
 - `overlapping_points` _function_ — Pure: the duplication candidates — two points deriving from a shared segment. A
@@ -263,11 +268,17 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `proposals_from_point_rows` _function_ — Resolve validated rows to proposal rows: a minted proposal id (the point's future
 - `pure_notes_type` _function_ — The pure-notes profile as data: information policy = a stratum query, presentation
 - `read_source_unit` _function_ — Read one source unit: the EFFECTIVE spine (layer-0 + applied corrections, via the
-- `render_notes` _function_ — Derive the Note's body from its Points and APPLY it: the authored frontmatter + preamble
+- `rehead_points` _function_ — Re-derive every Point's captured heading / heading_index from its segment run against a
+- `render_notes` _function_ — Derive the Note's body from its Points and APPLY it: the authored preamble stays, the
 - `render_notes_pack` _function_ — Render a pack as the brief a proposer reads: the unit, the kind slate, the headers
 - `render_points` _function_ — Render the body from the Points — deterministic, so a replayed `render-notes` derives
+- `render_source_card` _function_ — The reader-facing provenance (second-read ruling (1)): a derived one-line callout under
 - `resolve_sibling_source` _function_ — Resolve a Source in the sibling graph: id prefix first (the shared seam), then a
+- `retract_note_points` _function_ — Retract EVERY point of a Note (the re-drive's clean slate — ruling e1fd4d64 (5)): one
 - `retract_point` _function_ — Retract a point: delete the node (its edges cascade). The compensating op of accept —
+- `synopsis_of` _function_
+- `unit_label` _function_ — The short unit handle the title carries (second-read ruling (1): the short shape).
+- `unit_title_header` _function_ — Ruling e1fd4d64 (C): the first read-aloud header of a chapter file is the chapter's own
 - `validate_point_rows` _function_ — Validate + normalize proposer rows against their pack — loud on the first bad row.
 - `write_notes_propset` _function_ — Write one notes proposal set: `<out_root>/<set_id>/manifest.json` + `proposals.jsonl`
 

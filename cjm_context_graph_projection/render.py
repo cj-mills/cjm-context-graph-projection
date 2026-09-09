@@ -306,7 +306,7 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             lines.append("_(nothing to propose — the review frontier is empty)_")
         return "\n".join(lines)
     if kind in ("notes-type", "notes-pack", "notes-ingest", "notes-accept", "notes-retract", "notes-retract-all",
-                "notes-coverage", "notes-overlap", "notes-check", "notes-edit", "notes-render"):
+                "notes-coverage", "notes-overlap", "notes-check", "notes-edit", "notes-rehead", "notes-render"):
         return _render_notes_lane(kind, obj)
     if kind == "confirm-proposal":
         if obj.get("error"):
@@ -1442,6 +1442,17 @@ def _render_notes_lane(kind: str, obj: Dict[str, Any]) -> str:
         for k, (old, new) in changed.items():
             lines.append(f"  {k}: {_short(str(old) or '∅', 70)} → {_short(str(new) or '∅', 70)}")
         lines.append("  next: `notes-render --slug <post>` to re-derive the page")
+        return "\n".join(lines)
+    if kind == "notes-rehead":
+        ch, un = obj.get("changed") or [], obj.get("unmapped") or []
+        lines = [f"**rehead** `{obj.get('slug')}` — {len(ch)} of {obj.get('points')} point(s) re-headed"
+                 + (f" · {len(un)} unmapped (segments the pack no longer numbers)" if un else "")]
+        for c in ch:
+            lines.append(f"  `{str(c.get('key') or '')[:8]}`: {_short(c.get('old') or '∅', 45)} (#{c.get('old_index')}) → "
+                         f"{_short(c.get('new') or '∅', 45)} (#{c.get('new_index')})")
+        for u in un:
+            lines.append(f"  ⚠ `{str(u.get('key') or '')[:8]}` {_short(str(u.get('text') or ''), 60)} — not in the pack")
+        lines.append("  next: `notes-render --slug <post>` to re-derive the page" if ch else "  nothing to do")
         return "\n".join(lines)
     if kind == "notes-retract-all":
         done = obj.get("retracted") or []

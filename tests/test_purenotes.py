@@ -58,9 +58,9 @@ def _unit():
         {"id": "s7", "index": 7, "text": "", "start": 12.0, "end": 12.5},
     ]
     strata = [
-        {"id": "c-app1", "correction_type": "stratum", "payload": {"category": "apparatus", "segment_ids": ["s0"], "start_time": 0.0}},
+        {"id": "c-app1", "correction_type": "stratum", "payload": {"category": "section-header", "segment_ids": ["s0"], "start_time": 0.0}},
         {"id": "c-tan", "correction_type": "stratum", "payload": {"category": "tangent", "segment_ids": ["s2"], "start_time": 5.0}},
-        {"id": "c-app2", "correction_type": "stratum", "payload": {"category": "apparatus", "segment_ids": ["s3"], "start_time": 6.0}},
+        {"id": "c-app2", "correction_type": "stratum", "payload": {"category": "section-header", "segment_ids": ["s3"], "start_time": 6.0}},
         {"id": "c-q", "correction_type": "stratum", "payload": {"category": "quotation", "segment_ids": ["s4", "s5"], "start_time": 7.0}},
         {"id": "c-rm", "correction_type": "stratum", "payload": {"category": "research-mark", "segment_ids": ["s1"], "start_time": 2.0}},
     ]
@@ -362,8 +362,8 @@ def _build_sibling(sdb: str):
                 nodes.append({"id": f"seg-{i}", "label": "Segment", "sources": [],
                               "properties": {"text": t, "index": i, "start_time": a, "end_time": b,
                                              "source_id": "src-1"}})
-            for cid, cat, sids, st in (("cor-h1", "apparatus", ["seg-0"], 0.0), ("cor-t", "tangent", ["seg-2"], 5.0),
-                                       ("cor-h2", "apparatus", ["seg-3"], 6.0), ("cor-q", "quotation", ["seg-4", "seg-5"], 7.0)):
+            for cid, cat, sids, st in (("cor-h1", "section-header", ["seg-0"], 0.0), ("cor-t", "tangent", ["seg-2"], 5.0),
+                                       ("cor-h2", "section-header", ["seg-3"], 6.0), ("cor-q", "quotation", ["seg-4", "seg-5"], 7.0)):
                 nodes.append({"id": cid, "label": "Correction", "sources": [],
                               "properties": {"correction_type": "stratum", "status": "applied", "actor": "human",
                                              "session_id": "s", "created_at": 1.0,
@@ -531,6 +531,26 @@ def test_cli_pure_notes_lane_end_to_end_and_replay(tmp_path):
     assert "→" not in staged.split("---\n", 2)[2]
     live_text = _run("--graph-db-path", pdb, "read", note_id).stdout
     assert live_text == staged
+
+    # (7c) rehead (ruling b398d73f): a header reclassified upstream vanishes from a FRESH pack;
+    #      every point under it re-derives its heading in place (one edit-point each, anchors
+    #      kept); the render regroups; the reverse pack restores the sections
+    nolesson = tmp_path / "pack_nolesson.json"
+    nolesson.write_text(json.dumps({**pack, "headers": [h for h in pack["headers"] if not h["text"].startswith("Lesson 1")]}))
+    r = _run(*base, "notes-rehead", "--slug", "the-learning-game/ch01", "--pack", str(nolesson))
+    assert r.returncode == 0 and "3 of 5 point(s) re-headed" in r.stdout, r.stderr or r.stdout
+    assert len([o for o in read_journal(pj) if o["verb"] == "edit-point"]) == 6
+    r = _run(*base, "notes-render", "--slug", "the-learning-game/ch01")
+    regrouped = (pri_dir / "staging" / "the-learning-game" / "ch01" / "index.md").read_text()
+    assert "## Lesson 1. Confusion" not in regrouped and f"#pt-{child_key[:8]}" in regrouped
+    assert "\n  - Isolation = no **coherent** picture. [§]" in regrouped        # the nesting survives the regroup
+    r = _run(*base, "notes-rehead", "--slug", "the-learning-game/ch01", "--pack", str(pack_json))
+    assert r.returncode == 0 and "3 of 5 point(s) re-headed" in r.stdout, r.stderr or r.stdout
+    r = _run(*base, "notes-rehead", "--slug", "the-learning-game/ch01", "--pack", str(pack_json))
+    assert "0 of 5 point(s) re-headed" in r.stdout and "nothing to do" in r.stdout
+    r = _run(*base, "notes-render", "--slug", "the-learning-game/ch01")
+    assert (pri_dir / "staging" / "the-learning-game" / "ch01" / "index.md").read_text() == staged
+    assert len([o for o in read_journal(pj) if o["verb"] == "edit-point"]) == 9
 
     # (8) frontier: approve; a segment edit IN THE SIBLING surfaces through Point -> Reference
     r = _run(*base, "assert", note_id, "publish_state", "published")

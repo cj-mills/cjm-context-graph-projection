@@ -76,8 +76,10 @@ def pure_notes_type(
         information_policy={
             "include_unclassified": True,                 # absence of a stratum IS main topic
             "include_strata": ["quotation"],              # verbatim units, carried as `quotation` points
-            "structure_strata": ["apparatus"],            # read-aloud headers -> the heading hierarchy (never content)
-            "exclude_strata": ["tangent", "sponsor", "disfluency"],
+            "structure_strata": ["section-header"],       # read-aloud section titles -> the heading hierarchy (never content)
+            # 2047cf1d ruling (2026-09-09): a cross-reference or a transition is never a heading and never
+            # content; apparatus (credits, legal, boilerplate) is excluded outright, no longer a header source
+            "exclude_strata": ["tangent", "sponsor", "disfluency", "apparatus", "cross-reference", "transition"],
             "never_carry": ["research-mark", "tool-mention", "asr-error"],  # things to DO, not things the source says
         },
         presentation_policy={
@@ -934,6 +936,8 @@ async def edit_point(
     text: Optional[str] = None,         # New statement text (None = keep)
     lead: Optional[str] = None,         # New lead term ("" clears; None = keep)
     parent: Optional[str] = None,       # New parent: a Point key, id or prefix in the same Note; "" = top level; None = keep
+    heading: Optional[str] = None,      # Re-derived section heading (the rehead pass; None = keep)
+    heading_index: Optional[int] = None,  # Its order within the unit (None = keep)
     actor: str = "user:cli",
 ) -> Dict[str, Any]:  # {point_id, note_id, key, changed: {field: [old, new]}, args, written} | {error}
     """Edit an accepted point IN PLACE — the per-point repair the ch. 2 staging read demanded
@@ -967,14 +971,21 @@ async def edit_point(
             fields["text"] = text.strip()
     if lead is not None and lead.strip() != str(cur.get("lead") or ""):
         fields["lead"] = lead.strip()
+    if heading is not None and heading.strip() != str(cur.get("heading") or ""):
+        fields["heading"] = heading.strip()
+    if heading_index is not None and int(heading_index) != int(cur.get("heading_index") or 0):
+        fields["heading_index"] = int(heading_index)
     new_text = str(fields.get("text", cur.get("text") or ""))
     new_lead = str(fields.get("lead", cur.get("lead") or ""))
-    if new_lead and str(cur.get("kind")) != "definition" and new_lead.lower() not in new_text.lower():
-        return {"error": f"lead {new_lead!r} does not appear in the text (a lead is bolded IN PLACE — "
-                         f"e1fd4d64 (I); only `definition` may carry a lead the text lacks)", "written": False}
-    if new_text.count("→") > 1:
-        return {"error": f"{new_text.count('→')} arrows — at most ONE `→` per point (ruling 5625b74e); "
-                         f"say the rest in words", "written": False}
+    if "text" in fields or "lead" in fields:
+        # The ingest contracts hold on what this edit TOUCHES; a heading-only edit (the rehead
+        # pass) leaves a pre-ruling row's text as it stands — its arrows are that row's debt.
+        if new_lead and str(cur.get("kind")) != "definition" and new_lead.lower() not in new_text.lower():
+            return {"error": f"lead {new_lead!r} does not appear in the text (a lead is bolded IN PLACE — "
+                             f"e1fd4d64 (I); only `definition` may carry a lead the text lacks)", "written": False}
+        if new_text.count("→") > 1:
+            return {"error": f"{new_text.count('→')} arrows — at most ONE `→` per point (ruling 5625b74e); "
+                             f"say the rest in words", "written": False}
     old_parent_key = str(cur.get("parent_key") or "")
     if parent is not None:
         new_parent_key = ""
@@ -1031,6 +1042,54 @@ async def edit_point(
     changed = {k: [cur.get(k) if cur.get(k) is not None else "", v] for k, v in fields.items()}
     return {"point_id": pid, "note_id": note_id, "key": key, "changed": changed, "text": pn.text, "written": True,
             "args": {"point_id": pid, "key": key, "fields": dict(fields), "actor": actor}}
+
+
+async def rehead_points(
+    gx: GraphHandle,
+    slug: str,                      # The deliverable Note's slug
+    pack: Dict[str, Any],           # A FRESH notes pack over the same source unit (its headers are the new structure)
+    *,
+    actor: str = "user:cli",
+) -> Dict[str, Any]:  # {slug, points, changed: [{point_id, key, old, new}], unmapped, results, written}
+    """Re-derive every Point's captured heading / heading_index from its segment run against a
+    fresh pack — the per-point re-derivation a header RECLASSIFICATION upstream demands (ruling
+    b398d73f; the b542896b (b) gap): a title that stops being a header (a cross-reference, a
+    transition) leaves every Point under it carrying a stale heading, and the renderer groups
+    by that heading. The rule is the pack's own (`heading_index` = the count of headers at or
+    before the run's first line; `heading` = the last of them). Each changed Point lands as an
+    `edit_point` field set — the caller journals one edit-point per result — so every anchor
+    stands. A Point whose segments the pack no longer numbers (excluded upstream since) is
+    reported, never touched; the synopsis spans the unit and is skipped."""
+    note_id = note_node_id(slug)
+    points = await load_points(gx, note_id)
+    by_seg = {str(r.get("id")): int(r.get("i") or 0) for r in (pack.get("segments") or [])}
+    headers = list(pack.get("headers") or [])
+    changed: List[Dict[str, Any]] = []
+    unmapped: List[Dict[str, Any]] = []
+    results: List[Dict[str, Any]] = []
+    for p in points:
+        if str(p.get("kind")) == "synopsis":
+            continue
+        idx = [by_seg[s] for s in (p.get("segment_ids") or []) if s in by_seg]
+        if not idx:
+            unmapped.append({"point_id": p["id"], "key": p.get("key"), "text": p.get("text")})
+            continue
+        first = min(idx)
+        before = [h for h in headers if int(h.get("i_before") or 0) <= first]
+        heading = str(before[-1].get("text") or "") if before else ""
+        h_index = len(before)
+        if heading == str(p.get("heading") or "") and h_index == int(p.get("heading_index") or 0):
+            continue
+        r = await edit_point(gx, p["id"], heading=heading, heading_index=h_index, actor=actor)
+        if r.get("error"):
+            return {"error": r["error"], "slug": slug, "points": len(points), "changed": changed,
+                    "unmapped": unmapped, "results": results, "written": bool(results)}
+        results.append(r)
+        changed.append({"point_id": p["id"], "key": p.get("key"),
+                        "old": str(p.get("heading") or ""), "new": heading,
+                        "old_index": int(p.get("heading_index") or 0), "new_index": h_index})
+    return {"slug": slug, "points": len(points), "changed": changed, "unmapped": unmapped,
+            "results": results, "written": bool(results)}
 
 
 # --------------------------------------------------------------------------------------
