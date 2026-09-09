@@ -409,7 +409,7 @@ Write ONE JSON object per line (JSONL). Each row proposes ONE point over a run o
 consecutive pack lines:
 
     {"kind": "<kind>", "from_i": <int>, "to_i": <int>, "text": "<telegraphic statement>",
-     "lead": "<optional: a term the text CONTAINS>",
+     "lead": "<optional: a term the text CONTAINS — definition: the term defined, which the text does NOT repeat>",
      "parent": <optional: the 0-based ROW NUMBER of the point this one elaborates>,
      "attribution": "<quotation only: who is quoted>",
      "data": {<comparison: "columns": [...], "rows": [[...], ...] | sequence: "items": [{"when": "...", "what": "..."}]}}
@@ -469,7 +469,8 @@ consecutive pack lines:
   never spans a header (except the synopsis).
 * `lead`: the term the reader's eye keys on (a name, a concept). It MUST appear in the
   text — it is bolded IN PLACE, never prefixed. Only for `definition` does the lead stand
-  apart as the term defined.
+  apart as the term defined: its text is the gloss ALONE (the row renders as
+  `**Term** — gloss`), so never open a definition's text with the term itself.
 * Names: where the source speaks as "I", name the author by surname (the Work line
   above); never "the author". Symbols, a small fixed palette a general reader parses
   without decoding: `→` for consequence or result, `vs` for contrast, `≈` and `≠` only
@@ -1127,12 +1128,14 @@ def _bold_in_place(text: str, lead: str) -> str:  # bold the FIRST occurrence of
 def _lead_text(p: Dict[str, Any]) -> str:  # definition: "**Term** — text"; else the lead bolded IN PLACE
     """Ruling e1fd4d64 (I): a prefixed lead that restates a term already in the text adds
     nothing — bold the term where it occurs. `definition` keeps the glossary shape (the term,
-    then what it means); a lead the text lacks (legacy rows) falls back to the prefix."""
+    then what it means) when its text is the gloss alone — a definition whose text already
+    carries the term is bolded in place like every other kind, never prefixed on top of it
+    (finding 06fa8cb5: the ch. 2 proposer's self-check moved the term into the text and the
+    page read "**Term** — Term — gloss"). A lead the text lacks (legacy rows) falls back to
+    the prefix."""
     lead, text = str(p.get("lead") or "").strip(), str(p.get("text") or "").strip()
     if not lead:
         return text
-    if str(p.get("kind")) == "definition":
-        return f"**{lead}** — {text}"
     return _bold_in_place(text, lead) or f"**{lead}** — {text}"
 
 

@@ -210,10 +210,16 @@ def test_render_lead_in_place_definition_keeps_the_glossary_shape():
     pts = [{"id": "p1", "key": "11111111", "kind": "claim", "ordinal": 0, "lead": "troublemakers",
             "text": "Kids labeled Troublemakers for asking hard questions.", **base},
            {"id": "p2", "key": "22222222", "kind": "definition", "ordinal": 1, "lead": "Budget",
-            "text": "A plan for money not yet spent.", **base}]
+            "text": "A plan for money not yet spent.", **base},
+           # 06fa8cb5: a definition whose text already carries the term (the proposer's self-check moved it
+           # in) is bolded in place — never "**Term** — Term — gloss" (ch. 2's Elastic thinking row)
+           {"id": "p3", "key": "33333333", "kind": "definition", "ordinal": 2, "lead": "Elastic thinking",
+            "text": "Elastic thinking — new perspectives by letting the mind wander.", **base}]
     out = render_points(pts)
     assert f"- Kids labeled **Troublemakers** for asking hard questions. {_glyph('11111111')}\n" in out   # case kept, bolded in place
     assert f"- **Budget** — A plan for money not yet spent. {_glyph('22222222')}\n" in out
+    assert f"- **Elastic thinking** — new perspectives by letting the mind wander. {_glyph('33333333')}\n" in out
+    assert "Elastic thinking — Elastic thinking" not in out
     assert render_points(pts, rendering="outline").startswith("## At a glance\n\n**Lesson 7**\n\n- Kids labeled **Troublemakers**")
 
 
