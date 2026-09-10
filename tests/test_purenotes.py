@@ -360,6 +360,26 @@ def test_frontmatter_fields_and_works_table_are_plain_data():
     assert render_works_table([]).startswith("_No works")
 
 
+def test_source_card_folds_resolved_references_and_a_dangling_target_renders_as_its_label():
+    # Item ae103970 (ruling a7ca900d (3)): human-added links render INSIDE the source card as a
+    # Resources line, in the order given; a link with no resolvable target is its label alone.
+    unit = {"work_structure": {"kind": "chapter", "part": 1, "chapter": 1, "title": "Seven Dangerous Lessons",
+                               "work": {"title": "The Learning Game", "author": "Ana Lorena Fábrega"}}}
+    plain = render_source_card(unit)
+    assert plain.startswith("::: {.callout-note") and "Resources" not in plain
+    assert render_source_card(unit, []) == plain and render_source_card(unit, None) == plain
+    card = render_source_card(unit, [
+        {"label": "Dumbing Us Down (publisher page)", "href": "https://newsociety.com/dud"},
+        {"label": "Notes on Dumbing Us Down", "href": "/posts/dumbing-us-down/ch01-notes/"},
+        {"label": "no target yet", "href": ""},
+        {"label": "   ", "href": "https://ignored.example"}])
+    assert card.startswith(plain.split("\n:::")[0])
+    assert ("\n\nResources: [Dumbing Us Down (publisher page)](https://newsociety.com/dud) · "
+            "[Notes on Dumbing Us Down](/posts/dumbing-us-down/ch01-notes/) · no target yet\n:::\n") in card
+    assert "ignored.example" not in card
+    assert render_source_card({}, [{"label": "x", "href": "y"}]) == ""    # no work metadata -> no card at all
+
+
 # ---------------------------------------------------------------- the CLI chain
 
 def _build_sibling(sdb: str):
@@ -739,3 +759,75 @@ def test_cli_draft_lifecycle_staging_index_and_work_promotion_gate(tmp_path):
     assert r.returncode == 0, r.stderr or r.stdout
     rl = lambda name: yaml.safe_load((tmp_path / "rep-staging" / "lists" / name).read_text())
     assert [i["note_id"] for i in rl("retired.yml")] == [ch1] and [i["note_id"] for i in rl("fixture.yml")] == [ch2]
+
+
+@pytest.mark.skipif(not _HAVE_GRAPH, reason=f"graph capability {DEFAULT_GRAPH_ID!r} not installed (CI)")
+def test_cli_references_render_into_the_source_card_and_replay(tmp_path):
+    # Item ae103970 (ruling a7ca900d (3)): Reference nodes on the sibling's Source render as the
+    # source card's Resources line (never a body edit); a cross-work link to a not-yet-born
+    # note falls back to its URL and RESOLVES to the born page on the next render (finding
+    # 962866ae, second datapoint); the render op journals what it observed, so a replay with
+    # no sibling reproduces the live text byte for byte.
+    sib_dir, pri_dir = tmp_path / "sib", tmp_path / "pri"
+    sib_dir.mkdir(); pri_dir.mkdir()
+    sdb = str(sib_dir / "sib.db")
+    _build_sibling(sdb)
+
+    async def add_refs():   # what the transcription core's `add-reference` lands
+        async with open_graph(sdb) as sg:
+            nodes = [{"id": "ref-1", "label": "Reference", "sources": [],
+                      "properties": {"source_id": "src-1", "label": "Dumbing Us Down (publisher page)",
+                                     "url": "https://newsociety.com/dud", "notes_slug": "", "role": "cited-work", "added_by": "human:test"}},
+                     {"id": "ref-2", "label": "Reference", "sources": [],
+                      "properties": {"source_id": "src-1", "label": "Notes on Dumbing Us Down",
+                                     "url": "https://example.org/hand-notes", "notes_slug": "dumbing-us-down/ch01-notes",
+                                     "role": "related-notes", "added_by": "human:test"}}]
+            edges = [{"id": f"e-{r}", "source_id": "src-1", "target_id": r, "relation_type": "HAS_REFERENCE", "properties": {}}
+                     for r in ("ref-1", "ref-2")]
+            await extend_graph(sg.queue, sg.graph_id, nodes, edges)
+    asyncio.run(add_refs())
+    pdb, pj = str(pri_dir / "pri.db"), str(pri_dir / "writes.jsonl")
+    (pri_dir / "graph.config.json").write_text(json.dumps(
+        {"notes_profile": "quarto_post", "emit_root": str(pri_dir / "staging"), "sibling_graphs": {"tx": sdb}}))
+    base = ("--graph-db-path", pdb, "--journal-path", pj, "--source-journal-path", str(pri_dir / "source.jsonl"))
+    assert _run(*base, "notes-type", "pure-notes").returncode == 0
+    post = "---\ntitle: \"ch01\"\ndate: 2026-09-09\ncategories: [book, notes]\n---\n\nPreamble.\n"
+    r = _run(*base, "new-note", "--slug", "the-learning-game/ch01", "--content", post)
+    assert r.returncode == 0, r.stderr or r.stdout
+    note_id = [o for o in read_journal(pj) if o["verb"] == "assert"][-1]["args"]["subject"]
+    r = _run(*base, "notes-pack", "--source", "Seven Dangerous")
+    assert r.returncode == 0, r.stderr or r.stdout
+    pack_json = next(l.split(None, 1)[1].strip() for l in r.stdout.splitlines() if l.strip().startswith("json"))
+    pack = json.loads(Path(pack_json).read_text())
+    assert [x["role"] for x in pack["source"]["references"]] == ["cited-work", "related-notes"]   # the unit snapshot carries them
+    rows = tmp_path / "rows.jsonl"
+    rows.write_text(json.dumps({"kind": "claim", "from_i": 0, "to_i": 0, "text": "Gatto quit teaching in 1991."}) + "\n")
+    assert _run(*base, "notes-ingest", "--pack", pack_json, "--rows", str(rows), "--proposer", "test").returncode == 0
+    r = _run(*base, "notes-accept", "--slug", "the-learning-game/ch01", "--accept-all")
+    assert r.returncode == 0 and "accepted 1" in r.stdout, r.stderr or r.stdout
+    # (1) render: the Resources line inside the source card; the cross-work target is unborn -> fallback URL
+    r = _run(*base, "notes-render", "--slug", "the-learning-game/ch01")
+    assert r.returncode == 0, r.stderr or r.stdout
+    staged_path = pri_dir / "staging" / "the-learning-game" / "ch01" / "index.md"
+    staged = staged_path.read_text()
+    assert ("Resources: [Dumbing Us Down (publisher page)](https://newsociety.com/dud) · "
+            "[Notes on Dumbing Us Down](https://example.org/hand-notes)\n:::") in staged
+    ops = [o for o in read_journal(pj) if o["verb"] == "render-notes"]
+    assert len(ops) == 1 and [x["notes_slug"] for x in ops[0]["args"]["references"]] == ["", "dumbing-us-down/ch01-notes"]
+    # (2) the target is born -> the next render resolves the link to the born page (a NEW op: the
+    #     substance digest covers the resolution, so the re-render is never deduped away)
+    r = _run(*base, "new-note", "--slug", "dumbing-us-down/ch01-notes",
+             "--content", "---\ntitle: \"DUD ch01\"\ndate: 2026-09-09\n---\n\nBorn.\n")
+    assert r.returncode == 0, r.stderr or r.stdout
+    r = _run(*base, "notes-render", "--slug", "the-learning-game/ch01")
+    assert r.returncode == 0, r.stderr or r.stdout
+    staged2 = staged_path.read_text()
+    assert "[Notes on Dumbing Us Down](/posts/dumbing-us-down/ch01-notes/)" in staged2 and "hand-notes" not in staged2
+    assert len([o for o in read_journal(pj) if o["verb"] == "render-notes"]) == 2
+    live = _run("--graph-db-path", pdb, "read", note_id).stdout
+    assert live == staged2
+    # (3) replay onto a fresh db with NO sibling: the journaled references reproduce the live text
+    rep = str(tmp_path / "rep.db")
+    r = _run("--graph-db-path", rep, "--journal-path", pj, "replay")
+    assert r.returncode == 0, r.stderr or r.stdout
+    assert _run("--graph-db-path", rep, "read", note_id).stdout == staged2

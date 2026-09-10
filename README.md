@@ -268,6 +268,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `point_from_args` _function_ — The op-args -> PointNode mapping the live accept AND replay share.
 - `proposals_from_point_rows` _function_ — Resolve validated rows to proposal rows: a minted proposal id (the point's future
 - `pure_notes_type` _function_ — The pure-notes profile as data: information policy = a stratum query, presentation
+- `read_source_references` _function_ — The Source's human-added resource links (`Reference` nodes minted by the transcription
 - `read_source_unit` _function_ — Read one source unit: the EFFECTIVE spine (layer-0 + applied corrections, via the
 - `rehead_points` _function_ — Re-derive every Point's captured heading / heading_index from its segment run against a
 - `render_notes` _function_ — Derive the Note's body from its Points and APPLY it: the authored preamble stays, the
@@ -275,6 +276,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `render_points` _function_ — Render the body from the Points — deterministic, so a replayed `render-notes` derives
 - `render_source_card` _function_ — The reader-facing provenance (second-read ruling (1)): a derived one-line callout under
 - `render_works_table` _function_ — Pure: the per-work promotion condition as the staging site's works table (item
+- `resolve_references` _function_ — Resolve human-added links for rendering (ae103970): a cross-work link naming a
 - `resolve_sibling_source` _function_ — Resolve a Source in the sibling graph: id prefix first (the shared seam), then a
 - `retract_note_points` _function_ — Retract EVERY point of a Note (the re-drive's clean slate — ruling e1fd4d64 (5)): one
 - `retract_point` _function_ — Retract a point: delete the node (its edges cascade). The compensating op of accept —

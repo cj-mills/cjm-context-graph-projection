@@ -306,9 +306,13 @@ async def _apply_op(gx: GraphHandle, op: Dict[str, Any]) -> str:
         # (write_md=False — the staging file is emit's job), landing after the accepts in
         # append order.
         from .purenotes import render_notes
+        # References (ae103970): the op journals the resource links it OBSERVED in the sibling,
+        # so replay renders the same source card without opening it (an op from before the
+        # field renders none, as it did live).
         await render_notes(gx, a["slug"], rendering=a.get("rendering", "both"),
                            timestamps=a.get("timestamps", "always"),   # pre-e1fd4d64 ops rendered every span
-                           write_md=False, actor=a.get("actor", "agent:session"))
+                           write_md=False, actor=a.get("actor", "agent:session"),
+                           references=list(a.get("references") or []))
     else:
         return ""
     return verb

@@ -1714,7 +1714,8 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
         return 1 if res.get("error") else 0
     if cmd == "notes-render":
         res = await render_notes(gx, args.slug, rendering=args.rendering, timestamps=args.timestamps,
-                                 write_md=not args.no_write, actor=args.actor)
+                                 write_md=not args.no_write, actor=args.actor,
+                                 siblings=siblings, manifests_dir=args.manifests_dir)
         print(render("notes-render", res, args.format))
         if res.get("error"):
             return 1

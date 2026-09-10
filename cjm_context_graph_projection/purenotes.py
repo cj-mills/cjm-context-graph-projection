@@ -299,11 +299,59 @@ async def read_source_unit(
     # A public, time-addressable URL (YouTube / a podcast player) makes the source ADDRESSABLE:
     # only then does the public rendering carry timestamps, as links (ruling e1fd4d64 (D)).
     public_url = str(sp.get("public_url") or sp.get("url") or "").strip()
+    # Human-added resource links ride the unit snapshot too (item ae103970) — the pack brief
+    # shows them and a render with no sibling at hand falls back to this snapshot.
+    references = await read_source_references(sg, source_id)
     return {"source": {"source_id": source_id, "title": str(sp.get("title") or ""),
                        "work_structure": sp.get("work_structure"), "skeleton_hash": chosen,
-                       **({"public_url": public_url} if public_url else {})},
+                       **({"public_url": public_url} if public_url else {}),
+                       **({"references": references} if references else {})},
             "skeleton_hash": chosen, "segments": segments, "strata": strata,
             "spines": {(h or "legacy"): n for h, n in groups.items()}}
+
+
+async def read_source_references(
+    sg: GraphHandle,   # The sibling (transcription) graph
+    source_id: str,    # The Source whose human-added links to read
+) -> List[Dict[str, Any]]:  # [{id, label, url, notes_slug, role}] — role, then label order
+    """The Source's human-added resource links (`Reference` nodes minted by the transcription
+    core's `add-reference`; ruling a7ca900d (3), item ae103970) — read LIVE from the sibling
+    so every rendering of the unit carries the current set, never a body-authored copy."""
+    q = NodeQuery(label="Reference", where=[PropertyPredicate("source_id", "eq", source_id)], limit=10000)
+    res = await graph_task(sg.queue, sg.graph_id, "query_nodes", query=q.to_dict())
+    out: List[Dict[str, Any]] = []
+    for n in (getattr(res, "nodes", None) or []):
+        d = n.to_dict() if hasattr(n, "to_dict") else dict(n)
+        p = dict(d.get("properties") or {})
+        out.append({"id": d.get("id"), "label": str(p.get("label") or ""), "url": str(p.get("url") or ""),
+                    "notes_slug": str(p.get("notes_slug") or ""), "role": str(p.get("role") or "")})
+    out.sort(key=lambda r: (r["role"], r["label"]))
+    return out
+
+
+async def resolve_references(
+    gx: GraphHandle,
+    references: List[Dict[str, Any]],  # Raw Reference rows [{label, url, notes_slug, role}] (read_source_references / a journaled render op)
+) -> List[Dict[str, Any]]:  # [{label, href, role, notes_slug, resolved}] — href = the born page's permalink, else the URL fallback, else ""
+    """Resolve human-added links for rendering (ae103970): a cross-work link naming a
+    notes-graph slug points at the BORN page (`/posts/<slug>/`) when that Note exists on
+    this graph and falls back to its URL until then — finding 962866ae's shape: a forward
+    reference to a not-yet-born note heals on the next render, never dangles as an empty
+    link. Plain links keep their URL."""
+    out: List[Dict[str, Any]] = []
+    for r in references or []:
+        slug = str(r.get("notes_slug") or "").strip()
+        href = ""
+        if slug:
+            node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=note_node_id(slug))
+            if node is not None:
+                href = f"/posts/{slug}/"
+        resolved = bool(href)
+        if not href:
+            href = str(r.get("url") or "").strip()
+        out.append({"label": str(r.get("label") or "").strip(), "href": href, "role": str(r.get("role") or ""),
+                    "notes_slug": slug, "resolved": resolved})
+    return out
 
 
 # --------------------------------------------------------------------------------------
@@ -1573,10 +1621,14 @@ def unit_label(unit: Dict[str, Any]) -> str:  # "Ch. 1" | "Part 2" | the unit ti
 
 def render_source_card(
     unit: Dict[str, Any],  # A point's `unit` (carries work_structure incl. `work`)
+    references: Optional[List[Dict[str, Any]]] = None,  # RESOLVED human-added links [{label, href}] (ae103970); none = no Resources line
 ) -> str:  # A Quarto callout naming the work, author, and unit; "" without work metadata
     """The reader-facing provenance (second-read ruling (1)): a derived one-line callout under
     the title so the post is never mistaken for the source — the work, its author, the
-    part/chapter, and the paraphrase/verbatim rule. Nothing of the lane's vocabulary."""
+    part/chapter, and the paraphrase/verbatim rule. Nothing of the lane's vocabulary. The
+    Source's human-added resource links (ruling a7ca900d (3)) render as a `Resources:` line
+    INSIDE the card — derived from Reference nodes, never authored into the body; a link
+    with no resolvable target renders as its label alone (never an empty link)."""
     ws = dict((unit or {}).get("work_structure") or {})
     work = dict(ws.get("work") or {})
     if not work.get("title"):
@@ -1590,9 +1642,15 @@ def render_source_card(
     where = " · ".join(where_bits)
     title = str(ws.get("title") or "").strip()
     place = (f" — {where}" if where else "") + (f", *{title}*" if title else "")
+    refs = [r for r in (references or []) if str(r.get("label") or "").strip()]
+    resources = ""
+    if refs:
+        parts = [(f"[{str(r['label']).strip()}]({r['href']})" if str(r.get("href") or "").strip()
+                  else str(r["label"]).strip()) for r in refs]
+        resources = "\n\nResources: " + " · ".join(parts)
     return ("::: {.callout-note appearance=\"simple\" icon=false}\n"
             f"Notes on **{work['title']}**{who}{place}. The points paraphrase the {ws.get('kind') or 'source'} "
-            "in its own order; only the quotations are verbatim.\n:::\n")
+            "in its own order; only the quotations are verbatim." + resources + "\n:::\n")
 
 
 def derived_description(
@@ -1682,13 +1740,21 @@ async def render_notes(
     timestamps: str = "addressable",    # "always" | "addressable" | "never"
     write_md: bool = True,              # Write the staging `.md` (replay passes False)
     actor: str = "agent:session",
+    siblings: Optional[Dict[str, str]] = None,        # {graph key: db path} — read the unit's LIVE Reference nodes from the sibling (ae103970)
+    graph_key: Optional[str] = None,                  # Sibling key (default: the points' unit graph, else the sole key)
+    manifests_dir: Optional[str] = None,              # Capability manifests dir
+    references: Optional[List[Dict[str, Any]]] = None,  # Raw Reference rows to render (REPLAY passes the journaled ones; None = read live, else the unit snapshot)
 ) -> Dict[str, Any]:  # {slug, points, added, updated, removed, written, text} | {error}
     """Derive the Note's body from its Points and APPLY it: the authored preamble stays, the
     frontmatter's type-owned lines (title / description) are re-derived per the type's
     presentation policy, everything after is re-derived, the diff lands as Section
     adds/updates, and Sections the rendering no longer produces are deleted (render owns the
     body). The staging file is rewritten from the same text. Idempotent: the same Points
-    render the same bytes."""
+    render the same bytes. The source card carries the unit's human-added links (ruling
+    a7ca900d (3)): read LIVE from the sibling when one is at hand, else the points' unit
+    snapshot; the op JOURNALS the rows it observed so replay renders the same card with no
+    sibling open (the accept-point observations pattern), and the substance digest covers
+    the RESOLVED hrefs so a re-render after a cross-work target is born lands a new op."""
     from .authoring import _note_section_wires
     from .structure import _apply_note_text
     note_id = note_node_id(slug)
@@ -1716,10 +1782,25 @@ async def render_notes(
     syn = synopsis_of(points)
     fm = derive_frontmatter(str(F.prop(note, "frontmatter_raw") or ""), points, fm_policy, synopsis=syn)
     card = ""
+    resolved: List[Dict[str, Any]] = []
     if ppol.get("source_card", True) and points:
         # The reader-facing provenance (second-read ruling (1)) — derived from the unit's work
-        # metadata, rendered above the body, never authored.
-        card = render_source_card(dict(sorted(points, key=_sort_key)[0].get("unit") or {}))
+        # metadata, rendered above the body, never authored. Its Resources line (ae103970):
+        # explicit rows (replay) > the sibling's LIVE Reference nodes > the unit snapshot.
+        unit0 = dict(sorted(points, key=_sort_key)[0].get("unit") or {})
+        if references is None:
+            key = graph_key or str(unit0.get("graph") or "")
+            if siblings and (key in siblings or len(siblings) == 1) and unit0.get("source_id"):
+                key = key if key in siblings else next(iter(siblings))
+                try:
+                    async with open_graph(siblings[key], manifests_dir or DEFAULT_MANIFESTS, readonly=True) as sg:
+                        references = await read_source_references(sg, str(unit0["source_id"]))
+                except RuntimeError:
+                    references = None   # sibling unavailable -> the snapshot below
+            if references is None:
+                references = list(unit0.get("references") or [])
+        resolved = await resolve_references(gx, references)
+        card = render_source_card(unit0, resolved)
     body = render_points(points, rendering=rendering, timestamps=timestamps)
     if pre and not pre.endswith("\n\n"):
         pre = pre.rstrip("\n") + "\n\n"
@@ -1736,13 +1817,18 @@ async def render_notes(
     # identical ops — without it a re-render after an accept/retract would be dropped as a
     # duplicate of the first render and a rebuild would stop at the stale body. A true no-op
     # re-render (same points) still dedups.
+    # The RESOLVED hrefs ride the digest too (ae103970): the same rows resolve differently once a
+    # cross-work target is born, and that re-render must land as a new op, not dedup away.
     digest = hashlib.sha256(json.dumps(
-        [[p.get("key"), p.get("kind"), p.get("text"), p.get("lead"), p.get("heading"), p.get("data"),
-          p.get("parent_key")]
-         for p in points], sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")).hexdigest()
+        [[[p.get("key"), p.get("kind"), p.get("text"), p.get("lead"), p.get("heading"), p.get("data"),
+           p.get("parent_key")] for p in points],
+         [[r.get("label"), r.get("href")] for r in resolved]],
+        sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")).hexdigest()
     res.update(points=len(points), rendering=rendering, timestamps=timestamps, text=new_text,
+               references=resolved,
                args={"slug": slug, "rendering": rendering, "timestamps": timestamps, "actor": actor,
-                     "substance": f"sha256:{digest}"})
+                     "substance": f"sha256:{digest}",
+                     **({"references": [dict(r) for r in references]} if references else {})})
     return res
 
 
