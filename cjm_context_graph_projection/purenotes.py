@@ -2062,6 +2062,7 @@ def work_page_type(
             "frontmatter": {"title": "notes-on-work",          # "Notes on *<work>*" — the site's series convention
                             "description": "work-summary"},    # derived from the work's subtitle + author
             "source_card": True,
+            "matter": "born-only",                             # front/back matter (credits, acknowledgments) lists only once it has a page; "all" lists every unit
             "structure": "front matter · parts in order · back matter, from the structure map's file order",
             "tone": "formal; no first person; nothing of the lane's vocabulary (no states, no counts of what is held)",
             "unit": "one page per Source work; its chapter pages are its members and never repeat the work-level content",
@@ -2261,12 +2262,19 @@ def _work_group(u: Dict[str, Any]) -> str:  # "Front matter" | "Part n — title
 def render_work_chapters(
     units: List[Dict[str, Any]],       # read_work_structure units, in source order
     born: Dict[str, Dict[str, Any]],   # {source id: {slug, synopsis}} for units with a born page
+    *,
+    matter: str = "born-only",         # Front/back matter: "born-only" (a credits/acknowledgments unit lists only once it has a page) | "all"
 ) -> str:  # The `## Chapters` section: one heading per group, a line per unit (linked + synopsis once born); "" without units
     """The TOC that is also the executive summary (checks 2d01fe1e + 34f73e46): the units in
     source order under their part, each chapter numbered, linked to `/posts/<slug>/` once its
-    page is born and followed by that page's synopsis; an unborn unit is its title alone (the
-    public emit never sees one — the page is gated on every chapter). Nothing of the lane's
-    vocabulary reaches the reader."""
+    page is born and followed by that page's synopsis; an unborn CHAPTER is its title alone
+    (the public emit never sees one — the page is gated on every chapter), while an unborn
+    front/back-matter unit (opening credits, acknowledgments, end credits) is apparatus the
+    reader has no page for and is left out under the default `matter` policy. Nothing of the
+    lane's vocabulary reaches the reader."""
+    if matter == "born-only":
+        units = [u for u in units if u.get("kind") not in ("front-matter", "back-matter")
+                 or str(u.get("source_id") or "") in born]
     if not units:
         return ""
     lines: List[str] = ["## Chapters"]
@@ -2402,7 +2410,7 @@ async def render_work_page(
     if pre and not pre.endswith("\n\n"):
         pre = pre.rstrip("\n") + "\n\n"
     card = render_work_card(work, units, collections, resolved) if ppol.get("source_card", True) else ""
-    body = render_work_chapters(units, born)
+    body = render_work_chapters(units, born, matter=str(ppol.get("matter") or "born-only"))
     new_text = fm + pre + BODY_MARKER + "\n\n" + (card + "\n" if card else "") + body
     path = str(F.prop(note, "path") or "")
     res = await _apply_note_text(gx, note, slug, new_text, path, write=True, write_md=write_md)

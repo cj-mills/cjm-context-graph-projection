@@ -858,10 +858,18 @@ def test_work_page_renderers_are_pure_and_the_type_is_data():
     series = render_work_card({"title": "Lecture 17: NCCL", "author": "GPU MODE"}, units[1:2], ["GPU MODE"])
     assert "Part of *GPU MODE*." in series and "narrated" not in series
     assert render_work_card({}, units) == ""
-    body = render_work_chapters(units, {"s1": {"slug": "the-learning-game/ch01-notes", "synopsis": "Gatto's seven lessons."},
-                                        "s3": {"slug": "the-learning-game/ch03-notes", "synopsis": ""}})
+    born = {"s1": {"slug": "the-learning-game/ch01-notes", "synopsis": "Gatto's seven lessons."},
+            "s3": {"slug": "the-learning-game/ch03-notes", "synopsis": ""}}
+    body = render_work_chapters(units, born, matter="all")
     assert body.split("\n")[0] == "## Chapters"
     assert "### Front matter\n\n- Foreword\n" in body
+    # the default policy: unborn front/back matter (credits, acknowledgments) is apparatus with no page — left out;
+    # a front-matter unit with a born page lists like any other
+    default = render_work_chapters(units, born)
+    assert "Front matter" not in default and "Back matter" not in default and "Foreword" not in default
+    assert "1. [Seven Dangerous Lessons]" in default and "2. How Did We Get Here?" in default
+    with_foreword = render_work_chapters(units, {**born, "s0": {"slug": "the-learning-game/foreword-notes", "synopsis": ""}})
+    assert "### Front matter\n\n- [Foreword](/posts/the-learning-game/foreword-notes/)\n" in with_foreword
     assert ("### Part 1 — School\n\n1. [Seven Dangerous Lessons](/posts/the-learning-game/ch01-notes/) — Gatto's seven lessons.\n"
             "2. How Did We Get Here?\n") in body
     assert "### Part 2\n\n3. [Learning to Love Learning](/posts/the-learning-game/ch03-notes/)\n" in body   # born, no synopsis yet: the link alone
@@ -973,7 +981,7 @@ def test_cli_work_page_binds_by_edge_renders_the_toc_gates_on_published_chapters
     assert "aliases: [/posts/the-learning-game-book-notes/]" in text and "Authored preamble." in text
     assert "Notes on **The Learning Game**: *Teaching Kids to Think* by Ana Lorena Fábrega — 2 chapters, 3 files." in text
     assert "Resources: [Publisher page](https://x.test/tlg)" in text
-    assert "### Front matter\n\n- Foreword\n" in text
+    assert "Front matter" not in text and "Foreword" not in text   # unborn front matter is apparatus: left out (policy `matter`)
     assert ("1. [Seven Dangerous Lessons](/posts/the-learning-game/ch01/) — Gatto's seven lessons diagnose school.\n"
             "2. How Did We Get Here\n") in text, text
     # the promotion readout names the work page beside the work it belongs to
