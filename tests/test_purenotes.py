@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from cjm_context_graph_layer.grammar import make_edge
 from cjm_context_graph_layer.ops import extend_graph, graph_task
 from cjm_context_graph_primitives.journal import read_journal
 from cjm_context_graph_primitives.query import EdgeQuery
@@ -22,7 +23,9 @@ from cjm_context_graph_projection.purenotes import (_time_link, build_notes_pack
                                                     render_notes_pack, render_points,
                                                     render_source_card, synopsis_of, unit_label,
                                                     unit_title_header, validate_point_rows,
-                                                    _frontmatter_fields, render_works_table)
+                                                    _frontmatter_fields, render_works_table,
+                                                    _replace_frontmatter_lines, derive_work_frontmatter,
+                                                    render_work_card, render_work_chapters, work_page_type)
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
 
 _HAVE_GRAPH = (Path(DEFAULT_MANIFESTS) / f"{DEFAULT_GRAPH_ID}.json").exists()
@@ -831,3 +834,175 @@ def test_cli_references_render_into_the_source_card_and_replay(tmp_path):
     r = _run("--graph-db-path", rep, "--journal-path", pj, "replay")
     assert r.returncode == 0, r.stderr or r.stdout
     assert _run("--graph-db-path", rep, "read", note_id).stdout == staged2
+
+
+def test_work_page_renderers_are_pure_and_the_type_is_data():
+    # Item ebb77107 (ruling a7ca900d (2)): the work card carries the work-level content, the
+    # chapters section is the TOC that is also the executive summary (a born chapter links to
+    # its page and carries its synopsis; an unborn one is its title alone), the frontmatter is
+    # type-owned, and the profile is graph data with the pure-notes shape.
+    work = {"title": "The Learning Game", "subtitle": "Teaching Kids to Think", "author": "Ana Lorena Fábrega",
+            "narrator": "Ana Lorena Fábrega"}
+    units = [{"source_id": "s0", "file": 2, "kind": "front-matter", "chapter": None, "part": None, "part_title": "", "unit": "foreword", "title": "Foreword"},
+             {"source_id": "s1", "file": 4, "kind": "chapter", "chapter": 1, "part": 1, "part_title": "School", "unit": "", "title": "Seven Dangerous Lessons"},
+             {"source_id": "s2", "file": 5, "kind": "chapter", "chapter": 2, "part": 1, "part_title": "School", "unit": "", "title": "How Did We Get Here?"},
+             {"source_id": "s3", "file": 9, "kind": "chapter", "chapter": 3, "part": 2, "part_title": "", "unit": "", "title": "Learning to Love Learning"},
+             {"source_id": "s4", "file": 23, "kind": "back-matter", "chapter": None, "part": None, "part_title": "", "unit": "conclusion", "title": "Conclusion"}]
+    card = render_work_card(work, units, ["The Learning Game"],
+                            [{"label": "Publisher page", "href": "https://x.test/tlg"}, {"label": "Dangling", "href": ""}])
+    assert card.startswith("::: {.callout-note")
+    assert ("Notes on **The Learning Game**: *Teaching Kids to Think* by Ana Lorena Fábrega (read by the author) "
+            "— 3 chapters in 2 parts, 5 files.") in card
+    assert "Part of" not in card                                   # a book's collection IS the work
+    assert "Resources: [Publisher page](https://x.test/tlg) · Dangling" in card
+    series = render_work_card({"title": "Lecture 17: NCCL", "author": "GPU MODE"}, units[1:2], ["GPU MODE"])
+    assert "Part of *GPU MODE*." in series and "narrated" not in series
+    assert render_work_card({}, units) == ""
+    body = render_work_chapters(units, {"s1": {"slug": "the-learning-game/ch01-notes", "synopsis": "Gatto's seven lessons."},
+                                        "s3": {"slug": "the-learning-game/ch03-notes", "synopsis": ""}})
+    assert body.split("\n")[0] == "## Chapters"
+    assert "### Front matter\n\n- Foreword\n" in body
+    assert ("### Part 1 — School\n\n1. [Seven Dangerous Lessons](/posts/the-learning-game/ch01-notes/) — Gatto's seven lessons.\n"
+            "2. How Did We Get Here?\n") in body
+    assert "### Part 2\n\n3. [Learning to Love Learning](/posts/the-learning-game/ch03-notes/)\n" in body   # born, no synopsis yet: the link alone
+    assert "### Back matter\n\n- Conclusion\n" in body
+    assert render_work_chapters([], {}) == ""
+    fm = '---\ntitle: "x"\ndate: 2026-09-10\naliases: [/posts/the-learning-game-book-notes/]\n---\n'
+    pol = {"title": "notes-on-work", "description": "work-summary"}
+    out = derive_work_frontmatter(fm, work, pol)
+    assert out.startswith('---\ntitle: "Notes on *The Learning Game*"\ndescription: "Chapter-by-chapter notes on '
+                          '*The Learning Game: Teaching Kids to Think* by Ana Lorena Fábrega')
+    assert "date: 2026-09-10\naliases: [/posts/the-learning-game-book-notes/]\n---\n" in out
+    assert derive_work_frontmatter(fm, {}, pol) == fm
+    assert out == derive_work_frontmatter(out, work, pol)   # idempotent
+    assert _replace_frontmatter_lines("no block", {"title": "t"}) == "no block"
+    t = work_page_type()
+    assert t.key == "work-page" and t.presentation_policy["frontmatter"] == pol
+    assert t.presentation_policy["public"] == "expanded" and any("DERIVED_FROM" in s for s in t.production_procedure)
+
+
+@pytest.mark.skipif(not _HAVE_GRAPH, reason=f"graph capability {DEFAULT_GRAPH_ID!r} not installed (CI)")
+def test_cli_work_page_binds_by_edge_renders_the_toc_gates_on_published_chapters_and_replays(tmp_path):
+    # Item ebb77107 (ruling a7ca900d (2)): the WORK PAGE is a born Note bound to its work by a
+    # DERIVED_FROM edge to the work's Collection on the sibling; its body derives from the
+    # structure map + the born chapter notes (linked, with their synopses) + the work's
+    # Reference links; it emits only when every chapter page is PUBLISHED; the render op
+    # journals its sibling observation so a replay reproduces the page with no sibling open.
+    sib_dir, pri_dir = tmp_path / "sib", tmp_path / "pri"
+    sib_dir.mkdir(); pri_dir.mkdir()
+    sdb = str(sib_dir / "sib.db")
+    _build_sibling(sdb)
+    work = {"title": "The Learning Game", "subtitle": "Teaching Kids to Think", "author": "Ana Lorena Fábrega"}
+    COL = "c011ec71-0000-5000-8000-00000000c011"   # the work's Collection on the sibling (a hex id: a foreign ref resolves by prefix)
+
+    async def more_sibling():   # a foreword, a second chapter, the work's Collection + a work-level link
+        async with open_graph(sdb) as sg:
+            await graph_task(sg.queue, sg.graph_id, "update_node", node_id="src-1",
+                             properties={"title": "The Learning Game — 04 - 1. Seven Dangerous Lessons",
+                                         "work_structure": {"kind": "chapter", "part": 1, "chapter": 1, "file": 4,
+                                                            "title": "Seven Dangerous Lessons", "work": work}})
+            nodes = [{"id": "src-0", "label": "Source", "sources": [],
+                      "properties": {"title": "02 - Foreword",
+                                     "work_structure": {"kind": "front-matter", "unit": "foreword", "file": 2, "title": "Foreword", "work": work}}},
+                     {"id": "src-2", "label": "Source", "sources": [],
+                      "properties": {"title": "05 - 2. How Did We Get Here",
+                                     "work_structure": {"kind": "chapter", "part": 1, "chapter": 2, "file": 5, "title": "How Did We Get Here", "work": work}}},
+                     {"id": "seg-b0", "label": "Segment", "sources": [],
+                      "properties": {"text": "Chapter 2. How did we get here.", "index": 0, "start_time": 0.0, "end_time": 2.0, "source_id": "src-2"}},
+                     {"id": "seg-b1", "label": "Segment", "sources": [],
+                      "properties": {"text": "Prussia built the modern school.", "index": 1, "start_time": 2.0, "end_time": 5.0, "source_id": "src-2"}},
+                     {"id": "cor-bh", "label": "Correction", "sources": [],
+                      "properties": {"correction_type": "stratum", "status": "applied", "actor": "human", "session_id": "s",
+                                     "created_at": 1.0, "payload": {"operation": "classify", "source_id": "src-2",
+                                                                    "category": "section-header", "segment_ids": ["seg-b0"], "start_time": 0.0}}},
+                     {"id": COL, "label": "Collection", "sources": [], "properties": {"title": "The Learning Game", "status": "confirmed"}},
+                     {"id": "ref-1", "label": "Reference", "sources": [],
+                      "properties": {"source_id": COL, "label": "Publisher page", "url": "https://x.test/tlg", "notes_slug": "", "role": "publisher-page"}}]
+            edges = [make_edge(s, COL, "PART_OF") for s in ("src-0", "src-1", "src-2")] + [make_edge(COL, "ref-1", "HAS_REFERENCE")]
+            await extend_graph(sg.queue, sg.graph_id, nodes, edges)
+    asyncio.run(more_sibling())
+    pdb, pj = str(pri_dir / "pri.db"), str(pri_dir / "writes.jsonl")
+    staging, site = pri_dir / "staging", pri_dir / "site"
+    (pri_dir / "graph.config.json").write_text(json.dumps(
+        {"notes_profile": "quarto_post", "emit_root": str(staging / "posts"), "website_root": str(site),
+         "sibling_graphs": {"tx": sdb}}))
+    base = ("--graph-db-path", pdb, "--journal-path", pj, "--source-journal-path", str(pri_dir / "source.jsonl"))
+    for key in ("pure-notes", "work-page"):
+        r = _run(*base, "notes-type", key)
+        assert r.returncode == 0 and "created" in r.stdout, r.stderr or r.stdout
+
+    def born(slug, source, text, synopsis):   # a typed chapter page: born draft, a claim + a synopsis accepted, rendered
+        post = f"---\ntitle: \"{slug}\"\ndate: 2026-09-10\ncategories: [book, notes]\n---\n\nPreamble.\n"
+        r = _run(*base, "new-note", "--slug", slug, "--content", post)
+        assert r.returncode == 0, r.stderr or r.stdout
+        note_id = [o for o in read_journal(pj) if o["verb"] == "assert"][-1]["args"]["subject"]
+        r = _run(*base, "notes-pack", "--source", source)
+        assert r.returncode == 0, r.stderr or r.stdout
+        pack_json = next(l.split(None, 1)[1].strip() for l in r.stdout.splitlines() if l.strip().startswith("json"))
+        n = len(json.loads(Path(pack_json).read_text())["segments"])
+        rows = tmp_path / (slug.replace("/", "_") + ".jsonl")
+        rows.write_text(json.dumps({"kind": "claim", "from_i": 0, "to_i": 0, "text": text}) + "\n"
+                        + json.dumps({"kind": "synopsis", "from_i": 0, "to_i": n - 1, "text": synopsis}) + "\n")
+        r = _run(*base, "notes-ingest", "--pack", pack_json, "--rows", str(rows), "--proposer", "test")
+        assert r.returncode == 0, r.stderr or r.stdout
+        r = _run(*base, "notes-accept", "--slug", slug, "--accept-all")
+        assert r.returncode == 0 and "accepted 2" in r.stdout, r.stderr or r.stdout
+        r = _run(*base, "notes-render", "--slug", slug)
+        assert r.returncode == 0, r.stderr or r.stdout
+        return note_id
+
+    ch1 = born("the-learning-game/ch01", "Seven Dangerous", "Gatto quit teaching in 1991.", "Gatto's seven lessons diagnose school.")
+    # the work page: born draft and typed; a render before the edge is refused with the recipe
+    post = ('---\ntitle: "x"\ndate: 2026-09-10\ncategories: [book, notes]\n'
+            'aliases: [/posts/the-learning-game-book-notes/]\n---\n\nAuthored preamble.\n')
+    r = _run(*base, "new-note", "--slug", "the-learning-game", "--content", post)
+    assert r.returncode == 0, r.stderr or r.stdout
+    wp = [o for o in read_journal(pj) if o["verb"] == "assert"][-1]["args"]["subject"]
+    r = _run(*base, "assert", wp, "deliverable_type", "work-page")
+    assert r.returncode == 0, r.stderr or r.stdout
+    r = _run(*base, "notes-render", "--slug", "the-learning-game")
+    assert r.returncode != 0 and "not bound" in (r.stdout + r.stderr)
+    r = _run(*base, "link", wp, "DERIVED_FROM", f"tx:{COL[:8]}")   # a PREFIX resolves sibling-side
+    assert r.returncode == 0, r.stderr or r.stdout
+    r = _run(*base, "notes-render", "--slug", "the-learning-game")
+    assert r.returncode == 0 and "work page" in r.stdout and "1 of 2 chapter(s) born" in r.stdout, r.stderr or r.stdout
+    page = staging / "posts" / "the-learning-game" / "index.md"
+    text = page.read_text()
+    assert text.startswith('---\ntitle: "Notes on *The Learning Game*"\ndescription: "Chapter-by-chapter notes on '
+                           '*The Learning Game: Teaching Kids to Think* by Ana Lorena Fábrega'), text[:300]
+    assert "aliases: [/posts/the-learning-game-book-notes/]" in text and "Authored preamble." in text
+    assert "Notes on **The Learning Game**: *Teaching Kids to Think* by Ana Lorena Fábrega — 2 chapters, 3 files." in text
+    assert "Resources: [Publisher page](https://x.test/tlg)" in text
+    assert "### Front matter\n\n- Foreword\n" in text
+    assert ("1. [Seven Dangerous Lessons](/posts/the-learning-game/ch01/) — Gatto's seven lessons diagnose school.\n"
+            "2. How Did We Get Here\n") in text, text
+    # the promotion readout names the work page beside the work it belongs to
+    r = _run(*base, "notes-promotion")
+    assert r.returncode == 0 and "work page `the-learning-game`" in r.stdout and "1 of 2" in r.stdout, r.stderr or r.stdout
+    # the second chapter born -> a re-render links it (a new op, not a dedup); the condition now holds
+    ch2 = born("the-learning-game/ch02", "How Did We", "Prussia built the modern school.", "School descends from Prussia.")
+    r = _run(*base, "notes-render", "--slug", "the-learning-game")
+    assert r.returncode == 0 and "2 of 2 chapter(s) born" in r.stdout, r.stderr or r.stdout
+    text = page.read_text()
+    assert "2. [How Did We Get Here](/posts/the-learning-game/ch02/) — School descends from Prussia.\n" in text
+    assert sum(1 for o in read_journal(pj) if o["verb"] == "render-work-page") == 2
+    # the work page's own emit: published, the work READY, but the chapter pages still draft -> held (the stricter gate)
+    r = _run(*base, "assert", wp, "publish_state", "published")
+    assert r.returncode == 0, r.stderr or r.stdout
+    landed = site / "posts" / "the-learning-game" / "index.md"
+    r = _run(*base, "emit-post", wp)
+    assert r.returncode != 0 and "0 of 2 chapter page(s) published" in (r.stdout + r.stderr) and not landed.exists()
+    for ch in (ch1, ch2):
+        r = _run(*base, "assert", ch, "publish_state", "published")
+        assert r.returncode == 0, r.stderr or r.stdout
+    r = _run(*base, "emit-post", wp)
+    assert r.returncode == 0 and landed.exists() and landed.read_text() == text, r.stderr or r.stdout
+    # replay: a fresh db from the journal alone carries the same page — the render replays from
+    # its journaled observation (the sibling is opened only by emit's gate, never by replay)
+    rep = str(tmp_path / "rep.db")
+    (tmp_path / "graph.config.json").write_text(json.dumps({"website_root": str(tmp_path / "rep-site"), "sibling_graphs": {"tx": sdb}}))
+    r = _run("--graph-db-path", rep, "--journal-path", pj, "replay")
+    assert r.returncode == 0, r.stderr or r.stdout
+    r = _run("--graph-db-path", rep, "emit-post", wp, "--website-root", str(tmp_path / "rep-site"))
+    assert r.returncode == 0, r.stderr or r.stdout
+    assert (tmp_path / "rep-site" / "posts" / "the-learning-game" / "index.md").read_text() == text

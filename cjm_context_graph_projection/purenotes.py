@@ -136,8 +136,11 @@ async def mint_deliverable_type(
     actor: str = "agent:session",
 ) -> Dict[str, Any]:  # {type_id, key, created|updated, args, written}
     """UPSERT a DeliverableType by slug (the display-rule pattern: last journaled op wins).
-    An absent policy falls back to the pure-notes defaults when `key` is `pure-notes`."""
-    base = pure_notes_type(actor) if key == PURE_NOTES_KEY else DeliverableTypeNode(key=key, actor=actor)
+    An absent policy falls back to the type's code-carried defaults for the two built-in
+    profiles: `pure-notes` (a7262fe7) and `work-page` (ebb77107)."""
+    base = (pure_notes_type(actor) if key == PURE_NOTES_KEY
+            else work_page_type(actor) if key == WORK_PAGE_KEY
+            else DeliverableTypeNode(key=key, actor=actor))
     node = DeliverableTypeNode(
         key=key, title=title or base.title, description=description or base.description,
         information_policy=information_policy if information_policy is not None else base.information_policy,
@@ -1710,26 +1713,7 @@ def derive_frontmatter(
         d = derived_description(points)
         if d:
             want["description"] = d
-    if not want:
-        return fm_raw
-    lines = fm_raw.split("\n")
-    end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
-    if end is None:
-        return fm_raw
-    seen: set = set()
-    out: List[str] = [lines[0]]
-    for ln in lines[1:end]:
-        key = ln.split(":", 1)[0].strip() if ":" in ln and not ln.startswith((" ", "\t", "-")) else ""
-        if key in want:
-            out.append(f"{key}: {json.dumps(want[key], ensure_ascii=False)}")
-            seen.add(key)
-        else:
-            out.append(ln)
-    for key in ("title", "description"):
-        if key in want and key not in seen:
-            at = next((i for i, l in enumerate(out) if l.startswith("title:")), 0) + 1 if key == "description" else 1
-            out.insert(at, f"{key}: {json.dumps(want[key], ensure_ascii=False)}")
-    return "\n".join(out + lines[end:])
+    return _replace_frontmatter_lines(fm_raw, want)
 
 
 async def render_notes(
@@ -1882,14 +1866,16 @@ async def work_of_note(
     note_id: str,  # The deliverable Note id
 ) -> str:  # The work title the note's Points derive from ("" for a page with no typed points)
     """Which WORK a typed deliverable belongs to — read from its Points' unit (the structure
-    map rides every accepted point), so an essay or fixture page with no Points has no work
-    and the work-page promotion condition never applies to it."""
+    map rides every accepted point); a WORK PAGE has no Points and names its work by the
+    Collection its DERIVED_FROM edge observes (`work_reference_of_note`). An essay or fixture
+    page with neither has no work and the promotion condition never applies to it."""
     for p in await load_points(gx, note_id):
         ws = dict((p.get("unit") or {}).get("work_structure") or {})
         work = ws.get("work")
         if isinstance(work, dict) and str(work.get("title") or "").strip():
             return str(work["title"]).strip()
-    return ""
+    ref = await work_reference_of_note(gx, note_id)
+    return ref["title"] if ref else ""
 
 
 async def work_promotion_status(
@@ -1937,24 +1923,10 @@ async def work_promotion_status(
             continue
         chapters.setdefault(title, []).append({"source_id": str(r.get("id") or ""), "chapter": ws.get("chapter"),
                                                "title": str(ws.get("title") or "").strip(), "file": ws.get("file")})
-    # Which chapter units carry a born deliverable at draft or better on THIS graph: a Note's
-    # unit rides its Points (the first point's unit names the Source), its state is the fact.
-    live = {P.PUBLISH_DRAFT, P.PUBLISH_REVIEWED, P.PUBLISH_PUBLISHED}
-    states = await note_publish_states(gx)
-    unit_of_note: Dict[str, Dict[str, Any]] = {}
-    for n in await F.load_label(gx, DevNodeKinds.POINT):
-        pr = F.props(n)
-        nid_ = str(pr.get("note_id") or "")
-        unit = dict(pr.get("unit") or {})
-        if nid_ and nid_ not in unit_of_note and unit.get("source_id"):
-            unit_of_note[nid_] = unit
-    notes_by_source: Dict[str, List[Dict[str, Any]]] = {}
-    for nid_, unit in unit_of_note.items():
-        st = states.get(nid_) or []
-        node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=nid_)
-        slug = str(F.prop(node, "slug") or "") if node is not None else ""
-        notes_by_source.setdefault(str(unit["source_id"]), []).append(
-            {"note_id": nid_, "slug": slug, "states": st, "born": any(s in live for s in st)})
+    # Which chapter units carry a born deliverable at draft or better on THIS graph (a Note's
+    # unit rides its Points; its state is the fact) — one pass, shared with the work page.
+    notes_by_source = await born_notes_by_unit(gx)
+    pages = await work_page_notes(gx)   # the work PAGES (ebb77107), by the work their Collection edge names
     works: List[Dict[str, Any]] = []
     for title in sorted(chapters):
         units = sorted(chapters[title], key=lambda u: (u.get("chapter") is None, u.get("chapter") or 0, u.get("file") or 0))
@@ -1966,7 +1938,8 @@ async def work_promotion_status(
             if not any(n["born"] for n in ns):
                 missing.append(u)
         works.append({"work": title, "chapters_total": len(units), "chapters_born": len(units) - len(missing),
-                      "condition_met": bool(units) and not missing, "missing": missing, "notes": notes})
+                      "condition_met": bool(units) and not missing, "missing": missing, "notes": notes,
+                      "units": units, "work_page": list(pages.get(title) or [])})
     if work_title and not works:
         return {"error": f"no chapter units for work {work_title!r} in sibling `{key}`'s structure map",
                 "sibling": key, "works": []}
@@ -2052,3 +2025,404 @@ async def staging_index(
         wp.write_text(render_works_table(out["works"]))
         out["written"].append(str(wp))
     return out
+
+
+def work_page_type(
+    actor: str = "agent:session",  # Who mints the profile
+) -> DeliverableTypeNode:  # The work-page DeliverableType (ruling a7ca900d (2); item ebb77107)
+    """The WORK PAGE profile as data: one page per Source work, the directory index above its
+    chapter pages. Its substance is not Points but the work itself — the structure map (units
+    in source order), the born chapter notes and their synopsis points, and the work's
+    human-added links (Reference nodes on the work's Collection). The body is DERIVED on every
+    render: the work card, then the chapters per part — each linked once its page is born,
+    followed by its synopsis — the executive summary by construction (no authored summary
+    prose). Identity: the Note is linked DERIVED_FROM the work's Collection on the sibling."""
+    return DeliverableTypeNode(
+        key=WORK_PAGE_KEY,
+        title="Work page",
+        description=("One page per Source work: the work card (title, subtitle, author, narrator, shape, "
+                     "resources) and its chapters per part in source order — each linked once born, with its "
+                     "synopsis — the derived executive summary; never authored."),
+        information_policy={
+            "reads": ["the sibling's structure map for the work (work_structure on its Sources)",
+                      "the born chapter notes on this graph and their accepted `synopsis` points",
+                      "the work's human-added links: Reference nodes on the work's Collection (sibling)"],
+            "identity": ("the Note is linked DERIVED_FROM the work's Collection node on the sibling "
+                         "(`link <note> DERIVED_FROM <key>:<collection-id>`); the Collection title is the work title"),
+        },
+        presentation_policy={
+            "renderings": {
+                "expanded": {"role": "the public work page (the directory index above the chapter pages)",
+                             "card": "work, subtitle, author, narrator, chapters/parts/files, the paraphrase rule, Resources",
+                             "chapters": ("one heading per part (front matter first, back matter last); a chapter = its "
+                                          "number, its title linked to /posts/<slug>/ once born, an em dash, its synopsis"),
+                             "unborn": "the title alone, no link (a public emit never sees one: the page is gated on every chapter)"},
+            },
+            "public": "expanded",
+            "frontmatter": {"title": "notes-on-work",          # "Notes on *<work>*" — the site's series convention
+                            "description": "work-summary"},    # derived from the work's subtitle + author
+            "source_card": True,
+            "structure": "front matter · parts in order · back matter, from the structure map's file order",
+            "tone": "formal; no first person; nothing of the lane's vocabulary (no states, no counts of what is held)",
+            "unit": "one page per Source work; its chapter pages are its members and never repeat the work-level content",
+        },
+        production_procedure=[
+            "new-note --slug <work-slug>: bear the page (draft at birth) with its authored frontmatter + preamble",
+            "link <note> DERIVED_FROM <sibling>:<collection-id>: bind the page to its work (the Collection's title = the work title)",
+            "assert <note> deliverable_type work-page",
+            "add-reference <collection-id> … (transcription core): the work's links live on the Collection, never in the body",
+            "notes-render --slug <work-slug>: derive the card + chapters; re-run after any chapter is born or re-rendered",
+            "emit-post <note>: gated on publish_state=published AND every chapter page published (the whole work at once)",
+        ],
+        actor=actor,
+    )
+
+
+async def work_reference_of_note(
+    gx: GraphHandle,
+    note_id: str,  # The work-page Note id
+) -> Optional[Dict[str, Any]]:  # {graph, foreign_id, title, reference_id} for the linked Collection, or None
+    """The work a WORK PAGE stands for, read off its edges: the page is linked DERIVED_FROM a
+    local Reference observing the work's Collection node on the sibling (ruling 2f8073bb —
+    references are edges, never a copied title). The observed display handle IS the work
+    title (the transcription core names a Collection by the work). None = not yet linked."""
+    for s, t in await F.load_edge_pairs(gx, DevRelations.DERIVED_FROM):
+        if s != note_id:
+            continue
+        node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=t)
+        if node is None or F.label(node) != DevNodeKinds.REFERENCE:
+            continue
+        p = F.props(node)
+        if str(p.get("foreign_label") or "") != "Collection":
+            continue
+        return {"graph": str(p.get("graph") or ""), "foreign_id": str(p.get("foreign_id") or ""),
+                "title": str(p.get("name") or "").strip(), "reference_id": t}
+    return None
+
+
+async def read_work_structure(
+    sg: GraphHandle,          # The sibling (transcription) graph
+    work_title: str,          # The work (the structure map's work.title == the Collection title)
+    collection_id: str = "",  # The work's Collection node (carries the work's Reference links)
+) -> Dict[str, Any]:  # {work, units: [{source_id, file, kind, chapter, part, part_title, unit, title}], collections: [titles], references: [rows]} | {error}
+    """The WORK as the sibling holds it: every Source whose structure map names the work, in
+    file order (front matter, the parts' chapters, back matter), the work metadata off the
+    first, the Collections those Sources are PART_OF (a book's collection is the work; a
+    lecture's is its series), and the work's human-added links (Reference nodes on the
+    Collection, `read_source_references`). Read live; the render journals what it observed."""
+    q = NodeQuery(label="Source", limit=200000)
+    res = await graph_task(sg.queue, sg.graph_id, "query_nodes", query=q.to_dict())
+    units: List[Dict[str, Any]] = []
+    work: Dict[str, Any] = {}
+    for n in (getattr(res, "nodes", None) or []):
+        d = n.to_dict() if hasattr(n, "to_dict") else dict(n)
+        p = dict(d.get("properties") or {})
+        ws = p.get("work_structure") or {}
+        w = ws.get("work") if isinstance(ws, dict) and isinstance(ws.get("work"), dict) else {}
+        if str((w or {}).get("title") or "").strip() != work_title:
+            continue
+        for k in ("title", "subtitle", "author", "narrator"):
+            if w.get(k) and not work.get(k):
+                work[k] = str(w[k]).strip()
+        units.append({"source_id": str(d.get("id") or ""), "file": ws.get("file"), "kind": str(ws.get("kind") or ""),
+                      "chapter": ws.get("chapter"), "part": ws.get("part"), "part_title": str(ws.get("part_title") or ""),
+                      "unit": str(ws.get("unit") or ""), "title": str(ws.get("title") or "").strip()})
+    if not units:
+        return {"error": f"no Source in the sibling names the work {work_title!r} in its structure map"}
+    units.sort(key=lambda u: (u["file"] is None, u["file"] or 0, u["chapter"] is None, u["chapter"] or 0, u["title"]))
+    collections: List[str] = []
+    eq = EdgeQuery(relation_type="PART_OF", source_ids=[u["source_id"] for u in units], project=["source_id", "target_id"])
+    eres = await graph_task(sg.queue, sg.graph_id, "query_edges", query=eq.to_dict())
+    for tid in sorted({str(r["target_id"]) for r in (getattr(eres, "rows", None) or [])}):
+        node = await graph_task(sg.queue, sg.graph_id, "get_node", node_id=tid)
+        title = str(F.prop(node, "title") or "").strip() if node is not None else ""
+        if title and title not in collections:
+            collections.append(title)
+    references = await read_source_references(sg, collection_id) if collection_id else []
+    return {"work": work, "units": units, "collections": collections, "references": references}
+
+
+async def born_notes_by_unit(
+    gx: GraphHandle,
+) -> Dict[str, List[Dict[str, Any]]]:  # {source id: [{note_id, slug, states, born, synopsis}]} — every typed deliverable, keyed by the unit its Points derive from
+    """Which source UNITS carry a born deliverable on this graph, with its state and synopsis:
+    a Note's unit rides its Points (the first point's unit names the Source), its state is the
+    publish_state fact — born = draft or better (a fixture, a retired page, or a Note without
+    the fact does not count) — and its synopsis is the accepted `synopsis` point's text. One
+    pass over the Points; the promotion condition and the work page both read it."""
+    live = {P.PUBLISH_DRAFT, P.PUBLISH_REVIEWED, P.PUBLISH_PUBLISHED}
+    states = await note_publish_states(gx)
+    unit_of_note: Dict[str, Dict[str, Any]] = {}
+    synopsis_of_note: Dict[str, str] = {}
+    for n in await F.load_label(gx, DevNodeKinds.POINT):
+        pr = F.props(n)
+        nid_ = str(pr.get("note_id") or "")
+        if not nid_:
+            continue
+        unit = dict(pr.get("unit") or {})
+        if nid_ not in unit_of_note and unit.get("source_id"):
+            unit_of_note[nid_] = unit
+        if str(pr.get("kind")) == "synopsis" and nid_ not in synopsis_of_note:
+            synopsis_of_note[nid_] = str(pr.get("text") or "").strip()
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    for nid_, unit in unit_of_note.items():
+        st = states.get(nid_) or []
+        node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=nid_)
+        slug = str(F.prop(node, "slug") or "") if node is not None else ""
+        out.setdefault(str(unit["source_id"]), []).append(
+            {"note_id": nid_, "slug": slug, "states": st, "born": any(s in live for s in st),
+             "synopsis": synopsis_of_note.get(nid_, "")})
+    for rows in out.values():
+        rows.sort(key=lambda r: (not r["born"], r["slug"]))
+    return out
+
+
+async def work_page_notes(
+    gx: GraphHandle,
+) -> Dict[str, List[Dict[str, Any]]]:  # {work title: [{note_id, slug, states}]} — the work-page Notes on this graph, by the work their Collection edge names
+    """The WORK PAGES on this graph: every Note bound to the work-page type, keyed by the work
+    its DERIVED_FROM Collection reference names (`work_reference_of_note`); an unbound page
+    keys under "" so the readout shows it."""
+    slot = [a for a in await F.load_assertions(gx) if F.prop(a, "predicate") == "deliverable_type"]
+    active = F.active_assertions(slot, await F.load_supersedes(gx))
+    states = await note_publish_states(gx)
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    for a in active:
+        if str(F.prop(a, "value") or "") != WORK_PAGE_KEY:
+            continue
+        nid_ = str(F.prop(a, "subject_id") or "")
+        ref = await work_reference_of_note(gx, nid_)
+        node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=nid_)
+        slug = str(F.prop(node, "slug") or "") if node is not None else ""
+        out.setdefault(ref["title"] if ref else "", []).append(
+            {"note_id": nid_, "slug": slug, "states": states.get(nid_) or []})
+    return out
+
+
+def render_work_card(
+    work: Dict[str, Any],                               # {title, subtitle?, author?, narrator?}
+    units: List[Dict[str, Any]],                        # read_work_structure units
+    collections: Optional[List[str]] = None,            # Collection titles the units are PART_OF
+    references: Optional[List[Dict[str, Any]]] = None,  # RESOLVED links [{label, href}]
+) -> str:  # A Quarto callout: the work, author/narrator, its shape, the paraphrase rule, Resources; "" without a title
+    """The work page's reader-facing card (check 2d01fe1e): the work-level content — never
+    repeated on a chapter page. A collection is named only when it is not the work itself (a
+    book's collection is the book; a lecture names its series). The Resources line renders
+    the work's Reference nodes exactly as a chapter card does — a link with no resolvable
+    target is its label alone."""
+    title = str(work.get("title") or "").strip()
+    if not title:
+        return ""
+    head = f"Notes on **{title}**"
+    if work.get("subtitle"):
+        head += f": *{str(work['subtitle']).strip()}*"
+    author = str(work.get("author") or "").strip()
+    narrator = str(work.get("narrator") or "").strip()
+    if author:
+        head += f" by {author}"
+    if narrator and narrator == author:
+        head += " (read by the author)"
+    elif narrator:
+        head += f", narrated by {narrator}"
+    chapters = [u for u in units if u.get("kind") == "chapter"]
+    parts = sorted({u.get("part") for u in chapters if u.get("part") is not None}, key=str)
+    shape: List[str] = []
+    if chapters:
+        shape.append(f"{len(chapters)} chapter{'s' if len(chapters) != 1 else ''}"
+                     + (f" in {len(parts)} parts" if len(parts) > 1 else ""))
+    if units:
+        shape.append(f"{len(units)} file{'s' if len(units) != 1 else ''}")
+    first = head + (f" — {', '.join(shape)}" if shape else "") + "."
+    series = [c.strip() for c in (collections or []) if c.strip() and c.strip() != title]
+    if series:
+        first += " Part of " + ", ".join(f"*{c}*" for c in series) + "."
+    text = ("::: {.callout-note appearance=\"simple\" icon=false}\n" + first
+            + " One page per chapter: what the chapter says, in its own order; only the quotations are "
+              "verbatim. Each chapter's synopsis is rolled up below.")
+    refs = [r for r in (references or []) if str(r.get("label") or "").strip()]
+    if refs:
+        parts_ = [(f"[{str(r['label']).strip()}]({r['href']})" if str(r.get("href") or "").strip()
+                   else str(r["label"]).strip()) for r in refs]
+        text += "\n\nResources: " + " · ".join(parts_)
+    return text + "\n:::\n"
+
+
+def _work_group(u: Dict[str, Any]) -> str:  # "Front matter" | "Part n — title" | "Chapters" | "Back matter"
+    kind = str(u.get("kind") or "")
+    if kind == "front-matter":
+        return "Front matter"
+    if kind == "back-matter":
+        return "Back matter"
+    if u.get("part") is not None:
+        return f"Part {u['part']}" + (f" — {u['part_title']}" if u.get("part_title") else "")
+    return "Chapters"
+
+
+def render_work_chapters(
+    units: List[Dict[str, Any]],       # read_work_structure units, in source order
+    born: Dict[str, Dict[str, Any]],   # {source id: {slug, synopsis}} for units with a born page
+) -> str:  # The `## Chapters` section: one heading per group, a line per unit (linked + synopsis once born); "" without units
+    """The TOC that is also the executive summary (checks 2d01fe1e + 34f73e46): the units in
+    source order under their part, each chapter numbered, linked to `/posts/<slug>/` once its
+    page is born and followed by that page's synopsis; an unborn unit is its title alone (the
+    public emit never sees one — the page is gated on every chapter). Nothing of the lane's
+    vocabulary reaches the reader."""
+    if not units:
+        return ""
+    lines: List[str] = ["## Chapters"]
+    group = None
+    for u in units:
+        g = _work_group(u)
+        if g != group:
+            lines += ["", f"### {g}", ""]
+            group = g
+        title = str(u.get("title") or "").strip() or str(u.get("unit") or "").strip() or "Untitled"
+        b = born.get(str(u.get("source_id") or ""))
+        label = f"[{title}](/posts/{b['slug']}/)" if b and b.get("slug") else title
+        syn = f" — {str(b['synopsis']).strip()}" if b and str(b.get("synopsis") or "").strip() else ""
+        num = f"{u['chapter']}. " if u.get("kind") == "chapter" and u.get("chapter") is not None else "- "
+        lines.append(f"{num}{label}{syn}")
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
+def _replace_frontmatter_lines(
+    fm_raw: str,             # The authored frontmatter block ("---\n…\n---\n")
+    want: Dict[str, str],    # {key: value} — the policy-owned lines to replace (or insert after title)
+) -> str:  # The frontmatter with those lines replaced; unchanged when the block is malformed or nothing is wanted
+    """Pure: the line surgery shared by every type's frontmatter derivation — replace a top-level
+    key's line in place, insert a missing `title` first and a missing `description` right after
+    the title, keep everything else (date, categories, aliases, …) verbatim. Idempotent."""
+    if not want or not fm_raw.startswith("---"):
+        return fm_raw
+    lines = fm_raw.split("\n")
+    end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
+    if end is None:
+        return fm_raw
+    seen: set = set()
+    out: List[str] = [lines[0]]
+    for ln in lines[1:end]:
+        key = ln.split(":", 1)[0].strip() if ":" in ln and not ln.startswith((" ", "\t", "-")) else ""
+        if key in want:
+            out.append(f"{key}: {json.dumps(want[key], ensure_ascii=False)}")
+            seen.add(key)
+        else:
+            out.append(ln)
+    for key in ("title", "description"):
+        if key in want and key not in seen:
+            at = next((i for i, l in enumerate(out) if l.startswith("title:")), 0) + 1 if key == "description" else 1
+            out.insert(at, f"{key}: {json.dumps(want[key], ensure_ascii=False)}")
+    return "\n".join(out + lines[end:])
+
+
+def derive_work_frontmatter(
+    fm_raw: str,                # The authored frontmatter block
+    work: Dict[str, Any],       # {title, subtitle?, author?}
+    policy: Dict[str, Any],     # presentation_policy["frontmatter"] ({"title": "notes-on-work", "description": "work-summary"})
+) -> str:  # The frontmatter with the policy-owned lines replaced
+    """The work-page type OWNS the title and description: `notes-on-work` = "Notes on *<work>*"
+    (the site's series convention); `work-summary` = one derived sentence from the work's
+    subtitle and author. The rest of the authored block (date, categories, aliases) stays."""
+    title = str(work.get("title") or "").strip()
+    if not title:
+        return fm_raw
+    want: Dict[str, str] = {}
+    if policy.get("title") == "notes-on-work":
+        want["title"] = f"Notes on *{title}*"
+    if policy.get("description") == "work-summary":
+        full = title + (f": {str(work['subtitle']).strip()}" if work.get("subtitle") else "")
+        who = f" by {str(work['author']).strip()}" if work.get("author") else ""
+        want["description"] = (f"Chapter-by-chapter notes on *{full}*{who} — what each chapter says, in its own "
+                               "order, with every chapter's synopsis rolled up on this page.")
+    return _replace_frontmatter_lines(fm_raw, want)
+
+
+async def render_work_page(
+    gx: GraphHandle,
+    slug: str,                          # The work-page Note's slug
+    *,
+    write_md: bool = True,              # Write the staging `.md` (replay passes False)
+    actor: str = "agent:session",
+    siblings: Optional[Dict[str, str]] = None,   # {graph key: db path} — the structure map + the work's links live in the sibling
+    manifests_dir: Optional[str] = None,         # Capability manifests dir
+    observed: Optional[Dict[str, Any]] = None,   # REPLAY: the journaled sibling observation {work, units, collections, references}; None = read live
+) -> Dict[str, Any]:  # {slug, work, units, chapters, chapters_born, born, added, updated, removed, written, text, args} | {error}
+    """Derive the WORK PAGE's body and APPLY it (item ebb77107; ruling a7ca900d (2)): the
+    authored frontmatter + preamble stay (title/description re-derived per the type), then the
+    work card and the chapters — from the sibling's structure map (observed live and JOURNALED
+    so replay renders the same page with no sibling open), the born chapter notes and their
+    synopsis points on THIS graph (read live, on replay too — they land earlier in the journal),
+    and the work's Reference links resolved like a chapter's. The substance digest covers the
+    units, the born slugs + synopses and the resolved hrefs, so a re-render after a chapter is
+    born lands a new op instead of dedup-ing away. Idempotent: the same state renders the same
+    bytes."""
+    from .authoring import _note_section_wires
+    from .structure import _apply_note_text
+    note_id = note_node_id(slug)
+    note = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=note_id)
+    if note is None:
+        return {"error": f"no note `{slug}`", "slug": slug, "written": False}
+    ref = await work_reference_of_note(gx, note_id)
+    if ref is None:
+        return {"error": f"work page `{slug}` is not bound to a work — link it to the work's Collection on the "
+                         "sibling first: `link <note> DERIVED_FROM <key>:<collection-id>`", "slug": slug, "written": False}
+    if observed is None:
+        sibs = dict(siblings or {})
+        key = ref["graph"] if ref["graph"] in sibs else (next(iter(sibs)) if len(sibs) == 1 else None)
+        if not key:
+            return {"error": f"no sibling graph `{ref['graph']}` configured to read the work's structure map "
+                             f"(config `sibling_graphs` keys: {sorted(sibs) or 'none'})", "slug": slug, "written": False}
+        try:
+            async with open_graph(sibs[key], manifests_dir or DEFAULT_MANIFESTS, readonly=True) as sg:
+                observed = await read_work_structure(sg, ref["title"], ref["foreign_id"])
+        except RuntimeError as e:
+            return {"error": f"sibling graph `{key}` unavailable: {e}", "slug": slug, "written": False}
+        if observed.get("error"):
+            return {"error": observed["error"], "slug": slug, "written": False}
+    work = dict(observed.get("work") or {})
+    units = list(observed.get("units") or [])
+    collections = list(observed.get("collections") or [])
+    references = list(observed.get("references") or [])
+    by_unit = await born_notes_by_unit(gx)
+    born: Dict[str, Dict[str, Any]] = {}
+    for u in units:
+        rows = [r for r in by_unit.get(str(u.get("source_id") or ""), []) if r.get("born") and r.get("slug")]
+        if rows:
+            born[str(u["source_id"])] = {"slug": rows[0]["slug"], "synopsis": rows[0].get("synopsis") or "",
+                                         "states": rows[0]["states"]}
+    resolved = await resolve_references(gx, references)
+    tkey = await note_deliverable_type(gx, note_id) or WORK_PAGE_KEY
+    tprops = await load_deliverable_type(gx, tkey) or {}
+    ppol = dict(tprops.get("presentation_policy") or {})
+    fm = derive_work_frontmatter(str(F.prop(note, "frontmatter_raw") or ""), work, dict(ppol.get("frontmatter") or {}))
+    pre = ""
+    for w in await _note_section_wires(gx, note_id):
+        if str(F.props(w).get("anchor")) == "_preamble":
+            pre = str(F.props(w).get("raw") or "")
+    pre = pre.split(BODY_MARKER, 1)[0]
+    if pre and not pre.endswith("\n\n"):
+        pre = pre.rstrip("\n") + "\n\n"
+    card = render_work_card(work, units, collections, resolved) if ppol.get("source_card", True) else ""
+    body = render_work_chapters(units, born)
+    new_text = fm + pre + BODY_MARKER + "\n\n" + (card + "\n" if card else "") + body
+    path = str(F.prop(note, "path") or "")
+    res = await _apply_note_text(gx, note, slug, new_text, path, write=True, write_md=write_md)
+    removed = list(res.get("removed") or [])
+    if removed:
+        from cjm_dev_graph_schema.identity import section_node_id
+        await graph_task(gx.queue, gx.graph_id, "delete_nodes",
+                         node_ids=[section_node_id(note_id, a) for a in removed], cascade=True)
+        res["removed_applied"] = removed
+    digest = hashlib.sha256(json.dumps(
+        [work, units, collections, [[k, v.get("slug"), v.get("synopsis")] for k, v in sorted(born.items())],
+         [[r.get("label"), r.get("href")] for r in resolved]],
+        sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")).hexdigest()
+    chapters = [u for u in units if u.get("kind") == "chapter"]
+    res.update(work=work.get("title"), units=len(units), chapters=len(chapters),
+               chapters_born=sum(1 for u in chapters if str(u["source_id"]) in born),
+               born=born, references=resolved, text=new_text,
+               args={"slug": slug, "actor": actor, "substance": f"sha256:{digest}",
+                     "observed": {"work": work, "units": units, "collections": collections, "references": references}})
+    return res
+
+
+WORK_PAGE_KEY = "work-page"   # the second deliverable type: one page per Source work (ruling a7ca900d (2); item ebb77107)

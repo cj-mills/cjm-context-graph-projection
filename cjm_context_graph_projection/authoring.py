@@ -1457,7 +1457,7 @@ async def emit_post(
     # deliverable at draft or better — the whole book replaces the pre-graph notes at once.
     # Evaluated as a graph query over the sibling's structure map; a typed page whose work
     # cannot be evaluated (no sibling configured) is held, never waved through.
-    from .purenotes import work_of_note, work_promotion_status
+    from .purenotes import WORK_PAGE_KEY, note_deliverable_type, work_of_note, work_promotion_status
     work = await work_of_note(gx, nid)
     if work:
         if not siblings:
@@ -1481,6 +1481,22 @@ async def emit_post(
                              f"pre-graph notes at once)" + (f"; missing: {missing}" if missing else ""),
                     "node_id": nid, "slug": slug, "publish_state": "published", "path": target,
                     "work": work, "promotion": w, "written": False}
+        # The WORK PAGE itself (ebb77107) links every chapter page: it emits only when each
+        # chapter unit carries a PUBLISHED page — a public work page never links a page the
+        # site does not have (the stricter form of the same condition).
+        if await note_deliverable_type(gx, nid) == WORK_PAGE_KEY:
+            w = rows[0]
+            published = {n.get("chapter") for n in (w.get("notes") or [])
+                         if "published" in (n.get("states") or [])}
+            held = [u for u in (w.get("units") or []) if u.get("chapter") not in published]
+            if held:
+                total = len(w.get("units") or [])
+                names = ", ".join(str(u.get("title") or f"ch. {u.get('chapter')}") for u in held)
+                return {"error": f"work page `{slug}` is held: {total - len(held)} of {total} chapter page(s) "
+                                 "published — a public work page links every chapter, so each chapter page "
+                                 f"publishes first; unpublished: {names}",
+                        "node_id": nid, "slug": slug, "publish_state": "published", "path": target,
+                        "work": work, "promotion": w, "written": False}
     secs = await _note_section_wires(gx, nid)
     text = note_text_from_graph_nodes(_as_wire(node, DevNodeKinds.NOTE), secs)
     # APPROVAL BINDS TO CONTENT (design 40622922): the published assertion carries the

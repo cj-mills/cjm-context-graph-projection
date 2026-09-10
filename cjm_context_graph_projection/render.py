@@ -1505,6 +1505,9 @@ def _render_notes_lane(kind: str, obj: Dict[str, Any]) -> str:
             for n in w.get("notes") or []:
                 lines.append(f"    · ch. {n.get('chapter')} `{n.get('slug')}` publish_state="
                              f"{'/'.join(n.get('states') or []) or 'ABSENT'}")
+            for pg in w.get("work_page") or []:
+                lines.append(f"    · work page `{pg.get('slug')}` publish_state="
+                             f"{'/'.join(pg.get('states') or []) or 'ABSENT'}")
         if not obj.get("works"):
             lines.append("_no works with chapter units in the sibling's structure map_")
         return "\n".join(lines)
@@ -1524,6 +1527,11 @@ def _render_notes_lane(kind: str, obj: Dict[str, Any]) -> str:
         return "\n".join(lines)
     if kind == "notes-render":
         status = "written" if obj.get("written") else "graph-only"
+        if obj.get("work") is not None:   # a WORK PAGE (ebb77107): derived from the work, not from Points
+            return (f"**rendered** work page `{obj.get('slug')}` for **{obj.get('work')}** — "
+                    f"{obj.get('chapters_born')} of {obj.get('chapters')} chapter(s) born ({obj.get('units')} unit(s)) · "
+                    f"+{len(obj.get('added') or [])} ~{len(obj.get('updated') or [])} −{len(obj.get('removed_applied') or [])} section(s) · "
+                    f"{status} → `{obj.get('path')}`")
         return (f"**rendered** `{obj.get('slug')}` ({obj.get('rendering')}) from {obj.get('points')} point(s) — "
                 f"+{len(obj.get('added') or [])} ~{len(obj.get('updated') or [])} −{len(obj.get('removed_applied') or [])} section(s) · "
                 f"{status} → `{obj.get('path')}`")

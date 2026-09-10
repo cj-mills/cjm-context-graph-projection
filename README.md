@@ -245,11 +245,13 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 ### `cjm_context_graph_projection.purenotes`
 
 - `accept_point` _function_ — Land ONE accepted point: the Point node, its segment References (from observations —
+- `born_notes_by_unit` _function_ — Which source UNITS carry a born deliverable on this graph, with its state and synopsis:
 - `build_notes_pack` _function_ — Apply the type's INFORMATION POLICY (a stratum query) to the unit and number what a
 - `build_point_tree` _function_ — Nest by `parent_key` (second-read ruling (4): depth TWO in practice, the tree is generic).
 - `choose_spine` _function_ — Pick the SKELETON spine to read (the correction core's `spine_where_for` rule, pure):
 - `coverage_gaps` _function_ — Pure: the unreferenced-lines query — every content line the type includes that no
 - `derive_frontmatter` _function_ — The type may OWN the title and the description — the rest of the authored frontmatter
+- `derive_work_frontmatter` _function_ — The work-page type OWNS the title and description: `notes-on-work` = "Notes on *<work>*"
 - `derived_description` _function_ — What the unit CONTAINS, from data the rendering already uses: the work (when the
 - `edit_point` _function_ — Edit an accepted point IN PLACE — the per-point repair the ch. 2 staging read demanded
 - `load_deliverable_type` _function_ — Read a DeliverableType profile off the graph (None = `notes-type <key>` first).
@@ -270,11 +272,15 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `pure_notes_type` _function_ — The pure-notes profile as data: information policy = a stratum query, presentation
 - `read_source_references` _function_ — The Source's human-added resource links (`Reference` nodes minted by the transcription
 - `read_source_unit` _function_ — Read one source unit: the EFFECTIVE spine (layer-0 + applied corrections, via the
+- `read_work_structure` _function_ — The WORK as the sibling holds it: every Source whose structure map names the work, in
 - `rehead_points` _function_ — Re-derive every Point's captured heading / heading_index from its segment run against a
 - `render_notes` _function_ — Derive the Note's body from its Points and APPLY it: the authored preamble stays, the
 - `render_notes_pack` _function_ — Render a pack as the brief a proposer reads: the unit, the kind slate, the headers
 - `render_points` _function_ — Render the body from the Points — deterministic, so a replayed `render-notes` derives
 - `render_source_card` _function_ — The reader-facing provenance (second-read ruling (1)): a derived one-line callout under
+- `render_work_card` _function_ — The work page's reader-facing card (check 2d01fe1e): the work-level content — never
+- `render_work_chapters` _function_ — The TOC that is also the executive summary (checks 2d01fe1e + 34f73e46): the units in
+- `render_work_page` _function_ — Derive the WORK PAGE's body and APPLY it (item ebb77107; ruling a7ca900d (2)): the
 - `render_works_table` _function_ — Pure: the per-work promotion condition as the staging site's works table (item
 - `resolve_references` _function_ — Resolve human-added links for rendering (ae103970): a cross-work link naming a
 - `resolve_sibling_source` _function_ — Resolve a Source in the sibling graph: id prefix first (the shared seam), then a
@@ -286,7 +292,10 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `unit_title_header` _function_ — Ruling e1fd4d64 (C): the first read-aloud header of a chapter file is the chapter's own
 - `validate_point_rows` _function_ — Validate + normalize proposer rows against their pack — loud on the first bad row.
 - `work_of_note` _function_ — Which WORK a typed deliverable belongs to — read from its Points' unit (the structure
+- `work_page_notes` _function_ — The WORK PAGES on this graph: every Note bound to the work-page type, keyed by the work
+- `work_page_type` _function_ — The WORK PAGE profile as data: one page per Source work, the directory index above its
 - `work_promotion_status` _function_ — The WORK-PAGE promotion condition (ruling a7ca900d (1)/(4); item 140981e9 (c)) as a
+- `work_reference_of_note` _function_ — The work a WORK PAGE stands for, read off its edges: the page is linked DERIVED_FROM a
 - `write_notes_propset` _function_ — Write one notes proposal set: `<out_root>/<set_id>/manifest.json` + `proposals.jsonl`
 
 ### `cjm_context_graph_projection.readiness`

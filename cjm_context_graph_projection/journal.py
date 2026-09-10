@@ -74,7 +74,8 @@ JOURNAL_VERBS = ("decide", "alias", "assert", "link", "unlink", "section", "new-
                  "add-section", "display-rule", "set-lens", "check", "session",
                  "retract-session", "pull-transcript", "mint-messages", "edit-message",
                  "derive-message", "procedure", "propose",
-                 "deliverable-type", "accept-point", "retract-point", "edit-point", "render-notes")
+                 "deliverable-type", "accept-point", "retract-point", "edit-point", "render-notes",
+                 "render-work-page")
 
 
 def m3_baseline_import(
@@ -313,6 +314,13 @@ async def _apply_op(gx: GraphHandle, op: Dict[str, Any]) -> str:
                            timestamps=a.get("timestamps", "always"),   # pre-e1fd4d64 ops rendered every span
                            write_md=False, actor=a.get("actor", "agent:session"),
                            references=list(a.get("references") or []))
+    elif verb == "render-work-page":
+        # The work page (ebb77107): the body is a function of the sibling's structure map (the
+        # journaled OBSERVATION — replay never opens the sibling) and of the born chapter notes
+        # on this graph, which landed earlier in the journal; graph-only, the .md is emit's job.
+        from .purenotes import render_work_page
+        await render_work_page(gx, a["slug"], write_md=False, actor=a.get("actor", "agent:session"),
+                               observed=dict(a.get("observed") or {}))
     else:
         return ""
     return verb
@@ -456,7 +464,7 @@ def touched_node_ids(
     elif verb in ("retract-point", "edit-point"):
         if a.get("point_id"):
             out.append(a["point_id"])
-    elif verb == "render-notes":
+    elif verb in ("render-notes", "render-work-page"):
         if a.get("slug"):
             out.append(note_node_id(a["slug"]))
     elif a.get("repo_key") and a.get("module_path"):

@@ -1486,7 +1486,7 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
                             point_check, point_coverage, proposals_from_point_rows, read_source_unit,
                             render_notes, render_notes_pack, resolve_sibling_source, retract_note_points,
                             retract_point, staging_index, validate_point_rows, work_promotion_status,
-                            write_notes_propset)
+                            write_notes_propset, WORK_PAGE_KEY, render_work_page)
     from .write import assert_value
     siblings = sibling_graphs(load_graph_config(args.graph_db_path))
 
@@ -1713,6 +1713,17 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
                     append_write(args.journal_path, "edit-point", r["args"])
         return 1 if res.get("error") else 0
     if cmd == "notes-render":
+        if await note_deliverable_type(gx, note_node_id(args.slug)) == WORK_PAGE_KEY:
+            # A WORK PAGE (ebb77107) derives from the work — the sibling's structure map (journaled
+            # as the op's observation) + the born chapter notes here — never from Points.
+            res = await render_work_page(gx, args.slug, write_md=not args.no_write, actor=args.actor,
+                                         siblings=siblings, manifests_dir=args.manifests_dir)
+            print(render("notes-render", res, args.format))
+            if res.get("error"):
+                return 1
+            if args.journal_path and not args.no_write:
+                append_write(args.journal_path, "render-work-page", res["args"])
+            return 0
         res = await render_notes(gx, args.slug, rendering=args.rendering, timestamps=args.timestamps,
                                  write_md=not args.no_write, actor=args.actor,
                                  siblings=siblings, manifests_dir=args.manifests_dir)
@@ -1843,7 +1854,9 @@ def _add_notes_lane_parsers(sub) -> None:
 
     p = sub.add_parser("notes-render", help="Derive the Note's body from its Points (EXPANDED = the public post; "
                                             "OUTLINE = the review view): title/description re-derived per the type, "
-                                            "Sections re-derived, staging .md rewritten, journaled `render-notes`")
+                                            "Sections re-derived, staging .md rewritten, journaled `render-notes`; "
+                                            "a WORK PAGE (type work-page) derives from the work's structure map + "
+                                            "born chapter notes instead, journaled `render-work-page`")
     p.add_argument("--slug", required=True)
     p.add_argument("--rendering", choices=("outline", "expanded", "both"), default="expanded")
     p.add_argument("--timestamps", choices=("always", "addressable", "never"), default="addressable",
