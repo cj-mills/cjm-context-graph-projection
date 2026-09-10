@@ -18,11 +18,12 @@ dependencies = [
     'cjm-substrate>=0.0.52',
     'cjm-context-graph-layer>=0.0.12',
     'cjm-context-graph-primitives>=0.0.13',
-    'cjm-dev-graph-schema>=0.0.21',
+    'cjm-dev-graph-schema>=0.0.22',
     'cjm-markdown-decompose-core>=0.0.12',
     'cjm-python-decompose-core>=0.0.6',
     'cjm-notebook-decompose-core>=0.0.4',
     'cjm-harness-transcripts>=0.0.2',
+    'pyyaml>=6.0',
 ]
 
 [project.scripts]

@@ -1407,6 +1407,8 @@ async def emit_post(
     website_root: str,     # The website clone root; the post lands at <root>/posts/<slug>/index.md
     *,
     write: bool = True,    # Write the file (else report the gate verdict + target only)
+    siblings: Optional[Dict[str, str]] = None,  # {graph key: db path} — the transcription sibling the work's structure map lives in (the promotion condition needs it)
+    manifests_dir: Optional[str] = None,        # Capability manifests dir for opening the sibling
 ) -> Dict[str, Any]:  # {node_id, slug, publish_state, path, written} or {error}
     """Emit a born post to the PUBLIC website clone — GATED on publish_state=published.
 
@@ -1431,6 +1433,18 @@ async def emit_post(
     active = F.active_assertions(slot, await F.load_supersedes(gx))
     states = sorted({str(F.prop(a, "value") or "") for a in active})
     target = str(Path(website_root) / "posts" / slug / "index.md")
+    # The draft lifecycle (item 140981e9): a FIXTURE never publishes (a page kept for the graph
+    # mechanics it exercises — no promotion recipe is offered) and a RETIRED page never
+    # publishes again (reopening is an explicit human --supersede, not an emit).
+    if "fixture" in states:
+        return {"error": f"post `{slug}` is a FIXTURE (publish_state=fixture) — fixtures stay in "
+                         "staging and are never emitted to the public site (ruling a7ca900d (4))",
+                "node_id": nid, "slug": slug, "publish_state": states, "path": target, "written": False}
+    if "retired" in states:
+        return {"error": f"post `{slug}` is RETIRED (publish_state=retired) — a retired page is never "
+                         "emitted; reopen with an explicit `assert <note> publish_state draft "
+                         "--supersede retired` if it should live again",
+                "node_id": nid, "slug": slug, "publish_state": states, "path": target, "written": False}
     if states != ["published"]:
         shown = "/".join(states) if states else "ABSENT"
         return {"error": f"post `{slug}` is not published (publish_state={shown}) — the website "
@@ -1438,6 +1452,35 @@ async def emit_post(
                          "793f025e); promote with `assert <note> publish_state published`",
                 "node_id": nid, "slug": slug, "publish_state": states, "path": target,
                 "written": False}
+    # The WORK's promotion condition (ruling a7ca900d (1)/(4); item 140981e9 (c)): a chapter
+    # page of a work is emitted only when EVERY chapter unit of that work has a born
+    # deliverable at draft or better — the whole book replaces the pre-graph notes at once.
+    # Evaluated as a graph query over the sibling's structure map; a typed page whose work
+    # cannot be evaluated (no sibling configured) is held, never waved through.
+    from .purenotes import work_of_note, work_promotion_status
+    work = await work_of_note(gx, nid)
+    if work:
+        if not siblings:
+            return {"error": f"post `{slug}` belongs to the work **{work}** but no sibling graph is "
+                             "configured to evaluate its promotion condition (config "
+                             "`sibling_graphs`) — held (ruling a7ca900d (1))",
+                    "node_id": nid, "slug": slug, "publish_state": "published", "path": target,
+                    "work": work, "written": False}
+        status = await work_promotion_status(gx, siblings=siblings, manifests_dir=manifests_dir,
+                                             work_title=work)
+        if status.get("error"):
+            return {"error": status["error"], "node_id": nid, "slug": slug, "path": target,
+                    "work": work, "written": False}
+        rows = [w for w in status.get("works") or [] if w.get("work") == work]
+        if not rows or not rows[0].get("condition_met"):
+            w = rows[0] if rows else {}
+            missing = ", ".join(str(m.get("title") or f"ch. {m.get('chapter')}") for m in (w.get("missing") or []))
+            return {"error": f"post `{slug}` is held by the work's promotion condition: **{work}** has "
+                             f"{w.get('chapters_born', 0)} of {w.get('chapters_total', '?')} chapter unit(s) "
+                             f"born at draft or better (ruling a7ca900d (1) — the whole work replaces the "
+                             f"pre-graph notes at once)" + (f"; missing: {missing}" if missing else ""),
+                    "node_id": nid, "slug": slug, "publish_state": "published", "path": target,
+                    "work": work, "promotion": w, "written": False}
     secs = await _note_section_wires(gx, nid)
     text = note_text_from_graph_nodes(_as_wire(node, DevNodeKinds.NOTE), secs)
     # APPROVAL BINDS TO CONTENT (design 40622922): the published assertion carries the

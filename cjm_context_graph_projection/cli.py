@@ -1204,7 +1204,9 @@ async def _dispatch(args) -> int:
                 print("error: emit-post needs --website-root (or `website_root` in the "
                       "graph-sibling graph.config.json)", file=sys.stderr)
                 return 1
-            res = await emit_post(gx, args.note_id, args.website_root, write=not args.no_write)
+            res = await emit_post(gx, args.note_id, args.website_root, write=not args.no_write,
+                                  siblings=sibling_graphs(load_graph_config(args.graph_db_path)),
+                                  manifests_dir=args.manifests_dir)
             print(render("structure", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "move":
@@ -1483,7 +1485,8 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
                             note_deliverable_type, observe_segments, overlapping_points, pick_propset,
                             point_check, point_coverage, proposals_from_point_rows, read_source_unit,
                             render_notes, render_notes_pack, resolve_sibling_source, retract_note_points,
-                            retract_point, validate_point_rows, write_notes_propset)
+                            retract_point, staging_index, validate_point_rows, work_promotion_status,
+                            write_notes_propset)
     from .write import assert_value
     siblings = sibling_graphs(load_graph_config(args.graph_db_path))
 
@@ -1718,6 +1721,26 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
         if args.journal_path and not args.no_write:
             append_write(args.journal_path, "render-notes", res["args"])
         return 0
+    if cmd == "notes-promotion":
+        res = await work_promotion_status(gx, siblings=siblings, graph_key=args.sibling,
+                                          manifests_dir=args.manifests_dir, work_title=args.work)
+        print(render("notes-promotion", res, args.format))
+        return 1 if res.get("error") else 0
+    if cmd == "notes-staging-index":
+        root = args.project_root
+        if not root:
+            # The staging project root is the PARENT of the config's emit_root (posts land under
+            # <root>/posts); read the config directly — this parser carries no --emit-root flag.
+            emit_root = (load_graph_config(args.graph_db_path) or {}).get("emit_root")
+            if not emit_root:
+                print("error: notes-staging-index needs --project-root (or `emit_root` in the graph-sibling "
+                      "graph.config.json, whose parent is the staging project root)", file=sys.stderr)
+                return 1
+            root = str(Path(emit_root).expanduser().resolve().parent)
+        res = await staging_index(gx, project_root=root, siblings=(siblings or None), graph_key=args.sibling,
+                                  manifests_dir=args.manifests_dir, write=bool(args.write))
+        print(render("notes-staging-index", res, args.format))
+        return 1 if res.get("error") else 0
     print(f"error: unknown notes verb {cmd}", file=sys.stderr)
     return 2
 
@@ -1801,6 +1824,21 @@ def _add_notes_lane_parsers(sub) -> None:
 
     p = sub.add_parser("notes-check", help="Review: one point beside its segments' LIVE text in the sibling (fidelity spot-check)")
     p.add_argument("point", help="The Point id (or unique prefix)")
+
+    p = sub.add_parser("notes-promotion", help="Derived: the WORK-PAGE promotion condition (ruling a7ca900d; item 140981e9) — "
+                                               "per work in the sibling's structure map, which chapter units carry a born "
+                                               "deliverable at draft or better; a work is promotable only when every chapter is")
+    p.add_argument("--work", default=None, help="Restrict to one work title (default: every work)")
+    p.add_argument("--sibling", default=None, help="Sibling graph key (default: the sole `sibling_graphs` key)")
+
+    p = sub.add_parser("notes-staging-index", help="Project the staging site's LISTINGS from the publish_state facts (item 140981e9): "
+                                                  "<project-root>/_lists/<state>.yml per state (fixture / draft / reviewed / "
+                                                  "published / retired) + _lists/works.md (the promotion-condition table); "
+                                                  "never journaled — a rendering of the facts")
+    p.add_argument("--project-root", default=None,
+                   help="The staging Quarto project root (default: the parent of the config's emit_root)")
+    p.add_argument("--sibling", default=None, help="Sibling graph key for the works table (default: the sole key)")
+    p.add_argument("--write", action="store_true", help="Write the listing files (default: report only)")
 
     p = sub.add_parser("notes-render", help="Derive the Note's body from its Points (EXPANDED = the public post; "
                                             "OUTLINE = the review view): title/description re-derived per the type, "

@@ -306,7 +306,8 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             lines.append("_(nothing to propose — the review frontier is empty)_")
         return "\n".join(lines)
     if kind in ("notes-type", "notes-pack", "notes-ingest", "notes-accept", "notes-retract", "notes-retract-all",
-                "notes-coverage", "notes-overlap", "notes-check", "notes-edit", "notes-rehead", "notes-render"):
+                "notes-coverage", "notes-overlap", "notes-check", "notes-edit", "notes-rehead", "notes-render",
+                "notes-promotion", "notes-staging-index"):
         return _render_notes_lane(kind, obj)
     if kind == "confirm-proposal":
         if obj.get("error"):
@@ -1491,6 +1492,35 @@ def _render_notes_lane(kind: str, obj: Dict[str, Any]) -> str:
                 continue
             mark = " ⚠ moved since observation" if s.get("moved") else ""
             lines.append(f"- `{s['id'][:8]}` {_fmt_span(s.get('start'), s.get('end'))} — {s.get('text')}{mark}")
+        return "\n".join(lines)
+    if kind == "notes-promotion":
+        # The work-page promotion condition (ruling a7ca900d (1)/(4); item 140981e9 (c)) — derived.
+        lines = [f"## Work promotion condition — sibling `{obj.get('sibling')}` (derived, never stored)"]
+        for w in obj.get("works") or []:
+            flag = "🏁 READY" if w.get("condition_met") else "⛔ HELD"
+            lines.append(f"- {flag} **{w.get('work')}** — {w.get('chapters_born')} of {w.get('chapters_total')} "
+                         "chapter unit(s) born at draft or better")
+            for m in w.get("missing") or []:
+                lines.append(f"    ↳ missing ch. {m.get('chapter')} — {m.get('title') or m.get('source_id')}")
+            for n in w.get("notes") or []:
+                lines.append(f"    · ch. {n.get('chapter')} `{n.get('slug')}` publish_state="
+                             f"{'/'.join(n.get('states') or []) or 'ABSENT'}")
+        if not obj.get("works"):
+            lines.append("_no works with chapter units in the sibling's structure map_")
+        return "\n".join(lines)
+    if kind == "notes-staging-index":
+        c = obj.get("counts") or {}
+        lines = [f"## Staging index — `{obj.get('project_root')}`",
+                 "_" + (" · ".join(f"{k} {v}" for k, v in c.items()) or "no deliverables carry a publish_state") + "_"]
+        for w in obj.get("works") or []:
+            flag = "🏁 READY" if w.get("condition_met") else "⛔ HELD"
+            lines.append(f"- {flag} **{w.get('work')}** — {w.get('chapters_born')} of {w.get('chapters_total')} chapter unit(s) born")
+        if obj.get("works_error"):
+            lines.append(f"⚠ works table skipped: {obj['works_error']}")
+        if obj.get("written"):
+            lines.append(f"written {len(obj['written'])} file(s) under `{obj.get('project_root')}/lists/`")
+        else:
+            lines.append("_report only — pass --write to project the listing files_")
         return "\n".join(lines)
     if kind == "notes-render":
         status = "written" if obj.get("written") else "graph-only"

@@ -138,3 +138,49 @@ def test_task_state_in_progress_supersedes_forward(tmp_path):
             assert not done.get("multi_active")
 
     asyncio.run(go())
+
+
+def test_explicit_supersede_honors_a_demotion_and_retired_is_terminal(tmp_path):
+    # Item 140981e9 (ruling a7ca900d (4)): on the ordered publish_state enum a DEMOTION
+    # (draft -> fixture) is born superseded when blind, but HONORED when the human names the
+    # value being replaced with --supersede; `retired` is terminal — it supersedes any stage
+    # outright, and a stage asserted over it is born superseded unless named explicitly.
+    db = str(tmp_path / "g.db")
+
+    async def go():
+        async with open_graph(db) as gx:
+            a = await _mint(gx, "WORK ITEM: lifecycle fixture A (blind demotion)")
+            draft_a = await assert_value(gx, a, "publish_state", "draft")
+            blind = await assert_value(gx, a, "publish_state", "fixture")
+            assert blind["born_superseded"] is True and blind["superseded"] == []
+            b = await _mint(gx, "WORK ITEM: lifecycle fixture B (named demotion)")
+            draft_b = await assert_value(gx, b, "publish_state", "draft")
+            named = await assert_value(gx, b, "publish_state", "fixture", supersede=["draft"])
+            assert named["born_superseded"] is False
+            assert named["superseded"] == [draft_b["assertion_id"]] and not named.get("multi_active")
+            c = await _mint(gx, "WORK ITEM: lifecycle fixture C (retire, blind reopen)")
+            pub_c = await assert_value(gx, c, "publish_state", "published")
+            ret_c = await assert_value(gx, c, "publish_state", "retired")
+            assert ret_c["superseded"] == [pub_c["assertion_id"]] and ret_c["born_superseded"] is False
+            reopen_blind = await assert_value(gx, c, "publish_state", "draft")
+            assert reopen_blind["born_superseded"] is True and reopen_blind["superseded"] == []
+            d = await _mint(gx, "WORK ITEM: lifecycle fixture D (retire, named reopen)")
+            await assert_value(gx, d, "publish_state", "draft")
+            ret_d = await assert_value(gx, d, "publish_state", "retired")
+            reopened = await assert_value(gx, d, "publish_state", "reviewed", supersede=["retired"])
+            assert reopened["born_superseded"] is False
+            assert reopened["superseded"] == [ret_d["assertion_id"]] and not reopened.get("multi_active")
+            # Blind demotion left the draft ACTIVE on A; the named one left only the fixture on B.
+            from cjm_context_graph_projection import factlayer as F
+            supers = await F.load_supersedes(gx)
+            allv = await F.load_assertions(gx)
+
+            def active_values(item):
+                slot = [x for x in allv if F.prop(x, "subject_id") == item and F.prop(x, "predicate") == "publish_state"]
+                return sorted(F.prop(x, "value") for x in F.active_assertions(slot, supers))
+            assert active_values(a) == ["draft"] and draft_a["assertion_id"]
+            assert active_values(b) == ["fixture"]
+            assert active_values(c) == ["retired"]
+            assert active_values(d) == ["reviewed"]
+
+    asyncio.run(go())

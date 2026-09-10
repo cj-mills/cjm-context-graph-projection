@@ -30,14 +30,17 @@ op, `edit-point` re-applies a field set (text / lead / parent_key) to the standi
 
 import hashlib
 import json
+import os
 import re
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+import yaml
 from cjm_context_graph_layer.ops import extend_graph, graph_task
 from cjm_context_graph_primitives.query import EdgeQuery, NodeQuery, OrderBy, PropertyPredicate
+from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.identity import note_node_id, point_node_id
 from cjm_dev_graph_schema.nodes import (DeliverableTypeNode, POINT_KIND_GLOSSES, PointNode,
                                         ReferenceNode)
@@ -1741,3 +1744,225 @@ async def render_notes(
                args={"slug": slug, "rendering": rendering, "timestamps": timestamps, "actor": actor,
                      "substance": f"sha256:{digest}"})
     return res
+
+
+def _frontmatter_fields(
+    fm_raw: str,  # The Note's authored frontmatter block ("---\n…\n---\n")
+) -> Dict[str, Any]:  # {title, date, description, categories} as plain strings / string lists; {} when absent or unparsable
+    """Pure: the listing fields a staging index needs, parsed from a note's frontmatter with
+    yaml (a date value becomes its ISO string so the projection stays plain data)."""
+    if not fm_raw.startswith("---"):
+        return {}
+    lines = fm_raw.split("\n")
+    end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
+    if end is None:
+        return {}
+    try:
+        data = yaml.safe_load("\n".join(lines[1:end])) or {}
+    except yaml.YAMLError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: Dict[str, Any] = {}
+    for k in ("title", "date", "description", "categories"):
+        v = data.get(k)
+        if v is None:
+            continue
+        if hasattr(v, "isoformat"):
+            v = v.isoformat()
+        out[k] = [str(x) for x in v] if isinstance(v, list) else str(v)
+    return out
+
+
+async def note_publish_states(
+    gx: GraphHandle,
+) -> Dict[str, List[str]]:  # {Note id: sorted ACTIVE publish_state values} — deliverables only (the Notes carrying the fact)
+    """The publish_state facts as a map: every deliverable's active values. One value is the
+    healthy case; several is a supersession gap the staging index SHOWS (a `multi-active`
+    list), never hides. The fixture / draft / reviewed / published / retired vocabulary is
+    schema data (`predicates.PUBLISH_*`, item 140981e9)."""
+    slot = [a for a in await F.load_assertions(gx) if F.prop(a, "predicate") == P.PUBLISH_STATE]
+    active = F.active_assertions(slot, await F.load_supersedes(gx))
+    out: Dict[str, List[str]] = {}
+    for a in active:
+        sid = str(F.prop(a, "subject_id") or "")
+        if sid:
+            out.setdefault(sid, []).append(str(F.prop(a, "value") or ""))
+    return {k: sorted(set(v)) for k, v in out.items()}
+
+
+async def work_of_note(
+    gx: GraphHandle,
+    note_id: str,  # The deliverable Note id
+) -> str:  # The work title the note's Points derive from ("" for a page with no typed points)
+    """Which WORK a typed deliverable belongs to — read from its Points' unit (the structure
+    map rides every accepted point), so an essay or fixture page with no Points has no work
+    and the work-page promotion condition never applies to it."""
+    for p in await load_points(gx, note_id):
+        ws = dict((p.get("unit") or {}).get("work_structure") or {})
+        work = ws.get("work")
+        if isinstance(work, dict) and str(work.get("title") or "").strip():
+            return str(work["title"]).strip()
+    return ""
+
+
+async def work_promotion_status(
+    gx: GraphHandle,
+    *,
+    siblings: Dict[str, str],               # {graph key: db path} — the transcription sibling holding the structure map
+    graph_key: Optional[str] = None,        # Sibling key (default: the sole key)
+    manifests_dir: Optional[str] = None,    # Capability manifests dir for opening the sibling
+    work_title: Optional[str] = None,       # Restrict to one work (default: every work in the sibling's structure map)
+) -> Dict[str, Any]:  # {sibling, works: [{work, chapters_total, chapters_born, condition_met, missing: [{source_id, chapter, title, file}], notes: [{note_id, slug, states, born, chapter, unit_title}]}]} | {error}
+    """The WORK-PAGE promotion condition (ruling a7ca900d (1)/(4); item 140981e9 (c)) as a
+    graph query: for each work in the sibling's structure map, its chapter units (Sources
+    whose work_structure.kind is "chapter") and which of them carry a born deliverable at
+    draft or better on THIS graph — a fixture, a retired page, or a Note with no
+    publish_state does not count. A work is promotable only when EVERY chapter is born: the
+    whole work replaces the pre-graph notes at once. Derived on read, never stored."""
+    key = graph_key
+    if key is None:
+        if len(siblings) != 1:
+            return {"error": f"pass a sibling key (config `sibling_graphs` keys: {sorted(siblings) or 'none'})"}
+        key = next(iter(siblings))
+    if key not in siblings:
+        return {"error": f"no sibling graph `{key}` (keys: {sorted(siblings) or 'none'})"}
+    # The works and their chapter units, from the sibling's structure map.
+    try:
+        async with open_graph(siblings[key], manifests_dir or DEFAULT_MANIFESTS, readonly=True) as sg:
+            # Full nodes, not a projected row set: the structure map is a NESTED property and
+            # only the node form carries it whole (the `read_source_unit` corrections pattern).
+            q = NodeQuery(label="Source", limit=200000)
+            res = await graph_task(sg.queue, sg.graph_id, "query_nodes", query=q.to_dict())
+            rows = []
+            for n in (getattr(res, "nodes", None) or []):
+                d = n.to_dict() if hasattr(n, "to_dict") else dict(n)
+                rows.append({"id": d.get("id"), **dict(d.get("properties") or {})})
+    except RuntimeError as e:
+        return {"error": f"sibling graph `{key}` unavailable: {e}"}
+    chapters: Dict[str, List[Dict[str, Any]]] = {}
+    for r in rows:
+        ws = r.get("work_structure") or {}
+        if not isinstance(ws, dict) or ws.get("kind") != "chapter":
+            continue
+        work = ws.get("work") if isinstance(ws.get("work"), dict) else {}
+        title = str((work or {}).get("title") or "").strip()
+        if not title or (work_title and title != work_title):
+            continue
+        chapters.setdefault(title, []).append({"source_id": str(r.get("id") or ""), "chapter": ws.get("chapter"),
+                                               "title": str(ws.get("title") or "").strip(), "file": ws.get("file")})
+    # Which chapter units carry a born deliverable at draft or better on THIS graph: a Note's
+    # unit rides its Points (the first point's unit names the Source), its state is the fact.
+    live = {P.PUBLISH_DRAFT, P.PUBLISH_REVIEWED, P.PUBLISH_PUBLISHED}
+    states = await note_publish_states(gx)
+    unit_of_note: Dict[str, Dict[str, Any]] = {}
+    for n in await F.load_label(gx, DevNodeKinds.POINT):
+        pr = F.props(n)
+        nid_ = str(pr.get("note_id") or "")
+        unit = dict(pr.get("unit") or {})
+        if nid_ and nid_ not in unit_of_note and unit.get("source_id"):
+            unit_of_note[nid_] = unit
+    notes_by_source: Dict[str, List[Dict[str, Any]]] = {}
+    for nid_, unit in unit_of_note.items():
+        st = states.get(nid_) or []
+        node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=nid_)
+        slug = str(F.prop(node, "slug") or "") if node is not None else ""
+        notes_by_source.setdefault(str(unit["source_id"]), []).append(
+            {"note_id": nid_, "slug": slug, "states": st, "born": any(s in live for s in st)})
+    works: List[Dict[str, Any]] = []
+    for title in sorted(chapters):
+        units = sorted(chapters[title], key=lambda u: (u.get("chapter") is None, u.get("chapter") or 0, u.get("file") or 0))
+        missing: List[Dict[str, Any]] = []
+        notes: List[Dict[str, Any]] = []
+        for u in units:
+            ns = notes_by_source.get(u["source_id"]) or []
+            notes.extend({**n, "chapter": u.get("chapter"), "unit_title": u.get("title")} for n in ns)
+            if not any(n["born"] for n in ns):
+                missing.append(u)
+        works.append({"work": title, "chapters_total": len(units), "chapters_born": len(units) - len(missing),
+                      "condition_met": bool(units) and not missing, "missing": missing, "notes": notes})
+    if work_title and not works:
+        return {"error": f"no chapter units for work {work_title!r} in sibling `{key}`'s structure map",
+                "sibling": key, "works": []}
+    return {"sibling": key, "works": works}
+
+
+def render_works_table(
+    works: List[Dict[str, Any]],  # work_promotion_status output rows
+) -> str:  # A markdown table: work · chapters born · condition · missing
+    """Pure: the per-work promotion condition as the staging site's works table (item
+    140981e9 (c)) — the reader sees why a work's pages are held before any page is."""
+    if not works:
+        return "_No works with chapter units in the sibling's structure map._\n"
+    lines = ["| Work | Chapters born | Condition | Missing |", "|---|---|---|---|"]
+    for w in works:
+        miss = ", ".join((f"ch. {m.get('chapter')}" if m.get("chapter") is not None else str(m.get("title") or "?"))
+                         for m in (w.get("missing") or []))
+        cond = "READY — every chapter born" if w.get("condition_met") else "HELD"
+        lines.append(f"| {w.get('work')} | {w.get('chapters_born')} of {w.get('chapters_total')} | {cond} | {miss or '—'} |")
+    return "\n".join(lines) + "\n"
+
+
+async def staging_index(
+    gx: GraphHandle,
+    *,
+    project_root: str,                          # The staging Quarto project root (index.qmd lives here)
+    siblings: Optional[Dict[str, str]] = None,  # For the works table (skipped when absent)
+    graph_key: Optional[str] = None,            # Sibling key (default: the sole key)
+    manifests_dir: Optional[str] = None,        # Capability manifests dir
+    write: bool = True,                         # Write <project_root>/_lists/<state>.yml + works.md (else report only)
+) -> Dict[str, Any]:  # {project_root, lists: {state: [items]}, counts, works, works_error?, written: [paths]}
+    """Project the staging site's LISTINGS from the publish_state facts (item 140981e9 (b)):
+    one Quarto listing file per state under <project_root>/lists/<state>.yml — fixtures,
+    drafts, reviewed, published and retired pages as SEPARATE lists, so a reader of staging
+    never mistakes a fixture for a candidate — plus lists/_works.md, the per-work promotion
+    condition table (item 140981e9 (c)). Deterministic from graph state and never journaled:
+    the facts are the truth, this is their rendering. A page whose slot holds several active
+    values lands in `multi-active.yml` (a supersession gap, shown). Quarto mechanics fixed
+    by the first live render: the directory carries NO underscore (Quarto skips `_dirs` when
+    resolving listing contents), item paths are RELATIVE TO THE LISTING FILE, and the works
+    table is an underscore file (includable via the include shortcode, never rendered as a
+    page of its own)."""
+    root = Path(project_root)
+    lists_dir = root / "lists"
+    pred = P.get_predicate(P.PUBLISH_STATE)
+    order = list(pred.order_values or ()) + list(pred.terminal_values or ())
+    lists: Dict[str, List[Dict[str, Any]]] = {s: [] for s in order}
+    lists["multi-active"] = []
+    for nid_, vals in (await note_publish_states(gx)).items():
+        node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=nid_)
+        if node is None or F.label(node) != DevNodeKinds.NOTE:
+            continue
+        fm = _frontmatter_fields(str(F.prop(node, "frontmatter_raw") or ""))
+        path = str(F.prop(node, "path") or "")
+        try:
+            rel = os.path.relpath(Path(path).resolve(), lists_dir.resolve()) if path else ""
+        except ValueError:
+            rel = path
+        item: Dict[str, Any] = {"path": rel, "title": fm.get("title") or str(F.prop(node, "title") or "")}
+        for k in ("date", "description", "categories"):
+            if fm.get(k):
+                item[k] = fm[k]
+        item["publish_state"] = "/".join(vals)
+        item["note_id"] = nid_
+        lists.setdefault(vals[0] if len(vals) == 1 else "multi-active", []).append(item)
+    for items in lists.values():
+        items.sort(key=lambda it: (str(it.get("date") or ""), str(it.get("title") or "")), reverse=True)
+    out: Dict[str, Any] = {"project_root": str(root), "lists": lists,
+                           "counts": {s: len(v) for s, v in lists.items()}, "works": [], "written": []}
+    if siblings:
+        st = await work_promotion_status(gx, siblings=siblings, graph_key=graph_key, manifests_dir=manifests_dir)
+        if st.get("error"):
+            out["works_error"] = st["error"]
+        out["works"] = list(st.get("works") or [])
+    if write:
+        lists_dir.mkdir(parents=True, exist_ok=True)
+        for state, items in lists.items():
+            p = lists_dir / f"{state}.yml"
+            p.write_text(yaml.safe_dump(items, allow_unicode=True, sort_keys=False, default_flow_style=False)
+                         if items else "[]\n")
+            out["written"].append(str(p))
+        wp = lists_dir / "_works.md"
+        wp.write_text(render_works_table(out["works"]))
+        out["written"].append(str(wp))
+    return out

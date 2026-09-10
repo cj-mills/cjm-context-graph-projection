@@ -258,6 +258,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `mint_deliverable_type` _function_ — UPSERT a DeliverableType by slug (the display-rule pattern: last journaled op wins).
 - `nest_points` _function_ — The one-level view of `build_point_tree` (kept for callers that only need parent -> children).
 - `note_deliverable_type` _function_ — The Note's bound type slug (the active `deliverable_type` fact).
+- `note_publish_states` _function_ — The publish_state facts as a map: every deliverable's active values. One value is the
 - `observe_segments` _function_ — Observe each segment in the sibling READ-ONLY (label + properties hash + title) — the
 - `overlapping_points` _function_ — Pure: the duplication candidates — two points deriving from a shared segment. A
 - `pack_digest` _function_ — Digest the READ content (source binding + numbered lines + headers) — what a proposal
@@ -273,13 +274,17 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `render_notes_pack` _function_ — Render a pack as the brief a proposer reads: the unit, the kind slate, the headers
 - `render_points` _function_ — Render the body from the Points — deterministic, so a replayed `render-notes` derives
 - `render_source_card` _function_ — The reader-facing provenance (second-read ruling (1)): a derived one-line callout under
+- `render_works_table` _function_ — Pure: the per-work promotion condition as the staging site's works table (item
 - `resolve_sibling_source` _function_ — Resolve a Source in the sibling graph: id prefix first (the shared seam), then a
 - `retract_note_points` _function_ — Retract EVERY point of a Note (the re-drive's clean slate — ruling e1fd4d64 (5)): one
 - `retract_point` _function_ — Retract a point: delete the node (its edges cascade). The compensating op of accept —
+- `staging_index` _function_ — Project the staging site's LISTINGS from the publish_state facts (item 140981e9 (b)):
 - `synopsis_of` _function_
 - `unit_label` _function_ — The short unit handle the title carries (second-read ruling (1): the short shape).
 - `unit_title_header` _function_ — Ruling e1fd4d64 (C): the first read-aloud header of a chapter file is the chapter's own
 - `validate_point_rows` _function_ — Validate + normalize proposer rows against their pack — loud on the first bad row.
+- `work_of_note` _function_ — Which WORK a typed deliverable belongs to — read from its Points' unit (the structure
+- `work_promotion_status` _function_ — The WORK-PAGE promotion condition (ruling a7ca900d (1)/(4); item 140981e9 (c)) as a
 - `write_notes_propset` _function_ — Write one notes proposal set: `<out_root>/<set_id>/manifest.json` + `proposals.jsonl`
 
 ### `cjm_context_graph_projection.readiness`
@@ -434,5 +439,5 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 
 ## Dependencies
 
-**Depends on:** `cjm-context-graph-layer`, `cjm-context-graph-primitives`, `cjm-dev-graph-schema`, `cjm-harness-transcripts`, `cjm-markdown-decompose-core`, `cjm-notebook-decompose-core`, `cjm-python-decompose-core`, `cjm-substrate`
+**Depends on:** `cjm-context-graph-layer`, `cjm-context-graph-primitives`, `cjm-dev-graph-schema`, `cjm-harness-transcripts`, `cjm-markdown-decompose-core`, `cjm-notebook-decompose-core`, `cjm-python-decompose-core`, `cjm-substrate`, `pyyaml`
 **Used by:** `cjm-graph-workbench-qt`, `cjm-notebook-decompose-core`, `cjm-session-scratchpad-qt`

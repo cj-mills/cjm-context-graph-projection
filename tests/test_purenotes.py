@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from cjm_context_graph_layer.ops import extend_graph, graph_task
 from cjm_context_graph_primitives.journal import read_journal
@@ -20,7 +21,8 @@ from cjm_context_graph_projection.purenotes import (_time_link, build_notes_pack
                                                     proposals_from_point_rows, pure_notes_type,
                                                     render_notes_pack, render_points,
                                                     render_source_card, synopsis_of, unit_label,
-                                                    unit_title_header, validate_point_rows)
+                                                    unit_title_header, validate_point_rows,
+                                                    _frontmatter_fields, render_works_table)
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
 
 _HAVE_GRAPH = (Path(DEFAULT_MANIFESTS) / f"{DEFAULT_GRAPH_ID}.json").exists()
@@ -339,6 +341,25 @@ def test_coverage_gaps_and_overlap_pairs():
     assert ("p1", "p2") not in keys
 
 
+def test_frontmatter_fields_and_works_table_are_plain_data():
+    # Item 140981e9 (b)/(c): the staging index parses only the listing fields (a date becomes
+    # its ISO string), tolerates absent or broken frontmatter, and the works table names the
+    # held work's missing chapters.
+    fm = '---\ntitle: "The Learning Game, Ch. 2 notes"\ndate: 2026-09-08\ncategories: [book, education, notes]\ndescription: "School descends from Prussia."\nextra: ignored\n---\n'
+    assert _frontmatter_fields(fm) == {"title": "The Learning Game, Ch. 2 notes", "date": "2026-09-08",
+                                       "categories": ["book", "education", "notes"],
+                                       "description": "School descends from Prussia."}
+    assert _frontmatter_fields("no frontmatter") == {} and _frontmatter_fields("---\ntitle: [unclosed\n---\n") == {}
+    assert _frontmatter_fields("---\n- a list, not a map\n---\n") == {}
+    works = [{"work": "The Learning Game", "chapters_total": 19, "chapters_born": 2, "condition_met": False,
+              "missing": [{"chapter": 3, "title": "How Tests and Rewards Go Wrong"}, {"chapter": None, "title": "Conclusion"}]},
+             {"work": "Superstruct Manifesto", "chapters_total": 4, "chapters_born": 4, "condition_met": True, "missing": []}]
+    table = render_works_table(works)
+    assert "| The Learning Game | 2 of 19 | HELD | ch. 3, Conclusion |" in table
+    assert "| Superstruct Manifesto | 4 of 4 | READY — every chapter born | — |" in table
+    assert render_works_table([]).startswith("_No works")
+
+
 # ---------------------------------------------------------------- the CLI chain
 
 def _build_sibling(sdb: str):
@@ -604,3 +625,117 @@ def test_cli_pure_notes_lane_end_to_end_and_replay(tmp_path):
     assert r.returncode == 0, r.stderr or r.stdout
     r = _run("--graph-db-path", str(rep2 / "rep.db"), "read", note_id)
     assert r.stdout == staged3
+
+
+@pytest.mark.skipif(not _HAVE_GRAPH, reason=f"graph capability {DEFAULT_GRAPH_ID!r} not installed (CI)")
+def test_cli_draft_lifecycle_staging_index_and_work_promotion_gate(tmp_path):
+    # Item 140981e9 (ruling a7ca900d (1)/(4)): the draft lifecycle end to end — the work-page
+    # promotion condition holds a published chapter until EVERY chapter of the work is born;
+    # the staging index lists fixture / draft / reviewed / published / retired pages apart;
+    # a draft re-stated as a fixture (named --supersede) stops counting as born and never
+    # emits; retired is terminal and never emits; the whole chain replays from the journal.
+    sib_dir, pri_dir = tmp_path / "sib", tmp_path / "pri"
+    sib_dir.mkdir(); pri_dir.mkdir()
+    sdb = str(sib_dir / "sib.db")
+    _build_sibling(sdb)
+
+    async def second_chapter():   # a SECOND chapter unit of the same work, so the condition has something to wait on
+        async with open_graph(sdb) as sg:
+            ws = {"kind": "chapter", "part": 1, "chapter": 2, "title": "How Did We Get Here",
+                  "work": {"title": "The Learning Game", "author": "Ana Lorena Fábrega"}}
+            nodes = [{"id": "src-2", "label": "Source", "sources": [],
+                      "properties": {"title": "The Learning Game — 05 - 2. How Did We Get Here", "work_structure": ws}},
+                     {"id": "seg-b0", "label": "Segment", "sources": [],
+                      "properties": {"text": "Chapter 2. How did we get here.", "index": 0, "start_time": 0.0, "end_time": 2.0, "source_id": "src-2"}},
+                     {"id": "seg-b1", "label": "Segment", "sources": [],
+                      "properties": {"text": "Prussia built the modern school.", "index": 1, "start_time": 2.0, "end_time": 5.0, "source_id": "src-2"}},
+                     {"id": "cor-bh", "label": "Correction", "sources": [],
+                      "properties": {"correction_type": "stratum", "status": "applied", "actor": "human", "session_id": "s",
+                                     "created_at": 1.0, "payload": {"operation": "classify", "source_id": "src-2",
+                                                                    "category": "section-header", "segment_ids": ["seg-b0"], "start_time": 0.0}}}]
+            await extend_graph(sg.queue, sg.graph_id, nodes, [])
+    asyncio.run(second_chapter())
+    pdb, pj = str(pri_dir / "pri.db"), str(pri_dir / "writes.jsonl")
+    staging, site = pri_dir / "staging", pri_dir / "site"
+    (pri_dir / "graph.config.json").write_text(json.dumps(
+        {"notes_profile": "quarto_post", "emit_root": str(staging / "posts"), "website_root": str(site),
+         "sibling_graphs": {"tx": sdb}}))
+    base = ("--graph-db-path", pdb, "--journal-path", pj, "--source-journal-path", str(pri_dir / "source.jsonl"))
+    r = _run(*base, "notes-type", "pure-notes")
+    assert r.returncode == 0, r.stderr or r.stdout
+
+    def born(slug, source, text):   # a typed chapter page: born draft, one accepted point, rendered
+        post = f"---\ntitle: \"{slug}\"\ndate: 2026-09-09\ncategories: [book, notes]\n---\n\nPreamble.\n"
+        r = _run(*base, "new-note", "--slug", slug, "--content", post)
+        assert r.returncode == 0, r.stderr or r.stdout
+        note_id = [o for o in read_journal(pj) if o["verb"] == "assert"][-1]["args"]["subject"]
+        r = _run(*base, "notes-pack", "--source", source)
+        assert r.returncode == 0, r.stderr or r.stdout
+        pack_json = next(l.split(None, 1)[1].strip() for l in r.stdout.splitlines() if l.strip().startswith("json"))
+        rows = tmp_path / (slug.replace("/", "_") + ".jsonl")
+        rows.write_text(json.dumps({"kind": "claim", "from_i": 0, "to_i": 0, "text": text}) + "\n")
+        r = _run(*base, "notes-ingest", "--pack", pack_json, "--rows", str(rows), "--proposer", "test")
+        assert r.returncode == 0, r.stderr or r.stdout
+        r = _run(*base, "notes-accept", "--slug", slug, "--accept-all")
+        assert r.returncode == 0 and "accepted 1" in r.stdout, r.stderr or r.stdout
+        r = _run(*base, "notes-render", "--slug", slug)
+        assert r.returncode == 0, r.stderr or r.stdout
+        return note_id
+
+    ch1 = born("the-learning-game/ch01", "Seven Dangerous", "Gatto quit teaching in 1991.")
+    # (c) one of two chapters born -> the work is HELD; a published chapter still does not emit
+    r = _run(*base, "notes-promotion")
+    assert r.returncode == 0 and "1 of 2" in r.stdout and "HELD" in r.stdout and "missing ch. 2" in r.stdout, r.stderr or r.stdout
+    r = _run(*base, "assert", ch1, "publish_state", "published")
+    assert r.returncode == 0, r.stderr or r.stdout
+    landed = site / "posts" / "the-learning-game" / "ch01" / "index.md"
+    r = _run(*base, "emit-post", ch1)
+    assert r.returncode != 0 and "promotion condition" in (r.stdout + r.stderr) and not landed.exists()
+    ch2 = born("the-learning-game/ch02", "How Did We", "Prussia built the modern school.")
+    r = _run(*base, "notes-promotion", "--work", "The Learning Game")
+    assert "2 of 2" in r.stdout and "READY" in r.stdout, r.stderr or r.stdout
+    r = _run(*base, "emit-post", ch1)
+    assert r.returncode == 0 and landed.exists(), r.stderr or r.stdout
+    # (b) the staging index: one listing file per state + the works table, from the facts alone
+    r = _run(*base, "notes-staging-index")
+    assert r.returncode == 0 and "report only" in r.stdout and not (staging / "lists").exists(), r.stderr or r.stdout
+    r = _run(*base, "notes-staging-index", "--write")
+    assert r.returncode == 0 and "written" in r.stdout, r.stderr or r.stdout
+    lists = staging / "lists"
+    load = lambda name: yaml.safe_load((lists / name).read_text())
+    pub, dr = load("published.yml"), load("draft.yml")
+    assert [i["path"] for i in pub] == ["../posts/the-learning-game/ch01/index.md"]   # relative to the listing file (Quarto)
+    assert pub[0]["note_id"] == ch1 and pub[0]["publish_state"] == "published" and pub[0]["date"] == "2026-09-09"
+    assert pub[0]["categories"] == ["book", "notes"] and pub[0]["title"]
+    assert [i["note_id"] for i in dr] == [ch2]
+    assert load("fixture.yml") == [] and load("retired.yml") == [] and load("reviewed.yml") == [] and load("multi-active.yml") == []
+    works_md = (lists / "_works.md").read_text()   # an underscore file: includable by Quarto, never a page of its own
+    assert "| The Learning Game | 2 of 2 | READY" in works_md
+    # (d) a draft re-stated as a FIXTURE with the draft named: it lists as a fixture, never emits,
+    #     and no longer counts as born — the work is HELD again and ch01 cannot re-emit
+    r = _run(*base, "assert", ch2, "publish_state", "fixture", "--supersede", "draft")
+    assert r.returncode == 0, r.stderr or r.stdout
+    r = _run(*base, "notes-staging-index", "--write")
+    assert r.returncode == 0, r.stderr or r.stdout
+    assert [i["note_id"] for i in load("fixture.yml")] == [ch2] and load("draft.yml") == [] and load("multi-active.yml") == []
+    assert "| The Learning Game | 1 of 2 | HELD | ch. 2 |" in (lists / "_works.md").read_text()
+    r = _run(*base, "emit-post", ch2)
+    assert r.returncode != 0 and "FIXTURE" in (r.stdout + r.stderr)
+    landed.unlink()
+    r = _run(*base, "emit-post", ch1)
+    assert r.returncode != 0 and "promotion condition" in (r.stdout + r.stderr) and not landed.exists()
+    # (a) retired is TERMINAL: it supersedes published outright and the emit refuses by name
+    r = _run(*base, "assert", ch1, "publish_state", "retired")
+    assert r.returncode == 0, r.stderr or r.stdout
+    r = _run(*base, "emit-post", ch1)
+    assert r.returncode != 0 and "RETIRED" in (r.stdout + r.stderr)
+    r = _run(*base, "notes-staging-index", "--write")
+    assert [i["note_id"] for i in load("retired.yml")] == [ch1] and load("published.yml") == []
+    # (e) the lifecycle chain is journaled: a fresh db from the journal alone lists the same states
+    rep = str(tmp_path / "rep.db")
+    r = _run("--graph-db-path", rep, "--journal-path", pj, "replay")
+    assert r.returncode == 0, r.stderr or r.stdout
+    r = _run("--graph-db-path", rep, "notes-staging-index", "--project-root", str(tmp_path / "rep-staging"), "--write")
+    assert r.returncode == 0, r.stderr or r.stdout
+    rl = lambda name: yaml.safe_load((tmp_path / "rep-staging" / "lists" / name).read_text())
+    assert [i["note_id"] for i in rl("retired.yml")] == [ch1] and [i["note_id"] for i in rl("fixture.yml")] == [ch2]

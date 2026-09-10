@@ -214,6 +214,27 @@ async def assert_value(
     superseded_ids: List[str] = []
     born_superseded = False
 
+    # Explicit supersede targets (ids, unique prefixes, or values) are resolved FIRST, on
+    # THIS slot, and REFUSED LOUDLY on any miss (41449193): a supersede that lands nothing
+    # leaves two active values, so nothing is written and the CLI journals nothing (same
+    # never-journal-a-refused-write rule as the subject path). Resolved before the ordering
+    # pass because an explicitly named target is a HUMAN DEMOTION (item 140981e9: a draft
+    # re-stated as a fixture, a retired page reopened) — the ordering rule must not also
+    # mark the new value born superseded by the very assertion it was told to replace.
+    explicit_ids: List[str] = []
+    if supersede:
+        m = _match_supersede_targets(supersede, slot_existing, predicate)
+        if m["unmatched"] or m["ambiguous"]:
+            details = [await _diagnose_supersede_miss(gx, t, slot.id)
+                       for t in m["unmatched"]]
+            details += [f"`{a['token']}` is ambiguous on this slot — candidates: "
+                        + ", ".join(a["candidates"]) for a in m["ambiguous"]]
+            return {"error": "--supersede refused (nothing superseded, nothing "
+                             "written): " + "; ".join(details),
+                    "subject": subject, "predicate": predicate, "value": value,
+                    "written": False}
+        explicit_ids = list(m["ids"])
+
     # Ordered predicate: newer auto-supersedes older active values (healthy evolution).
     if P.is_ordered(predicate):
         for old in active_existing:
@@ -224,8 +245,9 @@ async def assert_value(
             if verdict is True:
                 edges.append(assertion.supersedes_edge(old_id))
                 superseded_ids.append(old_id)
-            elif verdict is False:
-                # New value is older than an existing active one -> born superseded.
+            elif verdict is False and old_id not in explicit_ids:
+                # New value is older than an existing active one -> born superseded
+                # (unless the human named that value: an explicit demotion is honored).
                 edges.append(make_edge(old_id, assertion.id, DevRelations.SUPERSEDES))
                 born_superseded = True
 
@@ -241,25 +263,11 @@ async def assert_value(
                 edges.append(assertion.supersedes_edge(old_id))
                 superseded_ids.append(old_id)
 
-    # Explicit supersede targets (ids, unique prefixes, or values) — resolved on
-    # THIS slot, and REFUSED LOUDLY on any miss (41449193): a supersede that lands
-    # nothing leaves two active values, so nothing is written and the CLI journals
-    # nothing (same never-journal-a-refused-write rule as the subject path).
-    if supersede:
-        m = _match_supersede_targets(supersede, slot_existing, predicate)
-        if m["unmatched"] or m["ambiguous"]:
-            details = [await _diagnose_supersede_miss(gx, t, slot.id)
-                       for t in m["unmatched"]]
-            details += [f"`{a['token']}` is ambiguous on this slot — candidates: "
-                        + ", ".join(a["candidates"]) for a in m["ambiguous"]]
-            return {"error": "--supersede refused (nothing superseded, nothing "
-                             "written): " + "; ".join(details),
-                    "subject": subject, "predicate": predicate, "value": value,
-                    "written": False}
-        for tid in m["ids"]:
-            if tid != assertion.id and tid not in superseded_ids:
-                edges.append(assertion.supersedes_edge(tid))
-                superseded_ids.append(tid)
+    # The explicit targets (resolved above) land their SUPERSEDES edges.
+    for tid in explicit_ids:
+        if tid != assertion.id and tid not in superseded_ids:
+            edges.append(assertion.supersedes_edge(tid))
+            superseded_ids.append(tid)
 
     res = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
 
