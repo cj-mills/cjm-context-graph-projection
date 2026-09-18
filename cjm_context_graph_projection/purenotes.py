@@ -81,8 +81,10 @@ def pure_notes_type(
             "include_strata": ["quotation"],              # verbatim units, carried as `quotation` points
             "structure_strata": ["section-header"],       # read-aloud section titles -> the heading hierarchy (never content)
             # 2047cf1d ruling (2026-09-09): a cross-reference or a transition is never a heading and never
-            # content; apparatus (credits, legal, boilerplate) is excluded outright, no longer a header source
-            "exclude_strata": ["tangent", "sponsor", "disfluency", "apparatus", "cross-reference", "transition"],
+            # content; apparatus (credits, legal, boilerplate) is excluded outright, no longer a header source.
+            # 353394c8 / c4a0c744 (2026-09-17): `filler` (a wholly elidable line) is what the clean read
+            # excludes — `disfluency` marks a run that CONTAINS disfluencies and its content stays content
+            "exclude_strata": ["tangent", "sponsor", "filler", "apparatus", "cross-reference", "transition"],
             "never_carry": ["research-mark", "tool-mention", "asr-error"],  # things to DO, not things the source says
         },
         presentation_policy={
