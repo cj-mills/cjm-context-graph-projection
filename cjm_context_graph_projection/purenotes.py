@@ -433,7 +433,8 @@ def pack_digest(pack: Dict[str, Any]) -> str:  # "sha256:<hex>" over the read co
     role fields (spans, line notes, speakers — ruling e1e096fa) join the digest only when a
     pack carries them, so a pack without them digests exactly as it did before the ruling.
     The source's `speaker_roster` stays OUT: the per-line speakers already ride the margin,
-    and the roster is how a label PRINTS, not what was read."""
+    and the roster is how a label PRINTS, not what was read. A window pack's read-only
+    `context` was read too, so it joins the digest when the pack carries one."""
     source = pack.get("source")
     if isinstance(source, dict) and "speaker_roster" in source:
         source = {k: v for k, v in source.items() if k != "speaker_roster"}
@@ -446,6 +447,11 @@ def pack_digest(pack: Dict[str, Any]) -> str:  # "sha256:<hex>" over the read co
         body["margin"] = margin
     if pack.get("spans"):
         body["spans"] = [[s["class"], s["from_i"], s["to_i"]] for s in pack["spans"]]
+    if pack.get("context"):
+        body["context"] = {side: [[r["id"], r.get("speaker"), r["text"]] for r in pack["context"].get(side) or []]
+                           for side in ("before", "after")}
+    if pack.get("index"):
+        body["index"] = [[e.get("key"), e.get("proposal_id"), e.get("text")] for e in pack["index"]]
     return "sha256:" + hashlib.sha256(json.dumps(body, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
@@ -482,6 +488,7 @@ def build_notes_pack(
     type_props: Dict[str, Any],     # The DeliverableType node's properties (the policies)
     *,
     window: Optional[Tuple[float, Optional[float]]] = None,  # (start, end) source seconds; None = whole unit
+    margin: int = 0,                # Content lines of READ-ONLY context either side of the window
 ) -> Dict[str, Any]:  # The pack (JSON-serializable)
     """Apply the type's INFORMATION POLICY (a stratum query read as ROLES — ruling e1e096fa)
     to the unit and number what a proposer reads: content lines 0..n-1 (unclassified lines
@@ -489,7 +496,10 @@ def build_notes_pack(
     (never content), quote spans and structure SPANS over the numbered lines (a span's lines
     stay content: a qa block is read, never removed), the annotate classes as per-line
     `notes`, the speaker on every line when the unit carries speakers, the kind slate with
-    glosses, and the output contract. Raises ValueError on a policy naming an unknown role."""
+    glosses, and the output contract. `margin` keeps the neighbouring content lines as
+    UN-NUMBERED `context` a window drafter reads but cannot draft over (design 6752db0a (5),
+    the filter pack's shape): the same role policy applies, so an excluded line stays out
+    of the margin too. Raises ValueError on a policy naming an unknown role."""
     info = dict(type_props.get("information_policy") or {})
     roles, default_role = stratum_role_policy(info)
     speakers = unit.get("speakers")   # segment id -> display name; None = the unit carries no speakers
@@ -506,15 +516,30 @@ def build_notes_pack(
     pending_header_id: Optional[str] = None
     quote_runs: Dict[str, List[int]] = {}
     span_runs: Dict[str, Tuple[str, List[int]]] = {}
+    margin = max(0, int(margin or 0))
+    before: List[Dict[str, Any]] = []
+    after: List[Dict[str, Any]] = []
     for s in unit.get("segments") or []:
+        side: Optional[List[Dict[str, Any]]] = None
         if w0 is not None and s["end"] is not None and s["end"] <= w0:
-            continue
-        if w1 is not None and s["start"] is not None and s["start"] >= w1:
+            side = before
+        elif w1 is not None and s["start"] is not None and s["start"] >= w1:
+            side = after
+        if side is not None and not margin:
             continue
         by_role: Dict[str, List[Tuple[str, str]]] = {}
         for c, cid in by_seg.get(s["id"], []):
             by_role.setdefault(roles.get(c, default_role), []).append((c, cid))
         if "exclude" in by_role:
+            continue
+        if side is not None:
+            # a margin line: what the drafter would have read as content next door — un-numbered,
+            # so no row can name it (a header run is structure, never context)
+            if "header" not in by_role:
+                ctx = {"id": s["id"], "start": s["start"], "end": s["end"], "text": s["text"]}
+                if speakers is not None:
+                    ctx["speaker"] = speakers.get(s["id"])
+                side.append(ctx)
             continue
         if "header" in by_role:
             # a read-aloud header: accumulate its run, flush as one header before the next content line
@@ -579,8 +604,79 @@ def build_notes_pack(
         **({"read": dict(unit["read"])} if unit.get("read") else {}),
         "segments": rows,
     }
+    if margin and (before or after):
+        pack["context"] = {"before": before[-margin:], "after": after[:margin]}
     pack["digest"] = pack_digest(pack)
     return pack
+
+
+def plan_notes_windows(
+    pack: Dict[str, Any],   # The WHOLE-unit pack (build_notes_pack with no window)
+    count: int,             # How many windows to cut the unit into
+    *,
+    slack: float = 0.2,     # Search radius around each even cut, as a fraction of one window
+) -> List[Dict[str, Any]]:  # `count` windows {k, start, end, from_i, to_i, seam}; the last end is None
+    """Cut a whole-unit pack into `count` windows of near-equal line count at MECHANICAL
+    seams (design 6752db0a (5); the filter lane's `plan_pack_windows` read over pack lines):
+    within `slack` of each even cut a header boundary wins, else the speaker turn nearest the
+    even cut, else the longest silence; no model chooses a seam. A seam NEVER falls inside a
+    span or a quote span — a qa block is drafted whole (work item 3a2c94eb (1)) — so when
+    the whole search radius sits inside one, the nearest legal seam outside it is taken
+    instead. A cut sits in the gap between two lines, so `build_notes_pack(window=...)` over
+    the returned (start, end) pairs tiles the unit; `from_i`/`to_i` are the whole-pack lines
+    each window is expected to hold and `seam` names what opened it."""
+    rows = pack.get("segments") or []
+    n = int(count)
+    if n < 1:
+        raise ValueError("count must be >= 1")
+    if n > max(1, len(rows)):
+        raise ValueError(f"cannot cut {len(rows)} lines into {n} windows")
+    runs = [(int(s["from_i"]), int(s["to_i"]))
+            for s in list(pack.get("spans") or []) + list(pack.get("quote_spans") or [])]
+
+    def _legal(j: int) -> bool:  # may a cut sit between line j-1 and line j?
+        a, b = rows[j - 1], rows[j]
+        if a.get("end") is None or b.get("start") is None or float(b["start"]) < float(a["end"]):
+            return False   # untimed or overlapping neighbours: no gap to cut in
+        return not any(f < j <= t for f, t in runs)
+
+    def _gap(j: int) -> float:
+        return float(rows[j]["start"]) - float(rows[j - 1]["end"])
+
+    per = len(rows) / n
+    radius = max(1, int(per * float(slack)))
+    seams: List[Tuple[int, str]] = []
+    lo_bound = 1
+    for k in range(1, n):
+        target = int(round(k * per))
+        cands = [j for j in range(max(lo_bound, target - radius), min(len(rows) - 1, target + radius) + 1)
+                 if _legal(j)]
+        if not cands:
+            # the radius sits inside a span (or among overlapping lines): the nearest legal seam wins
+            legal = [j for j in range(lo_bound, len(rows)) if _legal(j)]
+            if not legal:
+                raise ValueError(f"no legal seam for cut {k} of {n - 1} — fewer windows, or a span covers the rest of the unit")
+            cands = [min(legal, key=lambda j: abs(j - target))]
+        heads = [j for j in cands if rows[j].get("h") != rows[j - 1].get("h")]
+        turns = [j for j in cands if "speaker" in rows[j] and rows[j].get("speaker") != rows[j - 1].get("speaker")]
+        if heads:
+            j, seam = min(heads, key=lambda j: abs(j - target)), "header"
+        elif turns:
+            j, seam = min(turns, key=lambda j: (abs(j - target), -_gap(j))), "turn"
+        else:
+            j, seam = max(cands, key=lambda j: (_gap(j), -abs(j - target))), "silence"
+        seams.append((j, seam))
+        lo_bound = j + 1
+    out: List[Dict[str, Any]] = []
+    edges = [(0, "start")] + seams
+    for k, (j, seam) in enumerate(edges):
+        nxt = edges[k + 1][0] if k + 1 < len(edges) else None
+        start = 0.0 if k == 0 else round((float(rows[j - 1]["end"]) + float(rows[j]["start"])) / 2.0, 4)
+        end = (None if nxt is None
+               else round((float(rows[nxt - 1]["end"]) + float(rows[nxt]["start"])) / 2.0, 4))
+        out.append({"k": k, "start": start, "end": end, "from_i": j,
+                    "to_i": (len(rows) - 1 if nxt is None else nxt - 1), "seam": seam})
+    return out
 
 
 OUTPUT_CONTRACT = """\
@@ -670,7 +766,10 @@ def render_notes_pack(pack: Dict[str, Any]) -> str:  # The proposer brief (markd
     the notes will use, the quote spans, the structure spans and the margin (line notes,
     speakers, the clean read — each section only when the pack carries it, so a pack
     without role fields renders exactly as before ruling e1e096fa), the output contract,
-    then the numbered lines with `[H]` header rows interleaved. Deterministic for a given pack."""
+    then the numbered lines with `[H]` header rows interleaved. A WINDOW pack (design
+    6752db0a (5)) says so after the contract — no synopsis, no section rows: both belong to
+    the whole source — and prints its read-only `context` as un-numbered `[·]` lines either
+    side of the numbered ones. Deterministic for a given pack."""
     src = pack.get("source") or {}
     ws = src.get("work_structure") or {}
     unit_bits = [f"{k}: {ws[k]}" for k in ("kind", "part", "part_title", "chapter", "title") if ws.get(k)]
@@ -737,7 +836,54 @@ def render_notes_pack(pack: Dict[str, Any]) -> str:  # The proposer brief (markd
                   "Everything above holds for every row. This deliverable type adds:", ""]
         lines += [f"* `{k}` — {v}" for k, v in kind_fields.items()]
         lines.append("")
+    win = dict(pack.get("window") or {})
+    ctx = dict(pack.get("context") or {})
+    if win.get("start") is not None or win.get("end") is not None:
+        lines += ["## This window", "",
+                  f"This pack is ONE WINDOW of a longer source ({_fmt_ts(win.get('start') or 0.0)} to "
+                  f"{_fmt_ts(win['end']) if win.get('end') is not None else 'the end'}). The other windows are "
+                  "drafted separately and the rows are merged afterwards, so:", "",
+                  "* Write NO `synopsis` row and NO `section` row — both are proposed over the WHOLE source once "
+                  "the windows are merged. This overrides the contract above."]
+        if ctx.get("before") or ctx.get("after"):
+            lines.append("* `[·]` lines are the neighbouring lines, READ-ONLY: read them to see what the window "
+                         "opens on and closes into; never draft a point over them (they carry no line number, "
+                         "so no row can name them).")
+        index = list(pack.get("index") or [])
+        lines.append("* A point of yours may elaborate or lean on something said BEFORE this window (the speaker "
+                     "returns to it, an answer goes back to a slide). You cannot give a row number for a point of "
+                     "another window, so say it on the row as an OPEN REFERENCE — `\"open_refs\": [{\"role\": "
+                     "\"refers_to\", " + ("\"point\": \"p017\"}]` naming the earlier point by its key from "
+                     "\"Points so far\" below" if index else "\"hint\": \"<what the earlier point said, in the "
+                     "source's own terms>\"}]` — it is matched against the other windows' points afterwards") +
+                     "; role `parent` when your row would NEST under that point (one parent only, and then give "
+                     "no `parent` row number)." + (" Where the index does not list what you mean, give a `hint` "
+                     "(what the earlier point said, in the source's own terms) in place of `point`." if index else "")
+                     + " Inside this window keep using `parent` / `refers_to` row numbers. Only when the lines "
+                     "really do reach back — never to decorate.")
+        if index:
+            lines += ["", "### Points so far", "",
+                      "The points ALREADY drafted from the earlier windows, in source order (children indented). Do "
+                      "not redraft them; write in the same register and at the same grain; name one by its key "
+                      "when your row leans on it or nests under it.", ""]
+            lines += render_points_index(index)
+        lines.append("")
     lines += ["## Transcript", ""]
+
+    def _context(title: str, ctx_rows: List[Dict[str, Any]]) -> List[str]:  # un-numbered read-only lines
+        out: List[str] = [f"### {title}", ""]
+        prev: Any = object()
+        for c in ctx_rows:
+            if "speaker" in c and c.get("speaker") != prev:
+                prev = c.get("speaker")
+                out.append(f"— {prev or '?'} —")
+            out.append(f"[·] {_fmt_ts(c['start'])}–{_fmt_ts(c['end'])}  {c['text']}")
+        return out + [""]
+
+    if ctx.get("before"):
+        lines += _context("Context before (read-only)", ctx["before"])
+    if ctx.get("before") or ctx.get("after"):
+        lines += ["### This window's lines", ""]
     headers = pack.get("headers") or []
     hi = 0
     prev_speaker: Any = object()
@@ -753,6 +899,8 @@ def render_notes_pack(pack: Dict[str, Any]) -> str:  # The proposer brief (markd
     while hi < len(headers):
         lines.append(f"[H] {headers[hi]['text']}")
         hi += 1
+    if ctx.get("after"):
+        lines += [""] + _context("Context after (read-only)", ctx["after"])[:-1]
     return "\n".join(lines) + "\n"
 
 
@@ -780,7 +928,10 @@ def validate_point_rows(
     that is itself top-level (ONE level of nesting — e1fd4d64 (H)). A `section` row (ruling
     bc62c727 (A)) is an ANCHOR, never a run: its text is the title and it carries nothing
     else; no row nests under it or refers to it. A `question` may say it was `relayed` and
-    by whom it was asked (`asker`) — bc62c727 (B3)."""
+    by whom it was asked (`asker`) — bc62c727 (B3). A link that crosses a WINDOW cut rides
+    the row as an OPEN REFERENCE (work item 3a2c94eb (3)): `open_refs` = [{role, hint}] to be
+    closed over the merged Points, or [{role, point}] naming a key of the pack's running
+    `index` of earlier windows' points (closed at ingest)."""
     segs = pack.get("segments") or []
     n = len(segs)
     out: List[Dict[str, Any]] = []
@@ -877,6 +1028,34 @@ def validate_point_rows(
                     raise ValueError(f"row {k}: refers_to {t} is the {out[t]['kind']} — name the point it leans on")
                 if t not in refers:
                     refers.append(t)
+        # OPEN REFERENCES (work item 3a2c94eb (3)): a window drafter cannot number a row of ANOTHER
+        # window, so a link across the cut rides the row — as a `hint` (what the earlier point said;
+        # closed later over the merged Points, never guessed) or, when the pack carries a running
+        # index of the earlier windows' points, as that `point`'s key (closed at ingest).
+        open_refs: List[Dict[str, str]] = []
+        index_depth = {str(e.get("key")): int(e.get("depth") or 0) for e in pack.get("index") or []}
+        if raw.get("open_refs") not in (None, "", []):
+            if not isinstance(raw.get("open_refs"), list):
+                raise ValueError(f"row {k}: open_refs takes a LIST of {{role, hint}} / {{role, point}} objects")
+            if kind in STRUCTURE_KINDS:
+                raise ValueError(f"row {k}: a {kind} never refers to other points")
+            for o in raw.get("open_refs"):
+                if not isinstance(o, dict):
+                    raise ValueError(f"row {k}: an open reference is an object {{role, hint}} or {{role, point}}")
+                role = str(o.get("role") or "refers_to").strip()
+                if role not in OPEN_REF_ROLES:
+                    raise ValueError(f"row {k}: open reference role {role!r} — one of {' | '.join(OPEN_REF_ROLES)}")
+                hint, point = str(o.get("hint") or "").strip(), str(o.get("point") or "").strip()
+                if bool(hint) == bool(point):
+                    raise ValueError(f"row {k}: an open reference carries exactly ONE of `hint` / `point`")
+                if point and point not in index_depth:
+                    raise ValueError(f"row {k}: open reference names point {point!r}, which this pack's index does not list")
+                if role == "parent":
+                    if parent is not None or any(x["role"] == "parent" for x in open_refs):
+                        raise ValueError(f"row {k}: one parent only — a `parent` row number OR one open `parent` reference")
+                    if point and index_depth[point] >= 2:
+                        raise ValueError(f"row {k}: point {point} is already a grandchild — two levels at most")
+                open_refs.append({"role": role, **({"point": point} if point else {"hint": hint})})
         asr_form = str(raw.get("asr_form") or "").strip()
         if asr_form or raw.get("unverified") is not None:
             data = dict(data)
@@ -906,7 +1085,7 @@ def validate_point_rows(
                 data["asker"] = asker
         out.append({"kind": kind, "from_i": fi, "to_i": ti, "text": text, "lead": lead, "parent": parent,
                     "attribution": str(raw.get("attribution") or "").strip(),
-                    "data": data, "refers_to": refers})
+                    "data": data, "refers_to": refers, "open_refs": open_refs})
     return out
 
 
@@ -916,11 +1095,16 @@ def proposals_from_point_rows(
 ) -> List[Dict[str, Any]]:  # Proposal rows, source order, pack positions resolved to segment identity
     """Resolve validated rows to proposal rows: a minted proposal id (the point's future
     key), the segment ids + times of the run, the header the run falls under, and the
-    read-trace (pack id + run)."""
+    read-trace (pack id + run). An open reference naming a `point` of the pack's running
+    index closes HERE (its proposal id joins `refers_to`, or becomes the `parent_key` — a
+    link into ANOTHER set, which only the merge resolves); a `hint` stays open on the row."""
     segs = pack.get("segments") or []
     headers = pack.get("headers") or []
     out: List[Dict[str, Any]] = []
+    by_key = {str(e.get("key")): str(e.get("proposal_id")) for e in pack.get("index") or []}
     for r in rows:
+        keyed = [o for o in r.get("open_refs") or [] if o.get("point")]
+        hints = [o for o in r.get("open_refs") or [] if o.get("hint")]
         run = segs[r["from_i"]:r["to_i"] + 1]
         starts = [s["start"] for s in run if s.get("start") is not None]
         ends = [s["end"] for s in run if s.get("end") is not None]
@@ -936,7 +1120,8 @@ def proposals_from_point_rows(
             "kind": r["kind"], "text": r["text"], "lead": r["lead"],
             "speaker": (voices[0] if voices else ""), "speakers": (voices if len(voices) > 1 else []),
             # rows -> proposal ids: a proposal id IS the point's future key, so these are point keys at accept
-            "refers_to": [out[t]["proposal_id"] for t in (r.get("refers_to") or [])],
+            "refers_to": ([out[t]["proposal_id"] for t in (r.get("refers_to") or [])]
+                          + [by_key[o["point"]] for o in keyed if o["role"] == "refers_to"]),
             "attribution": r["attribution"], "data": r["data"],
             "from_i": r["from_i"], "to_i": r["to_i"],
             "segment_ids": [s["id"] for s in run],
@@ -946,7 +1131,9 @@ def proposals_from_point_rows(
             "heading_index": h,
             # ONE level of nesting (e1fd4d64 (H)): the parent's proposal id becomes the point's
             # `parent_key` at accept (validated as an earlier, top-level, same-header row).
-            "parent_key": (out[parent_row]["proposal_id"] if parent_row is not None else ""),
+            "parent_key": (out[parent_row]["proposal_id"] if parent_row is not None
+                           else next((by_key[o["point"]] for o in keyed if o["role"] == "parent"), "")),
+            **({"open_refs": hints} if hints else {}),
             "evidence": {"pack_id": pack.get("pack_id"), "digest": pack.get("digest"),
                          "from_i": r["from_i"], "to_i": r["to_i"]},
         })
@@ -979,6 +1166,8 @@ def write_notes_propset(
     *,
     out_root: Path,                   # Proposal-set root
     proposer: Dict[str, Any],         # Provenance: {"kind": ..., "name": ..., "model": ...}
+    arm: Optional[str] = None,        # The experiment arm this set belongs to (work item 3a2c94eb (4))
+    extra: Optional[Dict[str, Any]] = None,  # Further manifest fields (a merge's `merged_from`, a close's `closed_from`)
 ) -> Dict[str, Any]:  # {set_id, set_dir, manifest_path, counts}
     """Write one notes proposal set: `<out_root>/<set_id>/manifest.json` + `proposals.jsonl`
     — the durable half of the propose/accept contract (the filter lane's shape)."""
@@ -998,7 +1187,10 @@ def write_notes_propset(
                 "pack": {"pack_id": pack.get("pack_id"), "digest": pack.get("digest"),
                          "segments": len(pack.get("segments") or [])},
                 "source": dict(pack.get("source") or {}), "window": dict(pack.get("window") or {}),
-                "files": {"proposals": "proposals.jsonl"}, "counts": counts}
+                "files": {"proposals": "proposals.jsonl"}, "counts": counts,
+                **({"arm": str(arm)} if arm else {}), **dict(extra or {})}
+    if (pack.get("plan") or {}).get("whole_pack_id"):
+        manifest["plan"] = dict(pack["plan"])   # which window of which whole pack this set drafted
     (set_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
     return {"set_id": set_id, "set_dir": str(set_dir), "manifest_path": str(set_dir / "manifest.json"),
             "counts": counts, "proposals": len(proposals)}
@@ -1043,6 +1235,450 @@ def pick_propset(
         return sets[0]
     hits = [s for s in sets if str(s["manifest"].get("proposal_set_id") or "").startswith(selector)]
     return hits[0] if len(hits) == 1 else None
+
+
+def points_index(
+    proposals: List[Dict[str, Any]],  # Proposal rows of ONE lineage (one arm's earlier windows, or a merged set), any order
+) -> List[Dict[str, Any]]:  # [{key, proposal_id, kind, lead, text, start_time, depth, parent}] in source order
+    """Key a set of proposal rows for a reader that cannot see their lines: `p001`… in source
+    order (structure kinds left out — a synopsis or a section is nobody's back-link target),
+    each with its nesting depth so a later row never nests under a grandchild. One index
+    serves both readers of work item 3a2c94eb: the SEQUENTIAL drafter's running view of the
+    earlier windows' points (arm (4)) and the reconciler that closes hinted references (3)."""
+    rows = [p for p in proposals if p.get("kind") not in STRUCTURE_KINDS]
+    by_id = {p["proposal_id"]: p for p in rows}
+
+    def _depth(p: Dict[str, Any]) -> int:
+        d, cur = 0, p
+        while cur.get("parent_key") and cur["parent_key"] in by_id and d < 8:
+            d, cur = d + 1, by_id[cur["parent_key"]]
+        return d
+
+    def _root_start(p: Dict[str, Any]) -> float:
+        cur, hops = p, 0
+        while cur.get("parent_key") and cur["parent_key"] in by_id and hops < 8:
+            cur, hops = by_id[cur["parent_key"]], hops + 1
+        return float(cur.get("start_time") or 0.0)
+
+    rows.sort(key=lambda p: (_root_start(p), _depth(p) > 0, float(p.get("start_time") or 0.0)))
+    # children directly after their parent, in the order the sort left them
+    ordered: List[Dict[str, Any]] = []
+
+    def _emit(p: Dict[str, Any]) -> None:
+        ordered.append(p)
+        for c in rows:
+            if c.get("parent_key") == p["proposal_id"]:
+                _emit(c)
+    for p in rows:
+        if not (p.get("parent_key") and p["parent_key"] in by_id):
+            _emit(p)
+    width = max(3, len(str(len(ordered))))
+    keys = {p["proposal_id"]: f"p{n:0{width}d}" for n, p in enumerate(ordered, start=1)}
+    return [{"key": keys[p["proposal_id"]], "proposal_id": p["proposal_id"], "kind": p.get("kind"),
+             "lead": p.get("lead") or "", "text": p.get("text") or "", "start_time": p.get("start_time"),
+             "speaker": p.get("speaker") or "", "depth": _depth(p),
+             "parent": keys.get(p.get("parent_key") or "", "")} for p in ordered]
+
+
+def render_points_index(
+    index: List[Dict[str, Any]],  # points_index output
+) -> List[str]:  # One markdown line per point, children indented under their parent
+    """The index as a reader sees it: `p017 [claim] 12:03  **lead** — text`, nested by depth."""
+    lines: List[str] = []
+    for e in index:
+        lead = f"**{e['lead']}** — " if e.get("lead") else ""
+        who = f" ({e['speaker']})" if e.get("speaker") else ""
+        lines.append(f"{'  ' * int(e.get('depth') or 0)}- `{e['key']}` [{e.get('kind')}] {_fmt_ts(e.get('start_time'))}{who}  {lead}{e.get('text')}")
+    return lines
+
+
+def with_points_index(
+    pack: Dict[str, Any],             # A WINDOW pack (build_notes_pack with a window)
+    proposals: List[Dict[str, Any]],  # The earlier windows' proposal rows, one lineage
+) -> Dict[str, Any]:  # A NEW pack (own id + digest) whose brief opens on the points so far
+    """The SEQUENTIAL arm's pack (design 6752db0a (11)): the window pack plus a running index
+    of the points the earlier windows produced, so the drafter names an earlier point by KEY
+    (`open_refs` … `point`) instead of describing it. What was read changed, so the pack is a
+    new one — new id, the index inside the digest."""
+    out = dict(pack)
+    out["index"] = points_index(proposals)
+    out["pack_id"] = f"npack_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+    out["indexed_from"] = pack.get("pack_id")
+    out["created_at"] = time.time()
+    out["digest"] = pack_digest(out)
+    return out
+
+
+def merge_point_proposals(
+    sets: List[Dict[str, Any]],  # load_notes_propsets-shaped entries ({"manifest", "proposals"}): window sets and whole sets, any arms
+    pack: Dict[str, Any],        # The WHOLE-unit pack every row re-resolves against
+    *,
+    iou: float = 0.5,            # Whole-pack line IoU at/above which two rows of different cells are ONE point
+    same_kind: bool = True,      # Agreement also needs the same kind
+) -> Dict[str, Any]:  # {"proposals": merged rows in accept order, "stats": {...}}
+    """Fold the window sets of several ARMS (and drafter models) over one unit into ONE
+    walkable proposal set (work item 3a2c94eb (2); the filter lane's `merge_filter_proposals`
+    read over points). Each row re-resolves by SEGMENT ID into the whole pack's line numbers
+    (loud when a segment is not in it — the spine moved or the pack is the wrong one), so a
+    window-relative run, heading and speaker are all re-read from the whole unit. A CELL is
+    one (arm, model); rows of DIFFERENT cells whose runs agree collapse into one row whose
+    `origins` name every contributing (set, proposal, arm, model, window, run, kind, text) —
+    never two rows of one cell, which drafted them as distinct points. The text SHOWN for a
+    collapsed row rotates across the agreeing cells (the cell shown least so far wins, user
+    ruling 2026-09-21), and `shown` records whose wording the human read, so an edit at
+    accept is attributable. Structure kinds are left out — a synopsis and the sections are
+    proposed over the whole source after the merge (ruling bc62c727). `parent_key` and
+    `refers_to` follow the collapse (a member's id maps to its merged row, across sets — a
+    sequential drafter's keyed reference lands here). Nesting is the SHOWN row's (its text
+    was written for that parent); back-links are the UNION of the agreeing members' — a
+    link any arm found is a candidate the human sees — and a hinted `refers_to` survives
+    only on a row no member closed a back-link for. A link the merge cannot honour (target
+    gone, a cycle, a third level, another header) is DETACHED and counted, never bent."""
+    segs = pack.get("segments") or []
+    headers = pack.get("headers") or []
+    pos = {r["id"]: r["i"] for r in segs}
+    src_id = (pack.get("source") or {}).get("source_id")
+    flat: List[Dict[str, Any]] = []
+    stats: Dict[str, Any] = {"sets": len(sets), "cells": {}, "structure_dropped": 0}
+    for entry in sets:
+        m = entry.get("manifest") or {}
+        if (m.get("source") or {}).get("source_id") != src_id:
+            raise ValueError(f"set {m.get('proposal_set_id')}: a different source than the target pack")
+        model = str((m.get("model") or {}).get("model") or (m.get("model") or {}).get("name") or "?")
+        arm = str(m.get("arm") or "?")
+        cell = f"{arm}/{model}"
+        for p in entry.get("proposals") or []:
+            if p.get("kind") in STRUCTURE_KINDS:
+                stats["structure_dropped"] += 1
+                continue
+            ids = list(p.get("segment_ids") or [])
+            missing = [i for i in ids if i not in pos]
+            if not ids or missing:
+                raise ValueError(f"set {m.get('proposal_set_id')} proposal {p.get('proposal_id')}: "
+                                 f"{len(missing) or 'all'} segment id(s) not in the target pack")
+            run = (min(pos[i] for i in ids), max(pos[i] for i in ids))
+            stats["cells"][cell] = stats["cells"].get(cell, 0) + 1
+            flat.append({"p": p, "run": run, "cell": cell,
+                         "origin": {"set_id": m.get("proposal_set_id"), "proposal_id": p.get("proposal_id"),
+                                    "arm": arm, "model": model, "cell": cell,
+                                    "window": (m.get("plan") or {}).get("k"),
+                                    "from_i": run[0], "to_i": run[1], "kind": p.get("kind"),
+                                    "lead": p.get("lead") or "", "text": p.get("text") or ""}})
+    stats["inputs"] = len(flat)
+
+    def _iou(a: Tuple[int, int], b: Tuple[int, int]) -> float:
+        inter = min(a[1], b[1]) - max(a[0], b[0]) + 1
+        if inter <= 0:
+            return 0.0
+        return inter / float((a[1] - a[0] + 1) + (b[1] - b[0] + 1) - inter)
+
+    flat.sort(key=lambda f: (f["run"][0], f["run"][1], f["cell"], str(f["origin"]["set_id"]), str(f["origin"]["proposal_id"])))
+    clusters: List[List[Dict[str, Any]]] = []
+    for f in flat:
+        best, best_v = None, 0.0
+        for c in clusters:
+            if c[0]["run"][1] < f["run"][0] or c[0]["run"][0] > f["run"][1]:
+                continue   # no shared line
+            if f["cell"] in {x["cell"] for x in c} or (same_kind and c[0]["p"].get("kind") != f["p"].get("kind")):
+                continue
+            v = _iou(c[0]["run"], f["run"])
+            if v >= float(iou) and v > best_v:
+                best, best_v = c, v
+        if best is None:
+            clusters.append([f])
+        else:
+            best.append(f)
+    # the wording SHOWN for a collapsed row rotates: the agreeing cell shown least so far (ties by name)
+    shown: Dict[str, int] = {c: 0 for c in stats["cells"]}
+    id_map: Dict[str, str] = {}
+    merged: List[Dict[str, Any]] = []
+    for c in clusters:
+        rep = c[0] if len(c) == 1 else min(c, key=lambda f: (shown[f["cell"]], f["cell"]))
+        if len(c) > 1:
+            shown[rep["cell"]] += 1
+        p, (fi, ti) = rep["p"], rep["run"]
+        run = segs[fi:ti + 1]
+        starts = [s["start"] for s in run if s.get("start") is not None]
+        ends = [s["end"] for s in run if s.get("end") is not None]
+        voices = list(dict.fromkeys(s["speaker"] for s in run if s.get("speaker")))
+        h = int(run[0].get("h") or 0)
+        new_id = str(uuid.uuid4())
+        for f in c:
+            id_map[str(f["p"].get("proposal_id"))] = new_id
+        merged.append({
+            "proposal_id": new_id, "kind": p.get("kind"), "text": p.get("text"), "lead": p.get("lead") or "",
+            "speaker": (voices[0] if voices else ""), "speakers": (voices if len(voices) > 1 else []),
+            "refers_to": list(dict.fromkeys(t for f in [rep] + c for t in (f["p"].get("refers_to") or []))),
+            "attribution": p.get("attribution") or "",
+            "data": p.get("data") or {}, "from_i": fi, "to_i": ti,
+            "segment_ids": [s["id"] for s in run],
+            "start_time": (round(min(starts), 3) if starts else None),
+            "end_time": (round(max(ends), 3) if ends else None),
+            "heading": (headers[h - 1]["text"] if h > 0 and h - 1 < len(headers) else ""), "heading_index": h,
+            "parent_key": str(p.get("parent_key") or ""),
+            "_parent_hints": [o for o in p.get("open_refs") or [] if o.get("role") == "parent"],
+            "_ref_hints": [o for f in [rep] + c for o in f["p"].get("open_refs") or [] if o.get("role") != "parent"],
+            "evidence": {"pack_id": pack.get("pack_id"), "digest": pack.get("digest"), "from_i": fi, "to_i": ti},
+            "shown": rep["cell"], "origins": [f["origin"] for f in c],
+        })
+    by_id = {r["proposal_id"]: r for r in merged}
+    detached = dropped_refs = 0
+    for r in merged:   # member ids -> merged ids
+        refs = [id_map.get(t) for t in r["refers_to"]]
+        kept = list(dict.fromkeys(t for t in refs if t and t != r["proposal_id"]))
+        # LOST links only (target left out, or collapsed into this very row) — members agreeing on one target is a fold, not a loss
+        dropped_refs += sum(1 for t in refs if not t or t == r["proposal_id"])
+        r["refers_to"] = kept
+        if r["parent_key"]:
+            t = id_map.get(r["parent_key"]) or ""
+            if not t or t == r["proposal_id"] or by_id[t]["heading_index"] != r["heading_index"]:
+                detached += 1
+                t = ""
+            r["parent_key"] = t
+        parent_hints, ref_hints = r.pop("_parent_hints"), r.pop("_ref_hints")
+        still_open = (([] if r["parent_key"] else parent_hints[:1])
+                      + ([] if kept else list({o["hint"]: o for o in ref_hints}.values())))
+        if still_open:
+            r["open_refs"] = still_open
+    for r in merged:   # a cycle or a third level: detach the link that made it
+        seen, cur, depth = {r["proposal_id"]}, r, 0
+        while cur["parent_key"]:
+            nxt = by_id[cur["parent_key"]]
+            depth += 1
+            if nxt["proposal_id"] in seen or depth > 2:
+                r["parent_key"] = ""
+                detached += 1
+                break
+            seen.add(nxt["proposal_id"])
+            cur = nxt
+    # accept order: source order, every descendant directly after its ancestors
+    merged.sort(key=lambda r: (r["from_i"], r["to_i"], r["proposal_id"]))
+    kids: Dict[str, List[Dict[str, Any]]] = {}
+    for r in merged:
+        if r["parent_key"]:
+            kids.setdefault(r["parent_key"], []).append(r)
+    out: List[Dict[str, Any]] = []
+
+    def _emit(r: Dict[str, Any]) -> None:
+        out.append(r)
+        for k in kids.get(r["proposal_id"], []):
+            _emit(k)
+    for r in merged:
+        if not r["parent_key"]:
+            _emit(r)
+    sizes: Dict[str, int] = {}
+    alone: Dict[str, int] = {c: 0 for c in stats["cells"]}
+    for r in out:
+        sizes[str(len(r["origins"]))] = sizes.get(str(len(r["origins"])), 0) + 1
+        if len(r["origins"]) == 1:
+            alone[r["shown"]] += 1
+    stats.update({"merged": len(out), "by_agreement": dict(sorted(sizes.items())), "alone_by_cell": alone,
+                  "shown_by_cell": shown, "detached_parents": detached, "dropped_refs": dropped_refs,
+                  "open_refs": sum(len(r.get("open_refs") or []) for r in out),
+                  "iou": float(iou), "same_kind": bool(same_kind)})
+    return {"proposals": out, "stats": stats}
+
+
+def open_reference_list(
+    proposals: List[Dict[str, Any]],  # One proposal set's rows (normally a merged set)
+) -> List[Dict[str, Any]]:  # [{ref, row, proposal_id, role, hint}] in index order — `r01`… are stable for the set
+    """Every hinted reference still open in a set, keyed `r01`… in the order of `points_index`
+    — the ids a reconciler answers by and `close_open_refs` applies (work item 3a2c94eb (3))."""
+    index = points_index(proposals)
+    by_id = {p["proposal_id"]: p for p in proposals}
+    found = [(e, o) for e in index for o in by_id[e["proposal_id"]].get("open_refs") or [] if o.get("hint")]
+    width = max(2, len(str(len(found))))
+    return [{"ref": f"r{n:0{width}d}", "row": e["key"], "proposal_id": e["proposal_id"],
+             "role": o.get("role") or "refers_to", "hint": o["hint"]} for n, (e, o) in enumerate(found, start=1)]
+
+
+def render_reconcile_brief(
+    proposals: List[Dict[str, Any]],  # One proposal set's rows (normally a merged set)
+    *,
+    set_id: str = "",                 # The set the brief is about (printed only)
+) -> str:  # The reconciler's brief (markdown)
+    """The brief of the pass that closes hinted references (work item 3a2c94eb (3)): a
+    WHOLE-SOURCE reader works from the Points, never the spine (design 6752db0a (6)), so it
+    reads the keyed index and answers each open reference with the key of the EARLIER point
+    the hint describes — or null. An unresolved reference stays open; it is never guessed."""
+    refs = open_reference_list(proposals)
+    lines = [f"# Open references — set `{set_id}`", "",
+             "Window drafters could not number a point of ANOTHER window, so where a point leans on or elaborates "
+             "something said earlier they left a HINT. Close each hint against the points below.", "",
+             "## Output contract", "",
+             "ONE JSON object per line, one per reference, in the order listed:", "",
+             '    {"ref": "r01", "target": "p017"}     the EARLIER point the hint describes',
+             '    {"ref": "r02", "target": null}       nothing below is what the hint describes', "",
+             "* The target sits EARLIER than the referring row (a smaller key). Never the row itself.",
+             "* `parent` role: the target is the point the row would NEST under — a top-level point or a child, "
+             "never a grandchild (two-space indents below show depth).",
+             "* Judge by what the points SAY. A hint that fits two points takes the more specific one; a hint that "
+             "fits none takes null — a wrong back-link is worse than an open one.",
+             "* Rows only — no prose, no code fences.", "",
+             f"## References ({len(refs)})", ""]
+    lines += [f"- `{r['ref']}` from `{r['row']}` ({r['role']}): {r['hint']}" for r in refs] or ["- (none)"]
+    lines += ["", "## Points", ""] + render_points_index(points_index(proposals))
+    return "\n".join(lines) + "\n"
+
+
+def close_open_refs(
+    proposals: List[Dict[str, Any]],  # One proposal set's rows (normally a merged set)
+    closures: List[Dict[str, Any]],   # The reconciler's rows: {"ref": "r01", "target": "p017" | null}
+) -> Dict[str, Any]:  # {"proposals": rows with closed references applied, "stats": {...}}
+    """Apply a reconciler's answers to a set's hinted references — mechanically checked, loud
+    on the first bad row: a known `ref` answered once, a `target` key of this set's index
+    that sits EARLIER than the referring row and is not the row itself; a `parent` closure
+    needs a row with no parent yet, a target under the same header, and no third level. A
+    closed `refers_to` joins the row's `refers_to`; a closed `parent` becomes its
+    `parent_key`. A null target — and any reference never answered — stays open on the row.
+    Proposal ids are KEPT: they are the points' future keys."""
+    index = points_index(proposals)
+    order = {e["key"]: n for n, e in enumerate(index)}
+    entry = {e["key"]: e for e in index}
+    refs = {r["ref"]: r for r in open_reference_list(proposals)}
+    out = [dict(p) for p in proposals]
+    by_id = {p["proposal_id"]: p for p in out}
+    has_kids = {p["parent_key"] for p in out if p.get("parent_key")}
+    seen: set = set()
+    closed = left_open = 0
+    for n, c in enumerate(closures, start=1):
+        ref = str((c or {}).get("ref") or "")
+        if ref not in refs:
+            raise ValueError(f"closure {n}: unknown reference {ref!r}")
+        if ref in seen:
+            raise ValueError(f"closure {n}: reference {ref} answered twice")
+        seen.add(ref)
+        r = refs[ref]
+        if c.get("target") in (None, "", "null"):
+            left_open += 1
+            continue
+        target = str(c.get("target"))
+        if target not in order:
+            raise ValueError(f"closure {n}: target {target!r} is not a point of this set")
+        if order[target] >= order[r["row"]]:
+            raise ValueError(f"closure {n}: target {target} is not EARLIER than {r['row']}")
+        row, tgt = by_id[r["proposal_id"]], by_id[entry[target]["proposal_id"]]
+        if r["role"] == "parent":
+            if row.get("parent_key"):
+                raise ValueError(f"closure {n}: {r['row']} already has a parent")
+            if tgt.get("heading_index") != row.get("heading_index"):
+                raise ValueError(f"closure {n}: parent {target} is under another header")
+            if int(entry[target]["depth"]) + 1 + (1 if row["proposal_id"] in has_kids else 0) > 2:
+                raise ValueError(f"closure {n}: nesting {r['row']} under {target} makes a third level")
+            row["parent_key"] = tgt["proposal_id"]
+        elif tgt["proposal_id"] not in (row.get("refers_to") or []):
+            row["refers_to"] = list(row.get("refers_to") or []) + [tgt["proposal_id"]]
+        left = [o for o in row.get("open_refs") or [] if not (o.get("hint") == r["hint"] and (o.get("role") or "refers_to") == r["role"])]
+        if left:
+            row["open_refs"] = left
+        else:
+            row.pop("open_refs", None)
+        closed += 1
+    return {"proposals": out, "stats": {"references": len(refs), "closed": closed, "answered_open": left_open,
+                                        "unanswered": len(refs) - len(seen)}}
+
+
+def render_outline_brief(
+    proposals: List[Dict[str, Any]],  # One proposal set's rows (normally the merged set)
+    pack: Dict[str, Any],             # The whole-unit pack (its source line heads the brief)
+    *,
+    set_id: str = "",                 # The set the brief is about (printed only)
+) -> str:  # The outline pass's brief (markdown)
+    """The brief of the whole-source OUTLINE PASS (ruling bc62c727 (A)): after the window merge,
+    one reader proposes the SECTIONS — each a title anchored at the first point it covers —
+    and the unit's synopsis. It reads the keyed Points, never the spine (design 6752db0a (6));
+    slide titles are not the basis (the ruling), the points' own content is."""
+    src = pack.get("source") or {}
+    index = points_index(proposals)
+    tops = sum(1 for e in index if not e["depth"])
+    lines = [f"# Outline pass — set `{set_id}`", "",
+             f"Source: **{src.get('title') or src.get('source_id')}**", "",
+             f"Below are the {len(index)} points drafted from this source ({tops} top-level; children indented), in source "
+             "order, each with a key, its kind, the time it starts and who says it. They will render as ONE page of "
+             "notes. Propose the page's SECTIONS and its SYNOPSIS.", "",
+             "## Output contract", "",
+             "ONE JSON object per line: the sections in source order, then the synopsis LAST.", "",
+             '    {"section": "<title>", "first": "p017"}',
+             '    {"synopsis": "<one or two sentences>"}', "",
+             "* A section is a stretch of the source a returning reader would JUMP to: one topic, one demonstration, "
+             "one question-and-answer block. `first` is the key of the FIRST point it covers — a TOP-LEVEL point (never "
+             "an indented child); the section runs until the next section's `first`. The first section's `first` is "
+             "the first top-level point, so every point falls under a heading.",
+             "* Cut where the SUBJECT changes, judged by what the points say — never at even intervals, never one "
+             "section per speaker turn. A run of questions on one subject is one section; a long topic with a clear "
+             "internal turn is two. Sections of very different lengths are fine when the source is like that.",
+             "* Title: a short noun phrase in the source's own terms, naming what the section is ABOUT (\"Replacing "
+             "raw pointers with mdspan\"), never a generic label (\"Introduction\", \"Part 2\", \"Discussion\"), never a "
+             "sentence, no trailing period, no numbering. A Q&A section's title names the subject asked about.",
+             "* `synopsis`: one or two sentences, under 30 words, on what the source ARGUES or SHOWS — its claim and its "
+             "move, in its own terms; never a list of the section titles. It becomes the page's description.",
+             "* Rows only — no prose, no code fences.", "",
+             "## Points", ""]
+    return "\n".join(lines + render_points_index(index)) + "\n"
+
+
+def apply_outline(
+    proposals: List[Dict[str, Any]],  # One proposal set's rows (normally the merged set)
+    answers: List[Dict[str, Any]],    # The outline pass's rows: {"section", "first"}… then {"synopsis"}
+    pack: Dict[str, Any],             # The whole-unit pack the set's rows are numbered in
+) -> Dict[str, Any]:  # {"proposals": rows + the section and synopsis rows in accept order, "stats": {...}}
+    """Turn the outline pass's answers into STRUCTURE rows on the set (ruling bc62c727 (A)) —
+    mechanically checked, loud on the first bad row: each `first` a TOP-LEVEL point of this
+    set's index, the sections in strictly rising order, the first one at the first top-level
+    point, one synopsis. A section becomes a `section` row anchored at the first line of its
+    first point (validated by the same contract a drafter's row meets), placed directly
+    before that point; the synopsis spans the unit and goes last. A set that already carries
+    structure rows is refused — the outline is proposed once, over points."""
+    if any(p.get("kind") in STRUCTURE_KINDS for p in proposals):
+        raise ValueError("the set already carries section / synopsis rows — outline a set of points")
+    index = points_index(proposals)
+    order = {e["key"]: n for n, e in enumerate(index)}
+    entry = {e["key"]: e for e in index}
+    by_id = {p["proposal_id"]: p for p in proposals}
+    tops = [e["key"] for e in index if not e["depth"]]
+    rows: List[Dict[str, Any]] = []
+    firsts: List[str] = []
+    synopsis = ""
+    for n, a in enumerate(answers, start=1):
+        if not isinstance(a, dict):
+            raise ValueError(f"outline row {n}: not an object")
+        if a.get("synopsis"):
+            if synopsis:
+                raise ValueError(f"outline row {n}: a second synopsis — one per unit")
+            synopsis = str(a["synopsis"]).strip()
+            continue
+        title, first = str(a.get("section") or "").strip(), str(a.get("first") or "").strip()
+        if not title or not first:
+            raise ValueError(f"outline row {n}: a section row carries `section` (the title) and `first` (a point key)")
+        if synopsis:
+            raise ValueError(f"outline row {n}: the synopsis goes LAST")
+        if first not in order:
+            raise ValueError(f"outline row {n}: `first` {first!r} is not a point of this set")
+        if entry[first]["depth"]:
+            raise ValueError(f"outline row {n}: `first` {first} is a child point — a section opens on a TOP-LEVEL point")
+        if firsts and order[first] <= order[firsts[-1]]:
+            raise ValueError(f"outline row {n}: sections run in source order — {first} does not follow {firsts[-1]}")
+        firsts.append(first)
+        line = int(by_id[entry[first]["proposal_id"]]["from_i"])
+        rows.append({"kind": SECTION_KIND, "from_i": line, "to_i": line, "text": title.rstrip(".")})
+    if not firsts:
+        raise ValueError("the outline proposes no section")
+    if tops and firsts[0] != tops[0]:
+        raise ValueError(f"the first section opens on {firsts[0]}, not the first top-level point {tops[0]} — points would fall under no heading")
+    if not synopsis:
+        raise ValueError("the outline carries no synopsis")
+    rows.append({"kind": "synopsis", "from_i": 0, "to_i": len(pack.get("segments") or []) - 1, "text": synopsis})
+    made = {(p["kind"], p["from_i"], p["text"]): p for p in proposals_from_point_rows(validate_point_rows(rows, pack), pack)}
+    before = {entry[k]["proposal_id"]: made[(SECTION_KIND, r["from_i"], r["text"])] for k, r in zip(firsts, rows)}
+    out: List[Dict[str, Any]] = []
+    for p in proposals:
+        if p["proposal_id"] in before:
+            out.append(before[p["proposal_id"]])
+        out.append(p)
+    out.append(made[("synopsis", 0, synopsis)])
+    sizes = [(order[firsts[k + 1]] if k + 1 < len(firsts) else len(index)) - order[firsts[k]] for k in range(len(firsts))]
+    return {"proposals": out, "stats": {"sections": len(firsts), "points": len(index),
+                                        "smallest": min(sizes), "largest": max(sizes), "synopsis_words": len(synopsis.split())}}
 
 
 # --------------------------------------------------------------------------------------
@@ -2910,3 +3546,4 @@ BACK_LINK_WORDS = 4                     # a back-link to a point with no lead an
 STRUCTURE_KINDS = ("synopsis", "section")   # points that carry structure, never coverage
 LEAD_PREFIX_KINDS = ("definition", "glossary", "code")   # term-then-gloss kinds: the text may lack the lead
 SPEAKER_ROLES = ("presenter", "host", "audience member", "chat")   # the closed per-source role slate (bc62c727 (B1))
+OPEN_REF_ROLES = ("refers_to", "parent")   # what a link across a window cut may be (work item 3a2c94eb (3))

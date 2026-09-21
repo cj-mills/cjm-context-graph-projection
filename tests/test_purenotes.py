@@ -16,9 +16,13 @@ from cjm_context_graph_layer.grammar import make_edge
 from cjm_context_graph_layer.ops import extend_graph, graph_task
 from cjm_context_graph_primitives.journal import read_journal
 from cjm_context_graph_primitives.query import EdgeQuery
-from cjm_context_graph_projection.purenotes import (_time_link, build_notes_pack, build_point_tree,
+from cjm_context_graph_projection.purenotes import (apply_outline, render_outline_brief,
+                                                    close_open_refs, load_notes_propsets, merge_point_proposals,
+                                                    open_reference_list, pick_propset, points_index,
+                                                    render_reconcile_brief, with_points_index, write_notes_propset,
+                                                    _time_link, build_notes_pack, build_point_tree,
                                                     choose_spine, coverage_gaps, derive_frontmatter,
-                                                    derived_description, overlapping_points, pack_digest,
+                                                    derived_description, overlapping_points, pack_digest, plan_notes_windows,
                                                     proposals_from_point_rows, pure_notes_type, speaker_labels,
                                                     render_notes_pack, render_points, stratum_role_policy,
                                                     render_source_card, synopsis_of, unit_label,
@@ -156,6 +160,189 @@ def test_pack_roles_a_span_keeps_its_lines_and_the_margin_reaches_the_drafter():
     assert bare["digest"] != pack["digest"]                        # the margin + spans are part of what was read
     with pytest.raises(ValueError):
         build_notes_pack(unit, {"information_policy": {"stratum_roles": {"qa": "structure"}}})
+
+
+def test_window_plan_cuts_at_mechanical_seams_never_inside_a_span_and_tiles_the_unit():
+    # work item 3a2c94eb (1): seams are mechanical (turn, else silence), a qa block is drafted whole
+    def unit(spans, turn_at, gaps=None):
+        gaps = gaps or {}
+        segs, t = [], 0.0
+        for k in range(20):
+            t += gaps.get(k, 0.5)
+            segs.append({"id": f"s{k}", "index": k, "text": f"line {k}", "start": t, "end": t + 1.0})
+            t += 1.0
+        return {"source": {"source_id": "lec", "title": "Lecture"}, "segments": segs,
+                "strata": [{"id": f"c-qa{n}", "correction_type": "stratum",
+                            "payload": {"category": "qa", "segment_ids": [f"s{k}" for k in range(a, b + 1)]}}
+                           for n, (a, b) in enumerate(spans)],
+                "speakers": {f"s{k}": ("Alice" if k < turn_at else "Bob") for k in range(20)}}
+    tprops = {"key": "lecture-notes", "information_policy": {"stratum_roles": {"qa": "span"}}}
+
+    def plan(u, n, **kw):
+        whole = build_notes_pack(u, tprops)
+        windows = plan_notes_windows(whole, n, **kw)
+        ids = [r["id"] for r in whole["segments"]]
+        got = [[r["id"] for r in build_notes_pack(u, tprops, window=(w["start"], w["end"]))["segments"]] for w in windows]
+        assert [i for g in got for i in g] == ids                                  # the windows TILE the unit
+        assert got == [ids[w["from_i"]:w["to_i"] + 1] for w in windows]            # and hold the lines the plan names
+        return windows
+    # a turn inside the radius wins over a longer silence next to it
+    w = plan(unit([], turn_at=11, gaps={9: 5.0}), 2)
+    assert [(x["from_i"], x["to_i"], x["seam"]) for x in w] == [(0, 10, "start"), (11, 19, "turn")]
+    # the turn sits INSIDE a qa span (lines 8–12): the only legal seam in range opens the span
+    w = plan(unit([(8, 12)], turn_at=9), 2)
+    assert [(x["from_i"], x["seam"]) for x in w] == [(0, "start"), (8, "silence")]
+    # a span covering the whole radius: the nearest legal seam outside it, never a cut inside
+    w = plan(unit([(7, 13)], turn_at=20), 2)
+    assert w[1]["from_i"] == 7
+    assert [x["from_i"] for x in plan(unit([], turn_at=20), 4)] == [0, 5, 10, 15] and w[-1]["end"] is None
+    with pytest.raises(ValueError):
+        plan_notes_windows(build_notes_pack(unit([(0, 19)], turn_at=20), tprops), 2)   # one span IS the unit
+    with pytest.raises(ValueError):
+        plan_notes_windows(build_notes_pack(unit([], turn_at=20), tprops), 21)
+
+
+def test_window_pack_margin_is_read_only_context_the_policy_still_filters():
+    # design 6752db0a (5): a window drafter reads its neighbours and cannot draft over them
+    segs = [{"id": f"s{k}", "index": k, "text": f"line {k}", "start": float(2 * k), "end": float(2 * k + 1)} for k in range(10)]
+    unit = {"source": {"source_id": "lec", "title": "Lecture"}, "segments": segs,
+            "strata": [{"id": "c-log", "correction_type": "stratum", "payload": {"category": "logistics", "segment_ids": ["s2"]}}],
+            "speakers": {f"s{k}": ("Alice" if k < 4 else "Bob") for k in range(10)}}
+    tprops = {"key": "lecture-notes", "information_policy": {"stratum_roles": {"logistics": "exclude"}}}
+    whole = build_notes_pack(unit, tprops)
+    assert "context" not in whole and "## This window" not in render_notes_pack(whole)
+    assert "context" not in build_notes_pack(unit, tprops, margin=3)               # no window, nothing next door
+    bare = build_notes_pack(unit, tprops, window=(7.5, 13.5))
+    pack = build_notes_pack(unit, tprops, window=(7.5, 13.5), margin=2)
+    assert [r["id"] for r in pack["segments"]] == ["s4", "s5", "s6"] == [r["id"] for r in bare["segments"]]
+    assert [r["i"] for r in pack["segments"]] == [0, 1, 2]                          # only the window's own lines are numbered
+    assert [c["id"] for c in pack["context"]["before"]] == ["s1", "s3"]             # the excluded s2 stays out of the margin
+    assert [c["id"] for c in pack["context"]["after"]] == ["s7", "s8"]
+    assert pack["context"]["before"][0]["speaker"] == "Alice" and "i" not in pack["context"]["before"][0]
+    assert pack["digest"] != bare["digest"]                                         # the context was read
+    md = render_notes_pack(pack)
+    assert md.index("## Output contract") < md.index("## This window") < md.index("## Transcript")
+    assert "NO `synopsis` row and NO `section` row" in md and "(00:07 to 00:13)" in md
+    assert md.index("### Context before (read-only)") < md.index("[·] 00:02–00:03  line 1") < md.index("### This window's lines")
+    assert md.index("[0] 00:08–00:09  line 4") < md.index("### Context after (read-only)") < md.index("[·] 00:14–00:15  line 7")
+    assert "[·]" not in render_notes_pack(bare) and "## This window" in render_notes_pack(bare)
+    with pytest.raises(ValueError):
+        validate_point_rows([{"kind": "claim", "from_i": 0, "to_i": 3, "text": "reaches into the margin"}], pack)
+
+
+def test_merge_collapses_across_cells_rotates_the_wording_and_closes_open_references(tmp_path):
+    # work item 3a2c94eb (2)-(4): window sets of three arms -> ONE walkable set; links cross the cut
+    segs = [{"id": f"s{k}", "index": k, "text": f"line {k}", "start": float(2 * k), "end": float(2 * k + 1)} for k in range(12)]
+    unit = {"source": {"source_id": "lec", "title": "Lecture"}, "segments": segs, "strata": [],
+            "speakers": {f"s{k}": "Alice" for k in range(12)}}
+    tprops = {"key": "lecture-notes", "information_policy": {"stratum_roles": {}}}
+    whole = build_notes_pack(unit, tprops)
+    w0, w1 = (build_notes_pack(unit, tprops, window=w, margin=2) for w in ((0.0, 11.5), (11.5, None)))
+    for k, w in enumerate((w0, w1)):
+        w["plan"] = {"whole_pack_id": whole["pack_id"], "k": k, "of": 2}
+
+    def ingest(pack, rows, arm, model):
+        res = write_notes_propset(pack, proposals_from_point_rows(validate_point_rows(rows, pack), pack),
+                                  out_root=tmp_path, proposer={"kind": "t", "name": f"{arm}-{model}", "model": model}, arm=arm)
+        return res["set_id"]
+
+    def claim(a, b, text, **kw):
+        return {"kind": "claim", "from_i": a, "to_i": b, "text": text, **kw}
+    ingest(w0, [claim(0, 1, "A"), claim(3, 4, "B")], "blind", "opus")
+    ingest(w1, [claim(0, 2, "C", open_refs=[{"role": "refers_to", "hint": "the A thing"}]),
+                claim(3, 3, "E", open_refs=[{"hint": "the B thing"}]),
+                {"kind": "example", "from_i": 5, "to_i": 5, "text": "F", "open_refs": [{"role": "parent", "hint": "C stuff"}]}],
+           "blind", "opus")
+    seq0 = ingest(w0, [claim(0, 1, "A2"), {"kind": "example", "from_i": 3, "to_i": 4, "text": "B-ex"}], "sequential", "opus")
+    sets = load_notes_propsets(tmp_path)
+    w1i = with_points_index(w1, pick_propset(sets, seq0)["proposals"])
+    assert [e["key"] for e in w1i["index"]] == ["p001", "p002"] and w1i["digest"] != w1["digest"]
+    md = render_notes_pack(w1i)
+    assert "### Points so far" in md and "- `p002` [example] 00:06 (Alice)  B-ex" in md and '"point": "p017"' in md
+    assert "### Points so far" not in render_notes_pack(w1) and '"hint": "<what the earlier point said' in render_notes_pack(w1)
+    ingest(w1i, [claim(0, 2, "C2", open_refs=[{"role": "refers_to", "point": "p001"}]),
+                 claim(4, 5, "D", open_refs=[{"role": "parent", "point": "p002"}])], "sequential", "opus")
+    ingest(whole, [claim(0, 1, "A3"), claim(6, 8, "C3", refers_to=[0]),
+                   {"kind": "section", "from_i": 0, "to_i": 0, "text": "Opening"},
+                   {"kind": "synopsis", "from_i": 0, "to_i": 11, "text": "What it argues."}], "undivided", "fable")
+    with pytest.raises(ValueError):   # a key the index does not list; a hint AND a point; two parents
+        validate_point_rows([claim(0, 0, "x", open_refs=[{"point": "p009"}])], w1i)
+    with pytest.raises(ValueError):
+        validate_point_rows([claim(0, 0, "x", open_refs=[{"point": "p001", "hint": "both"}])], w1i)
+    with pytest.raises(ValueError):
+        validate_point_rows([claim(0, 0, "p"), claim(1, 1, "x", parent=0, open_refs=[{"role": "parent", "hint": "h"}])], w1)
+
+    sets = load_notes_propsets(tmp_path)
+    res = merge_point_proposals(sets, whole)
+    rows, stats = {r["text"]: r for r in res["proposals"]}, res["stats"]
+    assert sorted(rows) == ["A", "B", "B-ex", "C2", "D", "E", "F"]          # 12 drafted rows -> 7 points to walk
+    assert stats["structure_dropped"] == 2 and stats["by_agreement"] == {"1": 5, "3": 2}
+    assert stats["cells"] == {"blind/opus": 5, "sequential/opus": 4, "undivided/fable": 2}
+    assert (rows["A"]["shown"], rows["C2"]["shown"]) == ("blind/opus", "sequential/opus")   # the shown wording ROTATES
+    assert sorted(o["text"] for o in rows["C2"]["origins"]) == ["C", "C2", "C3"]
+    assert (rows["C2"]["from_i"], rows["C2"]["to_i"], rows["C2"]["segment_ids"]) == (6, 8, ["s6", "s7", "s8"])   # whole-pack lines
+    assert rows["C2"]["refers_to"] == [rows["A"]["proposal_id"]] and "open_refs" not in rows["C2"]   # keyed + numbered links agree; the hint is moot
+    assert rows["D"]["parent_key"] == rows["B-ex"]["proposal_id"]             # a keyed parent crosses the cut
+    assert rows["E"]["open_refs"] == [{"role": "refers_to", "hint": "the B thing"}]
+    order = [r["text"] for r in res["proposals"]]
+    assert order.index("D") == order.index("B-ex") + 1                        # a child directly after its parent
+    loose = merge_point_proposals(sets, whole, same_kind=False)["stats"]
+    assert loose["merged"] == 5 and loose["by_agreement"] == {"1": 1, "2": 2, "3": 2}   # B + B-ex and D + F agree on the lines
+
+    refs = open_reference_list(res["proposals"])
+    assert [(r["ref"], r["role"], r["hint"]) for r in refs] == [("r01", "refers_to", "the B thing"), ("r02", "parent", "C stuff")]
+    key = {e["text"]: e["key"] for e in points_index(res["proposals"])}
+    brief = render_reconcile_brief(res["proposals"], set_id="x")
+    assert f"- `r02` from `{key['F']}` (parent): C stuff" in brief and f"`{key['C2']}` [claim]" in brief
+    done = close_open_refs(res["proposals"], [{"ref": "r01", "target": key["B"]}, {"ref": "r02", "target": key["C2"]}])
+    closed = {r["text"]: r for r in done["proposals"]}
+    assert done["stats"] == {"references": 2, "closed": 2, "answered_open": 0, "unanswered": 0}
+    assert closed["E"]["refers_to"] == [rows["B"]["proposal_id"]] and closed["F"]["parent_key"] == rows["C2"]["proposal_id"]
+    assert "open_refs" not in closed["E"] and [r["proposal_id"] for r in done["proposals"]] == [r["proposal_id"] for r in res["proposals"]]
+    kept = close_open_refs(res["proposals"], [{"ref": "r01", "target": None}])
+    assert kept["stats"]["answered_open"] == 1 and kept["stats"]["unanswered"] == 1
+    assert {r["text"]: r for r in kept["proposals"]}["E"]["open_refs"]            # never guessed: it stays open
+    for bad in ([{"ref": "r09", "target": key["A"]}], [{"ref": "r01", "target": key["F"]}],
+                [{"ref": "r01", "target": key["A"]}, {"ref": "r01", "target": key["A"]}]):
+        with pytest.raises(ValueError):
+            close_open_refs(res["proposals"], bad)
+
+
+def test_outline_pass_reads_the_points_and_lands_as_section_and_synopsis_rows():
+    # ruling bc62c727 (A): sections are PROPOSED over the merged points, each anchored at its first point
+    segs = [{"id": f"s{k}", "index": k, "text": f"line {k}", "start": float(2 * k), "end": float(2 * k + 1)} for k in range(10)]
+    unit = {"source": {"source_id": "lec", "title": "Lecture"}, "segments": segs, "strata": [],
+            "speakers": {f"s{k}": "Alice" for k in range(10)}}
+    pack = build_notes_pack(unit, {"key": "lecture-notes", "information_policy": {"stratum_roles": {}}})
+    props = proposals_from_point_rows(validate_point_rows([
+        {"kind": "claim", "from_i": 0, "to_i": 1, "text": "Kernels launch twice"},
+        {"kind": "example", "from_i": 1, "to_i": 1, "text": "the warm-up launch", "parent": 0},
+        {"kind": "claim", "from_i": 4, "to_i": 5, "text": "Streams do not share"},
+        {"kind": "question", "from_i": 7, "to_i": 8, "text": "Why per rank?"}], pack), pack)
+    brief = render_outline_brief(props, pack, set_id="x")
+    assert "- `p001` [claim] 00:00 (Alice)  Kernels launch twice" in brief and "  - `p002` [example]" in brief
+    assert '{"section": "<title>", "first": "p017"}' in brief and "4 points drafted from this source (3 top-level" in brief
+    res = apply_outline(props, [{"section": "Kernel launches.", "first": "p001"}, {"section": "Streams per rank", "first": "p003"},
+                                {"synopsis": "Launches warm the cache; streams stay per rank."}], pack)
+    rows = res["proposals"]
+    assert [(r["kind"], r["text"]) for r in rows] == [
+        ("section", "Kernel launches"), ("claim", "Kernels launch twice"), ("example", "the warm-up launch"),
+        ("section", "Streams per rank"), ("claim", "Streams do not share"), ("question", "Why per rank?"),
+        ("synopsis", "Launches warm the cache; streams stay per rank.")]
+    assert rows[3]["from_i"] == rows[3]["to_i"] == 4 and rows[3]["speaker"] == ""      # an anchor at its first point; nobody's line
+    assert [r["proposal_id"] for r in rows if r["kind"] not in ("section", "synopsis")] == [p["proposal_id"] for p in props]
+    assert res["stats"] == {"sections": 2, "points": 4, "smallest": 2, "largest": 2, "synopsis_words": 8}
+    page = render_points([{**r, "key": r["proposal_id"], "ordinal": r["from_i"]} for r in rows])
+    assert page.index("Kernel launches") < page.index("Kernels launch twice") < page.index("Streams per rank") < page.index("Why per rank?")
+    for bad in ([{"section": "A", "first": "p002"}, {"synopsis": "s"}],                     # a child cannot open a section
+                [{"section": "A", "first": "p003"}, {"synopsis": "s"}],                     # points under no heading
+                [{"section": "A", "first": "p001"}, {"section": "B", "first": "p001"}, {"synopsis": "s"}],
+                [{"section": "A", "first": "p001"}],                                        # no synopsis
+                [{"section": "A", "first": "p001"}, {"synopsis": "s"}, {"section": "B", "first": "p003"}]):
+        with pytest.raises(ValueError):
+            apply_outline(props, bad, pack)
+    with pytest.raises(ValueError):
+        apply_outline(rows, [{"section": "A", "first": "p001"}, {"synopsis": "s"}], pack)   # already outlined
 
 
 def test_lecture_rows_derive_the_speaker_and_carry_refers_to_and_the_per_kind_fields():

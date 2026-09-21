@@ -307,7 +307,8 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         return "\n".join(lines)
     if kind in ("notes-type", "notes-pack", "notes-ingest", "notes-accept", "notes-retract", "notes-retract-all",
                 "notes-coverage", "notes-overlap", "notes-check", "notes-edit", "notes-rehead", "notes-render",
-                "notes-promotion", "notes-staging-index"):
+                "notes-promotion", "notes-staging-index", "notes-index", "notes-merge", "notes-merge-sweep",
+                "notes-close", "notes-outline"):
         return _render_notes_lane(kind, obj)
     if kind == "confirm-proposal":
         if obj.get("error"):
@@ -1402,8 +1403,48 @@ def _render_notes_lane(kind: str, obj: Dict[str, Any]) -> str:
                 + (f"\n  speakers: {', '.join(obj.get('speakers'))}" if obj.get("speakers") else "")
                 + (f"\n  read: {(obj.get('read') or {}).get('layer')} — {(obj.get('read') or {}).get('spans_cut')} span(s) cut, "
                    f"{(obj.get('read') or {}).get('lines_emptied')} line(s) emptied" if obj.get("read") else "")
+                + "".join(f"\n  window {w.get('k')}  lines {w.get('from_i')}–{w.get('to_i')} ({w.get('lines')})  "
+                          f"opens on {w.get('seam')} @ {float(w.get('start') or 0.0):.1f}s  "
+                          f"context {(w.get('context') or {}).get('before', 0)}/{(w.get('context') or {}).get('after', 0)}  "
+                          f"`{w.get('pack_id')}`" for w in obj.get("windows") or [])
                 + f"\n  json  {obj.get('json_path')}\n  brief {obj.get('md_path')}\n"
                 f"  next: hand the brief to a proposer, then `notes-ingest --pack {obj.get('json_path')} --rows <jsonl> --proposer <name>`")
+    if kind == "notes-index":
+        return (f"**indexed pack** `{obj.get('pack_id')}` — window pack `{obj.get('indexed_from')}` + "
+                f"{obj.get('points')} point(s) so far\n  json  {obj.get('json_path')}\n  brief {obj.get('md_path')}")
+    if kind in ("notes-merge", "notes-merge-sweep"):
+        def _stats(s: dict) -> str:
+            cells = s.get("cells") or {}
+            return (f"IoU ≥ {s.get('iou')} · {'same kind' if s.get('same_kind') else 'any kind'}: {s.get('inputs')} row(s) → "
+                    f"**{s.get('merged')}** point(s); agreement "
+                    + " · ".join(f"{k} cell(s)×{v}" for k, v in (s.get("by_agreement") or {}).items())
+                    + "\n    alone by cell: " + " · ".join(f"{c} {(s.get('alone_by_cell') or {}).get(c, 0)}/{n}" for c, n in sorted(cells.items()))
+                    + (f"\n    shown (collapsed rows): " + " · ".join(f"{c} {n}" for c, n in sorted((s.get('shown_by_cell') or {}).items())))
+                    + f"\n    structure rows left out {s.get('structure_dropped')} · parents detached {s.get('detached_parents')} · "
+                      f"refs dropped {s.get('dropped_refs')} · open references {s.get('open_refs')}")
+        if kind == "notes-merge-sweep":
+            return (f"## notes-merge sweep — pack `{obj.get('pack_id')}` · {obj.get('sets')} set(s) (nothing written)\n"
+                    + "\n".join("- " + _stats(s) for s in obj.get("table") or []))
+        return (f"**merged set** `{obj.get('set_id')}` — {obj.get('proposals')} point(s) from {(obj.get('stats') or {}).get('sets')} set(s)\n  "
+                + _stats(obj.get("stats") or {}) + f"\n  {obj.get('manifest_path')}"
+                + (f"\n  reconcile brief {obj.get('reconcile_brief')}\n  next: hand it to a reconciler, then `notes-close --set "
+                   f"{str(obj.get('set_id') or '')[:20]} --closures <jsonl>`" if obj.get("reconcile_brief")
+                   else f"\n  next: `notes-accept --slug <post> --set {str(obj.get('set_id') or '')[:20]} --list`"))
+    if kind == "notes-outline":
+        if obj.get("brief"):
+            return (f"**outline brief** — set `{obj.get('set_id')}` · {obj.get('points')} row(s)\n  {obj.get('brief')}\n"
+                    f"  next: hand it to ONE whole-source reader, then `notes-outline --set {str(obj.get('set_id') or '')[:20]} "
+                    f"--pack <whole pack json> --rows <jsonl>`")
+        s = obj.get("stats") or {}
+        return (f"**outlined set** `{obj.get('set_id')}` — {obj.get('proposals')} row(s): {s.get('sections')} section(s) over "
+                f"{s.get('points')} point(s) (smallest {s.get('smallest')} · largest {s.get('largest')}) + a synopsis of "
+                f"{s.get('synopsis_words')} word(s)\n  {obj.get('manifest_path')}\n"
+                f"  next: `notes-accept --slug <post> --set {str(obj.get('set_id') or '')[:20]} --list`")
+    if kind == "notes-close":
+        s = obj.get("stats") or {}
+        return (f"**closed set** `{obj.get('set_id')}` — {obj.get('proposals')} point(s); references {s.get('references')}: "
+                f"closed {s.get('closed')} · answered open {s.get('answered_open')} · unanswered {s.get('unanswered')}\n"
+                f"  {obj.get('manifest_path')}\n  next: `notes-accept --slug <post> --set {str(obj.get('set_id') or '')[:20]} --list`")
     if kind == "notes-ingest":
         c = obj.get("counts") or {}
         return (f"**proposal set** `{obj.get('set_id')}` — {obj.get('proposals')} point(s): "

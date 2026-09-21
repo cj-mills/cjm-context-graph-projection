@@ -1483,6 +1483,7 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
     from .purenotes import (PURE_NOTES_KEY, accept_point, build_notes_pack, load_deliverable_type,
                             load_notes_propsets, load_points, mint_deliverable_type,
                             note_deliverable_type, observe_segments, overlapping_points, pick_propset,
+                            plan_notes_windows,
                             point_check, point_coverage, proposals_from_point_rows, read_source_unit,
                             render_notes, render_notes_pack, resolve_sibling_source, retract_note_points,
                             retract_point, staging_index, validate_point_rows, work_promotion_status,
@@ -1541,19 +1542,55 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
             print(f"error: {unit['error']}", file=sys.stderr)
             return 1
         window = tuple(args.window) if args.window else None
+        n_windows = int(getattr(args, "windows", 0) or 0)
+        margin = int(getattr(args, "margin", 0) or 0)
+        if n_windows and window:
+            print("error: --windows plans over the WHOLE unit — drop --window", file=sys.stderr)
+            return 1
         try:
-            pack = build_notes_pack(unit, tprops, window=window)
+            pack = build_notes_pack(unit, tprops, window=window, margin=(0 if n_windows else margin))
         except ValueError as e:   # a type policy naming an unknown role (ruling e1e096fa)
             print(f"error: deliverable type `{args.type}`: {e}", file=sys.stderr)
             return 1
-        pack["source"]["graph"] = key
-        pack["digest"] = pack["digest"]  # digest excludes the graph key by construction (source block hashed before)
+        # The window plan (work item 3a2c94eb (1)): ONE spine read serves the whole pack and its
+        # N window packs, so every window numbers lines of the same unit; a plan whose windows
+        # do not TILE the whole pack (overlapping speech straddling a cut) is refused, never written.
+        windows: list = []
+        if n_windows:
+            try:
+                plan = plan_notes_windows(pack, n_windows, slack=float(getattr(args, "slack", 0.2)))
+            except ValueError as e:
+                print(f"error: window plan: {e}", file=sys.stderr)
+                return 1
+            ids = [r["id"] for r in pack["segments"]]
+            for w in plan:
+                wp = build_notes_pack(unit, tprops, window=(w["start"], w["end"]), margin=margin)
+                if [r["id"] for r in wp["segments"]] != ids[w["from_i"]:w["to_i"] + 1]:
+                    print(f"error: window {w['k']} holds {len(wp['segments'])} line(s) where the plan expects whole-pack "
+                          f"lines {w['from_i']}–{w['to_i']} — a line straddles the cut; try another --windows / --slack",
+                          file=sys.stderr)
+                    return 1
+                wp["plan"] = {"whole_pack_id": pack["pack_id"], "whole_digest": pack["digest"], "of": n_windows, **w}
+                windows.append(wp)
         out_dir = _notes_lane_root(args) / "packs"
         out_dir.mkdir(parents=True, exist_ok=True)
-        json_path, md_path = out_dir / f"{pack['pack_id']}.json", out_dir / f"{pack['pack_id']}.md"
-        json_path.write_text(json.dumps(pack, indent=2, ensure_ascii=False))
-        md_path.write_text(render_notes_pack(pack))
-        print(render("notes-pack", {"pack_id": pack["pack_id"], "source": pack["source"],
+        written: list = []
+        for one in [pack] + windows:
+            one["source"]["graph"] = key   # the digest hashed the source block before this key joined it
+            jp, mp = out_dir / f"{one['pack_id']}.json", out_dir / f"{one['pack_id']}.md"
+            jp.write_text(json.dumps(one, indent=2, ensure_ascii=False))
+            mp.write_text(render_notes_pack(one))
+            written.append((jp, mp))
+        json_path, md_path = written[0]
+        plan_rows = [{**wp["plan"], "pack_id": wp["pack_id"], "digest": wp["digest"], "lines": len(wp["segments"]),
+                      "context": {s: len((wp.get("context") or {}).get(s) or []) for s in ("before", "after")},
+                      "json_path": str(jp), "md_path": str(mp)}
+                     for wp, (jp, mp) in zip(windows, written[1:])]
+        if plan_rows:
+            (out_dir / f"{pack['pack_id']}.windows.json").write_text(json.dumps(
+                {"pack_id": pack["pack_id"], "digest": pack["digest"], "count": n_windows, "margin": margin,
+                 "slack": float(getattr(args, "slack", 0.2)), "windows": plan_rows}, indent=2, ensure_ascii=False))
+        print(render("notes-pack", {"pack_id": pack["pack_id"], "source": pack["source"], "windows": plan_rows,
                                     "lines": len(pack["segments"]), "headers": len(pack["headers"]),
                                     "quote_spans": len(pack["quote_spans"]), "spans": len(pack["spans"]),
                                     "noted_lines": sum(1 for r in pack["segments"] if r.get("notes")),
@@ -1572,8 +1609,115 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
         proposals = proposals_from_point_rows(rows, pack)
         res = write_notes_propset(pack, proposals, out_root=_notes_lane_root(args) / "proposals",
                                   proposer={"kind": args.proposer_kind, "name": args.proposer,
-                                            "model": args.model})
+                                            "model": args.model}, arm=getattr(args, "arm", None))
         print(render("notes-ingest", res, args.format))
+        return 0
+    if cmd in ("notes-index", "notes-merge", "notes-close", "notes-outline"):
+        # The drafting experiment's set verbs (work item 3a2c94eb): files in, files out — no graph write.
+        from .purenotes import (apply_outline, close_open_refs, merge_point_proposals, open_reference_list,
+                                render_outline_brief, render_reconcile_brief, with_points_index)
+        root = _notes_lane_root(args)
+        every = load_notes_propsets(root / "proposals")
+
+        def _pick(tokens: list) -> Optional[list]:
+            got = []
+            for tok in tokens:
+                one = pick_propset(every, tok)
+                if one is None:
+                    print(f"error: no unique proposal set matches `{tok}` under {root / 'proposals'}", file=sys.stderr)
+                    return None
+                got.append(one)
+            return got
+        if cmd == "notes-close":
+            chosen = _pick([args.set])
+            if chosen is None:
+                return 1
+            m = chosen[0]["manifest"]
+            try:
+                res = close_open_refs(chosen[0]["proposals"], _read_rows_file(Path(args.closures).expanduser()))
+            except (ValueError, json.JSONDecodeError) as e:
+                print(f"error: {e}", file=sys.stderr)
+                return 1
+            shell = {"pack_id": (m.get("pack") or {}).get("pack_id"), "digest": (m.get("pack") or {}).get("digest"),
+                     "type": m.get("type"), "source": m.get("source"), "window": m.get("window"),
+                     "segments": [None] * int((m.get("pack") or {}).get("segments") or 0)}
+            out = write_notes_propset(shell, res["proposals"], out_root=root / "proposals",
+                                      proposer={"kind": "close", "name": "notes-close", "model": args.model},
+                                      arm=m.get("arm"), extra={"closed_from": m.get("proposal_set_id"),
+                                                               "merged_from": m.get("merged_from"), "close": res["stats"]})
+            print(render("notes-close", {**out, "stats": res["stats"]}, args.format))
+            return 0
+        pack = json.loads(Path(args.pack).expanduser().read_text())
+        if cmd == "notes-outline":
+            # The whole-source OUTLINE PASS (ruling bc62c727 (A)): no --rows = write the brief beside the set;
+            # --rows = apply the pass's answers -> a NEW set carrying the section + synopsis rows (point ids kept).
+            chosen = _pick([args.set])
+            if chosen is None:
+                return 1
+            m = chosen[0]["manifest"]
+            if not args.rows:
+                brief = Path(chosen[0]["path"]).parent / "outline.md"
+                brief.write_text(render_outline_brief(chosen[0]["proposals"], pack, set_id=str(m.get("proposal_set_id") or "")))
+                print(render("notes-outline", {"set_id": m.get("proposal_set_id"), "brief": str(brief),
+                                               "points": len(chosen[0]["proposals"])}, args.format))
+                return 0
+            try:
+                res = apply_outline(chosen[0]["proposals"], _read_rows_file(Path(args.rows).expanduser()), pack)
+            except (ValueError, json.JSONDecodeError) as e:
+                print(f"error: {e}", file=sys.stderr)
+                return 1
+            out = write_notes_propset(pack, res["proposals"], out_root=root / "proposals",
+                                      proposer={"kind": "outline", "name": "notes-outline", "model": args.model},
+                                      arm=m.get("arm"), extra={"outlined_from": m.get("proposal_set_id"),
+                                                               "merged_from": m.get("merged_from"), "merge": m.get("merge"),
+                                                               "outline": res["stats"]})
+            print(render("notes-outline", {**out, "stats": res["stats"]}, args.format))
+            return 0
+        if cmd == "notes-index":
+            chosen = _pick(list(args.set))
+            if chosen is None:
+                return 1
+            indexed = with_points_index(pack, [p for c in chosen for p in c["proposals"]])
+            out_dir = root / "packs"
+            jp, mp = out_dir / f"{indexed['pack_id']}.json", out_dir / f"{indexed['pack_id']}.md"
+            jp.write_text(json.dumps(indexed, indent=2, ensure_ascii=False))
+            mp.write_text(render_notes_pack(indexed))
+            print(render("notes-index", {"pack_id": indexed["pack_id"], "indexed_from": indexed["indexed_from"],
+                                         "points": len(indexed["index"]), "json_path": str(jp), "md_path": str(mp)},
+                         args.format))
+            return 0
+        # notes-merge: the named sets, else every ARM-tagged set drafted from this whole pack or a window of it
+        if args.set:
+            chosen = _pick(list(args.set))
+            if chosen is None:
+                return 1
+        else:
+            chosen = [s for s in every if s["manifest"].get("arm") and pack["pack_id"] in (
+                (s["manifest"].get("plan") or {}).get("whole_pack_id"), (s["manifest"].get("pack") or {}).get("pack_id"))]
+        if not chosen:
+            print(f"error: no arm-tagged proposal set over pack `{pack['pack_id']}` — ingest with --arm, or name --set",
+                  file=sys.stderr)
+            return 1
+        try:
+            if args.sweep:
+                table = [merge_point_proposals(chosen, pack, iou=v, same_kind=k)["stats"]
+                         for k in (True, False) for v in (0.5, 0.7, 0.9)]
+                print(render("notes-merge-sweep", {"pack_id": pack["pack_id"], "sets": len(chosen), "table": table}, args.format))
+                return 0
+            res = merge_point_proposals(chosen, pack, iou=float(args.iou), same_kind=not args.any_kind)
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        out = write_notes_propset(pack, res["proposals"], out_root=root / "proposals",
+                                  proposer={"kind": "merge", "name": "notes-merge", "model": None}, arm="merged",
+                                  extra={"merged_from": [s["manifest"].get("proposal_set_id") for s in chosen],
+                                         "merge": res["stats"]})
+        brief = None
+        if open_reference_list(res["proposals"]):
+            brief = Path(out["set_dir"]) / "reconcile.md"
+            brief.write_text(render_reconcile_brief(res["proposals"], set_id=out["set_id"]))
+        print(render("notes-merge", {**out, "stats": res["stats"], "reconcile_brief": (str(brief) if brief else None)},
+                     args.format))
         return 0
     if cmd == "notes-accept":
         root = _notes_lane_root(args) / "proposals"
@@ -1786,6 +1930,14 @@ def _add_notes_lane_parsers(sub) -> None:
     p.add_argument("--skeleton", default=None, help="Spine selector: 'legacy' or a skeleton-hash prefix (auto refuses when several coexist)")
     p.add_argument("--window", nargs=2, type=float, default=None, metavar=("START", "END"),
                    help="Source-seconds window (default: the whole unit)")
+    p.add_argument("--windows", type=int, default=0, metavar="N",
+                   help="Also cut the whole unit into N window packs at mechanical seams (header, else speaker "
+                        "turn, else longest silence; never inside a span) — one spine read, a tiling check, and "
+                        "a <pack_id>.windows.json plan beside the packs")
+    p.add_argument("--margin", type=int, default=0, metavar="LINES",
+                   help="Content lines of READ-ONLY context either side of a window (un-numbered in the brief)")
+    p.add_argument("--slack", type=float, default=0.2,
+                   help="--windows seam search radius around each even cut, as a fraction of one window")
     p.add_argument("--out-dir", default=None, help="Lane root (default: <journal dir>/purenotes)")
 
     p = sub.add_parser("notes-ingest", help="Validate a proposer's point rows against their pack and write a "
@@ -1797,6 +1949,41 @@ def _add_notes_lane_parsers(sub) -> None:
     p.add_argument("--model", default=None)
     p.add_argument("--lenient", action="store_true",
                    help="Drop (instead of refuse) a lead the row's text does not contain")
+    p.add_argument("--arm", default=None, help="The experiment ARM this set belongs to (blind / sequential / undivided): "
+                                               "notes-merge folds arm-tagged sets and collapses across (arm, model) cells")
+    p.add_argument("--out-dir", default=None, help="Lane root (default: <journal dir>/purenotes)")
+
+    p = sub.add_parser("notes-index", help="The SEQUENTIAL arm's pack: a window pack plus the running index of the points "
+                                           "the earlier windows' sets produced (a new pack; the index joins its digest)")
+    p.add_argument("--pack", required=True, help="The WINDOW pack json")
+    p.add_argument("--set", action="append", required=True, help="An earlier window's proposal set id / prefix (repeatable)")
+    p.add_argument("--out-dir", default=None, help="Lane root (default: <journal dir>/purenotes)")
+
+    p = sub.add_parser("notes-merge", help="Fold the arm-tagged window sets over ONE whole pack into one walkable proposal set: "
+                                           "rows re-resolve by segment id, agreeing rows of different (arm, model) cells "
+                                           "collapse with `origins`, the shown wording rotates across cells")
+    p.add_argument("--pack", required=True, help="The WHOLE-unit pack json every row re-resolves against")
+    p.add_argument("--set", action="append", default=None,
+                   help="A proposal set id / prefix (repeatable; default: every arm-tagged set over this pack or its windows)")
+    p.add_argument("--iou", type=float, default=0.5, help="Line IoU at/above which two rows are one point")
+    p.add_argument("--any-kind", action="store_true", help="Agreement ignores the kind (default: same kind only)")
+    p.add_argument("--sweep", action="store_true", help="Write nothing: the collapse table at IoU 0.5 / 0.7 / 0.9, with and without same-kind")
+    p.add_argument("--out-dir", default=None, help="Lane root (default: <journal dir>/purenotes)")
+
+    p = sub.add_parser("notes-outline", help="The whole-source OUTLINE PASS (ruling bc62c727): without --rows, write the brief "
+                                             "(the set's keyed points + the section / synopsis contract) beside the set; with "
+                                             "--rows, apply the pass's answers — a NEW set with `section` + `synopsis` rows")
+    p.add_argument("--set", required=True, help="The (merged) proposal set id / prefix")
+    p.add_argument("--pack", required=True, help="The WHOLE-unit pack json the set's rows are numbered in")
+    p.add_argument("--rows", default=None, help="The outline pass's JSONL rows ({section, first}… then {synopsis})")
+    p.add_argument("--model", default=None, help="The outline pass's model (provenance)")
+    p.add_argument("--out-dir", default=None, help="Lane root (default: <journal dir>/purenotes)")
+
+    p = sub.add_parser("notes-close", help="Apply a reconciler's closures ({ref, target} rows) to a merged set's hinted open "
+                                           "references — mechanically checked; writes a new set with the SAME proposal ids")
+    p.add_argument("--set", required=True, help="The merged proposal set id / prefix")
+    p.add_argument("--closures", required=True, help="The reconciler's JSONL rows")
+    p.add_argument("--model", default=None, help="The reconciler's model (provenance)")
     p.add_argument("--out-dir", default=None, help="Lane root (default: <journal dir>/purenotes)")
 
     p = sub.add_parser("notes-accept", help="The human confirm: list a set's pending points, or accept them — "

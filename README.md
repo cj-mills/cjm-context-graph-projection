@@ -245,10 +245,12 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 ### `cjm_context_graph_projection.purenotes`
 
 - `accept_point` _function_ — Land ONE accepted point: the Point node, its segment References (from observations —
+- `apply_outline` _function_ — Turn the outline pass's answers into STRUCTURE rows on the set (ruling bc62c727 (A)) —
 - `born_notes_by_unit` _function_ — Which source UNITS carry a born deliverable on this graph, with its state and synopsis:
 - `build_notes_pack` _function_ — Apply the type's INFORMATION POLICY (a stratum query) to the unit and number what a
 - `build_point_tree` _function_ — Nest by `parent_key` (second-read ruling (4): depth TWO in practice, the tree is generic).
 - `choose_spine` _function_ — Pick the SKELETON spine to read (the correction core's `spine_where_for` rule, pure):
+- `close_open_refs` _function_ — Apply a reconciler's answers to a set's hinted references — mechanically checked, loud
 - `coverage_gaps` _function_ — Pure: the unreferenced-lines query — every content line the type includes that no
 - `derive_frontmatter` _function_ — The type may OWN the title and the description — the rest of the authored frontmatter
 - `derive_work_frontmatter` _function_ — The work-page type OWNS the title and description: `notes-on-work` = "Notes on *<work>*"
@@ -258,17 +260,21 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `load_deliverable_type` _function_ — Read a DeliverableType profile off the graph (None = `notes-type <key>` first).
 - `load_notes_propsets` _function_ — Every notes proposal set under `root` (optionally for one source), newest first.
 - `load_points` _function_ — A Note's Points, in source order (start_time, then pack ordinal, then key).
+- `merge_point_proposals` _function_ — Fold the window sets of several ARMS (and drafter models) over one unit into ONE
 - `mint_deliverable_type` _function_ — UPSERT a DeliverableType by slug (the display-rule pattern: last journaled op wins).
 - `nest_points` _function_ — The one-level view of `build_point_tree` (kept for callers that only need parent -> children).
 - `note_deliverable_type` _function_ — The Note's bound type slug (the active `deliverable_type` fact).
 - `note_publish_states` _function_ — The publish_state facts as a map: every deliverable's active values. One value is the
 - `observe_segments` _function_ — Observe each segment in the sibling READ-ONLY (label + properties hash + title) — the
+- `open_reference_list` _function_ — Every hinted reference still open in a set, keyed `r01`… in the order of `points_index`
 - `overlapping_points` _function_ — Pure: the duplication candidates — two points deriving from a shared segment. A
 - `pack_digest` _function_ — Digest the READ content (source binding + numbered lines + headers) — what a proposal
 - `pick_propset` _function_ — Choose a proposal set: newest by default, else the unique id/prefix match.
+- `plan_notes_windows` _function_ — Cut a whole-unit pack into `count` windows of near-equal line count at MECHANICAL
 - `point_check` _function_ — The CHECK review: one point beside its segments' LIVE text from the sibling — the
 - `point_coverage` _function_ — The COVERAGE review: re-read the unit per the Note's type policy and list the content
 - `point_from_args` _function_ — The op-args -> PointNode mapping the live accept AND replay share.
+- `points_index` _function_ — Key a set of proposal rows for a reader that cannot see their lines: `p001`… in source
 - `proposals_from_point_rows` _function_ — Resolve validated rows to proposal rows: a minted proposal id (the point's future
 - `pure_notes_type` _function_ — The pure-notes profile as data: information policy = a stratum query, presentation
 - `read_source_references` _function_ — The Source's human-added resource links (`Reference` nodes minted by the transcription
@@ -277,7 +283,10 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `rehead_points` _function_ — Re-derive every Point's captured heading / heading_index from its segment run against a
 - `render_notes` _function_ — Derive the Note's body from its Points and APPLY it: the authored preamble stays, the
 - `render_notes_pack` _function_ — Render a pack as the brief a proposer reads: the unit, the kind slate, the headers
+- `render_outline_brief` _function_ — The brief of the whole-source OUTLINE PASS (ruling bc62c727 (A)): after the window merge,
 - `render_points` _function_ — Render the body from the Points — deterministic, so a replayed `render-notes` derives
+- `render_points_index` _function_ — The index as a reader sees it: `p017 [claim] 12:03  **lead** — text`, nested by depth.
+- `render_reconcile_brief` _function_ — The brief of the pass that closes hinted references (work item 3a2c94eb (3)): a
 - `render_source_card` _function_ — The reader-facing provenance (second-read ruling (1)): a derived one-line callout under
 - `render_work_card` _function_ — The work page's reader-facing card (check 2d01fe1e): the work-level content — never
 - `render_work_chapters` _function_ — The TOC that is also the executive summary (checks 2d01fe1e + 34f73e46): the units in
@@ -294,6 +303,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `unit_label` _function_ — The short unit handle the title carries (second-read ruling (1): the short shape).
 - `unit_title_header` _function_ — Ruling e1fd4d64 (C): the first read-aloud header of a chapter file is the chapter's own
 - `validate_point_rows` _function_ — Validate + normalize proposer rows against their pack — loud on the first bad row.
+- `with_points_index` _function_ — The SEQUENTIAL arm's pack (design 6752db0a (11)): the window pack plus a running index
 - `work_of_note` _function_ — Which WORK a typed deliverable belongs to — read from its Points' unit (the structure
 - `work_page_notes` _function_ — The WORK PAGES on this graph: every Note bound to the work-page type, keyed by the work
 - `work_page_type` _function_ — The WORK PAGE profile as data: one page per Source work, the directory index above its
