@@ -1630,6 +1630,8 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
                 "skeleton_hash": source.get("skeleton_hash"), "work_structure": source.get("work_structure")}
         if source.get("public_url"):
             unit["public_url"] = source["public_url"]   # addressable source: the rendering links its spans (e1fd4d64 (D))
+        if source.get("speaker_roster"):
+            unit["speaker_roster"] = list(source["speaker_roster"])   # how a speaker's label prints: name, else role, else 'Speaker N' (bc62c727 (B))
         try:
             async with open_graph(siblings[key], args.manifests_dir, readonly=True) as sg:
                 for p in picked:

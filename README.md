@@ -254,6 +254,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `derive_work_frontmatter` _function_ — The work-page type OWNS the title and description: `notes-on-work` = "Notes on *<work>*"
 - `derived_description` _function_ — What the unit CONTAINS, from data the rendering already uses: the work (when the
 - `edit_point` _function_ — Edit an accepted point IN PLACE — the per-point repair the ch. 2 staging read demanded
+- `group_points` _function_ — The page's sections. SYNTHESIZED (ruling bc62c727 (A)): when the points include
 - `load_deliverable_type` _function_ — Read a DeliverableType profile off the graph (None = `notes-type <key>` first).
 - `load_notes_propsets` _function_ — Every notes proposal set under `root` (optionally for one source), newest first.
 - `load_points` _function_ — A Note's Points, in source order (start_time, then pack ordinal, then key).
@@ -286,6 +287,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `resolve_sibling_source` _function_ — Resolve a Source in the sibling graph: id prefix first (the shared seam), then a
 - `retract_note_points` _function_ — Retract EVERY point of a Note (the re-drive's clean slate — ruling e1fd4d64 (5)): one
 - `retract_point` _function_ — Retract a point: delete the node (its edges cascade). The compensating op of accept —
+- `speaker_labels` _function_ — Ruling bc62c727 (B): a speaker reads as its NAME, else its ROLE in the role's own words
 - `staging_index` _function_ — Project the staging site's LISTINGS from the publish_state facts (item 140981e9 (b)):
 - `stratum_role_policy` _function_ — Read a type's stratum policy as ROLES (ruling e1e096fa). `stratum_roles` is the one
 - `synopsis_of` _function_

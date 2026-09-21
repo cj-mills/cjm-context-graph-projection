@@ -332,6 +332,7 @@ async def read_source_unit(
     # Speakers ride every line once the assign lane has touched the source: the entity's
     # canonical name, else the diarization cluster the assignment was made over.
     speakers: Optional[Dict[str, Optional[str]]] = None
+    roster: Dict[str, Dict[str, str]] = {}
     assigned = active_speaker_assignments(active, superseded)
     if assigned:
         eres = await graph_task(sg.queue, sg.graph_id, "query_nodes",
@@ -343,7 +344,15 @@ async def read_source_unit(
         speakers = {}
         for s in segments:
             a = assigned.get(s["id"]) or {}
-            speakers[s["id"]] = names.get(a.get("entity_id")) or a.get("cluster") or None
+            name = names.get(a.get("entity_id"))
+            who = name or a.get("cluster") or None
+            speakers[s["id"]] = who
+            # The ROSTER (ruling bc62c727 (B)): every voice once, in first-appearance order over the
+            # WHOLE unit (a windowed pack numbers its anonymous voices the same way), with what a
+            # label may print — the name, else the per-source role, else 'Speaker N'. `role` stays
+            # empty until the per-source speaker-role fact exists on the transcript graph.
+            if who and who not in roster:
+                roster[who] = {"speaker": who, "name": str(name or ""), "role": ""}
     sp = dict(F.props(src))
     # A public, time-addressable URL (YouTube / a podcast player) makes the source ADDRESSABLE:
     # only then does the public rendering carry timestamps, as links (ruling e1fd4d64 (D)).
@@ -354,7 +363,8 @@ async def read_source_unit(
     return {"source": {"source_id": source_id, "title": str(sp.get("title") or ""),
                        "work_structure": sp.get("work_structure"), "skeleton_hash": chosen,
                        **({"public_url": public_url} if public_url else {}),
-                       **({"references": references} if references else {})},
+                       **({"references": references} if references else {}),
+                       **({"speaker_roster": list(roster.values())} if roster else {})},
             "skeleton_hash": chosen, "segments": segments, "strata": strata,
             **({"speakers": speakers} if speakers is not None else {}),
             **({"read": read} if read else {}),
@@ -421,8 +431,13 @@ def pack_digest(pack: Dict[str, Any]) -> str:  # "sha256:<hex>" over the read co
     """Digest the READ content (source binding + numbered lines + headers) — what a proposal
     set records so the read-trace is verifiable, independent of pack id / timestamps. The
     role fields (spans, line notes, speakers — ruling e1e096fa) join the digest only when a
-    pack carries them, so a pack without them digests exactly as it did before the ruling."""
-    body = {"source": pack.get("source"),
+    pack carries them, so a pack without them digests exactly as it did before the ruling.
+    The source's `speaker_roster` stays OUT: the per-line speakers already ride the margin,
+    and the roster is how a label PRINTS, not what was read."""
+    source = pack.get("source")
+    if isinstance(source, dict) and "speaker_roster" in source:
+        source = {k: v for k, v in source.items() if k != "speaker_roster"}
+    body = {"source": source,
             "headers": [[h["i_before"], h["text"]] for h in pack.get("headers") or []],
             "segments": [[r["i"], r["id"], r["start"], r["end"], r["text"]] for r in pack.get("segments") or []]}
     margin = [[r["i"], r.get("speaker"), r.get("notes") or []] for r in pack.get("segments") or []
@@ -760,9 +775,12 @@ def validate_point_rows(
     """Validate + normalize proposer rows against their pack — loud on the first bad row.
     Enforces the contract: kind token, in-range inclusive run, non-empty text, a run that
     never crosses a header, `comparison` carries columns+rows, `sequence` carries items,
-    a `lead` the text CONTAINS (bolded in place — ruling e1fd4d64 (I); `definition` exempt),
-    and `parent` = an EARLIER row under the same header that is itself top-level (ONE level
-    of nesting — e1fd4d64 (H))."""
+    a `lead` the text CONTAINS (bolded in place — ruling e1fd4d64 (I); the term-then-gloss
+    kinds of LEAD_PREFIX_KINDS exempt), and `parent` = an EARLIER row under the same header
+    that is itself top-level (ONE level of nesting — e1fd4d64 (H)). A `section` row (ruling
+    bc62c727 (A)) is an ANCHOR, never a run: its text is the title and it carries nothing
+    else; no row nests under it or refers to it. A `question` may say it was `relayed` and
+    by whom it was asked (`asker`) — bc62c727 (B3)."""
     segs = pack.get("segments") or []
     n = len(segs)
     out: List[Dict[str, Any]] = []
@@ -786,6 +804,15 @@ def validate_point_rows(
                 raise ValueError(f"row {k}: a second synopsis — one per unit")
         elif segs[fi]["h"] != segs[ti]["h"]:
             raise ValueError(f"row {k}: run {fi}..{ti} crosses a header (a point never spans sections)")
+        if kind == SECTION_KIND:
+            # A synthesized section (ruling bc62c727 (A1)): an anchor at the first line of the first
+            # point it covers — the title is its text, and a title carries nothing else.
+            if fi != ti:
+                raise ValueError(f"row {k}: a section is an anchor, not a run — from_i = to_i = the first line "
+                                 f"of the first point it covers")
+            extra = [f for f in ("lead", "parent", "refers_to", "attribution", "data") if raw.get(f) not in (None, "", [], {})]
+            if extra:
+                raise ValueError(f"row {k}: a section carries its title as `text` and nothing else (got {', '.join(extra)})")
         text = str(raw.get("text") or "").strip()
         if not text:
             raise ValueError(f"row {k}: text is empty")
@@ -795,10 +822,10 @@ def validate_point_rows(
         lead = str(raw.get("lead") or "").strip()
         if kind == "question":
             lead = ""   # the questioner is DERIVED from the asking lines' speaker, never drafted (ruling ba341c72 (1))
-        if lead and kind != "definition" and lead.lower() not in text.lower():
+        if lead and kind not in LEAD_PREFIX_KINDS and lead.lower() not in text.lower():
             if not lenient_leads:
                 raise ValueError(f"row {k}: lead {lead!r} does not appear in the text (a lead is bolded IN PLACE; "
-                                 f"only `definition` may carry a lead the text lacks) — fix the row or ingest --lenient")
+                                 f"only {' / '.join(LEAD_PREFIX_KINDS)} may carry a lead the text lacks) — fix the row or ingest --lenient")
             lead = ""
         if text.count("→") > 1:
             # Ruling 5625b74e (2): one arrow per point, cause-and-effect only — the ch. 2 page carried
@@ -815,6 +842,8 @@ def validate_point_rows(
                 raise ValueError(f"row {k}: parent {parent} is not an EARLIER row (0..{k - 2})")
             if kind == "synopsis":
                 raise ValueError(f"row {k}: a synopsis is never nested")
+            if out[parent]["kind"] == SECTION_KIND:
+                raise ValueError(f"row {k}: parent row {parent} is a section — a section is a heading, nothing nests under it")
             gp = out[parent].get("parent")
             if gp is not None and out[gp].get("parent") is not None:
                 raise ValueError(f"row {k}: parent row {parent} is already a grandchild — two levels at most")
@@ -844,8 +873,8 @@ def validate_point_rows(
                     raise ValueError(f"row {k}: refers_to takes 0-based ROW NUMBERS of earlier rows, got {v!r}")
                 if not (0 <= t < k - 1):
                     raise ValueError(f"row {k}: refers_to {t} is not an EARLIER row (0..{k - 2})")
-                if out[t]["kind"] == "synopsis":
-                    raise ValueError(f"row {k}: refers_to {t} is the synopsis — name the point it leans on")
+                if out[t]["kind"] in STRUCTURE_KINDS:
+                    raise ValueError(f"row {k}: refers_to {t} is the {out[t]['kind']} — name the point it leans on")
                 if t not in refers:
                     refers.append(t)
         asr_form = str(raw.get("asr_form") or "").strip()
@@ -855,6 +884,26 @@ def validate_point_rows(
                 data["asr_form"] = asr_form
             if raw.get("unverified") is not None:
                 data["unverified"] = bool(raw.get("unverified"))
+        # A RELAYED question (ruling bc62c727 (B3)): that the host read it out is content of the lines,
+        # so the row may say so — `relayed` = true, or the channel it came through (a SPEAKER_ROLES
+        # token: chat, audience member) — and name the `asker` when the host did. Both ride `data`;
+        # the derived speaker (the host) is untouched.
+        asker = str(raw.get("asker") or "").strip()
+        relayed = raw.get("relayed")
+        if asker or relayed not in (None, False, ""):
+            if kind != "question":
+                raise ValueError(f"row {k}: `relayed` / `asker` belong to a `question` row, not a {kind}")
+            if isinstance(relayed, str):
+                relayed = relayed.strip().lower()
+                if relayed not in SPEAKER_ROLES:
+                    raise ValueError(f"row {k}: relayed takes true or the channel the question came through "
+                                     f"({' | '.join(SPEAKER_ROLES)}), got {relayed!r}")
+            else:
+                relayed = True   # an asker the host named IS a relayed question
+            data = dict(data)
+            data["relayed"] = relayed
+            if asker:
+                data["asker"] = asker
         out.append({"kind": kind, "from_i": fi, "to_i": ti, "text": text, "lead": lead, "parent": parent,
                     "attribution": str(raw.get("attribution") or "").strip(),
                     "data": data, "refers_to": refers})
@@ -880,6 +929,8 @@ def proposals_from_point_rows(
         # Who says it is READ OFF THE LINES, never drafted (ruling ba341c72 (1)): the first line's
         # speaker; every speaker in order when the run crosses a turn.
         voices = list(dict.fromkeys(s["speaker"] for s in run if s.get("speaker")))
+        if r["kind"] == SECTION_KIND:
+            voices = []   # a synthesized title is nobody's line (ruling bc62c727 (A)): its anchor line only places it
         out.append({
             "proposal_id": str(uuid.uuid4()),
             "kind": r["kind"], "text": r["text"], "lead": r["lead"],
@@ -1350,9 +1401,13 @@ async def rehead_points(
 # --------------------------------------------------------------------------------------
 
 
-def _sort_key(p: Dict[str, Any]) -> Tuple[float, int, str]:
+def _sort_key(p: Dict[str, Any]) -> Tuple[float, int, int, str]:
+    """Source order: start time, then pack ordinal, then key. A synthesized `section` is
+    anchored at the first line of the first point it covers, so it sorts BEFORE every point
+    that starts where it does (ruling bc62c727 (A1))."""
     st = p.get("start_time")
-    return (float(st) if st is not None else float("inf"), int(p.get("ordinal") or 0), str(p.get("key") or ""))
+    return (float(st) if st is not None else float("inf"), 0 if str(p.get("kind")) == "section" else 1,
+            int(p.get("ordinal") or 0), str(p.get("key") or ""))
 
 
 async def load_points(
@@ -1375,7 +1430,8 @@ def overlapping_points(
     """Pure: the duplication candidates — two points deriving from a shared segment. A
     `quotation` beside a `claim` over the same run is expected; two claims are the flag."""
     out: List[Dict[str, Any]] = []
-    points = [p for p in points if str(p.get("kind")) != "synopsis"]   # the unit-spanning synopsis overlaps everything by design
+    # the unit-spanning synopsis overlaps everything by design, and a section shares its anchor line with the point it opens
+    points = [p for p in points if str(p.get("kind")) not in STRUCTURE_KINDS]
     for i, a in enumerate(points):
         sa = set(a.get("segment_ids") or [])
         for b in points[i + 1:]:
@@ -1397,8 +1453,8 @@ def coverage_gaps(
     as a graph read)."""
     covered: set = set()
     for p in points:
-        if str(p.get("kind")) == "synopsis":
-            continue   # spans the unit by design; it never counts as coverage
+        if str(p.get("kind")) in STRUCTURE_KINDS:
+            continue   # the synopsis spans the unit by design and a section only anchors a title: neither is coverage
         covered.update(p.get("segment_ids") or [])
     gaps: List[Dict[str, Any]] = []
     run: List[Dict[str, Any]] = []
@@ -1668,10 +1724,194 @@ def _tail(p: Dict[str, Any], timestamps: str) -> str:  # " (span) [§](#pt-x){�
     return f"{_span(p, timestamps)} {_anchor_link(p)}"
 
 
+def speaker_labels(
+    roster: Optional[List[Dict[str, Any]]],  # The unit's speaker roster, first-appearance order: [{speaker, name?, role?}]
+) -> Dict[str, str]:  # line speaker string -> the label a reader sees
+    """Ruling bc62c727 (B): a speaker reads as its NAME, else its ROLE in the role's own words
+    ('Audience member'), else a neutral anonymous label — 'Speaker N', numbered by first
+    appearance among the source's unnamed, role-less voices. A diarization cluster id is
+    never printed. A speaker the roster does not list keeps its own string (a point accepted
+    before rosters existed carries the name itself)."""
+    out: Dict[str, str] = {}
+    n = 0
+    for r in roster or []:
+        key = str((r or {}).get("speaker") or "")
+        if not key or key in out:
+            continue
+        name, role = str(r.get("name") or "").strip(), str(r.get("role") or "").strip()
+        if name:
+            out[key] = name
+        elif role:
+            out[key] = role[:1].upper() + role[1:]
+        else:
+            n += 1
+            out[key] = f"Speaker {n}"
+    return out
+
+
+def _render_ctx(
+    pts: List[Dict[str, Any]],   # every point the page renders (no synopsis)
+    unit: Dict[str, Any],        # the points' unit snapshot (carries `speaker_roster` when the source has speakers)
+) -> Dict[str, Any]:  # {labels, prev, by_key} — one per rendering pass (the outline and the body each track their own speaker)
+    """The state one rendering pass threads through its points: the reader-facing speaker
+    labels, the speaker of the previous rendered point (a label prints only where it
+    changes), and the STANDING points a back-link may target (a section is a heading, never
+    a target)."""
+    return {"labels": speaker_labels(unit.get("speaker_roster")), "prev": "",
+            "by_key": {str(p.get("key")): p for p in pts if str(p.get("kind")) != SECTION_KIND}}
+
+
+def _question_lead(
+    p: Dict[str, Any],     # a `question` point
+    who: str,              # the label of the point's derived speaker ("" when the source carries no speakers)
+) -> str:  # "**Q** (*who*):" | "**Q** (chat, relayed by *host*):" | "**Q** (*asker*, relayed by *host*):" | "**Q**:"
+    """A question LEADS with who asked it (work item e370e5db (2)). The derived speaker of a
+    RELAYED question is the host who read it out (ruling ba341c72 (1) stands), so the point's
+    `data.relayed` — true, or the channel it came through — and `data.asker` — the name the
+    host gave — say so (ruling bc62c727 (B3)): the asker (else the channel) leads, the host
+    is named as the relay."""
+    data = dict(p.get("data") or {})
+    asker = str(data.get("asker") or "").strip()
+    relayed = data.get("relayed")
+    if relayed or asker:
+        via = relayed.strip() if isinstance(relayed, str) else ""
+        bits = [f"*{asker}*" if asker else via, f"relayed by *{who}*" if who else "relayed"]
+    else:
+        bits = [f"*{who}*" if who else ""]
+    inner = ", ".join(b for b in bits if b)
+    return "**Q**" + (f" ({inner})" if inner else "") + ":"
+
+
+def _code_text(p: Dict[str, Any]) -> str:  # a `code` point: the identifier VERBATIM in inline code, an unverified mark when heard-not-seen
+    """Work item e370e5db (4): the lead is an identifier, so it is code-formatted where the
+    text names it (case-sensitive — an identifier is verbatim), prefixed when the text lacks
+    it, and left alone when the drafter already fenced it. `data.unverified` (the audio alone
+    could not confirm the identifier) prints a mark the reader can act on."""
+    lead, text = str(p.get("lead") or "").strip(), str(p.get("text") or "").strip()
+    body = text
+    if lead and f"`{lead}`" not in text:
+        i = text.find(lead)
+        body = (text[:i] + f"`{lead}`" + text[i + len(lead):]) if i >= 0 else f"`{lead}` — {text}"
+    if dict(p.get("data") or {}).get("unverified"):
+        body += " *(unverified)*"
+    return body
+
+
+def _back_links(
+    p: Dict[str, Any],
+    ctx: Dict[str, Any],   # _render_ctx output
+    timestamps: str,
+) -> str:  # " (see [§ label](#pt-x), …)" | "" — only the referred points that STAND
+    """A point's `refers_to` as anchors into the page (ruling ba341c72 (2); work item e370e5db
+    (2)): a referred point that was never accepted, or was retracted since, renders nothing —
+    never a dangling anchor. The link reads as the target's lead term, else its start time
+    where the page renders spans at all, else its opening words — never a bare glyph a
+    reader cannot tell from the next one."""
+    links: List[str] = []
+    for rk in p.get("refers_to") or []:
+        t = ctx["by_key"].get(str(rk))
+        if t is None or str(t.get("key")) == str(p.get("key")):
+            continue
+        label = str(t.get("lead") or "").strip() or (_fmt_ts(t.get("start_time")) if _span(t, timestamps) else "")
+        if not label:
+            words = str(t.get("text") or "").split()
+            label = " ".join(words[:BACK_LINK_WORDS]).rstrip(".,;:") + ("…" if len(words) > BACK_LINK_WORDS else "")
+        links.append(f"[{ANCHOR_GLYPH}{' ' + label if label else ''}](#{_anchor(t)})")
+    return f" (see {', '.join(links)})" if links else ""
+
+
+def _point_text(
+    p: Dict[str, Any],
+    ctx: Optional[Dict[str, Any]],   # _render_ctx output; None = no speakers, no back-links (the book path's old shape)
+    timestamps: str = "addressable",
+    *,
+    outline: bool = False,           # the scan line: the outline text, no back-links
+) -> str:  # the point's line text: who says it (only where that changes) + the kind's shape + its back-links
+    """One point's text as the page prints it. SPEAKER (work item e370e5db (1); ruling
+    bc62c727 (B)): an italic lead label only where the speaker differs from the previous
+    rendered point — dense text, never a per-line column — read from the Point's derived
+    `speaker`; a `question` always leads with who asked. A point with no speaker (a book)
+    prints no label and leaves the running speaker alone."""
+    kind = str(p.get("kind") or "claim")
+    body = _outline_text(p) if outline else (_code_text(p) if kind == "code" else _lead_text(p))
+    if ctx is None:
+        return body
+    sp = str(p.get("speaker") or "")
+    who = ctx["labels"].get(sp, sp)
+    changed = bool(sp) and sp != ctx["prev"]
+    if sp:
+        ctx["prev"] = sp
+    if kind == "question":
+        body = f"{_question_lead(p, who)} {body}"
+    elif changed:
+        body = f"*{who}:* {body}"
+    return body if outline else body + _back_links(p, ctx, timestamps)
+
+
+def group_points(
+    pts: List[Dict[str, Any]],   # the body's points, source order (no synopsis, no glossary)
+    unit: Dict[str, Any],        # the points' unit snapshot (its title suppresses a header that restates it)
+) -> List[Tuple[str, List[Dict[str, Any]]]]:  # [(heading, build_point_tree roots)] in page order; "" = no heading
+    """The page's sections. SYNTHESIZED (ruling bc62c727 (A)): when the points include
+    `section` points the structure is theirs — a section sorts immediately before the first
+    point it covers, and membership is DERIVED: every root point from one section's anchor
+    to the next, children following their parent wherever they fall. A section left with no
+    points (its points were retracted, or the next section starts where it does) renders
+    nothing, so retracting a section drops its points into the previous one. CAPTURED (the
+    book path, unchanged): consecutive points sharing the read-aloud header captured at
+    propose time; a header that restates the unit's own title is suppressed (e1fd4d64 (C))."""
+    marks = [p for p in pts if str(p.get("kind")) == SECTION_KIND]
+    if marks:
+        groups: List[Tuple[str, List[Dict[str, Any]]]] = [("", [])]
+        k = 0
+        for node in build_point_tree([p for p in pts if str(p.get("kind")) != SECTION_KIND]):
+            while k < len(marks) and _sort_key(marks[k]) <= _sort_key(node["p"]):
+                groups.append((str(marks[k].get("text") or ""), []))
+                k += 1
+            groups[-1][1].append(node)
+        return [(h, tree) for h, tree in groups if tree]
+    runs: List[Tuple[str, List[Dict[str, Any]]]] = []
+    for p in pts:
+        h = str(p.get("heading") or "")
+        if unit_title_header(h, unit):
+            h = ""   # the unit's own title, not a section — wherever it occurs, so its points stay ONE group
+        if runs and runs[-1][0] == h:
+            runs[-1][1].append(p)
+        else:
+            runs.append((h, [p]))
+    return [(h, build_point_tree(ps)) for h, ps in runs]
+
+
+def _glossary_lines(
+    gloss: List[Dict[str, Any]],   # the `glossary` points
+    timestamps: str,
+    *,
+    outline: bool = False,         # the scan view: no spans, no anchors of its own
+    link: bool = False,            # outline lines link to the body's anchors (rendering "both")
+) -> List[str]:  # the closer's list lines, alphabetical by term
+    """The DERIVED closing section (work item e370e5db (3)): every glossary point, by term —
+    `**Term** — the source's usage` — with the transcript's surface form kept beside the term
+    when it differed (nickel -> NCCL: the pair is the fidelity chain's evidence, f9d0fd93). A
+    text that opens with its own term never prints it twice."""
+    out: List[str] = []
+    for p in sorted(gloss, key=lambda q: (str(q.get("lead") or q.get("text") or "").casefold(), _sort_key(q))):
+        term, text = str(p.get("lead") or "").strip(), str(p.get("text") or "").strip()
+        asr = str(dict(p.get("data") or {}).get("asr_form") or "").strip()
+        heard = f" (heard as “{asr}”)" if asr and asr.casefold() != term.casefold() else ""
+        rest = text[len(term):].lstrip(" —–-:,") if term and text.casefold().startswith(term.casefold()) else text
+        line = (f"**{term}**{heard}" + (f" — {rest}" if rest else "")) if term else text
+        if outline:
+            out.append(f"- [{line}](#{_anchor(p)})" if link else f"- {line}")
+        else:
+            out.append(f"- {line}{_tail(p, timestamps)}")
+    return out
+
+
 def _render_node(
     node: Dict[str, Any],   # {"p", "kids"} from build_point_tree
     indent: str,            # the item's own indent ("" at top level); children indent to the item's CONTENT column
     timestamps: str,
+    ctx: Optional[Dict[str, Any]] = None,   # _render_ctx output: speaker labels + back-link targets (None = neither)
 ) -> List[str]:  # markdown lines for the point and its subtree
     """One point as a list item at `indent`, its children beneath it. Block kinds keep their
     shapes at every depth: a `quotation` is a `>` block (blank-line-separated, indented to
@@ -1679,7 +1919,9 @@ def _render_node(
     ordered list (legacy `data.items` still renders); a `comparison` carries its table inside
     the item; everything else is a bullet whose lead is bolded in place. Indents are the
     CONTENT column of the enclosing item ("- " = 2, "1. " = 3), the only way Pandoc keeps a
-    nested block inside the item."""
+    nested block inside the item. With a `ctx` the line text is `_point_text` — the speaker
+    label where it changes, a question's lead, a code point's identifier, the back-links; a
+    quotation nobody attributed takes a changed speaker as its attribution."""
     p, kids = node["p"], node["kids"]
     kind = str(p.get("kind") or "claim")
     sub = indent + "  "          # content column of a "- " item
@@ -1687,46 +1929,52 @@ def _render_node(
     if kind == "quotation":
         who = str(p.get("attribution") or "").strip()
         text = str(p.get("text") or "").strip()
+        sp = str(p.get("speaker") or "")
+        if ctx is not None and sp:
+            if not who and sp != ctx["prev"]:
+                who = ctx["labels"].get(sp, sp)
+            ctx["prev"] = sp
         if indent:
             out.append("")
         out.append(f"{indent}> {text}")
-        out.append(f"{indent}>" + (f" — {who}" if who else "") + _tail(p, timestamps))
+        out.append(f"{indent}>" + (f" — {who}" if who else "") + (_back_links(p, ctx, timestamps) if ctx is not None else "")
+                   + _tail(p, timestamps))
         out.append("")
         for k in kids:
-            out += _render_node(k, indent, timestamps)   # a quotation's support sits at the quotation's own indent
+            out += _render_node(k, indent, timestamps, ctx)   # a quotation's support sits at the quotation's own indent
         return out
     if kind == "sequence":
-        out.append(f"{indent}- {_lead_text(p)}{_tail(p, timestamps)}")
+        out.append(f"{indent}- {_point_text(p, ctx, timestamps)}{_tail(p, timestamps)}")
         events = [k for k in kids if str(k["p"].get("kind")) == "event"]
         others = [k for k in kids if str(k["p"].get("kind")) != "event"]
         n = 1
         for ev in events:
             q = ev["p"]
             when = str((q.get("data") or {}).get("when") or "").strip()
-            out.append(f"{sub}{n}. " + (f"**{when}** — " if when else "") + f"{_lead_text(q)}{_tail(q, timestamps)}")
+            out.append(f"{sub}{n}. " + (f"**{when}** — " if when else "") + f"{_point_text(q, ctx, timestamps)}{_tail(q, timestamps)}")
             for g in ev["kids"]:
-                out += _render_node(g, sub + "   ", timestamps)   # the ordered item's content column
+                out += _render_node(g, sub + "   ", timestamps, ctx)   # the ordered item's content column
             n += 1
         if not events:
             out += _sequence_items(p, sub)
         for k in others:
-            out += _render_node(k, sub, timestamps)
+            out += _render_node(k, sub, timestamps, ctx)
         return out
     if kind == "comparison":
-        out.append(f"{indent}- {_lead_text(p)}{_tail(p, timestamps)}")
+        out.append(f"{indent}- {_point_text(p, ctx, timestamps)}{_tail(p, timestamps)}")
         out.append("")
         out += _render_table(dict(p.get("data") or {}), sub)
         out.append("")
         for k in kids:
-            out += _render_node(k, sub, timestamps)
+            out += _render_node(k, sub, timestamps, ctx)
         return out
     if kind == "event":
         when = str((p.get("data") or {}).get("when") or "").strip()
-        out.append(f"{indent}- " + (f"**{when}** — " if when else "") + f"{_lead_text(p)}{_tail(p, timestamps)}")
+        out.append(f"{indent}- " + (f"**{when}** — " if when else "") + f"{_point_text(p, ctx, timestamps)}{_tail(p, timestamps)}")
     else:
-        out.append(f"{indent}- {_lead_text(p)}{_tail(p, timestamps)}")
+        out.append(f"{indent}- {_point_text(p, ctx, timestamps)}{_tail(p, timestamps)}")
     for k in kids:
-        out += _render_node(k, sub, timestamps)
+        out += _render_node(k, sub, timestamps, ctx)
     return out
 
 
@@ -1738,51 +1986,58 @@ def render_points(
     outline_title: str = "At a glance",
 ) -> str:  # The body markdown (after the preamble)
     """Render the body from the Points — deterministic, so a replayed `render-notes` derives
-    the same Sections. EXPANDED (the public post): under the derived headings — a header
-    that restates the unit's own title is suppressed (e1fd4d64 (C)) — each root point with
-    its permalink glyph and its subtree (depth two in practice), spans only when the source
-    is addressable; block kinds keep their shapes at every depth; consecutive top-level
-    `step`s are ONE ordered list; the `synopsis` never renders in the body (it is the
-    description). OUTLINE (review / the work page): one line per point, same headings."""
+    the same Sections. EXPANDED (the public post): under the derived headings (`group_points`:
+    the SYNTHESIZED section points when the points carry them — ruling bc62c727 (A) — else the
+    captured read-aloud headers) each root point with its permalink glyph and its subtree
+    (depth two in practice), spans only when the source is addressable; block kinds keep
+    their shapes at every depth; consecutive top-level `step`s are ONE ordered list; the
+    `synopsis` never renders in the body (it is the description). OUTLINE (review / the work
+    page): one line per point, same headings. THE LECTURE SHAPES (work item e370e5db): a
+    speaker label only where the speaker changes — and again at each heading, so a reader
+    who lands on a section knows who is speaking — a `question` led by who asked it with its
+    answers nested beneath, `refers_to` as back-link anchors to the points that stand, a
+    `code` point's identifier in inline code, and every `glossary` point in ONE derived
+    closing section, alphabetically, never in the body. Every input is a Point field (the
+    derived speaker, the back-link keys, the unit's speaker roster), so the labels and the
+    anchors replay from the accept ops alone."""
     pts = [p for p in sorted(points, key=_sort_key) if str(p.get("kind")) != "synopsis"]
     unit = dict((pts[0].get("unit") or {}) if pts else {})
-    groups: List[Tuple[str, List[Dict[str, Any]]]] = []
-    for p in pts:
-        h = str(p.get("heading") or "")
-        if unit_title_header(h, unit):
-            h = ""   # the unit's own title, not a section — wherever it occurs, so its points stay ONE group
-        if groups and groups[-1][0] == h:
-            groups[-1][1].append(p)
-        else:
-            groups.append((h, [p]))
+    gloss = [p for p in pts if str(p.get("kind")) == GLOSSARY_KIND]
+    groups = group_points([p for p in pts if str(p.get("kind")) != GLOSSARY_KIND], unit)
     lines: List[str] = []
     want_outline = rendering in ("outline", "both")
     want_expanded = rendering in ("expanded", "both")
 
     if want_outline:
+        octx = _render_ctx(pts, unit)
         lines += [f"## {outline_title}", ""]
-        for h, ps in groups:
+        for h, tree in groups:
             if h:
                 lines += [f"**{_heading_text(h)}**", ""]
+            octx["prev"] = ""
 
             def _walk(node: Dict[str, Any], depth: int) -> None:
                 q = node["p"]
                 ind = "  " * depth
-                lines.append(f"{ind}- [{_outline_text(q)}](#{_anchor(q)})" if want_expanded else f"{ind}- {_outline_text(q)}")
+                text = _point_text(q, octx, timestamps, outline=True)
+                lines.append(f"{ind}- [{text}](#{_anchor(q)})" if want_expanded else f"{ind}- {text}")
                 for k in node["kids"]:
                     _walk(k, depth + 1)
-            for n in build_point_tree(ps):
+            for n in tree:
                 _walk(n, 0)
             lines.append("")
+        if gloss:
+            lines += [f"**{GLOSSARY_HEADING}**", ""] + _glossary_lines(gloss, timestamps, outline=True, link=want_expanded) + [""]
 
     if want_expanded:
+        ctx = _render_ctx(pts, unit)
         block_kinds = ("step", "quotation")
-        for h, ps in groups:
+        for h, tree in groups:
             if h:
                 lines += [f"## {_heading_text(h)}", ""]
             # a unit with no section headers renders its points with no heading at all (a lone
             # "## Notes" says nothing to a reader; the source card already names the unit)
-            tree = build_point_tree(ps)
+            ctx["prev"] = ""
             i = 0
             while i < len(tree):
                 node = tree[i]
@@ -1791,18 +2046,22 @@ def render_points(
                     n = 1
                     while i < len(tree) and str(tree[i]["p"].get("kind")) == "step":
                         q = tree[i]["p"]
-                        lines.append(f"{n}. {_lead_text(q)}{_tail(q, timestamps)}")
+                        lines.append(f"{n}. {_point_text(q, ctx, timestamps)}{_tail(q, timestamps)}")
                         for k in tree[i]["kids"]:
-                            lines += _render_node(k, "   ", timestamps)   # the "1. " content column
+                            lines += _render_node(k, "   ", timestamps, ctx)   # the "1. " content column
                         n += 1
                         i += 1
                     lines.append("")
                     continue
-                lines += _render_node(node, "", timestamps)
+                lines += _render_node(node, "", timestamps, ctx)
                 nxt = str(tree[i + 1]["p"].get("kind")) if i + 1 < len(tree) else None
                 if kind != "quotation" and (nxt is None or nxt in block_kinds):
                     lines.append("")   # close the bullet run before a block or the section end
                 i += 1
+        if gloss:
+            if lines and lines[-1] != "":
+                lines.append("")
+            lines += [f"## {GLOSSARY_HEADING}", ""] + _glossary_lines(gloss, timestamps) + [""]
     text = "\n".join(lines).rstrip("\n") + "\n"
     return text if text.strip() else ""
 
@@ -1873,7 +2132,8 @@ def derived_description(
     kind = str(ws.get("kind") or "source").strip() or "source"
     heads: List[str] = []
     for p in pts:
-        h = _heading_text(str(p.get("heading") or ""))
+        # a SYNTHESIZED section's title is its own text (ruling bc62c727 (A)); every other point names its captured header
+        h = _heading_text(str((p.get("text") if str(p.get("kind")) == SECTION_KIND else p.get("heading")) or ""))
         if h and h not in heads and not (not heads and unit_title_header(h, unit)):
             heads.append(h)
     work = str((ws.get("work") or {}).get("title") or "").strip() if isinstance(ws.get("work"), dict) else ""
@@ -2005,10 +2265,15 @@ async def render_notes(
     # re-render (same points) still dedups.
     # The RESOLVED hrefs ride the digest too (ae103970): the same rows resolve differently once a
     # cross-work target is born, and that re-render must land as a new op, not dedup away.
+    # What the LECTURE shapes print rides it as well (work item e370e5db (6)): a point's derived
+    # speaker and its back-link keys, and the unit's speaker roster — appended only where a point
+    # carries them, so a book's digest is the one it always had.
+    roster0 = list(dict(sorted(points, key=_sort_key)[0].get("unit") or {}).get("speaker_roster") or []) if points else []
     digest = hashlib.sha256(json.dumps(
         [[[p.get("key"), p.get("kind"), p.get("text"), p.get("lead"), p.get("heading"), p.get("data"),
-           p.get("parent_key")] for p in points],
-         [[r.get("label"), r.get("href")] for r in resolved]],
+           p.get("parent_key")] + ([p.get("speaker"), list(p.get("refers_to") or [])]
+                                   if p.get("speaker") or p.get("refers_to") else []) for p in points],
+         [[r.get("label"), r.get("href")] for r in resolved]] + ([roster0] if roster0 else []),
         sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")).hexdigest()
     res.update(points=len(points), rendering=rendering, timestamps=timestamps, text=new_text,
                references=resolved,
@@ -2636,3 +2901,12 @@ async def render_work_page(
 
 
 WORK_PAGE_KEY = "work-page"   # the second deliverable type: one page per Source work (ruling a7ca900d (2); item ebb77107)
+
+# The lecture rendering's vocabulary (rulings bc62c727, ba341c72; work item e370e5db). Read at CALL time only.
+SECTION_KIND = "section"                # a SYNTHESIZED section (bc62c727 (A)): a Point whose text is the title, anchored at its first covered point
+GLOSSARY_KIND = "glossary"              # renders ONLY in the derived closing section, alphabetically
+GLOSSARY_HEADING = "Glossary"
+BACK_LINK_WORDS = 4                     # a back-link to a point with no lead and no rendered time reads as its opening words
+STRUCTURE_KINDS = ("synopsis", "section")   # points that carry structure, never coverage
+LEAD_PREFIX_KINDS = ("definition", "glossary", "code")   # term-then-gloss kinds: the text may lack the lead
+SPEAKER_ROLES = ("presenter", "host", "audience member", "chat")   # the closed per-source role slate (bc62c727 (B1))

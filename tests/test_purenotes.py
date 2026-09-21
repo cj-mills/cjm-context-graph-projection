@@ -18,8 +18,8 @@ from cjm_context_graph_primitives.journal import read_journal
 from cjm_context_graph_primitives.query import EdgeQuery
 from cjm_context_graph_projection.purenotes import (_time_link, build_notes_pack, build_point_tree,
                                                     choose_spine, coverage_gaps, derive_frontmatter,
-                                                    derived_description, overlapping_points,
-                                                    proposals_from_point_rows, pure_notes_type,
+                                                    derived_description, overlapping_points, pack_digest,
+                                                    proposals_from_point_rows, pure_notes_type, speaker_labels,
                                                     render_notes_pack, render_points, stratum_role_policy,
                                                     render_source_card, synopsis_of, unit_label,
                                                     unit_title_header, validate_point_rows,
@@ -669,7 +669,8 @@ def test_cli_pure_notes_lane_end_to_end_and_replay(tmp_path):
     assert staged.index("**Gatto** quit teaching in 1991.") < staged.index("## Lesson 1. Confusion")   # the opening points stand before the first section
     assert f"> I teach confusion.\n> — Gatto [§](#pt-{quote_pid[:8]}){{#pt-{quote_pid[:8]} .pt-anchor}}\n" in staged
     assert "(00:" not in staged
-    assert "- Subjects taught in isolation. [§]" in staged and "\n  - Isolation → no **coherent** picture. [§]" in staged
+    # the child's refers_to prints as a back-link to the standing point it leans on (work item e370e5db (2))
+    assert "- Subjects taught in isolation. [§]" in staged and "\n  - Isolation → no **coherent** picture. (see [§ Gatto](#pt-" in staged
     r = _run("--graph-db-path", pdb, "read", note_id)
     assert r.stdout == staged                                     # the graph reconstruction IS the file
     live_text = r.stdout
@@ -700,7 +701,7 @@ def test_cli_pure_notes_lane_end_to_end_and_replay(tmp_path):
     r = _run(*base, "notes-render", "--slug", "the-learning-game/ch01")
     assert r.returncode == 0, r.stderr or r.stdout
     staged = (pri_dir / "staging" / "the-learning-game" / "ch01" / "index.md").read_text()
-    assert "\n  - Isolation = no **coherent** picture. [§]" in staged and f"#pt-{child_key[:8]}" in staged
+    assert "\n  - Isolation = no **coherent** picture. (see [§ Gatto](#pt-" in staged and f"#pt-{child_key[:8]}" in staged   # the edit keeps its back-link
     assert "→" not in staged.split("---\n", 2)[2]
     live_text = _run("--graph-db-path", pdb, "read", note_id).stdout
     assert live_text == staged
@@ -716,7 +717,7 @@ def test_cli_pure_notes_lane_end_to_end_and_replay(tmp_path):
     r = _run(*base, "notes-render", "--slug", "the-learning-game/ch01")
     regrouped = (pri_dir / "staging" / "the-learning-game" / "ch01" / "index.md").read_text()
     assert "## Lesson 1. Confusion" not in regrouped and f"#pt-{child_key[:8]}" in regrouped
-    assert "\n  - Isolation = no **coherent** picture. [§]" in regrouped        # the nesting survives the regroup
+    assert "\n  - Isolation = no **coherent** picture. (see [§ Gatto](#pt-" in regrouped        # the nesting (and the back-link) survives the regroup
     r = _run(*base, "notes-rehead", "--slug", "the-learning-game/ch01", "--pack", str(pack_json))
     assert r.returncode == 0 and "3 of 5 point(s) re-headed" in r.stdout, r.stderr or r.stdout
     r = _run(*base, "notes-rehead", "--slug", "the-learning-game/ch01", "--pack", str(pack_json))
@@ -1163,3 +1164,128 @@ def test_cli_work_page_binds_by_edge_renders_the_toc_gates_on_published_chapters
     r = _run("--graph-db-path", rep, "emit-post", wp, "--website-root", str(tmp_path / "rep-site"))
     assert r.returncode == 0, r.stderr or r.stdout
     assert (tmp_path / "rep-site" / "posts" / "the-learning-game" / "index.md").read_text() == text
+
+
+def _lecture_points():
+    """A lecture in miniature (work item e370e5db; rulings bc62c727, ba341c72): two presenters, a
+    host relaying a chat question, an anonymous audience voice, two synthesized sections, a glossary
+    term the ASR mangled, an unverified code identifier, and an answer leaning back on the body."""
+    unit = {"graph": "tx", "source_id": "src-lec", "title": "Bonus Lecture", "public_url": "https://www.youtube.com/watch?v=abc",
+            "speaker_roster": [{"speaker": "Georgii", "name": "Georgii", "role": ""},
+                               {"speaker": "SPEAKER_07", "name": "", "role": ""},
+                               {"speaker": "Mark", "name": "Mark", "role": "host"},
+                               {"speaker": "SPEAKER_09", "name": "", "role": "audience member"},
+                               {"speaker": "SPEAKER_11", "name": "", "role": ""}]}
+
+    def pt(key, kind, text, start, speaker="", **kw):
+        return {"id": key, "key": key, "kind": kind, "text": text, "heading": "", "heading_index": 0,
+                "segment_ids": [f"s{int(start)}"], "start_time": float(start), "end_time": float(start) + 4.0,
+                "ordinal": int(start), "speaker": speaker, "unit": unit, **kw}
+    return [
+        pt("c1c1c1c1-0", "claim", "Thrust wraps CUB.", 10, "Georgii", lead="Thrust"),
+        pt("5ec00001-0", "section", "The core libraries", 10),                     # sorts BEFORE the point it opens
+        pt("c2c2c2c2-0", "claim", "CUB is the device layer.", 20, "Georgii"),
+        pt("90550001-0", "glossary", "NCCL is the collective library.", 25, "Georgii", lead="NCCL", data={"asr_form": "nickel"}),
+        pt("c3c3c3c3-0", "claim", "Kernels launch through it.", 30, "SPEAKER_07"),
+        pt("5ec00002-0", "section", "Questions from the chat", 40),
+        pt("99990001-0", "question", "Does it support AMD?", 40, "Mark", data={"relayed": "chat", "asker": "Chris"}),
+        pt("a1a1a1a1-0", "claim", "Only through HIP.", 44, "Georgii", parent_key="99990001-0",
+           refers_to=["c1c1c1c1-0", "c2c2c2c2-0", "deadbeef-0"]),
+        pt("c0de0001-0", "code", "cub::DeviceReduce sums on device.", 50, "Georgii", lead="cub::DeviceReduce",
+           data={"unverified": True}),
+        pt("99990002-0", "question", "Is it header-only?", 60, "SPEAKER_09"),
+        pt("a2a2a2a2-0", "claim", "Yes.", 64, "SPEAKER_11", parent_key="99990002-0"),
+        pt("90550002-0", "glossary", "The CUDA C++ Core Libraries.", 70, "Georgii", lead="CCCL"),
+    ]
+
+
+def test_render_lecture_sections_speakers_questions_glossary_and_code():
+    """Work item e370e5db on FIXTURE points (the Bonus lecture has none accepted yet — ruling
+    bc62c727 (C)): synthesized sections group by derived membership; a speaker label prints only
+    where the speaker changes (and again under each heading); a question leads with who asked —
+    a relayed one names its asker and its relay; an answer's back-links reach only the points
+    that STAND; a code identifier is inline code with its unverified mark; the glossary is ONE
+    alphabetical closer and never renders in the body; no cluster id is ever printed."""
+    out = render_points(_lecture_points())
+    assert out == render_points(_lecture_points())                                                   # deterministic
+    body, closer = out.split("## Glossary\n")
+    assert out.startswith("## The core libraries\n\n- *Georgii:* **Thrust** wraps CUB. [(00:10–00:14)]")  # the section opens ABOVE the point it anchors at
+    assert "\n- CUB is the device layer. [(00:20" in body                                             # same speaker: no label
+    assert "\n- *Speaker 1:* Kernels launch through it." in body                                      # an unnamed, role-less voice: numbered by first appearance
+    assert "SPEAKER_" not in out                                                                      # a diarization cluster id is never printed
+    assert "## Questions from the chat\n\n- **Q** (*Chris*, relayed by *Mark*): Does it support AMD?" in body
+    assert (f"\n  - *Georgii:* Only through HIP. (see [§ Thrust](#pt-c1c1c1c1), [§ 00:20](#pt-c2c2c2c2)) "
+            f"[(00:44–00:48)](https://www.youtube.com/watch?v=abc&t=44s) {_glyph('a1a1a1a1')}\n") in body   # the unaccepted target renders nothing
+    assert "deadbeef" not in out
+    assert "(see [§ Thrust](#pt-c1c1c1c1), [§ CUB is the device…](#pt-c2c2c2c2))" in render_points(_lecture_points(), timestamps="never")   # no lead, no rendered time: the opening words
+    assert "\n- `cub::DeviceReduce` sums on device. *(unverified)*" in body                           # same speaker as the answer: no label
+    assert "\n- **Q** (*Audience member*): Is it header-only?" in body and "\n  - *Speaker 2:* Yes." in body
+    assert "NCCL" not in body and "CCCL" not in body                                                  # glossary points live in the closer only
+    assert closer.index("**CCCL** — The CUDA C++ Core Libraries.") < closer.index("**NCCL** (heard as “nickel”) — is the collective library.")
+    assert _glyph("90550001") in closer and out.count("{#pt-90550001") == 1                           # ONE anchor per point
+    outline = render_points(_lecture_points(), rendering="outline")
+    assert "**The core libraries**\n\n- *Georgii:* **Thrust** wraps CUB.\n- CUB is the device layer.\n- *Speaker 1:*" in outline
+    assert "- **Q** (*Chris*, relayed by *Mark*): Does it support AMD?\n  - *Georgii:* Only through HIP.\n" in outline and "(see " not in outline
+    assert outline.rstrip().endswith("**Glossary**\n\n- **CCCL** — The CUDA C++ Core Libraries.\n- **NCCL** (heard as “nickel”) — is the collective library.")
+
+
+def test_render_lecture_retracted_section_falls_into_the_previous_and_relayed_channel():
+    """Ruling bc62c727 (A3): retracting a section drops its points into the section before it —
+    membership is derived, nothing is re-stamped. A relayed question with no named asker leads
+    with the channel; with neither, it still says it was relayed. A roster-less (legacy) point
+    prints its own speaker string."""
+    pts = [p for p in _lecture_points() if p["key"] != "5ec00002-0"]
+    out = render_points(pts)
+    assert "Questions from the chat" not in out and out.count("\n## ") == 1 and out.startswith("## The core libraries")   # only the Glossary heading follows
+    assert out.index("Kernels launch through it.") < out.index("**Q** (*Chris*")
+    q = next(p for p in pts if p["key"] == "99990001-0")
+    q["data"] = {"relayed": "chat"}
+    assert "- **Q** (chat, relayed by *Mark*): Does it support AMD?" in render_points(pts)
+    q["data"] = {"relayed": True}
+    assert "- **Q** (relayed by *Mark*): Does it support AMD?" in render_points(pts)
+    bare = [{**p, "unit": {}} for p in pts]
+    assert "- *SPEAKER_07:* Kernels launch through it." in render_points(bare)                        # no roster: the string stands (pre-roster points carry names)
+    assert derived_description(_lecture_points()).startswith("Notes: The core libraries · Questions from the chat.")
+
+
+def test_lecture_row_contract_section_anchor_relayed_question_and_prefix_leads():
+    """Ruling bc62c727 at ingest: a `section` row is an anchor (one line, a title, nothing else),
+    nothing nests under it or refers to it, and it carries no speaker; `relayed` / `asker` belong
+    to a question and ride its data; glossary and code leads may be terms the text lacks; coverage
+    and the overlap review ignore sections."""
+    segs = [{"i": i, "id": f"s{i}", "index": i, "start": float(i), "end": float(i) + 1.0, "text": f"line {i}", "h": 0,
+             "speaker": "Mark" if i == 2 else "Georgii"} for i in range(5)]
+    pack = {"pack_id": "npack_x", "digest": "sha256:x", "segments": segs, "headers": []}
+    rows = validate_point_rows([
+        {"kind": "section", "from_i": 0, "to_i": 0, "text": "Opening"},
+        {"kind": "claim", "from_i": 0, "to_i": 1, "text": "A claim."},
+        {"kind": "question", "from_i": 2, "to_i": 2, "text": "Why?", "asker": "Chris"},
+        {"kind": "question", "from_i": 2, "to_i": 2, "text": "How?", "relayed": "Chat"},
+        {"kind": "glossary", "from_i": 3, "to_i": 3, "text": "the collective library", "lead": "NCCL", "asr_form": "nickel"},
+        {"kind": "code", "from_i": 4, "to_i": 4, "text": "sums on device", "lead": "cub::DeviceReduce", "unverified": True}], pack)
+    assert rows[2]["data"] == {"relayed": True, "asker": "Chris"} and rows[3]["data"] == {"relayed": "chat"}
+    assert rows[4]["lead"] == "NCCL" and rows[5]["lead"] == "cub::DeviceReduce"
+    props = proposals_from_point_rows(rows, pack)
+    sec = next(p for p in props if p["kind"] == "section")
+    assert sec["speaker"] == "" and sec["segment_ids"] == ["s0"]
+    for bad, why in [
+        ({"kind": "section", "from_i": 0, "to_i": 1, "text": "T"}, "anchor, not a run"),
+        ({"kind": "section", "from_i": 0, "to_i": 0, "text": "T", "lead": "T"}, "nothing else"),
+        ({"kind": "claim", "from_i": 1, "to_i": 1, "text": "x", "relayed": True}, "belong to a `question`"),
+        ({"kind": "question", "from_i": 2, "to_i": 2, "text": "x", "relayed": "email"}, "relayed takes true or the channel"),
+    ]:
+        with pytest.raises(ValueError, match=why):
+            validate_point_rows([bad], pack)
+    with pytest.raises(ValueError, match="is a section"):
+        validate_point_rows([{"kind": "section", "from_i": 0, "to_i": 0, "text": "T"},
+                             {"kind": "claim", "from_i": 0, "to_i": 0, "text": "x", "parent": 0}], pack)
+    with pytest.raises(ValueError, match="is the section"):
+        validate_point_rows([{"kind": "section", "from_i": 0, "to_i": 0, "text": "T"},
+                             {"kind": "claim", "from_i": 0, "to_i": 0, "text": "x", "refers_to": [0]}], pack)
+    pts = [{"id": "a", "kind": "section", "segment_ids": ["s0"]}, {"id": "b", "kind": "claim", "segment_ids": ["s0", "s1"]}]
+    assert overlapping_points(pts) == []
+    assert [g["from_i"] for g in coverage_gaps(segs, pts[:1])] == [0]                                  # a section alone covers nothing
+    assert speaker_labels([{"speaker": "A", "name": "Ann"}, {"speaker": "c1", "role": "audience member"},
+                           {"speaker": "c2"}, {"speaker": "c3"}]) == {"A": "Ann", "c1": "Audience member", "c2": "Speaker 1", "c3": "Speaker 2"}
+    with_roster = {**pack, "source": {"source_id": "x", "speaker_roster": [{"speaker": "Georgii", "name": "Georgii", "role": ""}]}}
+    assert pack_digest(with_roster) == pack_digest({**pack, "source": {"source_id": "x"}})             # the roster is how a label prints, not what was read
