@@ -1429,7 +1429,10 @@ def _render_notes_lane(kind: str, obj: Dict[str, Any]) -> str:
         for a in acc:
             tag = " (re-accept, no-op)" if a.get("existing") else ""
             lines.append(f"- ✓ `{str(a.get('point_id') or '')[:8]}` [{a.get('kind')}] {_short(a.get('text'), 120)}{tag}"
-                         f" · refs {len(a.get('references') or [])}")
+                         f" · refs {len(a.get('references') or [])}"
+                         + (f" · ⚠ {len(a.get('refers_to_missing'))} back-link(s) wait on unaccepted point(s): "
+                            + ", ".join(f"`{str(k)[:8]}`" for k in a.get("refers_to_missing"))
+                            if a.get("refers_to_missing") else ""))
         for s in obj.get("skipped") or []:
             lines.append(f"- ✗ `{str(s.get('proposal_id') or '')[:8]}`: {s.get('reason')}")
         if obj.get("type_fact"):

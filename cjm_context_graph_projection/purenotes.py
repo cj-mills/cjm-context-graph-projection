@@ -542,6 +542,10 @@ def build_notes_pack(
     spans = [{"class": c, "stratum_id": cid, "from_i": min(v), "to_i": max(v)} for cid, (c, v) in span_runs.items()]
     spans.sort(key=lambda q: (q["from_i"], q["to_i"]))
     kinds = dict((type_props.get("presentation_policy") or {}).get("kinds") or POINT_KIND_GLOSSES)
+    # The row fields this TYPE adds to the contract (ruling ba341c72 (3)): contract text is type
+    # data, so a brief prints the fields of the kinds its type actually has.
+    kind_fields = {str(k): str(v) for k, v in
+                   dict((type_props.get("presentation_policy") or {}).get("kind_fields") or {}).items()}
     carried = {sp["class"] for sp in spans} | {c for r in rows for c in r.get("notes") or []}
     glosses = {str(c): str(g) for c, g in dict(info.get("stratum_glosses") or {}).items() if c in carried}
     pack = {
@@ -556,6 +560,7 @@ def build_notes_pack(
         "quote_spans": quote_spans,
         "spans": spans,
         "stratum_glosses": glosses,
+        **({"kind_fields": kind_fields} if kind_fields else {}),
         **({"read": dict(unit["read"])} if unit.get("read") else {}),
         "segments": rows,
     }
@@ -710,7 +715,14 @@ def render_notes_pack(pack: Dict[str, Any]) -> str:  # The proposer brief (markd
             lines.append(f"* The lines are the CLEAN read: `{read.get('marker') or '[…]'}` stands where spoken disfluency "
                          "(hesitations, repeats, false starts) was elided. Nothing of substance is behind it; never "
                          "carry the marker into a point.")
-    lines += ["", OUTPUT_CONTRACT, "## Transcript", ""]
+    lines += ["", OUTPUT_CONTRACT]
+    kind_fields = dict(pack.get("kind_fields") or {})
+    if kind_fields:
+        lines += ["## This type's row fields", "",
+                  "Everything above holds for every row. This deliverable type adds:", ""]
+        lines += [f"* `{k}` — {v}" for k, v in kind_fields.items()]
+        lines.append("")
+    lines += ["## Transcript", ""]
     headers = pack.get("headers") or []
     hi = 0
     prev_speaker: Any = object()
@@ -781,6 +793,8 @@ def validate_point_rows(
         if kind == "comparison" and not (data.get("columns") and data.get("rows")):
             raise ValueError(f"row {k}: a comparison needs data.columns and data.rows")
         lead = str(raw.get("lead") or "").strip()
+        if kind == "question":
+            lead = ""   # the questioner is DERIVED from the asking lines' speaker, never drafted (ruling ba341c72 (1))
         if lead and kind != "definition" and lead.lower() not in text.lower():
             if not lenient_leads:
                 raise ValueError(f"row {k}: lead {lead!r} does not appear in the text (a lead is bolded IN PLACE; "
@@ -814,9 +828,36 @@ def validate_point_rows(
                 raise ValueError(f"row {k}: an event needs data.when")
         if kind == "sequence" and not data.get("items"):
             data = dict(data)   # items arrive as `event` children now; legacy data.items still renders
+        # The optional per-kind fields a type's contract may name (ruling ba341c72 (2)): `refers_to` =
+        # earlier rows this one leans on (a Q&A answer's back-links; they become point keys), and the
+        # kind-specific `asr_form` (glossary/code: the transcript's surface form when it differed) and
+        # `unverified` (code: an identifier heard, not seen), which ride the point's `data`.
+        refers: List[int] = []
+        if raw.get("refers_to") is not None:
+            if kind == "synopsis":
+                raise ValueError(f"row {k}: a synopsis never refers to other rows")
+            vals = raw.get("refers_to") if isinstance(raw.get("refers_to"), list) else [raw.get("refers_to")]
+            for v in vals:
+                try:
+                    t = int(v)
+                except (TypeError, ValueError):
+                    raise ValueError(f"row {k}: refers_to takes 0-based ROW NUMBERS of earlier rows, got {v!r}")
+                if not (0 <= t < k - 1):
+                    raise ValueError(f"row {k}: refers_to {t} is not an EARLIER row (0..{k - 2})")
+                if out[t]["kind"] == "synopsis":
+                    raise ValueError(f"row {k}: refers_to {t} is the synopsis — name the point it leans on")
+                if t not in refers:
+                    refers.append(t)
+        asr_form = str(raw.get("asr_form") or "").strip()
+        if asr_form or raw.get("unverified") is not None:
+            data = dict(data)
+            if asr_form:
+                data["asr_form"] = asr_form
+            if raw.get("unverified") is not None:
+                data["unverified"] = bool(raw.get("unverified"))
         out.append({"kind": kind, "from_i": fi, "to_i": ti, "text": text, "lead": lead, "parent": parent,
                     "attribution": str(raw.get("attribution") or "").strip(),
-                    "data": data})
+                    "data": data, "refers_to": refers})
     return out
 
 
@@ -836,9 +877,15 @@ def proposals_from_point_rows(
         ends = [s["end"] for s in run if s.get("end") is not None]
         h = int(run[0]["h"])
         parent_row = r.get("parent")
+        # Who says it is READ OFF THE LINES, never drafted (ruling ba341c72 (1)): the first line's
+        # speaker; every speaker in order when the run crosses a turn.
+        voices = list(dict.fromkeys(s["speaker"] for s in run if s.get("speaker")))
         out.append({
             "proposal_id": str(uuid.uuid4()),
             "kind": r["kind"], "text": r["text"], "lead": r["lead"],
+            "speaker": (voices[0] if voices else ""), "speakers": (voices if len(voices) > 1 else []),
+            # rows -> proposal ids: a proposal id IS the point's future key, so these are point keys at accept
+            "refers_to": [out[t]["proposal_id"] for t in (r.get("refers_to") or [])],
             "attribution": r["attribution"], "data": r["data"],
             "from_i": r["from_i"], "to_i": r["to_i"],
             "segment_ids": [s["id"] for s in run],
@@ -964,7 +1011,9 @@ def point_from_args(
                      segment_ids=list(p.get("segment_ids") or []),
                      start_time=p.get("start_time"), end_time=p.get("end_time"),
                      attribution=str(p.get("attribution") or ""), data=dict(p.get("data") or {}),
-                     unit=dict(p.get("unit") or {}), parent_key=str(p.get("parent_key") or ""), actor=actor)
+                     unit=dict(p.get("unit") or {}), parent_key=str(p.get("parent_key") or ""),
+                     speaker=str(p.get("speaker") or ""), speakers=list(p.get("speakers") or []),
+                     refers_to=list(p.get("refers_to") or []), actor=actor)
 
 
 async def observe_segments(
@@ -1041,7 +1090,8 @@ async def accept_point(
     if existing is not None:
         new_props = node.to_graph_node()["properties"]
         changed = any(F.prop(existing, k) != new_props.get(k)
-                      for k in ("text", "kind", "lead", "attribution", "heading", "data", "parent_key"))
+                      for k in ("text", "kind", "lead", "attribution", "heading", "data", "parent_key",
+                                "speaker", "speakers", "refers_to"))
         if changed:
             # A re-accept with edited content (the human's edit-on-accept) lands as a property
             # update — same id, the journal carries the new state, last op wins on replay.
@@ -1060,12 +1110,22 @@ async def accept_point(
     nest = node.elaborates_edge()
     if nest is not None:
         edges.append(nest)
+    # Back-links (ruling ba341c72 (2)): an edge to every referred Point that already stands. A
+    # target not accepted (yet, or ever) is REPORTED, never a dangling edge — the key stays on
+    # the point and a re-accept lands the edge once the target stands.
+    standing: List[str] = []
+    for rk in node.refers_to:
+        if await graph_task(gx.queue, gx.graph_id, "get_node", node_id=point_node_id(note_id, rk)) is not None:
+            standing.append(rk)
+    edges += node.refers_to_edges(standing)
+    refers_missing = [rk for rk in node.refers_to if rk not in standing]
     res = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
     args = {"slug": slug, "point": {**point, "key": node.key}, "observations": list(observations),
             "actor": actor, "proposal_set_id": proposal_set_id}
     return {"point_id": node.id, "note_id": note_id, "key": node.key, "kind": node.kind,
             "text": node.text, "existing": existing is not None, "changed": changed,
             "references": ref_ids, "nodes_added": res.nodes_added, "edges_added": res.edges_added,
+            **({"refers_to_missing": refers_missing} if refers_missing else {}),
             "args": args, "written": True}
 
 
@@ -1155,7 +1215,7 @@ async def edit_point(
     pid, note_id, key = F.nid(node), str(F.prop(node, "note_id") or ""), str(F.prop(node, "key") or "")
     cur = {k: F.prop(node, k) for k in ("text", "kind", "lead", "attribution", "heading", "heading_index",
                                         "segment_ids", "start_time", "end_time", "data", "unit",
-                                        "parent_key", "ordinal", "actor")}
+                                        "parent_key", "ordinal", "actor", "speaker", "speakers", "refers_to")}
     fields: Dict[str, Any] = {}
     if text is not None:
         if not text.strip():

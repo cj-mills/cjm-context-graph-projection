@@ -1643,7 +1643,9 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
                              "heading": p.get("heading") or "", "heading_index": int(p.get("heading_index") or 0),
                              "segment_ids": list(p["segment_ids"]), "start_time": p.get("start_time"),
                              "end_time": p.get("end_time"), "unit": unit,
-                             "parent_key": p.get("parent_key") or ""}
+                             "parent_key": p.get("parent_key") or "",
+                             "speaker": p.get("speaker") or "", "speakers": list(p.get("speakers") or []),
+                             "refers_to": list(p.get("refers_to") or [])}
                     res = await accept_point(gx, args.slug, point, observations=obs["observations"],
                                              actor=args.actor, proposal_set_id=set_id)
                     if res.get("error") and res.get("skippable"):

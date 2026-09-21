@@ -158,6 +158,47 @@ def test_pack_roles_a_span_keeps_its_lines_and_the_margin_reaches_the_drafter():
         build_notes_pack(unit, {"information_policy": {"stratum_roles": {"qa": "structure"}}})
 
 
+def test_lecture_rows_derive_the_speaker_and_carry_refers_to_and_the_per_kind_fields():
+    # ruling ba341c72: speaker read off the lines (never drafted); refers_to / asr_form / unverified join the contract
+    segs = [{"id": f"s{k}", "index": k, "text": t, "start": float(k), "end": float(k + 1)} for k, t in enumerate([
+        "Nickel moves the tensors between GPUs.", "It launches one kernel per rank.",
+        "Chris asks: why per rank?", "Because each rank owns a stream.", "And streams do not share."])]
+    unit = {"source": {"source_id": "lec", "title": "Lecture"}, "segments": segs, "strata": [],
+            "speakers": {"s0": "Alice", "s1": "Alice", "s2": "Mark", "s3": "Alice", "s4": "Bob"}}
+    tprops = {"key": "lecture-notes", "information_policy": {"stratum_roles": {}},
+              "presentation_policy": {"kind_fields": {"question": "never give a lead", "glossary": "asr_form when it differed"}}}
+    pack = build_notes_pack(unit, tprops)
+    md = render_notes_pack(pack)
+    assert "## This type's row fields" in md and "* `glossary` — asr_form when it differed" in md
+    assert md.index("## This type's row fields") < md.index("## Transcript")
+    rows = validate_point_rows([
+        {"kind": "glossary", "from_i": 0, "to_i": 0, "lead": "NCCL", "text": "NCCL moves tensors between GPUs", "asr_form": "Nickel"},
+        {"kind": "code", "from_i": 1, "to_i": 1, "text": "one kernel launch per rank", "unverified": True},
+        {"kind": "question", "from_i": 2, "to_i": 2, "lead": "Chris", "text": "Why one launch per rank?"},
+        {"kind": "claim", "from_i": 3, "to_i": 4, "text": "Each rank owns its stream; streams are not shared",
+         "parent": 2, "refers_to": [1, 1, 0]},
+    ], pack)
+    assert rows[0]["data"] == {"asr_form": "Nickel"} and rows[1]["data"] == {"unverified": True}
+    assert rows[2]["lead"] == ""                        # a drafted questioner never refuses the row: it is derived
+    assert rows[3]["refers_to"] == [1, 0]               # distinct, in the order given
+    props = proposals_from_point_rows(rows, pack)
+    by_text = {p["text"]: p for p in props}
+    q, a = by_text["Why one launch per rank?"], by_text["Each rank owns its stream; streams are not shared"]
+    assert q["speaker"] == "Mark" and q["speakers"] == []                       # who SPOKE the asking line
+    assert a["speaker"] == "Alice" and a["speakers"] == ["Alice", "Bob"]        # a run that crosses a turn
+    assert a["refers_to"] == [by_text["one kernel launch per rank"]["proposal_id"],
+                              by_text["NCCL moves tensors between GPUs"]["proposal_id"]]
+    assert a["parent_key"] == q["proposal_id"]
+    for bad in ([5], [3], ["x"]):                       # a later row, itself, not a number
+        with pytest.raises(ValueError):
+            validate_point_rows([{"kind": "claim", "from_i": 0, "to_i": 0, "text": "a"},
+                                 {"kind": "claim", "from_i": 1, "to_i": 1, "text": "b", "refers_to": bad}], pack)
+    book = proposals_from_point_rows(validate_point_rows(
+        [{"kind": "claim", "from_i": 0, "to_i": 0, "text": "a"}], build_notes_pack({**unit, "speakers": None}, tprops)),
+        build_notes_pack({**unit, "speakers": None}, tprops))
+    assert book[0]["speaker"] == "" and book[0]["refers_to"] == []
+
+
 def test_validate_rows_and_resolve_proposals():
     pack = build_notes_pack(_unit(), pure_notes_type().to_graph_node()["properties"])
     good = [{"kind": "claim", "from_i": 0, "to_i": 0, "text": "Gatto quit 1991.", "lead": "Gatto"},
@@ -551,7 +592,8 @@ def test_cli_pure_notes_lane_end_to_end_and_replay(tmp_path):
         {"kind": "claim", "from_i": 0, "to_i": 0, "text": "Gatto quit teaching in 1991.", "lead": "Gatto"},
         {"kind": "quotation", "from_i": 1, "to_i": 2, "text": "I teach confusion.", "attribution": "Gatto"},
         {"kind": "claim", "from_i": 3, "to_i": 3, "text": "Subjects taught in isolation."},
-        {"kind": "claim", "from_i": 3, "to_i": 4, "text": "Isolation → no coherent picture.", "lead": "coherent", "parent": 2},
+        {"kind": "claim", "from_i": 3, "to_i": 4, "text": "Isolation → no coherent picture.", "lead": "coherent", "parent": 2,
+         "refers_to": [0]},   # a back-link (ruling ba341c72 (2)): rows -> proposal ids -> a REFERENCES edge at accept
         {"kind": "synopsis", "from_i": 0, "to_i": 4, "text": "Gatto quit in 1991; school teaches confusion by isolating subjects."},
     ]) + "\n")
     r = _run(*base, "notes-ingest", "--pack", str(pack_json), "--rows", str(rows), "--proposer", "test")
@@ -580,6 +622,16 @@ def test_cli_pure_notes_lane_end_to_end_and_replay(tmp_path):
                                    query=EdgeQuery(relation_type="ELABORATES", project=[]).to_dict())
             return len(res.rows or [])
     assert asyncio.run(_elaborates(pdb)) == 1
+
+    async def _back_links(db):   # point -> point REFERENCES edges minted from `refers_to`
+        async with open_graph(db) as g:
+            res = await graph_task(g.queue, g.graph_id, "query_edges",
+                                   query=EdgeQuery(relation_type="REFERENCES").to_dict())
+            rows = [e.to_dict() if hasattr(e, "to_dict") else dict(e) for e in (getattr(res, "edges", None) or res.rows or [])]
+            return [(e["source_id"], e["target_id"]) for e in rows if (e.get("properties") or {}).get("role") == "refers_to"]
+    assert ops[3]["args"]["point"]["refers_to"] == [ops[0]["args"]["point"]["key"]]
+    links = asyncio.run(_back_links(pdb))
+    assert len(links) == 1 and links[0][0] != links[0][1]
     r = _run("--graph-db-path", pdb, "--format", "agent", "list", "--label", "Point")
     points = json.loads(r.stdout)
     assert points.get("total", len(points.get("items", []))) == 5 or len(points.get("nodes", [])) == 5
@@ -710,6 +762,7 @@ def test_cli_pure_notes_lane_end_to_end_and_replay(tmp_path):
     assert any(m.get("label") == "DeliverableType" for m in json.loads(r.stdout)["matches"])
     assert live_text != staged2   # the retract really changed the body (sanity on the equality checks above)
     assert asyncio.run(_elaborates(rdb)) == 1      # the nesting edge replays from the accept op alone
+    assert asyncio.run(_back_links(rdb)) == links  # and so does the back-link
 
     # (11) the re-drive's clean slate: retract EVERY point (children first), render drops the
     #      body, and a second replay converges on the empty deliverable
