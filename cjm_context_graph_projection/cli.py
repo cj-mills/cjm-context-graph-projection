@@ -1541,7 +1541,11 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
             print(f"error: {unit['error']}", file=sys.stderr)
             return 1
         window = tuple(args.window) if args.window else None
-        pack = build_notes_pack(unit, tprops, window=window)
+        try:
+            pack = build_notes_pack(unit, tprops, window=window)
+        except ValueError as e:   # a type policy naming an unknown role (ruling e1e096fa)
+            print(f"error: deliverable type `{args.type}`: {e}", file=sys.stderr)
+            return 1
         pack["source"]["graph"] = key
         pack["digest"] = pack["digest"]  # digest excludes the graph key by construction (source block hashed before)
         out_dir = _notes_lane_root(args) / "packs"
@@ -1551,7 +1555,10 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
         md_path.write_text(render_notes_pack(pack))
         print(render("notes-pack", {"pack_id": pack["pack_id"], "source": pack["source"],
                                     "lines": len(pack["segments"]), "headers": len(pack["headers"]),
-                                    "quote_spans": len(pack["quote_spans"]), "json_path": str(json_path),
+                                    "quote_spans": len(pack["quote_spans"]), "spans": len(pack["spans"]),
+                                    "noted_lines": sum(1 for r in pack["segments"] if r.get("notes")),
+                                    "speakers": sorted({r["speaker"] for r in pack["segments"] if r.get("speaker")}),
+                                    "read": pack.get("read"), "json_path": str(json_path),
                                     "md_path": str(md_path)}, args.format))
         return 0
     if cmd == "notes-ingest":

@@ -39,7 +39,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import yaml
 from cjm_context_graph_layer.ops import extend_graph, graph_task
-from cjm_context_graph_primitives.query import EdgeQuery, NodeQuery, OrderBy, PropertyPredicate
+from cjm_context_graph_primitives.query import EdgeQuery, NodeQuery, PropertyPredicate
 from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.identity import note_node_id, point_node_id
 from cjm_dev_graph_schema.nodes import (DeliverableTypeNode, POINT_KIND_GLOSSES, PointNode,
@@ -52,12 +52,20 @@ from .runtime import DEFAULT_MANIFESTS, GraphHandle, open_graph
 PURE_NOTES_KEY = "pure-notes"
 
 NOTES_PACK_FORMAT = "cjm-context-graph-projection/notes-pack"
-NOTES_PACK_VERSION = "0.1.0"
+NOTES_PACK_VERSION = "0.2.0"   # 0.2.0: stratum roles — spans, line notes, speakers, the clean read (ruling e1e096fa)
 NOTES_PROPSET_FORMAT = "cjm-context-graph-projection/notes-proposal-set"
 NOTES_PROPSET_VERSION = "0.1.0"
 
 RENDERINGS = ("outline", "expanded")   # the two renderings one substance carries (ruling a7262fe7 (4))
 HEADER_MAX_WORDS = 15                  # a structure (apparatus) run longer than this is boilerplate, not a heading
+# What the notes pack DOES with a stratum class (ruling e1e096fa; finding 6735f8f1). header: the run leaves
+# the content and renders as a heading · span: the lines stay content and the pack carries the span ·
+# annotate: the lines stay content and carry the class as a margin note · quote: a quote span the drafter
+# carries as a `quotation` point · exclude: the lines are gone · content: plain content, no note.
+STRATUM_ROLES = ("header", "span", "annotate", "quote", "exclude", "content")
+DEFAULT_STRATUM_ROLE = "annotate"      # a class the policy never named REACHES the drafter (6752db0a (9)), never vanishes
+UNNAMED_CLASS_ROLES = ("annotate", "content")   # the only roles a default may take: neither can hide a line
+LEGACY_STRATUM_KEYS = (("include_strata", "quote"), ("structure_strata", "header"), ("exclude_strata", "exclude"))
 
 
 # --------------------------------------------------------------------------------------
@@ -78,13 +86,20 @@ def pure_notes_type(
                      "statement, in source order, no interpretation, no research enrichment."),
         information_policy={
             "include_unclassified": True,                 # absence of a stratum IS main topic
-            "include_strata": ["quotation"],              # verbatim units, carried as `quotation` points
-            "structure_strata": ["section-header"],       # read-aloud section titles -> the heading hierarchy (never content)
+            # A ROLE per stratum class (ruling e1e096fa; the vocabulary = STRATUM_ROLES). The book profile:
             # 2047cf1d ruling (2026-09-09): a cross-reference or a transition is never a heading and never
             # content; apparatus (credits, legal, boilerplate) is excluded outright, no longer a header source.
             # 353394c8 / c4a0c744 (2026-09-17): `filler` (a wholly elidable line) is what the clean read
             # excludes — `disfluency` marks a run that CONTAINS disfluencies and its content stays content
-            "exclude_strata": ["tangent", "sponsor", "filler", "apparatus", "cross-reference", "transition"],
+            "stratum_roles": {
+                "quotation": "quote",                     # verbatim units, carried as `quotation` points
+                "section-header": "header",               # read-aloud section titles -> the heading hierarchy (never content)
+                "tangent": "exclude", "sponsor": "exclude", "filler": "exclude", "apparatus": "exclude",
+                "cross-reference": "exclude", "transition": "exclude",
+                "disfluency": "content",
+            },
+            "default_role": "annotate",                   # an unnamed class reaches the drafter with a note, never vanishes
+            "stratum_glosses": {},                        # class -> how the drafter carries it (the brief prints these)
             "never_carry": ["research-mark", "tool-mention", "asr-error"],  # things to DO, not things the source says
         },
         presentation_policy={
@@ -246,28 +261,36 @@ async def read_source_unit(
     sg: GraphHandle,
     source_id: str,                     # The Source node id in the sibling graph
     *,
-    skeleton: Optional[str] = None,     # Spine selector (see `choose_spine`)
-) -> Dict[str, Any]:  # {source, skeleton_hash, segments: [{id,index,text,start,end}], strata: [correction dicts]} | {error}
+    skeleton: Optional[str] = None,     # Spine selector ("legacy" | a skeleton-hash prefix; None = auto)
+) -> Dict[str, Any]:  # {source, skeleton_hash, segments: [{id,index,text,start,end}], strata, speakers?, read?} | {error}
     """Read one source unit: the EFFECTIVE spine (layer-0 + applied corrections, via the
-    correction core's projection — imported lazily, the pull-transcript pattern) and the
-    live strata over it. Segments are read by `source_id` + the chosen skeleton, ordered."""
+    correction core's spine read + projection — imported lazily, the pull-transcript
+    pattern), the live strata over it, the speaker on each line once the assign lane has
+    touched the source, and — when the source carries accepted speech overlays — the lines
+    as L1, the clean read (ruling e1e096fa (5))."""
     src = await graph_task(sg.queue, sg.graph_id, "get_node", node_id=source_id)
     if src is None:
         return {"error": f"no Source `{source_id}` in the sibling graph"}
-    q = NodeQuery(label="Segment", where=[PropertyPredicate("source_id", "eq", source_id)],
-                  order_by=OrderBy(prop="index"),
-                  project=["index", "text", "start_time", "end_time", "skeleton_hash"], limit=200000)
-    res = await graph_task(sg.queue, sg.graph_id, "query_nodes", query=q.to_dict())
-    rows = list(res.rows or [])
-    groups: Dict[Optional[str], int] = {}
-    for r in rows:
-        groups[r.get("skeleton_hash")] = groups.get(r.get("skeleton_hash"), 0) + 1
     try:
-        chosen, _legacy = choose_spine(groups, skeleton)
+        from cjm_transcript_correction_core.cleanread import ELISION_MARKER, clean_read, clean_read_summary
+        from cjm_transcript_correction_core.graph import (active_speaker_assignments, active_speech_overlays,
+                                                          list_source_spines, load_source_segments,
+                                                          project_effective_spine, skeleton_hash_for)
+    except ModuleNotFoundError:
+        return {"error": "cjm-transcript-correction-core (>= 0.0.22, the clean read) is not installed in this "
+                         "env — it owns the spine read, the effective-spine projection and the clean read "
+                         "the notes pack reads"}
+    # The spine is the CORE's read, never a re-implementation: it picks the rendition chain,
+    # then the skeleton, and keeps only the LIVE view — a chunk respine leaves its replaced
+    # segments on the graph stamped `superseded_by` (ruling 0b4d5cfa (4)). A by-source-id read
+    # mixed 1,649 replaced segments into the Bonus lecture's 1,637-line spine (finding, 2026-09-20).
+    try:
+        segs = await load_source_segments(sg.queue, sg.graph_id, source_id, skeleton_selector=skeleton)
+        spines = await list_source_spines(sg.queue, sg.graph_id, source_id)
+        chosen = skeleton_hash_for(spines, skeleton)
     except ValueError as e:
         return {"error": str(e)}
-    rows = [r for r in rows if r.get("skeleton_hash") == chosen]
-    rows.sort(key=lambda r: int(r.get("index") or 0))
+    groups: Dict[Optional[str], int] = {sp.get("skeleton_hash"): int(sp.get("segments") or 0) for sp in spines}
     # Corrections for the source (append-only; supersession from SUPERSEDES edges).
     cq = NodeQuery(label="Correction", where=[PropertyPredicate("payload.source_id", "eq", source_id)],
                    limit=200000)
@@ -287,19 +310,40 @@ async def read_source_unit(
     active = [c for c in corrections if c["id"] not in superseded and c.get("status") != "proposed"]
     strata = sorted([c for c in active if c.get("correction_type") == "stratum"],
                     key=lambda c: float((c.get("payload") or {}).get("start_time") or 0.0))
-    try:
-        from cjm_transcript_correction_core.graph import project_effective_spine
-        from cjm_transcript_correction_core.models import SpineSegment
-    except ModuleNotFoundError:
-        return {"error": "cjm-transcript-correction-core is not installed in this env — it owns the "
-                         "effective-spine projection the notes pack reads"}
-    segs = [SpineSegment(id=r["id"], index=int(r.get("index") or 0), text=r.get("text") or "",
-                         start_time=r.get("start_time"), end_time=r.get("end_time")) for r in rows]
     eff = project_effective_spine(segs, active)
     segments = [{"id": s.id, "index": s.index, "text": s.text,
                  "start": (float(s.start_time) if s.start_time is not None else None),
                  "end": (float(s.end_time) if s.end_time is not None else None)}
                 for s in eff if (s.text or "").strip()]
+    # L1 (ruling e1e096fa (5)): the accepted speech overlays are subtracted from the lines a
+    # drafter reads — the clean read, as `filter-pack --read clean` reads it. Only the
+    # SUB-LINE subtraction happens here: which stratum classes leave the read is the TYPE's
+    # call (its exclude roles), made in `build_notes_pack`. A source with no overlays (a
+    # book) keeps its L0 lines untouched.
+    read: Optional[Dict[str, Any]] = None
+    overlays = active_speech_overlays(active, superseded)
+    if overlays:
+        clean = clean_read(eff, [], overlays, exclude_strata=())
+        kept = {ln["id"]: ln["text"] for ln in clean}
+        emptied = [s["id"] for s in segments if s["id"] not in kept]
+        segments = [{**s, "text": kept[s["id"]]} for s in segments if s["id"] in kept]
+        read = {"layer": "clean", "marker": ELISION_MARKER, "spans_cut": clean_read_summary(clean)["spans_cut"],
+                "lines_emptied": len(emptied)}
+    # Speakers ride every line once the assign lane has touched the source: the entity's
+    # canonical name, else the diarization cluster the assignment was made over.
+    speakers: Optional[Dict[str, Optional[str]]] = None
+    assigned = active_speaker_assignments(active, superseded)
+    if assigned:
+        eres = await graph_task(sg.queue, sg.graph_id, "query_nodes",
+                                query=NodeQuery(label="Entity", limit=100000).to_dict())
+        names: Dict[str, Optional[str]] = {}
+        for n in (getattr(eres, "nodes", None) or []):
+            d = n.to_dict() if hasattr(n, "to_dict") else dict(n)
+            names[d["id"]] = (d.get("properties") or {}).get("canonical_name")
+        speakers = {}
+        for s in segments:
+            a = assigned.get(s["id"]) or {}
+            speakers[s["id"]] = names.get(a.get("entity_id")) or a.get("cluster") or None
     sp = dict(F.props(src))
     # A public, time-addressable URL (YouTube / a podcast player) makes the source ADDRESSABLE:
     # only then does the public rendering carry timestamps, as links (ruling e1fd4d64 (D)).
@@ -312,6 +356,8 @@ async def read_source_unit(
                        **({"public_url": public_url} if public_url else {}),
                        **({"references": references} if references else {})},
             "skeleton_hash": chosen, "segments": segments, "strata": strata,
+            **({"speakers": speakers} if speakers is not None else {}),
+            **({"read": read} if read else {}),
             "spines": {(h or "legacy"): n for h, n in groups.items()}}
 
 
@@ -373,27 +419,65 @@ def _fmt_ts(seconds: Optional[float]) -> str:  # mm:ss for rendered lines
 
 def pack_digest(pack: Dict[str, Any]) -> str:  # "sha256:<hex>" over the read content
     """Digest the READ content (source binding + numbered lines + headers) — what a proposal
-    set records so the read-trace is verifiable, independent of pack id / timestamps."""
+    set records so the read-trace is verifiable, independent of pack id / timestamps. The
+    role fields (spans, line notes, speakers — ruling e1e096fa) join the digest only when a
+    pack carries them, so a pack without them digests exactly as it did before the ruling."""
     body = {"source": pack.get("source"),
             "headers": [[h["i_before"], h["text"]] for h in pack.get("headers") or []],
             "segments": [[r["i"], r["id"], r["start"], r["end"], r["text"]] for r in pack.get("segments") or []]}
+    margin = [[r["i"], r.get("speaker"), r.get("notes") or []] for r in pack.get("segments") or []
+              if r.get("speaker") or r.get("notes")]
+    if margin:
+        body["margin"] = margin
+    if pack.get("spans"):
+        body["spans"] = [[s["class"], s["from_i"], s["to_i"]] for s in pack["spans"]]
     return "sha256:" + hashlib.sha256(json.dumps(body, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
+def stratum_role_policy(
+    info: Dict[str, Any],  # A type's `information_policy`
+) -> Tuple[Dict[str, str], str]:  # (class -> role, the role of a class the policy does not name)
+    """Read a type's stratum policy as ROLES (ruling e1e096fa). `stratum_roles` is the one
+    vocabulary; the three book-shaped lists (include / structure / exclude) still read, as
+    quote / header / exclude, so a policy minted before the ruling behaves exactly as it
+    did — including its unnamed classes, which stay plain content. Under `stratum_roles` an
+    unnamed class takes `default_role` (annotate unless the policy says content): it
+    reaches the drafter with a note instead of vanishing. `never_carry` classes are things
+    to DO, not things the source says: plain content unless the policy names them."""
+    roles: Dict[str, str] = {}
+    for key, role in LEGACY_STRATUM_KEYS:
+        for c in info.get(key) or []:
+            roles[str(c)] = role
+    named = info.get("stratum_roles")
+    for c, role in dict(named or {}).items():
+        if role not in STRATUM_ROLES:
+            raise ValueError(f"stratum_roles: `{c}` names the role {role!r} — roles are {', '.join(STRATUM_ROLES)}")
+        roles[str(c)] = str(role)
+    default = str(info.get("default_role") or (DEFAULT_STRATUM_ROLE if named is not None else "content"))
+    if default not in UNNAMED_CLASS_ROLES:
+        raise ValueError(f"default_role {default!r}: a class the policy never named may only be "
+                         f"{' or '.join(UNNAMED_CLASS_ROLES)} — any other default can hide content")
+    for c in info.get("never_carry") or []:
+        roles.setdefault(str(c), "content")
+    return roles, default
+
+
 def build_notes_pack(
-    unit: Dict[str, Any],           # `read_source_unit` output (source / segments / strata)
+    unit: Dict[str, Any],           # `read_source_unit` output (source / segments / strata / speakers / read)
     type_props: Dict[str, Any],     # The DeliverableType node's properties (the policies)
     *,
     window: Optional[Tuple[float, Optional[float]]] = None,  # (start, end) source seconds; None = whole unit
 ) -> Dict[str, Any]:  # The pack (JSON-serializable)
-    """Apply the type's INFORMATION POLICY (a stratum query) to the unit and number what a
-    proposer reads: content lines (unclassified + included strata) 0..n-1, the structure
-    strata as HEADERS between lines (never content), quote spans over the numbered lines,
-    the kind slate with glosses, and the output contract."""
+    """Apply the type's INFORMATION POLICY (a stratum query read as ROLES — ruling e1e096fa)
+    to the unit and number what a proposer reads: content lines 0..n-1 (unclassified lines
+    plus every class whose role keeps its lines), the header runs as HEADERS between lines
+    (never content), quote spans and structure SPANS over the numbered lines (a span's lines
+    stay content: a qa block is read, never removed), the annotate classes as per-line
+    `notes`, the speaker on every line when the unit carries speakers, the kind slate with
+    glosses, and the output contract. Raises ValueError on a policy naming an unknown role."""
     info = dict(type_props.get("information_policy") or {})
-    exclude = set(info.get("exclude_strata") or [])
-    structure = set(info.get("structure_strata") or [])
-    include = set(info.get("include_strata") or [])
+    roles, default_role = stratum_role_policy(info)
+    speakers = unit.get("speakers")   # segment id -> display name; None = the unit carries no speakers
     by_seg: Dict[str, List[Tuple[str, str]]] = {}
     for c in unit.get("strata") or []:
         p = c.get("payload") or {}
@@ -406,18 +490,20 @@ def build_notes_pack(
     pending_header: List[str] = []
     pending_header_id: Optional[str] = None
     quote_runs: Dict[str, List[int]] = {}
+    span_runs: Dict[str, Tuple[str, List[int]]] = {}
     for s in unit.get("segments") or []:
         if w0 is not None and s["end"] is not None and s["end"] <= w0:
             continue
         if w1 is not None and s["start"] is not None and s["start"] >= w1:
             continue
-        cats = by_seg.get(s["id"], [])
-        names = {c for c, _ in cats}
-        if names & exclude:
+        by_role: Dict[str, List[Tuple[str, str]]] = {}
+        for c, cid in by_seg.get(s["id"], []):
+            by_role.setdefault(roles.get(c, default_role), []).append((c, cid))
+        if "exclude" in by_role:
             continue
-        if names & structure:
+        if "header" in by_role:
             # a read-aloud header: accumulate its run, flush as one header before the next content line
-            sid = next((i for c, i in cats if c in structure), None)
+            sid = by_role["header"][0][1]
             if pending_header and sid != pending_header_id:
                 headers.append({"i_before": len(rows), "text": " ".join(pending_header).strip(),
                                 "stratum_id": pending_header_id})
@@ -430,11 +516,18 @@ def build_notes_pack(
                             "stratum_id": pending_header_id})
             pending_header, pending_header_id = [], None
         i = len(rows)
-        rows.append({"i": i, "id": s["id"], "index": s["index"], "start": s["start"], "end": s["end"],
-                     "text": s["text"], "h": len(headers)})   # h = count of headers before this line
-        for c, cid in cats:
-            if c in include:
-                quote_runs.setdefault(cid, []).append(i)
+        row = {"i": i, "id": s["id"], "index": s["index"], "start": s["start"], "end": s["end"],
+               "text": s["text"], "h": len(headers)}   # h = count of headers before this line
+        if speakers is not None:
+            row["speaker"] = speakers.get(s["id"])
+        notes = list(dict.fromkeys(c for c, _ in by_role.get("annotate", [])))
+        if notes:
+            row["notes"] = notes
+        rows.append(row)
+        for _, cid in by_role.get("quote", []):
+            quote_runs.setdefault(cid, []).append(i)
+        for c, cid in by_role.get("span", []):
+            span_runs.setdefault(cid, (c, []))[1].append(i)
     if pending_header:
         headers.append({"i_before": len(rows), "text": " ".join(pending_header).strip(),
                         "stratum_id": pending_header_id})
@@ -446,7 +539,11 @@ def build_notes_pack(
         r["h"] = sum(1 for h in headers if h["i_before"] <= r["i"])
     quote_spans = [{"stratum_id": cid, "from_i": min(v), "to_i": max(v)} for cid, v in quote_runs.items()]
     quote_spans.sort(key=lambda q: q["from_i"])
+    spans = [{"class": c, "stratum_id": cid, "from_i": min(v), "to_i": max(v)} for cid, (c, v) in span_runs.items()]
+    spans.sort(key=lambda q: (q["from_i"], q["to_i"]))
     kinds = dict((type_props.get("presentation_policy") or {}).get("kinds") or POINT_KIND_GLOSSES)
+    carried = {sp["class"] for sp in spans} | {c for r in rows for c in r.get("notes") or []}
+    glosses = {str(c): str(g) for c, g in dict(info.get("stratum_glosses") or {}).items() if c in carried}
     pack = {
         "format": NOTES_PACK_FORMAT, "version": NOTES_PACK_VERSION,
         "pack_id": f"npack_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}",
@@ -457,6 +554,9 @@ def build_notes_pack(
         "kinds": [{"kind": k, "gloss": g} for k, g in kinds.items()],
         "headers": headers,
         "quote_spans": quote_spans,
+        "spans": spans,
+        "stratum_glosses": glosses,
+        **({"read": dict(unit["read"])} if unit.get("read") else {}),
         "segments": rows,
     }
     pack["digest"] = pack_digest(pack)
@@ -547,8 +647,10 @@ Rows only — no prose before or after, no code fences.
 
 def render_notes_pack(pack: Dict[str, Any]) -> str:  # The proposer brief (markdown)
     """Render a pack as the brief a proposer reads: the unit, the kind slate, the headers
-    the notes will use, the quote spans, the output contract, then the numbered lines with
-    `[H]` header rows interleaved. Deterministic for a given pack."""
+    the notes will use, the quote spans, the structure spans and the margin (line notes,
+    speakers, the clean read — each section only when the pack carries it, so a pack
+    without role fields renders exactly as before ruling e1e096fa), the output contract,
+    then the numbered lines with `[H]` header rows interleaved. Deterministic for a given pack."""
     src = pack.get("source") or {}
     ws = src.get("work_structure") or {}
     unit_bits = [f"{k}: {ws[k]}" for k in ("kind", "part", "part_title", "chapter", "title") if ws.get(k)]
@@ -556,14 +658,23 @@ def render_notes_pack(pack: Dict[str, Any]) -> str:  # The proposer brief (markd
     work_line = (f"Work: **{work.get('title')}**" + (f" by {work.get('author')}" if work.get("author") else "")
                  + (f" (narrated by {work.get('narrator')})" if work.get("narrator") and work.get("narrator") != work.get("author") else "")
                  + " — name the author by surname where the source says \"I\"; never write \"the author\".")
+    rows = pack.get("segments") or []
+    spans = pack.get("spans") or []
+    glosses = dict(pack.get("stratum_glosses") or {})
+    note_classes = list(dict.fromkeys(c for r in rows for c in r.get("notes") or []))
+    roster = list(dict.fromkeys(r["speaker"] for r in rows if r.get("speaker")))
+    has_speakers = any("speaker" in r for r in rows)
+    read = dict(pack.get("read") or {})
     lines: List[str] = [
         f"# Notes pack `{pack.get('pack_id')}` — type `{pack.get('type')}`", "",
         f"Source: **{src.get('title') or src.get('source_id')}**  (`{src.get('source_id')}`; "
         f"spine `{(src.get('skeleton_hash') or 'legacy')[-12:]}`)",
         *([work_line] if work.get("title") else []),
         ("Unit: " + " · ".join(unit_bits)) if unit_bits else "Unit: (no structure map on this source)",
-        f"{len(pack.get('segments') or [])} content lines · {len(pack.get('headers') or [])} headers · "
-        f"{len(pack.get('quote_spans') or [])} quote spans · digest `{pack.get('digest', '')[-12:]}`", "",
+        f"{len(rows)} content lines · {len(pack.get('headers') or [])} headers · "
+        f"{len(pack.get('quote_spans') or [])} quote spans"
+        + (f" · {len(spans)} spans" if spans else "")
+        + f" · digest `{pack.get('digest', '')[-12:]}`", "",
         "## Task", "",
         "Read the numbered lines below and propose POINTS: what the source says, COMPRESSED into",
         "telegraphic statements a reader would scan for, in source order, each over the run of lines",
@@ -578,14 +689,40 @@ def render_notes_pack(pack: Dict[str, Any]) -> str:  # The proposer brief (markd
     qs = pack.get("quote_spans") or []
     lines += ["", "## Quote spans (verbatim units the source quotes — propose as `quotation`)", ""]
     lines += [f"- lines {q['from_i']}–{q['to_i']}" for q in qs] or ["- (none)"]
+    if spans:
+        lines += ["", "## Spans (structure over the lines — the lines inside a span ARE content: read them, draft them)", ""]
+        lines += [f"- `{s['class']}` lines {s['from_i']}–{s['to_i']}" for s in spans]
+        for c in dict.fromkeys(s["class"] for s in spans):
+            if glosses.get(c):
+                lines.append(f"  - `{c}`: {glosses[c]}")
+    if note_classes or has_speakers or read.get("layer") == "clean":
+        lines += ["", "## The margin", ""]
+        if note_classes:
+            lines.append("* A `{class}` note before a line's text is the source's own stratum over that line. The line "
+                         "is content; the note tells you how to carry it:")
+            lines += [f"  - `{{{c}}}` — {glosses.get(c) or 'a class the type policy does not describe: keep the content, judge by the lines'}"
+                      for c in note_classes]
+        if has_speakers:
+            lines.append("* A `— name —` rule marks where the speaker changes; every line below it is that speaker's until "
+                         "the next rule" + (f" (speakers: {', '.join(roster)})" if roster else "") + ". A rule reading "
+                         "`— ? —` is a line nobody has been assigned to yet.")
+        if read.get("layer") == "clean":
+            lines.append(f"* The lines are the CLEAN read: `{read.get('marker') or '[…]'}` stands where spoken disfluency "
+                         "(hesitations, repeats, false starts) was elided. Nothing of substance is behind it; never "
+                         "carry the marker into a point.")
     lines += ["", OUTPUT_CONTRACT, "## Transcript", ""]
     headers = pack.get("headers") or []
     hi = 0
-    for r in pack.get("segments") or []:
+    prev_speaker: Any = object()
+    for r in rows:
         while hi < len(headers) and headers[hi]["i_before"] <= r["i"]:
             lines.append(f"[H] {headers[hi]['text']}")
             hi += 1
-        lines.append(f"[{r['i']}] {_fmt_ts(r['start'])}–{_fmt_ts(r['end'])}  {r['text']}")
+        if "speaker" in r and r.get("speaker") != prev_speaker:
+            prev_speaker = r.get("speaker")
+            lines.append(f"— {prev_speaker or '?'} —")
+        chips = "".join(f"{{{c}}} " for c in r.get("notes") or [])
+        lines.append(f"[{r['i']}] {_fmt_ts(r['start'])}–{_fmt_ts(r['end'])}  {chips}{r['text']}")
     while hi < len(headers):
         lines.append(f"[H] {headers[hi]['text']}")
         hi += 1
@@ -1252,7 +1389,10 @@ async def point_coverage(
         return {"error": f"sibling graph `{key}` unavailable: {e}", "slug": slug}
     if read.get("error"):
         return {"error": read["error"], "slug": slug}
-    pack = build_notes_pack(read, tprops)
+    try:
+        pack = build_notes_pack(read, tprops)
+    except ValueError as e:   # a type policy naming an unknown role (ruling e1e096fa)
+        return {"error": f"deliverable type `{tkey}`: {e}", "slug": slug}
     gaps = coverage_gaps(pack["segments"], points)
     body_points = [p for p in points if str(p.get("kind")) != "synopsis"]
     covered = sum(1 for r in pack["segments"] if any(r["id"] in (p.get("segment_ids") or []) for p in body_points))

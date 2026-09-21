@@ -287,6 +287,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `retract_note_points` _function_ — Retract EVERY point of a Note (the re-drive's clean slate — ruling e1fd4d64 (5)): one
 - `retract_point` _function_ — Retract a point: delete the node (its edges cascade). The compensating op of accept —
 - `staging_index` _function_ — Project the staging site's LISTINGS from the publish_state facts (item 140981e9 (b)):
+- `stratum_role_policy` _function_ — Read a type's stratum policy as ROLES (ruling e1e096fa). `stratum_roles` is the one
 - `synopsis_of` _function_
 - `unit_label` _function_ — The short unit handle the title carries (second-read ruling (1): the short shape).
 - `unit_title_header` _function_ — Ruling e1fd4d64 (C): the first read-aloud header of a chapter file is the chapter's own

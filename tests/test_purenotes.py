@@ -20,7 +20,7 @@ from cjm_context_graph_projection.purenotes import (_time_link, build_notes_pack
                                                     choose_spine, coverage_gaps, derive_frontmatter,
                                                     derived_description, overlapping_points,
                                                     proposals_from_point_rows, pure_notes_type,
-                                                    render_notes_pack, render_points,
+                                                    render_notes_pack, render_points, stratum_role_policy,
                                                     render_source_card, synopsis_of, unit_label,
                                                     unit_title_header, validate_point_rows,
                                                     _frontmatter_fields, render_works_table,
@@ -93,6 +93,69 @@ def test_pack_applies_the_stratum_query_headers_quote_spans_and_digest():
     # a window trims lines
     win = build_notes_pack(_unit(), tprops, window=(6.5, None))
     assert [r["id"] for r in win["segments"]] == ["s4", "s5", "s6"]
+
+
+def test_stratum_role_policy_reads_the_role_map_and_the_legacy_lists():
+    legacy = {"include_strata": ["quotation"], "structure_strata": ["section-header"],
+              "exclude_strata": ["tangent"], "never_carry": ["research-mark"]}
+    roles, default = stratum_role_policy(legacy)
+    assert roles == {"quotation": "quote", "section-header": "header", "tangent": "exclude",
+                     "research-mark": "content"}
+    assert default == "content"                        # a pre-ruling policy keeps its unnamed classes plain
+    roles, default = stratum_role_policy({"stratum_roles": {"qa": "span"}, "never_carry": ["asr-error"]})
+    assert roles == {"qa": "span", "asr-error": "content"} and default == "annotate"
+    assert stratum_role_policy({"stratum_roles": {}, "default_role": "content"})[1] == "content"
+    with pytest.raises(ValueError):
+        stratum_role_policy({"stratum_roles": {"qa": "structure"}})           # not a role
+    with pytest.raises(ValueError):
+        stratum_role_policy({"stratum_roles": {}, "default_role": "exclude"})  # a default that can hide content
+
+
+def test_pack_is_identical_under_the_legacy_lists_and_the_role_map():
+    # ruling e1e096fa (6): the book profile reads the same content under either vocabulary
+    legacy = {"key": "pure-notes", "information_policy": {
+        "include_strata": ["quotation"], "structure_strata": ["section-header"],
+        "exclude_strata": ["tangent", "sponsor", "filler", "apparatus", "cross-reference", "transition"],
+        "never_carry": ["research-mark", "tool-mention", "asr-error"]}}
+    old = build_notes_pack(_unit(), legacy)
+    new = build_notes_pack(_unit(), pure_notes_type().to_graph_node()["properties"])
+    assert old["digest"] == new["digest"]
+    assert old["spans"] == new["spans"] == [] and not any("notes" in r or "speaker" in r for r in new["segments"])
+    strip = lambda md: "\n".join(ln for ln in md.splitlines() if not ln.startswith("# Notes pack"))
+    assert strip(render_notes_pack(old)) == strip(render_notes_pack(new))
+    assert "## Spans" not in render_notes_pack(new) and "## The margin" not in render_notes_pack(new)
+
+
+def test_pack_roles_a_span_keeps_its_lines_and_the_margin_reaches_the_drafter():
+    # finding 6735f8f1: qa under the header role REMOVED every question and answer from the read
+    segs = [{"id": f"s{k}", "index": k, "text": t, "start": float(k), "end": float(k + 1)} for k, t in enumerate([
+        "Can everyone hear me?", "As the slide shows, the kernel launches twice.", "Quick aside on my keyboard.",
+        "Chris asks: why two launches?", "Because the first one warms the cache.", "One more thing […] on streams."])]
+    def stratum(cid, cat, ids):
+        return {"id": cid, "correction_type": "stratum", "payload": {"category": cat, "segment_ids": ids}}
+    unit = {"source": {"source_id": "lec", "title": "Lecture"}, "segments": segs,
+            "strata": [stratum("c-log", "logistics", ["s0"]), stratum("c-vis", "visual-ref", ["s1"]),
+                       stratum("c-new", "never-heard-of", ["s2"]), stratum("c-qa", "qa", ["s3", "s4"])],
+            "speakers": {"s1": "Alice", "s2": "Alice", "s3": "Chris", "s4": "Alice", "s5": None},
+            "read": {"layer": "clean", "marker": "[…]", "spans_cut": 1, "lines_emptied": 0}}
+    tprops = {"key": "lecture-notes", "information_policy": {
+        "stratum_roles": {"qa": "span", "visual-ref": "annotate", "logistics": "exclude"},
+        "stratum_glosses": {"qa": "one question with its answer", "visual-ref": "depends on what is shown"}}}
+    pack = build_notes_pack(unit, tprops)
+    assert [r["id"] for r in pack["segments"]] == ["s1", "s2", "s3", "s4", "s5"]          # only logistics left the read
+    assert pack["spans"] == [{"class": "qa", "stratum_id": "c-qa", "from_i": 2, "to_i": 3}]   # the qa lines ARE content
+    assert pack["segments"][0]["notes"] == ["visual-ref"]
+    assert pack["segments"][1]["notes"] == ["never-heard-of"]      # an unnamed class reaches the drafter (6752db0a (9))
+    assert [r["speaker"] for r in pack["segments"]] == ["Alice", "Alice", "Chris", "Alice", None]
+    assert pack["stratum_glosses"] == {"qa": "one question with its answer", "visual-ref": "depends on what is shown"}
+    md = render_notes_pack(pack)
+    assert "- `qa` lines 2–3" in md and "one question with its answer" in md
+    assert "{visual-ref} As the slide shows" in md and "`{never-heard-of}`" in md
+    assert md.count("— Alice —") == 2 and "— Chris —" in md and "— ? —" in md and "CLEAN read" in md
+    bare = build_notes_pack({**unit, "speakers": None, "strata": unit["strata"][:1]}, tprops)
+    assert bare["digest"] != pack["digest"]                        # the margin + spans are part of what was read
+    with pytest.raises(ValueError):
+        build_notes_pack(unit, {"information_policy": {"stratum_roles": {"qa": "structure"}}})
 
 
 def test_validate_rows_and_resolve_proposals():
@@ -405,7 +468,21 @@ def _build_sibling(sdb: str):
                                            ("Kids never build a coherent picture.", 12.0, 14.0)]):
                 nodes.append({"id": f"seg-{i}", "label": "Segment", "sources": [],
                               "properties": {"text": t, "index": i, "start_time": a, "end_time": b,
-                                             "source_id": "src-1"}})
+                                             "source_id": "src-1", "rendition_id": "rend-1"}})
+            # The real topology (the unit read is the correction core's spine read): Source <- AudioSegment
+            # <- AudioRendition <- Segment. One segment a chunk respine REPLACED stays on the graph stamped
+            # `superseded_by` — the live view never shows it (the Bonus lecture finding, 2026-09-20).
+            nodes += [{"id": "aseg-1", "label": "AudioSegment", "sources": [], "properties": {"index": 0}},
+                      {"id": "rend-1", "label": "AudioRendition", "sources": [],
+                       "properties": {"chain": [], "is_raw": True, "preprocessing": None}},
+                      {"id": "seg-old", "label": "Segment", "sources": [],
+                       "properties": {"text": "Gatto quit teaching in 1981.", "index": 1, "start_time": 2.0,
+                                      "end_time": 5.0, "source_id": "src-1", "rendition_id": "rend-1",
+                                      "superseded_by": "seg-1"}}]
+            spine_edges = [{"id": "e-aseg", "source_id": "aseg-1", "target_id": "src-1", "relation_type": "PART_OF", "properties": {}},
+                           {"id": "e-rend", "source_id": "rend-1", "target_id": "aseg-1", "relation_type": "DERIVED_FROM", "properties": {}}]
+            spine_edges += [{"id": f"e-seg-{k}", "source_id": k, "target_id": "rend-1", "relation_type": "PART_OF", "properties": {}}
+                            for k in [f"seg-{i}" for i in range(8)] + ["seg-old"]]
             for cid, cat, sids, st in (("cor-h1", "section-header", ["seg-0"], 0.0), ("cor-t", "tangent", ["seg-2"], 5.0),
                                        ("cor-h2", "section-header", ["seg-3"], 6.0), ("cor-q", "quotation", ["seg-4", "seg-5"], 7.0)):
                 nodes.append({"id": cid, "label": "Correction", "sources": [],
@@ -413,7 +490,7 @@ def _build_sibling(sdb: str):
                                              "session_id": "s", "created_at": 1.0,
                                              "payload": {"operation": "classify", "source_id": "src-1", "category": cat,
                                                          "segment_ids": sids, "start_time": st}}})
-            await extend_graph(sg.queue, sg.graph_id, nodes, [])
+            await extend_graph(sg.queue, sg.graph_id, nodes, spine_edges)
     asyncio.run(go())
 
 
@@ -675,8 +752,18 @@ def test_cli_draft_lifecycle_staging_index_and_work_promotion_gate(tmp_path):
                      {"id": "cor-bh", "label": "Correction", "sources": [],
                       "properties": {"correction_type": "stratum", "status": "applied", "actor": "human", "session_id": "s",
                                      "created_at": 1.0, "payload": {"operation": "classify", "source_id": "src-2",
-                                                                    "category": "section-header", "segment_ids": ["seg-b0"], "start_time": 0.0}}}]
-            await extend_graph(sg.queue, sg.graph_id, nodes, [])
+                                                                    "category": "section-header", "segment_ids": ["seg-b0"], "start_time": 0.0}}},
+                     {"id": "aseg-2", "label": "AudioSegment", "sources": [], "properties": {"index": 0}},
+                     {"id": "rend-2", "label": "AudioRendition", "sources": [],
+                      "properties": {"chain": [], "is_raw": True, "preprocessing": None}}]
+            for n in nodes:
+                if n["label"] == "Segment":
+                    n["properties"]["rendition_id"] = "rend-2"
+            edges = [{"id": "e-aseg-2", "source_id": "aseg-2", "target_id": "src-2", "relation_type": "PART_OF", "properties": {}},
+                     {"id": "e-rend-2", "source_id": "rend-2", "target_id": "aseg-2", "relation_type": "DERIVED_FROM", "properties": {}},
+                     {"id": "e-seg-b0", "source_id": "seg-b0", "target_id": "rend-2", "relation_type": "PART_OF", "properties": {}},
+                     {"id": "e-seg-b1", "source_id": "seg-b1", "target_id": "rend-2", "relation_type": "PART_OF", "properties": {}}]
+            await extend_graph(sg.queue, sg.graph_id, nodes, edges)
     asyncio.run(second_chapter())
     pdb, pj = str(pri_dir / "pri.db"), str(pri_dir / "writes.jsonl")
     staging, site = pri_dir / "staging", pri_dir / "site"
@@ -927,6 +1014,15 @@ def test_cli_work_page_binds_by_edge_renders_the_toc_gates_on_published_chapters
                      {"id": "ref-1", "label": "Reference", "sources": [],
                       "properties": {"source_id": COL, "label": "Publisher page", "url": "https://x.test/tlg", "notes_slug": "", "role": "publisher-page"}}]
             edges = [make_edge(s, COL, "PART_OF") for s in ("src-0", "src-1", "src-2")] + [make_edge(COL, "ref-1", "HAS_REFERENCE")]
+            # src-2's spine hangs under a rendition, as the correction core's spine read expects
+            nodes += [{"id": "aseg-2", "label": "AudioSegment", "sources": [], "properties": {"index": 0}},
+                      {"id": "rend-2", "label": "AudioRendition", "sources": [],
+                       "properties": {"chain": [], "is_raw": True, "preprocessing": None}}]
+            for n in nodes:
+                if n["label"] == "Segment":
+                    n["properties"]["rendition_id"] = "rend-2"
+            edges += [make_edge("aseg-2", "src-2", "PART_OF"), make_edge("rend-2", "aseg-2", "DERIVED_FROM"),
+                      make_edge("seg-b0", "rend-2", "PART_OF"), make_edge("seg-b1", "rend-2", "PART_OF")]
             await extend_graph(sg.queue, sg.graph_id, nodes, edges)
     asyncio.run(more_sibling())
     pdb, pj = str(pri_dir / "pri.db"), str(pri_dir / "writes.jsonl")

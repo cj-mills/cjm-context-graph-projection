@@ -1396,8 +1396,13 @@ def _render_notes_lane(kind: str, obj: Dict[str, Any]) -> str:
     if kind == "notes-pack":
         src = obj.get("source") or {}
         return (f"**pack** `{obj.get('pack_id')}` — {src.get('title') or src.get('source_id')} · "
-                f"{obj.get('lines')} content lines · {obj.get('headers')} headers · {obj.get('quote_spans')} quote spans\n"
-                f"  json  {obj.get('json_path')}\n  brief {obj.get('md_path')}\n"
+                f"{obj.get('lines')} content lines · {obj.get('headers')} headers · {obj.get('quote_spans')} quote spans"
+                + (f" · {obj.get('spans')} spans" if obj.get("spans") else "")
+                + (f" · {obj.get('noted_lines')} noted lines" if obj.get("noted_lines") else "")
+                + (f"\n  speakers: {', '.join(obj.get('speakers'))}" if obj.get("speakers") else "")
+                + (f"\n  read: {(obj.get('read') or {}).get('layer')} — {(obj.get('read') or {}).get('spans_cut')} span(s) cut, "
+                   f"{(obj.get('read') or {}).get('lines_emptied')} line(s) emptied" if obj.get("read") else "")
+                + f"\n  json  {obj.get('json_path')}\n  brief {obj.get('md_path')}\n"
                 f"  next: hand the brief to a proposer, then `notes-ingest --pack {obj.get('json_path')} --rows <jsonl> --proposer <name>`")
     if kind == "notes-ingest":
         c = obj.get("counts") or {}
