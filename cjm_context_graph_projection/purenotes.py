@@ -1725,7 +1725,11 @@ def unjudged_pairs(
     keys = {e["proposal_id"]: e["key"] for e in index}
 
     def _cells(p: Dict[str, Any]) -> set:
-        return {str(o.get("cell") or "") for o in (p.get("origins") or []) if o.get("cell")}
+        # the cells that AUTHORED the point (shown / matched / added), never a fold-in (`same` / `contains`): a
+        # compound folded into several finer survivors copies its origins onto each of them, and those copies must
+        # not make two other drafters' rows look like one drafter's (the nine-cell Bonus run, 2026-09-22)
+        return {str(o.get("cell") or "") for o in (p.get("origins") or [])
+                if o.get("cell") and str(o.get("how") or "shown") not in ("same", "contains")}
 
     def _judged(p: Dict[str, Any], other: str) -> bool:
         return any(str(j.get("key")) == other for j in (p.get("judged") or []))
@@ -2725,7 +2729,10 @@ def overlapping_points(
     points = [p for p in points if str(p.get("kind")) not in STRUCTURE_KINDS]
 
     def _cells(p: Dict[str, Any]) -> set:
-        return {str(o.get("cell") or "") for o in (p.get("origins") or []) if o.get("cell")}
+        # authoring cells only (shown / matched / added) — a fold-in origin (`same` / `contains`) is judgement
+        # provenance copied onto every survivor, not a drafter writing both points (see unjudged_pairs)
+        return {str(o.get("cell") or "") for o in (p.get("origins") or [])
+                if o.get("cell") and str(o.get("how") or "shown") not in ("same", "contains")}
 
     def _verdict(p: Dict[str, Any], other: str) -> str:
         return next((str(j.get("verdict") or "") for j in (p.get("judged") or []) if str(j.get("key")) == other), "")

@@ -1693,3 +1693,24 @@ def test_lecture_row_contract_section_anchor_relayed_question_and_prefix_leads()
                            {"speaker": "c2"}, {"speaker": "c3"}]) == {"A": "Ann", "c1": "Audience member", "c2": "Speaker 1", "c3": "Speaker 2"}
     with_roster = {**pack, "source": {"source_id": "x", "speaker_roster": [{"speaker": "Georgii", "name": "Georgii", "role": ""}]}}
     assert pack_digest(with_roster) == pack_digest({**pack, "source": {"source_id": "x"}})             # the roster is how a label prints, not what was read
+
+
+def test_standing_detection_ignores_fold_in_origins():
+    """A compound folded into several finer survivors copies its origins onto EACH of them (the fold's
+    every-survivor rule); those copies are judgement provenance, not authorship, so two other drafters'
+    rows still flag as cross-origin (the nine-cell Bonus run of 2026-09-22: 24 standing versions of one
+    point passed as 'one drafter's'). A shared `matched` origin — a drafter's own row — still exempts."""
+    def row(pid, seg, cell, extra_origins=()):
+        a, b = int(seg[0][1:]), int(seg[-1][1:])
+        return {"proposal_id": pid, "kind": "claim", "text": pid, "lead": "", "segment_ids": seg, "from_i": a, "to_i": b,
+                "start_time": float(2 * a), "end_time": float(2 * b + 1), "heading_index": 0, "parent_key": "",
+                "refers_to": [], "speaker": "Alice",
+                "origins": [{"set_id": "s", "proposal_id": pid, "cell": cell, "how": "added", "text": pid}, *extra_origins]}
+    fold_in = [{"set_id": "s", "proposal_id": "C", "cell": c, "how": "contains", "text": "C"} for c in ("blind/opus", "undivided/fable")]
+    rows = [row("P", ["s1", "s2"], "blind/fable", fold_in), row("Q", ["s2"], "sequential/opus", fold_in),
+            row("R", ["s3", "s4"], "blind/fable", [{"set_id": "s", "proposal_id": "R2", "cell": "sequential/opus", "how": "matched", "text": "R"}]),
+            row("S", ["s4"], "sequential/opus")]
+    assert [(q["a"]["text"], q["b"]["text"]) for q in unjudged_pairs(rows)] == [("P", "Q")]
+    pts = [dict(r, id=r["proposal_id"], key=r["proposal_id"]) for r in rows]
+    flags = {(p["a"]["key"], p["b"]["key"]): (p["cross_origin"], p["flagged"]) for p in overlapping_points(pts)}
+    assert flags == {("P", "Q"): (True, True), ("R", "S"): (False, False)}
