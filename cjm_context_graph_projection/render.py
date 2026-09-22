@@ -308,7 +308,7 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
     if kind in ("notes-type", "notes-pack", "notes-ingest", "notes-accept", "notes-retract", "notes-retract-all",
                 "notes-coverage", "notes-overlap", "notes-check", "notes-edit", "notes-rehead", "notes-render",
                 "notes-promotion", "notes-staging-index", "notes-index", "notes-merge", "notes-merge-sweep",
-                "notes-close", "notes-outline"):
+                "notes-close", "notes-outline", "notes-judge", "notes-judge-draft"):
         return _render_notes_lane(kind, obj)
     if kind == "confirm-proposal":
         if obj.get("error"):
@@ -1425,11 +1425,30 @@ def _render_notes_lane(kind: str, obj: Dict[str, Any]) -> str:
         if kind == "notes-merge-sweep":
             return (f"## notes-merge sweep — pack `{obj.get('pack_id')}` · {obj.get('sets')} set(s) (nothing written)\n"
                     + "\n".join("- " + _stats(s) for s in obj.get("table") or []))
-        return (f"**merged set** `{obj.get('set_id')}` — {obj.get('proposals')} point(s) from {(obj.get('stats') or {}).get('sets')} set(s)\n  "
-                + _stats(obj.get("stats") or {}) + f"\n  {obj.get('manifest_path')}"
-                + (f"\n  reconcile brief {obj.get('reconcile_brief')}\n  next: hand it to a reconciler, then `notes-close --set "
-                   f"{str(obj.get('set_id') or '')[:20]} --closures <jsonl>`" if obj.get("reconcile_brief")
-                   else f"\n  next: `notes-accept --slug <post> --set {str(obj.get('set_id') or '')[:20]} --list`"))
+        st = obj.get("stats") or {}
+        briefs = obj.get("briefs") or {}
+        if "blocks" in st:   # the BLOCK merge (ruling 1798a796): shown rows + extras, per-cell accounting
+            acct = st.get("accounting") or {}
+            body = (f"{st.get('inputs')} row(s) over {st.get('blocks')} block(s) (≤ {st.get('max_lines')} lines; {st.get('split_blocks')} split; "
+                    f"longest {st.get('longest_block')}) → **{st.get('merged')}** shown point(s) + **{st.get('extras')}** extra(s) for the judge; "
+                    f"match IoU ≥ {st.get('iou')} · {'same kind' if st.get('same_kind') else 'any kind'}; agreement "
+                    + " · ".join(f"{k} cell(s)×{v}" for k, v in (st.get("by_agreement") or {}).items())
+                    + "\n    accounting: " + " · ".join(f"{c} {a.get('shown')}/{a.get('matched')}/{a.get('extra')} of {a.get('rows')}"
+                                                       for c, a in sorted(acct.items())) + " (shown/matched/extra)"
+                    + f"\n    structure rows left out {st.get('structure_dropped')} · parents detached {st.get('detached_parents')} · "
+                      f"refs dropped {st.get('dropped_refs')} · open references {st.get('open_refs')}")
+        else:
+            body = _stats(st)
+        nxt = (f"hand the judge brief to ONE whole-source reader (Opus AND Fable), then `notes-judge --set {str(obj.get('set_id') or '')[:20]} --rows <jsonl> --model <m>`"
+               if briefs.get("judge") else
+               f"hand the reconcile brief to a reconciler, then `notes-close --set {str(obj.get('set_id') or '')[:20]} --closures <jsonl>`"
+               if (briefs.get("reconcile") or obj.get("reconcile_brief")) else
+               f"`notes-accept --slug <post> --set {str(obj.get('set_id') or '')[:20]} --list`")
+        return (f"**merged set** `{obj.get('set_id')}` — {obj.get('proposals')} row(s) from {st.get('sets')} set(s)\n  "
+                + body + f"\n  {obj.get('manifest_path')}"
+                + "".join(f"\n  {k} brief {v}" for k, v in briefs.items())
+                + (f"\n  reconcile brief {obj.get('reconcile_brief')}" if obj.get("reconcile_brief") and not briefs else "")
+                + f"\n  next: {nxt}")
     if kind == "notes-outline":
         if obj.get("brief"):
             return (f"**outline brief** — set `{obj.get('set_id')}` · {obj.get('points')} row(s)\n  {obj.get('brief')}\n"
@@ -1521,15 +1540,49 @@ def _render_notes_lane(kind: str, obj: Dict[str, Any]) -> str:
         return "\n".join(lines)
     if kind == "notes-overlap":
         pairs = obj.get("pairs") or []
-        lines = [f"## Overlap — `{obj.get('slug')}`", f"_{obj.get('points')} points · {len(pairs)} overlapping pair(s)"
-                 f" · {sum(1 for p in pairs if p.get('same_kind'))} same-kind_"]
-        for p in pairs:
+        flagged = [p for p in pairs if p.get("flagged")]
+        verdict = "CLEAN — no unjudged cross-origin overlap" if not flagged else f"UNCLEAN — {len(flagged)} unjudged cross-origin pair(s)"
+        lines = [f"## Overlap — `{obj.get('slug')}` · {verdict}",
+                 f"_{obj.get('points')} points · {len(pairs)} overlapping pair(s)"
+                 f" · {sum(1 for p in pairs if p.get('same_kind'))} same-kind · {sum(1 for p in pairs if p.get('nested'))} parent/child"
+                 f" · {sum(1 for p in pairs if p.get('judged'))} judged · {sum(1 for p in pairs if not p.get('cross_origin'))} one drafter's_"]
+        for p in flagged:
             flag = "⚠ " if p.get("same_kind") else ""
             lines.append(f"- {flag}`{p['a']['id'][:8]}` [{p['a'].get('kind')}] {_short(p['a'].get('text'), 70)}  ×  "
                          f"`{p['b']['id'][:8]}` [{p['b'].get('kind')}] {_short(p['b'].get('text'), 70)} — {len(p.get('shared') or [])} shared segment(s)")
         if not pairs:
             lines.append("_(no two points share a segment)_")
+        elif not flagged:
+            lines.append("_(every overlapping pair is a parent and its child, one drafter's, or judged)_")
+        if obj.get("brief"):
+            lines.append(f"  pairs brief {obj['brief']}\n  next: hand it to ONE whole-source reader, then `notes-overlap --slug {obj.get('slug')} --rows <jsonl>`")
         return "\n".join(lines)
+    if kind == "notes-judge-draft":
+        if obj.get("error"):
+            return f"**notes-overlap --rows** `{obj.get('slug')}` — error: {obj['error']}"
+        s = obj.get("stats") or {}
+        return (f"**judged draft** `{obj.get('slug')}` — pairs {s.get('pairs')}: answered {s.get('pairs_answered')} · folded "
+                f"{s.get('folded')} · recorded {s.get('recorded')} · lifted {s.get('lifted')} · detached {s.get('detached')}; "
+                f"{len(obj.get('edited') or [])} point(s) edited · {len(obj.get('retracted') or [])} retracted (journaled)\n"
+                f"  unjudged pairs left: {s.get('unjudged_pairs')}\n  next: `notes-render --slug {obj.get('slug')}`")
+    if kind == "notes-judge":
+        if obj.get("brief"):
+            what = "extras" if obj.get("mode") == "extras" else "pairs"
+            return (f"**judge brief ({what})** — set `{obj.get('set_id')}` · {obj.get('extras')} pending extra(s) · "
+                    f"{obj.get('pairs')} unjudged pair(s)\n  {obj.get('brief')}\n"
+                    f"  next: hand it to ONE whole-source reader (Opus AND Fable — the comparison carries on), then "
+                    f"`notes-judge --set {str(obj.get('set_id') or '')[:20]} --rows <jsonl> --model <m>`")
+        s = obj.get("stats") or {}
+        briefs = obj.get("briefs") or {}
+        nxt = (f"`notes-judge --set {str(obj.get('set_id') or '')[:20]} --rows <jsonl>` over {briefs.get('extras') or briefs.get('pairs')}"
+               if briefs.get("extras") or briefs.get("pairs")
+               else f"`notes-outline --set {str(obj.get('set_id') or '')[:20]} --pack <whole pack json>`")
+        return (f"**judged set** `{obj.get('set_id')}` — {s.get('points')} point(s): extras {s.get('extras')} (answered {s.get('answered')} · "
+                f"folded {s.get('folded')} · added {s.get('added')} · pending {s.get('pending_extras')}); pairs {s.get('pairs')} "
+                f"(answered {s.get('pairs_answered')} · recorded {s.get('recorded')}); lifted {s.get('lifted')} · detached {s.get('detached')}\n"
+                f"  unjudged pairs left: {s.get('unjudged_pairs')}\n  {obj.get('manifest_path')}"
+                + "".join(f"\n  {k} brief {v}" for k, v in briefs.items())
+                + f"\n  next: {nxt}")
     if kind == "notes-check":
         p = obj.get("point") or {}
         lines = [f"## Check — `{str(p.get('id') or '')[:8]}` [{p.get('kind')}]" + (f" under _{p.get('heading')}_" if p.get("heading") else ""),

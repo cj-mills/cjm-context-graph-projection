@@ -1244,8 +1244,9 @@ def points_index(
     order (structure kinds left out — a synopsis or a section is nobody's back-link target),
     each with its nesting depth so a later row never nests under a grandchild. One index
     serves both readers of work item 3a2c94eb: the SEQUENTIAL drafter's running view of the
-    earlier windows' points (arm (4)) and the reconciler that closes hinted references (3)."""
-    rows = [p for p in proposals if p.get("kind") not in STRUCTURE_KINDS]
+    earlier windows' points (arm (4)) and the reconciler that closes hinted references (3).
+    A block merge's pending EXTRAS are not points yet (`extra_list` keys them apart)."""
+    rows = [p for p in proposals if p.get("kind") not in STRUCTURE_KINDS and not p.get("extra")]
     by_id = {p["proposal_id"]: p for p in rows}
 
     def _depth(p: Dict[str, Any]) -> int:
@@ -1309,33 +1310,26 @@ def with_points_index(
     return out
 
 
-def merge_point_proposals(
+def _line_iou(a: Tuple[int, int], b: Tuple[int, int]) -> float:  # intersection over union of two inclusive line runs
+    """Whole-pack line agreement of two runs: 0.0 when they share no line."""
+    inter = min(a[1], b[1]) - max(a[0], b[0]) + 1
+    if inter <= 0:
+        return 0.0
+    return inter / float((a[1] - a[0] + 1) + (b[1] - b[0] + 1) - inter)
+
+
+def _resolve_cell_rows(
     sets: List[Dict[str, Any]],  # load_notes_propsets-shaped entries ({"manifest", "proposals"}): window sets and whole sets, any arms
     pack: Dict[str, Any],        # The WHOLE-unit pack every row re-resolves against
-    *,
-    iou: float = 0.5,            # Whole-pack line IoU at/above which two rows of different cells are ONE point
-    same_kind: bool = True,      # Agreement also needs the same kind
-) -> Dict[str, Any]:  # {"proposals": merged rows in accept order, "stats": {...}}
-    """Fold the window sets of several ARMS (and drafter models) over one unit into ONE
-    walkable proposal set (work item 3a2c94eb (2); the filter lane's `merge_filter_proposals`
-    read over points). Each row re-resolves by SEGMENT ID into the whole pack's line numbers
-    (loud when a segment is not in it — the spine moved or the pack is the wrong one), so a
-    window-relative run, heading and speaker are all re-read from the whole unit. A CELL is
-    one (arm, model); rows of DIFFERENT cells whose runs agree collapse into one row whose
-    `origins` name every contributing (set, proposal, arm, model, window, run, kind, text) —
-    never two rows of one cell, which drafted them as distinct points. The text SHOWN for a
-    collapsed row rotates across the agreeing cells (the cell shown least so far wins, user
-    ruling 2026-09-21), and `shown` records whose wording the human read, so an edit at
-    accept is attributable. Structure kinds are left out — a synopsis and the sections are
-    proposed over the whole source after the merge (ruling bc62c727). `parent_key` and
-    `refers_to` follow the collapse (a member's id maps to its merged row, across sets — a
-    sequential drafter's keyed reference lands here). Nesting is the SHOWN row's (its text
-    was written for that parent); back-links are the UNION of the agreeing members' — a
-    link any arm found is a candidate the human sees — and a hinted `refers_to` survives
-    only on a row no member closed a back-link for. A link the merge cannot honour (target
-    gone, a cycle, a third level, another header) is DETACHED and counted, never bent."""
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:  # ([{p, run, cell, origin}] in line order, the seed stats)
+    """The merges' shared first step: every drafted row of every set re-resolved by SEGMENT ID
+    into the whole pack's line numbers — loud when a segment is not in the pack (the spine
+    moved or the pack is the wrong one) and when a set drafted another source — so a
+    window-relative run, heading and speaker are all re-read from the whole unit. Structure
+    kinds are left out and counted (a synopsis and the sections are proposed over the whole
+    source after the merge, ruling bc62c727). A CELL is one (arm, model); the `origin` names
+    what the fold keeps of the row (set, proposal, cell, window, run, kind, wording)."""
     segs = pack.get("segments") or []
-    headers = pack.get("headers") or []
     pos = {r["id"]: r["i"] for r in segs}
     src_id = (pack.get("source") or {}).get("source_id")
     flat: List[Dict[str, Any]] = []
@@ -1365,14 +1359,136 @@ def merge_point_proposals(
                                     "from_i": run[0], "to_i": run[1], "kind": p.get("kind"),
                                     "lead": p.get("lead") or "", "text": p.get("text") or ""}})
     stats["inputs"] = len(flat)
-
-    def _iou(a: Tuple[int, int], b: Tuple[int, int]) -> float:
-        inter = min(a[1], b[1]) - max(a[0], b[0]) + 1
-        if inter <= 0:
-            return 0.0
-        return inter / float((a[1] - a[0] + 1) + (b[1] - b[0] + 1) - inter)
-
     flat.sort(key=lambda f: (f["run"][0], f["run"][1], f["cell"], str(f["origin"]["set_id"]), str(f["origin"]["proposal_id"])))
+    return flat, stats
+
+
+def _merged_row(
+    rep: Dict[str, Any],             # The member whose wording is SHOWN ({p, run, cell, origin}, optionally `how`)
+    members: List[Dict[str, Any]],   # Every member of the row, rep included — each becomes an origin, in this order
+    pack: Dict[str, Any],            # The whole-unit pack (its lines and headers)
+    new_id: str,                     # The merged row's proposal id (the point's future key)
+    **more: Any,                     # Further fields on the row (a block merge's `block`, `extra`)
+) -> Dict[str, Any]:  # One merged row — links still member ids, `_parent_hints` / `_ref_hints` pending `_fold_links`
+    """One merged row from its members: the shown member's kind, text, lead, data and nesting
+    (its text was written for that parent); the run, times, speaker and heading re-read from
+    the whole pack; back-links the UNION of the members' (a link any arm found is a candidate
+    the human sees); every member an origin with `how` it joined — `shown` for the wording
+    read, `matched` for a row that agreed on the lines, else what the caller set."""
+    segs = pack.get("segments") or []
+    headers = pack.get("headers") or []
+    p, (fi, ti) = rep["p"], rep["run"]
+    run = segs[fi:ti + 1]
+    starts = [s["start"] for s in run if s.get("start") is not None]
+    ends = [s["end"] for s in run if s.get("end") is not None]
+    voices = list(dict.fromkeys(s["speaker"] for s in run if s.get("speaker")))
+    h = int(run[0].get("h") or 0)
+    ordered = [rep] + [f for f in members if f is not rep]
+    return {
+        "proposal_id": new_id, "kind": p.get("kind"), "text": p.get("text"), "lead": p.get("lead") or "",
+        "speaker": (voices[0] if voices else ""), "speakers": (voices if len(voices) > 1 else []),
+        "refers_to": list(dict.fromkeys(t for f in ordered for t in (f["p"].get("refers_to") or []))),
+        "attribution": p.get("attribution") or "",
+        "data": p.get("data") or {}, "from_i": fi, "to_i": ti,
+        "segment_ids": [s["id"] for s in run],
+        "start_time": (round(min(starts), 3) if starts else None),
+        "end_time": (round(max(ends), 3) if ends else None),
+        "heading": (headers[h - 1]["text"] if h > 0 and h - 1 < len(headers) else ""), "heading_index": h,
+        "parent_key": str(p.get("parent_key") or ""),
+        "_parent_hints": [o for o in p.get("open_refs") or [] if o.get("role") == "parent"],
+        "_ref_hints": [o for f in ordered for o in f["p"].get("open_refs") or [] if o.get("role") != "parent"],
+        "evidence": {"pack_id": pack.get("pack_id"), "digest": pack.get("digest"), "from_i": fi, "to_i": ti},
+        "shown": rep["cell"],
+        "origins": [dict(f["origin"], how=(f.get("how") or ("shown" if f is rep else "matched"))) for f in ordered],
+        **more,
+    }
+
+
+def _fold_links(
+    rows: List[Dict[str, Any]],  # Merged rows (`_merged_row` output) whose links still name MEMBER ids
+    id_map: Dict[str, str],      # Member proposal id -> the merged row it became part of
+) -> Dict[str, int]:  # {"detached_parents", "dropped_refs"} — the links the fold could not honour
+    """The merges' shared link fold: `parent_key` and `refers_to` follow the collapse (a member's
+    id maps to its merged row, across sets — a sequential drafter's keyed reference lands here).
+    A hinted `refers_to` survives only on a row no member closed a back-link for; a parent hint
+    only where no parent landed. A link the merge cannot honour — target gone, collapsed into
+    the row itself, another header, a cycle, a third level — is DETACHED and counted, never
+    bent. Rows are updated in place; the pending hint fields are consumed."""
+    by_id = {r["proposal_id"]: r for r in rows}
+    detached = dropped_refs = 0
+    for r in rows:   # member ids -> merged ids
+        refs = [id_map.get(t) for t in r["refers_to"]]
+        kept = list(dict.fromkeys(t for t in refs if t and t != r["proposal_id"]))
+        # LOST links only (target left out, or collapsed into this very row) — members agreeing on one target is a fold, not a loss
+        dropped_refs += sum(1 for t in refs if not t or t == r["proposal_id"])
+        r["refers_to"] = kept
+        if r["parent_key"]:
+            t = id_map.get(r["parent_key"]) or ""
+            if not t or t == r["proposal_id"] or by_id[t]["heading_index"] != r["heading_index"]:
+                detached += 1
+                t = ""
+            r["parent_key"] = t
+        parent_hints, ref_hints = r.pop("_parent_hints", []), r.pop("_ref_hints", [])
+        still_open = (([] if r["parent_key"] else parent_hints[:1])
+                      + ([] if kept else list({o["hint"]: o for o in ref_hints}.values())))
+        if still_open:
+            r["open_refs"] = still_open
+    for r in rows:   # a cycle or a third level: detach the link that made it
+        seen, cur, depth = {r["proposal_id"]}, r, 0
+        while cur["parent_key"]:
+            nxt = by_id[cur["parent_key"]]
+            depth += 1
+            if nxt["proposal_id"] in seen or depth > 2:
+                r["parent_key"] = ""
+                detached += 1
+                break
+            seen.add(nxt["proposal_id"])
+            cur = nxt
+    return {"detached_parents": detached, "dropped_refs": dropped_refs}
+
+
+def _accept_order(
+    rows: List[Dict[str, Any]],  # Merged rows with their links folded (or a note's Points in proposal shape — `ordinal` stands in for the run)
+) -> List[Dict[str, Any]]:  # The rows in accept order
+    """Accept order: source order (first line, last line, id), every descendant DIRECTLY after
+    its ancestors so an in-order accept never meets a child before its parent."""
+    ordered = sorted(rows, key=lambda r: (int(r.get("from_i", r.get("ordinal", 0)) or 0), int(r.get("to_i", 0) or 0), r["proposal_id"]))
+    kids: Dict[str, List[Dict[str, Any]]] = {}
+    for r in ordered:
+        if r.get("parent_key"):
+            kids.setdefault(r["parent_key"], []).append(r)
+    out: List[Dict[str, Any]] = []
+
+    def _emit(r: Dict[str, Any]) -> None:
+        out.append(r)
+        for k in kids.get(r["proposal_id"], []):
+            _emit(k)
+    for r in ordered:
+        if not r.get("parent_key"):
+            _emit(r)
+    return out
+
+
+def merge_point_proposals(
+    sets: List[Dict[str, Any]],  # load_notes_propsets-shaped entries ({"manifest", "proposals"}): window sets and whole sets, any arms
+    pack: Dict[str, Any],        # The WHOLE-unit pack every row re-resolves against
+    *,
+    iou: float = 0.5,            # Whole-pack line IoU at/above which two rows of different cells are ONE point
+    same_kind: bool = True,      # Agreement also needs the same kind
+) -> Dict[str, Any]:  # {"proposals": merged rows in accept order, "stats": {...}}
+    """The ROW-LEVEL merge (work item 3a2c94eb (2); the filter lane's `merge_filter_proposals`
+    read over points) — kept as the sweep's measure and the first experiment's evidence; the
+    lane's merge is `merge_point_blocks` (ruling 1798a796: a row is not a comparable unit
+    across drafters, a block of source is). Each row re-resolves by SEGMENT ID into the whole
+    pack's line numbers (`_resolve_cell_rows`). A CELL is one (arm, model); rows of DIFFERENT
+    cells whose runs agree collapse into one row whose `origins` name every contributing (set,
+    proposal, arm, model, window, run, kind, text) — never two rows of one cell, which drafted
+    them as distinct points. The text SHOWN for a collapsed row rotates across the agreeing
+    cells (the cell shown least so far wins, user ruling 2026-09-21), and `shown` records
+    whose wording the human read, so an edit at accept is attributable. Structure kinds are
+    left out. Links follow the collapse (`_fold_links`): nesting is the SHOWN row's, back-links
+    the union of the members', a link the merge cannot honour detached and counted."""
+    flat, stats = _resolve_cell_rows(sets, pack)
     clusters: List[List[Dict[str, Any]]] = []
     for f in flat:
         best, best_v = None, 0.0
@@ -1381,7 +1497,7 @@ def merge_point_proposals(
                 continue   # no shared line
             if f["cell"] in {x["cell"] for x in c} or (same_kind and c[0]["p"].get("kind") != f["p"].get("kind")):
                 continue
-            v = _iou(c[0]["run"], f["run"])
+            v = _line_iou(c[0]["run"], f["run"])
             if v >= float(iou) and v > best_v:
                 best, best_v = c, v
         if best is None:
@@ -1396,76 +1512,12 @@ def merge_point_proposals(
         rep = c[0] if len(c) == 1 else min(c, key=lambda f: (shown[f["cell"]], f["cell"]))
         if len(c) > 1:
             shown[rep["cell"]] += 1
-        p, (fi, ti) = rep["p"], rep["run"]
-        run = segs[fi:ti + 1]
-        starts = [s["start"] for s in run if s.get("start") is not None]
-        ends = [s["end"] for s in run if s.get("end") is not None]
-        voices = list(dict.fromkeys(s["speaker"] for s in run if s.get("speaker")))
-        h = int(run[0].get("h") or 0)
         new_id = str(uuid.uuid4())
         for f in c:
             id_map[str(f["p"].get("proposal_id"))] = new_id
-        merged.append({
-            "proposal_id": new_id, "kind": p.get("kind"), "text": p.get("text"), "lead": p.get("lead") or "",
-            "speaker": (voices[0] if voices else ""), "speakers": (voices if len(voices) > 1 else []),
-            "refers_to": list(dict.fromkeys(t for f in [rep] + c for t in (f["p"].get("refers_to") or []))),
-            "attribution": p.get("attribution") or "",
-            "data": p.get("data") or {}, "from_i": fi, "to_i": ti,
-            "segment_ids": [s["id"] for s in run],
-            "start_time": (round(min(starts), 3) if starts else None),
-            "end_time": (round(max(ends), 3) if ends else None),
-            "heading": (headers[h - 1]["text"] if h > 0 and h - 1 < len(headers) else ""), "heading_index": h,
-            "parent_key": str(p.get("parent_key") or ""),
-            "_parent_hints": [o for o in p.get("open_refs") or [] if o.get("role") == "parent"],
-            "_ref_hints": [o for f in [rep] + c for o in f["p"].get("open_refs") or [] if o.get("role") != "parent"],
-            "evidence": {"pack_id": pack.get("pack_id"), "digest": pack.get("digest"), "from_i": fi, "to_i": ti},
-            "shown": rep["cell"], "origins": [f["origin"] for f in c],
-        })
-    by_id = {r["proposal_id"]: r for r in merged}
-    detached = dropped_refs = 0
-    for r in merged:   # member ids -> merged ids
-        refs = [id_map.get(t) for t in r["refers_to"]]
-        kept = list(dict.fromkeys(t for t in refs if t and t != r["proposal_id"]))
-        # LOST links only (target left out, or collapsed into this very row) — members agreeing on one target is a fold, not a loss
-        dropped_refs += sum(1 for t in refs if not t or t == r["proposal_id"])
-        r["refers_to"] = kept
-        if r["parent_key"]:
-            t = id_map.get(r["parent_key"]) or ""
-            if not t or t == r["proposal_id"] or by_id[t]["heading_index"] != r["heading_index"]:
-                detached += 1
-                t = ""
-            r["parent_key"] = t
-        parent_hints, ref_hints = r.pop("_parent_hints"), r.pop("_ref_hints")
-        still_open = (([] if r["parent_key"] else parent_hints[:1])
-                      + ([] if kept else list({o["hint"]: o for o in ref_hints}.values())))
-        if still_open:
-            r["open_refs"] = still_open
-    for r in merged:   # a cycle or a third level: detach the link that made it
-        seen, cur, depth = {r["proposal_id"]}, r, 0
-        while cur["parent_key"]:
-            nxt = by_id[cur["parent_key"]]
-            depth += 1
-            if nxt["proposal_id"] in seen or depth > 2:
-                r["parent_key"] = ""
-                detached += 1
-                break
-            seen.add(nxt["proposal_id"])
-            cur = nxt
-    # accept order: source order, every descendant directly after its ancestors
-    merged.sort(key=lambda r: (r["from_i"], r["to_i"], r["proposal_id"]))
-    kids: Dict[str, List[Dict[str, Any]]] = {}
-    for r in merged:
-        if r["parent_key"]:
-            kids.setdefault(r["parent_key"], []).append(r)
-    out: List[Dict[str, Any]] = []
-
-    def _emit(r: Dict[str, Any]) -> None:
-        out.append(r)
-        for k in kids.get(r["proposal_id"], []):
-            _emit(k)
-    for r in merged:
-        if not r["parent_key"]:
-            _emit(r)
+        merged.append(_merged_row(rep, c, pack, new_id))
+    links = _fold_links(merged, id_map)
+    out = _accept_order(merged)
     sizes: Dict[str, int] = {}
     alone: Dict[str, int] = {c: 0 for c in stats["cells"]}
     for r in out:
@@ -1473,10 +1525,531 @@ def merge_point_proposals(
         if len(r["origins"]) == 1:
             alone[r["shown"]] += 1
     stats.update({"merged": len(out), "by_agreement": dict(sorted(sizes.items())), "alone_by_cell": alone,
-                  "shown_by_cell": shown, "detached_parents": detached, "dropped_refs": dropped_refs,
+                  "shown_by_cell": shown, **links,
                   "open_refs": sum(len(r.get("open_refs") or []) for r in out),
                   "iou": float(iou), "same_kind": bool(same_kind)})
     return {"proposals": out, "stats": stats}
+
+
+def plan_notes_blocks(
+    extents: Dict[str, List[Tuple[int, int]]],  # Per cell: every root SUBTREE's full line extent (from_i, to_i), whole-pack lines
+    n_lines: int,                                # Lines in the whole pack
+    *,
+    max_lines: int = 40,                         # A longer block splits at the seam the fewest cells span
+) -> List[Dict[str, Any]]:  # [{k, from_i, to_i, lines, seam, spanned}] tiling the pack in order
+    """Cut the whole pack into BLOCKS (ruling 1798a796, fork 1): a block runs between COMMON
+    SEAMS — line boundaries no cell's root subtree (root + descendants, full extent) spans — so
+    one cell's rows can be shown WHOLE per block with their nesting intact. Root runs alone
+    will not do: a child's run usually sits outside its parent's, so blocks cut on root runs
+    degenerate to one line each (the pre-build datum in the ruling). A block longer than
+    `max_lines` splits at the internal boundary the FEWEST cells span (ties: nearest its
+    middle) and both halves are checked again; `seam` records how the block opened (`common`,
+    or `split:<cells spanning>`) and `spanned` names the cells whose subtree crosses its
+    opening — the rows the rotation shows across a cut."""
+    if n_lines <= 0:
+        return []
+    spanned: List[set] = [set() for _ in range(n_lines + 1)]   # boundary j sits between line j-1 and line j
+    for cell, exts in extents.items():
+        for a, b in exts:
+            for j in range(a + 1, b + 1):
+                spanned[j].add(cell)
+    blocks: List[Tuple[int, int, str]] = []
+    start = 0
+    for j in [j for j in range(1, n_lines) if not spanned[j]] + [n_lines]:
+        blocks.append((start, j - 1, "common"))
+        start = j
+    out: List[Tuple[int, int, str]] = []
+    stack = blocks[::-1]
+    while stack:
+        a, b, seam = stack.pop()
+        if b - a + 1 <= int(max_lines) or b <= a:
+            out.append((a, b, seam))
+            continue
+        mid = (a + b + 1) / 2.0
+        j = min(range(a + 1, b + 1), key=lambda j: (len(spanned[j]), abs(j - mid), j))
+        stack.append((j, b, f"split:{len(spanned[j])}"))
+        stack.append((a, j - 1, seam))
+    return [{"k": k, "from_i": a, "to_i": b, "lines": b - a + 1, "seam": s,
+             "spanned": (sorted(spanned[a]) if a > 0 else [])} for k, (a, b, s) in enumerate(out)]
+
+
+def merge_point_blocks(
+    sets: List[Dict[str, Any]],  # load_notes_propsets-shaped entries ({"manifest", "proposals"}): window sets and whole sets, any arms
+    pack: Dict[str, Any],        # The WHOLE-unit pack every row re-resolves against
+    *,
+    max_lines: int = 40,         # A block longer than this splits at the seam the fewest cells span
+    iou: float = 0.5,            # Whole-pack line IoU at/above which another cell's row MATCHES a shown row
+    same_kind: bool = True,      # A match also needs the same kind
+) -> Dict[str, Any]:  # {"proposals": shown rows + EXTRAS in accept order, "blocks": the plan, "stats": {...}}
+    """The BLOCK merge (ruling 1798a796, fork 1; work item 1561551e): the unit of agreement is
+    a stretch of source, not a row — grain differs across drafters, so no row-to-row overlap
+    threshold reconciles one row over a stretch with another's two (finding dfc75128). The
+    pack is cut into blocks at the seams no cell's root subtree spans (`plan_notes_blocks`; a
+    subtree sits in the block its first line falls in). Per block ONE cell's rows are shown
+    WHOLE (a parent with its children, one author, so nesting stays coherent), the shown cell
+    rotating to the one with the fewest rows shown so far (ties by name). Every other cell's
+    row then MATCHES the shown row its lines agree with (best IoU at or above the threshold,
+    the kind rule, at most one row per cell per shown row) and becomes an origin of it — or,
+    unmatched, an EXTRA: a row flagged `extra` in its block, for the judge
+    (`render_judge_brief` / `apply_judgements`) to classify as a grain variant (credited, not
+    shown) or a genuinely different point (added). Attribution is then complete: every
+    drafted row is shown, matched, or an extra awaiting its verdict (`stats.accounting`).
+    merge_point_proposals's contract holds: rows re-resolve by segment id, structure kinds are
+    left out, keyed cross-window links follow the fold, links the merge cannot honour are
+    detached and counted."""
+    flat, stats = _resolve_cell_rows(sets, pack)
+    n = len(pack.get("segments") or [])
+    by_pid = {str(f["p"]["proposal_id"]): f for f in flat}
+    root_of: Dict[str, str] = {}
+    for f in flat:
+        cur, hops = f, 0
+        while str(cur["p"].get("parent_key") or "") in by_pid and hops < 8:   # climb to the in-cell root
+            cur, hops = by_pid[str(cur["p"]["parent_key"])], hops + 1
+        root_of[str(f["p"]["proposal_id"])] = str(cur["p"]["proposal_id"])
+    extent: Dict[str, Tuple[int, int]] = {}
+    for f in flat:
+        r = root_of[str(f["p"]["proposal_id"])]
+        a, b = extent.get(r, (n, -1))
+        extent[r] = (min(a, f["run"][0]), max(b, f["run"][1]))   # a SUBTREE's full extent
+    per_cell: Dict[str, List[Tuple[int, int]]] = {}
+    for r, ext in extent.items():
+        per_cell.setdefault(by_pid[r]["cell"], []).append(ext)
+    blocks = plan_notes_blocks(per_cell, n, max_lines=max_lines)
+    block_of_line: List[int] = [0] * n
+    for b in blocks:
+        for i in range(b["from_i"], b["to_i"] + 1):
+            block_of_line[i] = b["k"]
+    in_block: Dict[int, Dict[str, int]] = {}
+    for f in flat:
+        f["block"] = block_of_line[extent[root_of[str(f["p"]["proposal_id"])]][0]]
+        in_block.setdefault(f["block"], {})
+        in_block[f["block"]][f["cell"]] = in_block[f["block"]].get(f["cell"], 0) + 1
+    # rotation: per block the cell with the fewest rows shown so far (ties by name)
+    shown_by_cell: Dict[str, int] = {c: 0 for c in stats["cells"]}
+    shown_cell: Dict[int, str] = {}
+    for b in blocks:
+        present = in_block.get(b["k"]) or {}
+        b["cells"] = dict(sorted(present.items()))
+        if not present:
+            continue
+        c = min(present, key=lambda c: (shown_by_cell[c], c))
+        shown_cell[b["k"]] = b["shown"] = c
+        shown_by_cell[c] += present[c]
+    shown = [f for f in flat if shown_cell.get(f["block"]) == f["cell"]]
+    others = [f for f in flat if shown_cell.get(f["block"]) != f["cell"]]
+    # matching: greedy by IoU over every (other row, shown row) sharing a line — one row per cell per shown row
+    cand: List[Tuple[float, int, int]] = []
+    for oi, o in enumerate(others):
+        for si, s in enumerate(shown):
+            if s["run"][1] < o["run"][0] or s["run"][0] > o["run"][1]:
+                continue
+            if same_kind and s["p"].get("kind") != o["p"].get("kind"):
+                continue
+            v = _line_iou(s["run"], o["run"])
+            if v >= float(iou):
+                cand.append((v, oi, si))
+    cand.sort(key=lambda t: (-t[0], t[1], t[2]))
+    taken: set = set()
+    matched: Dict[int, int] = {}
+    for v, oi, si in cand:
+        if oi in matched or (si, others[oi]["cell"]) in taken:
+            continue
+        matched[oi] = si
+        taken.add((si, others[oi]["cell"]))
+    members: Dict[int, List[Dict[str, Any]]] = {si: [s] for si, s in enumerate(shown)}
+    for oi, si in matched.items():
+        members[si].append(others[oi])
+    id_map: Dict[str, str] = {}
+    rows: List[Dict[str, Any]] = []
+    for si, s in enumerate(shown):
+        new_id = str(uuid.uuid4())
+        for f in members[si]:
+            id_map[str(f["p"]["proposal_id"])] = new_id
+        rows.append(_merged_row(s, members[si], pack, new_id, block=s["block"]))
+    for oi, o in enumerate(others):
+        if oi in matched:
+            continue
+        new_id = str(uuid.uuid4())
+        id_map[str(o["p"]["proposal_id"])] = new_id
+        o["how"] = "extra"
+        rows.append(_merged_row(o, [o], pack, new_id, block=o["block"], extra=True))
+    links = _fold_links(rows, id_map)
+    out = _accept_order(rows)
+    acct: Dict[str, Dict[str, int]] = {c: {"rows": stats["cells"][c], "shown": 0, "matched": 0, "extra": 0}
+                                       for c in stats["cells"]}
+    sizes: Dict[str, int] = {}
+    for r in out:
+        for o in r["origins"]:
+            acct[o["cell"]][o["how"]] += 1
+        if not r.get("extra"):
+            sizes[str(len(r["origins"]))] = sizes.get(str(len(r["origins"])), 0) + 1
+    stats.update({"merged": sum(1 for r in out if not r.get("extra")), "extras": sum(1 for r in out if r.get("extra")),
+                  "blocks": len(blocks), "split_blocks": sum(1 for b in blocks if str(b["seam"]).startswith("split")),
+                  "longest_block": max((b["lines"] for b in blocks), default=0),
+                  "by_agreement": dict(sorted(sizes.items())), "shown_by_cell": shown_by_cell, "accounting": acct,
+                  **links, "open_refs": sum(len(r.get("open_refs") or []) for r in out),
+                  "iou": float(iou), "same_kind": bool(same_kind), "max_lines": int(max_lines)})
+    return {"proposals": out, "blocks": blocks, "stats": stats}
+
+
+def extra_list(
+    proposals: List[Dict[str, Any]],  # A block-merged set's rows (`merge_point_blocks` output)
+) -> List[Dict[str, Any]]:  # [{key, proposal_id, block, cell, kind, lead, text, start_time, speaker, parent}] in set order — `x001`… are stable for the set
+    """Every EXTRA still pending in a set, keyed `x001`… in the set's order — the ids the judge
+    answers by and `apply_judgements` applies. `parent` is the key of the row the extra nests
+    under (a shown point's `p` key, or another extra's `x` key), "" at top level."""
+    rows = [p for p in proposals if p.get("extra")]
+    width = max(3, len(str(len(rows))))
+    xkeys = {str(p["proposal_id"]): f"x{n:0{width}d}" for n, p in enumerate(rows, start=1)}
+    pkeys = {e["proposal_id"]: e["key"] for e in points_index(proposals)}
+    return [{"key": xkeys[str(p["proposal_id"])], "proposal_id": p["proposal_id"], "block": p.get("block"),
+             "cell": p.get("shown") or "", "kind": p.get("kind"), "lead": p.get("lead") or "", "text": p.get("text") or "",
+             "start_time": p.get("start_time"), "speaker": p.get("speaker") or "",
+             "parent": pkeys.get(p.get("parent_key") or "") or xkeys.get(p.get("parent_key") or "") or ""} for p in rows]
+
+
+def unjudged_pairs(
+    proposals: List[Dict[str, Any]],  # A set's rows (a merged set), or a note's Points as `points_as_proposals` shapes them
+) -> List[Dict[str, Any]]:  # [{key, a: {key, proposal_id, …}, b: {…}, shared}] in index order — `q001`… are stable for the rows
+    """STANDING DETECTION (ruling 1798a796 (1)): the pairs of points that leave a draft
+    UNCLEAN — two rows deriving from shared segments, from different origins (no drafter cell
+    contributed to both; a row with no origins counts as unknown, so it flags), with no
+    judgement recorded on the pair. Legitimate relations do not flag: a parent and its child,
+    and a pair either row's `judged` names (`different` / `related` — recorded by
+    `apply_judgements`, carried onto the Points at accept). Structure rows and pending extras
+    are not points yet. Holds for any draft at any time — a re-draft after a spine correction,
+    a second source on one topic — not only for the merge that produced it."""
+    index = points_index(proposals)
+    by_id = {p["proposal_id"]: p for p in proposals}
+    rows = [by_id[e["proposal_id"]] for e in index]
+    keys = {e["proposal_id"]: e["key"] for e in index}
+
+    def _cells(p: Dict[str, Any]) -> set:
+        return {str(o.get("cell") or "") for o in (p.get("origins") or []) if o.get("cell")}
+
+    def _judged(p: Dict[str, Any], other: str) -> bool:
+        return any(str(j.get("key")) == other for j in (p.get("judged") or []))
+
+    def _entry(p: Dict[str, Any]) -> Dict[str, Any]:
+        return {"key": keys[p["proposal_id"]], "proposal_id": p["proposal_id"], "kind": p.get("kind"),
+                "lead": p.get("lead") or "", "text": p.get("text") or "", "start_time": p.get("start_time"),
+                "speaker": p.get("speaker") or "", "cells": sorted(_cells(p))}
+    out: List[Dict[str, Any]] = []
+    for i, a in enumerate(rows):
+        sa = set(a.get("segment_ids") or [])
+        for b in rows[i + 1:]:
+            shared = sorted(sa & set(b.get("segment_ids") or []))
+            if not shared:
+                continue
+            if a.get("parent_key") == b["proposal_id"] or b.get("parent_key") == a["proposal_id"]:
+                continue
+            ca, cb = _cells(a), _cells(b)
+            if ca and cb and ca & cb:
+                continue   # one drafter wrote both as distinct points
+            if _judged(a, b["proposal_id"]) or _judged(b, a["proposal_id"]):
+                continue
+            out.append({"a": _entry(a), "b": _entry(b), "shared": shared, "same_kind": a.get("kind") == b.get("kind")})
+    width = max(3, len(str(len(out))))
+    for n, q in enumerate(out, start=1):
+        q["key"] = f"q{n:0{width}d}"
+    return out
+
+
+def points_as_proposals(
+    points: List[Dict[str, Any]],  # load_points output (a note's accepted Points)
+) -> List[Dict[str, Any]]:  # The same rows in proposal shape: `proposal_id` = the point's key (what `parent_key` / `refers_to` / `judged` name)
+    """An accepted draft read as a proposal set — a point's key IS its accepted proposal id, so
+    the set-level judge (`unjudged_pairs`, `render_pairs_brief`, `apply_judgements`) works
+    over a note's Points unchanged; `id` rides along for the graph write that follows."""
+    return [{**p, "proposal_id": str(p.get("key") or "")} for p in points]
+
+
+def render_judge_brief(
+    proposals: List[Dict[str, Any]],  # A block-merged set's rows (`merge_point_blocks` output)
+    blocks: List[Dict[str, Any]],     # The set's block plan (the merge's `blocks`, carried on the manifest)
+    *,
+    set_id: str = "",                 # The set the brief is about (printed only)
+    source: str = "",                 # The source's title (printed only)
+) -> str:  # The duplicate judge's brief over the EXTRAS (markdown)
+    """The brief of the bounded JUDGEMENT (ruling 1798a796 (2)): ONE whole-source reader works
+    from the keyed Points, never the spine (design 6752db0a (6)), and answers each EXTRA of
+    the block merge beside the shown rows of its block — same statement / one contains the
+    other / different points on shared lines / legitimately related. When one row contains
+    two, the FINER rows win by default where each stands as a complete statement (fork 2);
+    the judge may say otherwise, and never edits text. Blocks without extras are left out."""
+    index = points_index(proposals)
+    extras = extra_list(proposals)
+    by_id = {p["proposal_id"]: p for p in proposals}
+    shown_in: Dict[Any, List[Dict[str, Any]]] = {}
+    for e in index:
+        shown_in.setdefault(by_id[e["proposal_id"]].get("block"), []).append(e)
+    extras_in: Dict[Any, List[Dict[str, Any]]] = {}
+    for x in extras:
+        extras_in.setdefault(x["block"], []).append(x)
+    with_x = [b for b in blocks if extras_in.get(b["k"])]
+    lines = [f"# Duplicate judge — set `{set_id}`", "", f"Source: **{source}**", "",
+             f"The merge cut this source into {len(blocks)} blocks and per block showed ONE drafter's rows whole; the other "
+             "drafters' rows that agree with a shown row on its lines were folded into it as origins. What remains are the "
+             f"EXTRAS — {len(extras)} rows that matched nothing — listed under the shown rows of their block. Say what each "
+             "extra is, judging by what the rows SAY on the lines they cite. Never rewrite anything.", "",
+             "## Output contract", "",
+             "ONE JSON object per line, one per extra, in the order listed:", "",
+             '    {"extra": "x012", "verdict": "same", "of": "p034"}                        it states what p034 states — a rewording, or the same statement at another grain',
+             '    {"extra": "x012", "verdict": "contains", "of": ["p034", "p035"], "keep": "shown"}   one contains the other: the extra is a compound of the rows named, or a finer statement inside ONE of them',
+             '    {"extra": "x012", "verdict": "different", "of": ["p034"]}                 a different point that happens to share lines with the rows named ([] when it shares lines with none)',
+             '    {"extra": "x012", "verdict": "related", "of": ["p034"]}                   legitimately beside them — a term beside a claim, a question beside its answer, a detail beside a summary that does not repeat it', "",
+             "* `same`: the extra folds into the row named — its drafter is credited as an origin; the shown wording stays.",
+             "* `contains`: `keep` names what stands. The FINER rows win by default where each stands as a complete statement — "
+             "a merged compound is harder to check against its lines. So `\"keep\": \"shown\"` when the extra is the compound of "
+             "the shown rows named; `\"keep\": \"extra\"` when the extra is the finer statement inside a shown compound AND the "
+             "extra with its neighbours covers what the compound says. Over fragments that are not complete statements keep the "
+             "complete row. The row that does not stand folds into the one that does.",
+             "* `different` and `related`: the extra is ADDED as a point of its own and its pairing with the rows named is recorded as "
+             "judged — so name in `of` EVERY shown row of the block that speaks about the same stretch (by time and content); a pair "
+             "left unnamed comes back as an open pair.",
+             "* When in doubt between `same` and `different`, a shared statement on shared lines is `same`.",
+             "* Rows only — no prose, no code fences.", "",
+             f"## Blocks ({len(with_x)} of {len(blocks)} carry extras)", ""]
+    for b in with_x:
+        k = b["k"]
+        rows_in = [by_id[e["proposal_id"]] for e in shown_in.get(k, [])] + [by_id[x["proposal_id"]] for x in extras_in[k]]
+        starts = [r["start_time"] for r in rows_in if r.get("start_time") is not None]
+        ends = [r["end_time"] for r in rows_in if r.get("end_time") is not None]
+        span = f" · {_fmt_ts(min(starts))}–{_fmt_ts(max(ends))}" if starts and ends else ""
+        lines += [f"### Block {k} — lines {b['from_i']}–{b['to_i']}{span} · shown: {b.get('shown') or '—'}", "", "Shown:", ""]
+        lines += render_points_index(shown_in.get(k, [])) or ["- (none)"]
+        lines += ["", "Extras:", ""]
+        for x in extras_in[k]:
+            lead = f"**{x['lead']}** — " if x["lead"] else ""
+            who = f" ({x['speaker']})" if x["speaker"] else ""
+            under = f" · under {x['parent']}" if x["parent"] else ""
+            lines.append(f"- `{x['key']}` [{x['kind']}] {_fmt_ts(x['start_time'])}{who} · {x['cell']}{under}  {lead}{x['text']}")
+        lines.append("")
+    return "\n".join(lines) + "\n"
+
+
+def render_pairs_brief(
+    proposals: List[Dict[str, Any]],  # A set's rows, or a note's Points as `points_as_proposals` shapes them
+    *,
+    set_id: str = "",                 # The set (or note) the brief is about (printed only)
+    source: str = "",                 # The source's title (printed only)
+) -> str:  # The overlap judge's brief over the UNJUDGED PAIRS (markdown)
+    """The brief of the judgement over what standing detection flags (ruling 1798a796 (1)-(2)):
+    every cross-origin pair of points sharing segments with no judgement yet, answered by ONE
+    whole-source reader from the keyed Points — same statement / one contains the other /
+    different points on shared lines / legitimately related. Serves a merged set before accept
+    and an accepted draft alike (a re-draft after a spine correction, a second source on one
+    topic); the full point list follows the pairs for context."""
+    pairs = unjudged_pairs(proposals)
+    index = points_index(proposals)
+    lines = [f"# Overlap judge — `{set_id}`", "", f"Source: **{source}**", "",
+             f"{len(pairs)} pair(s) of points derive from shared lines, come from different drafters, and carry no judgement — "
+             "a draft with such a pair is not clean. A parent and its child never appear here. Judge each pair by what the "
+             "two rows SAY on the lines they share; never rewrite anything. The full point list follows for context.", "",
+             "## Output contract", "",
+             "ONE JSON object per line, one per pair, in the order listed:", "",
+             '    {"pair": "q003", "verdict": "same", "keep": "a"}        one statement twice (a rewording, or the same statement at another grain): `keep` names the row that stands; the other folds into it, credited as an origin',
+             '    {"pair": "q003", "verdict": "contains", "keep": "b"}    one contains the other: `keep` names the row that stands — the FINER one by default when it is a complete statement (a compound is harder to check against its lines); the compound when the finer row is a fragment',
+             '    {"pair": "q003", "verdict": "different"}                different points that happen to share lines — both stand',
+             '    {"pair": "q003", "verdict": "related"}                  legitimately related — a term beside a claim, a question beside its answer, a detail beside a summary that does not repeat it; both stand', "",
+             "* When in doubt between `same` and `different`, a shared statement on shared lines is `same`.",
+             "* Rows only — no prose, no code fences.", "",
+             f"## Pairs ({len(pairs)})", ""]
+    for q in pairs:
+        lines.append(f"- `{q['key']}` · {len(q['shared'])} shared line(s)")
+        for side in ("a", "b"):
+            e = q[side]
+            lead = f"**{e['lead']}** — " if e.get("lead") else ""
+            who = f" ({e['speaker']})" if e.get("speaker") else ""
+            cells = f" · {', '.join(e['cells'])}" if e.get("cells") else ""
+            lines.append(f"  - {side}: `{e['key']}` [{e.get('kind')}] {_fmt_ts(e.get('start_time'))}{who}{cells}  {lead}{e.get('text')}")
+    if not pairs:
+        lines.append("- (none — the draft is clean)")
+    lines += ["", "## Points", ""] + render_points_index(index)
+    return "\n".join(lines) + "\n"
+
+
+def apply_judgements(
+    proposals: List[Dict[str, Any]],  # A set's rows (a block-merged set, judged or not), or a note's Points as `points_as_proposals` shapes them
+    answers: List[Dict[str, Any]],    # The judge's rows: {"extra": "x012", "verdict", "of", "keep"} | {"pair": "q003", "verdict", "keep"}
+) -> Dict[str, Any]:  # {"proposals": rows after the fold (survivors keep their ids), "folded": [{loser, into, verdict}], "stats": {...}}
+    """THE FOLD (ruling 1798a796 (3)): apply a judge's answers mechanically, loud on the first
+    bad row — a known extra or pair answered once, `of` naming shown points of this set, a
+    verdict from the four. A folded row is never deleted: it becomes an ORIGIN of every
+    survivor it folds into (`how` = the verdict), so per-arm and per-model credit survives;
+    its back-links join the survivor's and every link that named it now names the survivor
+    (a child of a folded row nests under the survivor — or, when the survivor was that child,
+    steps up to the folded row's parent). `same` folds the extra into the row named; on a
+    pair `keep` names the survivor. `contains` folds the row that does not stand into the one
+    that does (`keep`: shown / extra on an extra, a / b on a pair). `different` and `related`
+    ADD the extra as a point and record the verdict on BOTH rows of each pairing, so standing
+    detection never re-opens it. Nesting is re-checked after the fold: another header or a
+    cycle detaches, a third level LIFTS the row beside its parent, both counted. An extra
+    never answered stays an extra; a pair never answered stays unjudged — the stats say so."""
+    verdicts = ("same", "contains", "different", "related")
+    pkey = {e["key"]: e["proposal_id"] for e in points_index(proposals)}
+    xkey = {x["key"]: x["proposal_id"] for x in extra_list(proposals)}
+    qkey = {q["key"]: (q["a"]["proposal_id"], q["b"]["proposal_id"]) for q in unjudged_pairs(proposals)}
+    out = [json.loads(json.dumps(p)) for p in proposals]
+    by_id = {p["proposal_id"]: p for p in out}
+    seen: set = set()
+    folds: List[Tuple[str, str, str]] = []   # (loser, survivor, verdict)
+    pairs: List[Tuple[str, str, str]] = []   # (a, b, verdict) — recorded on both
+    added: List[str] = []
+    for n, a in enumerate(answers, start=1):
+        if not isinstance(a, dict):
+            raise ValueError(f"judgement {n}: not an object")
+        verdict = str(a.get("verdict") or "")
+        if verdict not in verdicts:
+            raise ValueError(f"judgement {n}: verdict {verdict!r} is not one of {' / '.join(verdicts)}")
+        if a.get("extra"):
+            xk = str(a["extra"])
+            if xk not in xkey:
+                raise ValueError(f"judgement {n}: unknown extra {xk!r}")
+            if xk in seen:
+                raise ValueError(f"judgement {n}: {xk} answered twice")
+            seen.add(xk)
+            xid = xkey[xk]
+            of = a.get("of")
+            of = [of] if isinstance(of, str) else list(of or [])
+            bad = [k for k in of if k not in pkey]
+            if bad:
+                raise ValueError(f"judgement {n}: `of` {bad[0]!r} is not a shown point of this set")
+            targets = list(dict.fromkeys(pkey[k] for k in of))
+            if verdict == "same":
+                if len(targets) != 1:
+                    raise ValueError(f"judgement {n}: `same` names exactly ONE shown point in `of`")
+                folds.append((xid, targets[0], "same"))
+            elif verdict == "contains":
+                if not targets:
+                    raise ValueError(f"judgement {n}: `contains` names the shown point(s) involved in `of`")
+                keep = str(a.get("keep") or "shown")
+                if keep not in ("shown", "extra"):
+                    raise ValueError(f"judgement {n}: `keep` is shown or extra")
+                if keep == "shown":
+                    folds += [(xid, t, "contains") for t in targets]
+                else:
+                    added.append(xid)
+                    folds += [(t, xid, "contains") for t in targets]
+            else:
+                added.append(xid)
+                pairs += [(xid, t, verdict) for t in targets]
+        elif a.get("pair"):
+            qk = str(a["pair"])
+            if qk not in qkey:
+                raise ValueError(f"judgement {n}: unknown pair {qk!r}")
+            if qk in seen:
+                raise ValueError(f"judgement {n}: {qk} answered twice")
+            seen.add(qk)
+            pa, pb = qkey[qk]
+            if verdict in ("same", "contains"):
+                keep = str(a.get("keep") or "")
+                if keep not in ("a", "b"):
+                    raise ValueError(f"judgement {n}: `{verdict}` on a pair names `keep` (a or b)")
+                loser, survivor = (pb, pa) if keep == "a" else (pa, pb)
+                folds.append((loser, survivor, verdict))
+            else:
+                pairs.append((pa, pb, verdict))
+        else:
+            raise ValueError(f"judgement {n}: names neither `extra` nor `pair`")
+    # the fold: a loser's origins join EACH survivor; its id maps to the first (chains follow, a cycle refuses)
+    gone: Dict[str, List[Tuple[str, str]]] = {}
+    for loser, survivor, verdict in folds:
+        if loser == survivor:
+            raise ValueError(f"a row cannot fold into itself ({loser[:8]})")
+        gone.setdefault(loser, []).append((survivor, verdict))
+
+    def _final(x: str) -> str:
+        path: set = set()
+        while x in gone:
+            if x in path:
+                raise ValueError(f"a fold cycle through {x[:8]} — the judgements fold rows into each other")
+            path.add(x)
+            x = gone[x][0][0]
+        return x
+    for loser, survivors in gone.items():
+        L = by_id[loser]
+        for s_id, verdict in survivors:
+            S = by_id[_final(s_id)]
+            have = {(o.get("set_id"), o.get("proposal_id")) for o in S.get("origins") or []}
+            S["origins"] = list(S.get("origins") or []) + [dict(o, how=verdict) for o in L.get("origins") or []
+                                                            if (o.get("set_id"), o.get("proposal_id")) not in have]
+            S["refers_to"] = list(dict.fromkeys(list(S.get("refers_to") or []) + list(L.get("refers_to") or [])))
+            S["judged"] = list(S.get("judged") or []) + [dict(j) for j in L.get("judged") or []]
+    id_map = {loser: _final(loser) for loser in gone}
+    orphan_parent = {loser: str(by_id[loser].get("parent_key") or "") for loser in gone}
+    out = [r for r in out if r["proposal_id"] not in gone]
+    by_id = {r["proposal_id"]: r for r in out}
+
+    def _map(x: str) -> str:   # a link's target after the fold; "" when it left the set
+        hops = 0
+        while x and x in id_map and hops < 16:
+            x, hops = id_map[x], hops + 1
+        return x if x in by_id else ""
+    lifted = detached = 0
+    for r in out:
+        pk = str(r.get("parent_key") or "")
+        if pk and pk not in by_id:
+            t = _map(pk)
+            if t == r["proposal_id"]:              # the survivor was the folded row's own child: step up to that row's parent
+                t = _map(orphan_parent.get(pk, ""))
+                if t == r["proposal_id"]:
+                    t = ""
+            r["parent_key"] = t
+        refs = [_map(t) for t in r.get("refers_to") or []]
+        r["refers_to"] = list(dict.fromkeys(t for t in refs if t and t != r["proposal_id"]))
+        seen_j: Dict[str, Dict[str, Any]] = {}
+        for j in r.get("judged") or []:
+            k = _map(str(j.get("key") or ""))
+            if k and k != r["proposal_id"] and k not in seen_j:
+                seen_j[k] = {"key": k, "verdict": str(j.get("verdict") or "")}
+        if seen_j:
+            r["judged"] = list(seen_j.values())
+        else:
+            r.pop("judged", None)
+    for a_id, b_id, verdict in pairs:   # a judgement is recorded on BOTH rows of the pairing
+        A, B = by_id.get(_map(a_id)), by_id.get(_map(b_id))
+        if A is None or B is None or A is B:
+            continue
+        for X, Y in ((A, B), (B, A)):
+            if not any(str(j.get("key")) == Y["proposal_id"] for j in X.get("judged") or []):
+                X["judged"] = list(X.get("judged") or []) + [{"key": Y["proposal_id"], "verdict": verdict}]
+    for xid in added:   # an extra the judge kept is a point now
+        r = by_id.get(xid)
+        if r is None:
+            continue
+        r.pop("extra", None)
+        for o in r.get("origins") or []:
+            if o.get("how") == "extra":
+                o["how"] = "added"
+    for r in out:   # nesting after the fold: same header, no cycle, two levels at most
+        if r.get("parent_key") and by_id[r["parent_key"]].get("heading_index") != r.get("heading_index"):
+            r["parent_key"] = ""
+            detached += 1
+    changed, rounds = True, 0
+    while changed and rounds < 8:
+        changed, rounds = False, rounds + 1
+        for r in out:
+            pk = str(r.get("parent_key") or "")
+            gp = str(by_id[pk].get("parent_key") or "") if pk else ""
+            if not gp:
+                continue
+            if gp == r["proposal_id"]:
+                r["parent_key"] = ""
+                detached += 1
+            else:
+                r["parent_key"] = gp   # a third level lifts the row beside its parent
+                lifted += 1
+            changed = True
+    out = _accept_order(out)
+    answered_x = sum(1 for k in seen if k in xkey)
+    answered_q = sum(1 for k in seen if k in qkey)
+    stats = {"extras": len(xkey), "answered": answered_x, "pending_extras": len(xkey) - answered_x,
+             "folded": len(gone), "added": len(added), "pairs": len(qkey), "pairs_answered": answered_q,
+             "recorded": len(pairs), "lifted": lifted, "detached": detached,
+             "points": len(points_index(out)), "unjudged_pairs": len(unjudged_pairs(out))}
+    return {"proposals": out, "stats": stats,
+            "folded": [{"loser": l, "into": list(dict.fromkeys(_final(s) for s, _ in v)), "verdict": v[0][1]} for l, v in gone.items()]}
 
 
 def open_reference_list(
@@ -1631,6 +2204,9 @@ def apply_outline(
     structure rows is refused — the outline is proposed once, over points."""
     if any(p.get("kind") in STRUCTURE_KINDS for p in proposals):
         raise ValueError("the set already carries section / synopsis rows — outline a set of points")
+    pending = sum(1 for p in proposals if p.get("extra"))
+    if pending:
+        raise ValueError(f"the set still carries {pending} unjudged extra(s) — `notes-judge` first, then outline the judged set")
     index = points_index(proposals)
     order = {e["key"]: n for n, e in enumerate(index)}
     entry = {e["key"]: e for e in index}
@@ -1700,7 +2276,9 @@ def point_from_args(
                      attribution=str(p.get("attribution") or ""), data=dict(p.get("data") or {}),
                      unit=dict(p.get("unit") or {}), parent_key=str(p.get("parent_key") or ""),
                      speaker=str(p.get("speaker") or ""), speakers=list(p.get("speakers") or []),
-                     refers_to=list(p.get("refers_to") or []), actor=actor)
+                     refers_to=list(p.get("refers_to") or []),
+                     origins=[dict(o) for o in (p.get("origins") or [])], judged=[dict(j) for j in (p.get("judged") or [])],
+                     actor=actor)
 
 
 async def observe_segments(
@@ -1778,7 +2356,7 @@ async def accept_point(
         new_props = node.to_graph_node()["properties"]
         changed = any(F.prop(existing, k) != new_props.get(k)
                       for k in ("text", "kind", "lead", "attribution", "heading", "data", "parent_key",
-                                "speaker", "speakers", "refers_to"))
+                                "speaker", "speakers", "refers_to", "origins", "judged"))
         if changed:
             # A re-accept with edited content (the human's edit-on-accept) lands as a property
             # update — same id, the journal carries the new state, last op wins on replay.
@@ -1878,17 +2456,23 @@ async def edit_point(
     parent: Optional[str] = None,       # New parent: a Point key, id or prefix in the same Note; "" = top level; None = keep
     heading: Optional[str] = None,      # Re-derived section heading (the rehead pass; None = keep)
     heading_index: Optional[int] = None,  # Its order within the unit (None = keep)
+    refers_to: Optional[List[str]] = None,   # New back-link keys (the judge's fold; None = keep) — REFERENCES edges re-derived to the standing targets
+    origins: Optional[List[Dict[str, Any]]] = None,  # New provenance list (the judge's fold; None = keep)
+    judged: Optional[List[Dict[str, Any]]] = None,   # New overlap judgements (the judge; None = keep)
     actor: str = "user:cli",
 ) -> Dict[str, Any]:  # {point_id, note_id, key, changed: {field: [old, new]}, args, written} | {error}
     """Edit an accepted point IN PLACE — the per-point repair the ch. 2 staging read demanded
-    (ruling 5625b74e; the lane gap named in b542896b (b) and 5fdeb80c): text, lead, parent.
-    Identity is (note, key), so the node, its `pt-` anchor and its References all stand; a
-    parent change rewires the ELABORATES edge under the accept-time rules (same Note, an
-    accepted parent, depth two at most — a point with children cannot become a grandchild —
-    and never a descendant of the point itself). The lead and arrow contracts of ingest hold
-    on the edited text. Journaled as `edit-point` with the FIELD SET applied; replay re-applies
-    it after the accept it edits (a missing point is a tolerated no-op — the accept may have
-    been retracted later in the journal). Unchanged fields land nothing."""
+    (ruling 5625b74e; the lane gap named in b542896b (b) and 5fdeb80c): text, lead, parent —
+    and, for the overlap judge over an accepted draft (ruling 1798a796), the back-links,
+    origins and judgements. Identity is (note, key), so the node, its `pt-` anchor and its
+    References all stand; a parent change rewires the ELABORATES edge under the accept-time
+    rules (same Note, an accepted parent, depth two at most — a point with children cannot
+    become a grandchild — and never a descendant of the point itself); a back-link change
+    re-derives the REFERENCES edges to the targets that stand (a missing target keeps its
+    key, as at accept). The lead and arrow contracts of ingest hold on the edited text.
+    Journaled as `edit-point` with the FIELD SET applied; replay re-applies it after the
+    accept it edits (a missing point is a tolerated no-op — the accept may have been
+    retracted later in the journal). Unchanged fields land nothing."""
     from .projection import ambiguity_error, resolve_node_ref
     r = await resolve_node_ref(gx, point_ref)
     if "candidates" in r:
@@ -1902,7 +2486,8 @@ async def edit_point(
     pid, note_id, key = F.nid(node), str(F.prop(node, "note_id") or ""), str(F.prop(node, "key") or "")
     cur = {k: F.prop(node, k) for k in ("text", "kind", "lead", "attribution", "heading", "heading_index",
                                         "segment_ids", "start_time", "end_time", "data", "unit",
-                                        "parent_key", "ordinal", "actor", "speaker", "speakers", "refers_to")}
+                                        "parent_key", "ordinal", "actor", "speaker", "speakers", "refers_to",
+                                        "origins", "judged")}
     fields: Dict[str, Any] = {}
     if text is not None:
         if not text.strip():
@@ -1915,6 +2500,12 @@ async def edit_point(
         fields["heading"] = heading.strip()
     if heading_index is not None and int(heading_index) != int(cur.get("heading_index") or 0):
         fields["heading_index"] = int(heading_index)
+    if refers_to is not None and [str(k) for k in refers_to] != list(cur.get("refers_to") or []):
+        fields["refers_to"] = [str(k) for k in refers_to]
+    if origins is not None and [dict(o) for o in origins] != list(cur.get("origins") or []):
+        fields["origins"] = [dict(o) for o in origins]
+    if judged is not None and [dict(j) for j in judged] != list(cur.get("judged") or []):
+        fields["judged"] = [dict(j) for j in judged]
     new_text = str(fields.get("text", cur.get("text") or ""))
     new_lead = str(fields.get("lead", cur.get("lead") or ""))
     if "text" in fields or "lead" in fields:
@@ -1968,7 +2559,7 @@ async def edit_point(
     merged = {**{k: v for k, v in cur.items() if v is not None}, **fields, "key": key}
     pn = point_from_args(note_id, merged, actor=str(cur.get("actor") or actor))
     props = pn.to_graph_node()["properties"]
-    props.update(fields)   # update_node MERGES: a cleared lead / parent_key lands as "" explicitly, never by absence
+    props.update(fields)   # update_node MERGES: a cleared lead / parent_key / list lands explicitly, never by absence
     await graph_task(gx.queue, gx.graph_id, "update_node", node_id=pid, properties=props)
     if "parent_key" in fields:
         q = EdgeQuery(source_ids=[pid], relation_type=DevRelations.ELABORATES, project=["id"])
@@ -1979,6 +2570,16 @@ async def edit_point(
         nest = pn.elaborates_edge()
         if nest is not None:
             await extend_graph(gx.queue, gx.graph_id, [], [nest])
+    if "refers_to" in fields:
+        q = EdgeQuery(source_ids=[pid], relation_type=DevRelations.REFERENCES, project=["id"])
+        res = await graph_task(gx.queue, gx.graph_id, "query_edges", query=q.to_dict())
+        old_edges = [row["id"] for row in (res.rows or []) if row.get("id")]
+        if old_edges:
+            await graph_task(gx.queue, gx.graph_id, "delete_edges", edge_ids=old_edges)
+        standing = [rk for rk in pn.refers_to
+                    if await graph_task(gx.queue, gx.graph_id, "get_node", node_id=point_node_id(note_id, rk)) is not None]
+        if standing:
+            await extend_graph(gx.queue, gx.graph_id, [], pn.refers_to_edges(standing))
     changed = {k: [cur.get(k) if cur.get(k) is not None else "", v] for k, v in fields.items()}
     return {"point_id": pid, "note_id": note_id, "key": key, "changed": changed, "text": pn.text, "written": True,
             "args": {"point_id": pid, "key": key, "fields": dict(fields), "actor": actor}}
@@ -2032,6 +2633,56 @@ async def rehead_points(
             "results": results, "written": bool(results)}
 
 
+async def judge_points(
+    gx: GraphHandle,
+    slug: str,                          # The deliverable Note's slug
+    answers: List[Dict[str, Any]],      # The overlap judge's rows over the draft's pairs brief ({"pair", "verdict", "keep"})
+    *,
+    actor: str = "user:cli",
+) -> Dict[str, Any]:  # {slug, stats, folded, edited: [edit results], retracted: [retract results], written} | {error}
+    """Apply an overlap judge's answers to an ACCEPTED draft (ruling 1798a796; work item
+    1561551e (4)): the same mechanical fold as a set (`apply_judgements` over the Points in
+    proposal shape), landed as the lane's journaled ops — every survivor whose parent,
+    back-links, origins or judgements changed is an `edit_point` (the caller journals one
+    `edit-point` per result), every folded point a `retract_point` after the edits that moved
+    its children (the caller journals `retract-point`). A folded point is never lost: it is an
+    origin of its survivor. Loud on the first bad answer, before any write."""
+    note_id = note_node_id(slug)
+    points = await load_points(gx, note_id)
+    rows = points_as_proposals(points)
+    before = {r["proposal_id"]: r for r in rows}
+    res = apply_judgements(rows, answers)
+    after = {r["proposal_id"]: r for r in res["proposals"]}
+    edited: List[Dict[str, Any]] = []
+    retracted: List[Dict[str, Any]] = []
+    for key, r in after.items():
+        old = before[key]
+        fields: Dict[str, Any] = {}
+        if str(r.get("parent_key") or "") != str(old.get("parent_key") or ""):
+            fields["parent"] = str(r.get("parent_key") or "")
+        if list(r.get("refers_to") or []) != list(old.get("refers_to") or []):
+            fields["refers_to"] = list(r.get("refers_to") or [])
+        if list(r.get("origins") or []) != list(old.get("origins") or []):
+            fields["origins"] = list(r.get("origins") or [])
+        if list(r.get("judged") or []) != list(old.get("judged") or []):
+            fields["judged"] = list(r.get("judged") or [])
+        if not fields:
+            continue
+        e = await edit_point(gx, old["id"], actor=actor, **fields)
+        if e.get("error"):
+            return {"error": e["error"], "slug": slug, "edited": edited, "retracted": retracted, "written": bool(edited)}
+        edited.append(e)
+    for key in before:
+        if key in after:
+            continue
+        d = await retract_point(gx, before[key]["id"], actor=actor)
+        if d.get("error"):
+            return {"error": d["error"], "slug": slug, "edited": edited, "retracted": retracted, "written": bool(edited or retracted)}
+        retracted.append(d)
+    return {"slug": slug, "stats": res["stats"], "folded": res["folded"], "edited": edited, "retracted": retracted,
+            "written": bool(edited or retracted)}
+
+
 # --------------------------------------------------------------------------------------
 # Reads: the review verbs
 # --------------------------------------------------------------------------------------
@@ -2062,21 +2713,38 @@ async def load_points(
 
 def overlapping_points(
     points: List[Dict[str, Any]],  # load_points output
-) -> List[Dict[str, Any]]:  # [{a, b, shared: [segment ids]}] — pairs whose segment runs intersect
-    """Pure: the duplication candidates — two points deriving from a shared segment. A
-    `quotation` beside a `claim` over the same run is expected; two claims are the flag."""
+) -> List[Dict[str, Any]]:  # [{a, b, shared: [segment ids], same_kind, nested, cross_origin, judged, flagged}] — pairs whose segment runs intersect
+    """Pure: the duplication candidates — two points deriving from a shared segment — and
+    STANDING DETECTION over them (ruling 1798a796 (1)): a pair is FLAGGED when it is
+    cross-origin (no drafter cell contributed to both — a point with no origins counts as
+    unknown), not a parent and its child, and neither point's `judged` names the other. A
+    draft with a flagged pair is unclean, whatever produced it. A `quotation` beside a `claim`
+    over the same run is expected (`same_kind` False); a recorded verdict rides on `judged`."""
     out: List[Dict[str, Any]] = []
     # the unit-spanning synopsis overlaps everything by design, and a section shares its anchor line with the point it opens
     points = [p for p in points if str(p.get("kind")) not in STRUCTURE_KINDS]
+
+    def _cells(p: Dict[str, Any]) -> set:
+        return {str(o.get("cell") or "") for o in (p.get("origins") or []) if o.get("cell")}
+
+    def _verdict(p: Dict[str, Any], other: str) -> str:
+        return next((str(j.get("verdict") or "") for j in (p.get("judged") or []) if str(j.get("key")) == other), "")
     for i, a in enumerate(points):
         sa = set(a.get("segment_ids") or [])
         for b in points[i + 1:]:
             shared = sorted(sa & set(b.get("segment_ids") or []))
             if shared:
-                out.append({"a": {"id": a["id"], "kind": a.get("kind"), "text": a.get("text")},
-                            "b": {"id": b["id"], "kind": b.get("kind"), "text": b.get("text")},
+                ka, kb = str(a.get("key") or ""), str(b.get("key") or "")
+                nested = str(a.get("parent_key") or "") == kb or str(b.get("parent_key") or "") == ka
+                ca, cb = _cells(a), _cells(b)
+                cross = not (ca and cb and ca & cb)
+                verdict = _verdict(a, kb) or _verdict(b, ka)
+                out.append({"a": {"id": a["id"], "key": ka, "kind": a.get("kind"), "text": a.get("text")},
+                            "b": {"id": b["id"], "key": kb, "kind": b.get("kind"), "text": b.get("text")},
                             "shared": shared,
-                            "same_kind": a.get("kind") == b.get("kind")})
+                            "same_kind": a.get("kind") == b.get("kind"),
+                            "nested": nested, "cross_origin": cross, "judged": verdict,
+                            "flagged": bool(cross and not nested and not verdict)})
     return out
 
 

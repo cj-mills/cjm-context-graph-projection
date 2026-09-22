@@ -16,7 +16,9 @@ from cjm_context_graph_layer.grammar import make_edge
 from cjm_context_graph_layer.ops import extend_graph, graph_task
 from cjm_context_graph_primitives.journal import read_journal
 from cjm_context_graph_primitives.query import EdgeQuery
-from cjm_context_graph_projection.purenotes import (apply_outline, render_outline_brief,
+from cjm_context_graph_projection.purenotes import (apply_judgements, apply_outline, extra_list, merge_point_blocks,
+                                                    plan_notes_blocks, render_judge_brief, render_outline_brief,
+                                                    render_pairs_brief, unjudged_pairs,
                                                     close_open_refs, load_notes_propsets, merge_point_proposals,
                                                     open_reference_list, pick_propset, points_index,
                                                     render_reconcile_brief, with_points_index, write_notes_propset,
@@ -306,6 +308,108 @@ def test_merge_collapses_across_cells_rotates_the_wording_and_closes_open_refere
                 [{"ref": "r01", "target": key["A"]}, {"ref": "r01", "target": key["A"]}]):
         with pytest.raises(ValueError):
             close_open_refs(res["proposals"], bad)
+
+
+def test_block_merge_shows_one_cell_whole_per_block_and_the_judge_folds_with_provenance(tmp_path):
+    # ruling 1798a796 / work item 1561551e: blocks between common seams, ONE cell shown whole per block, extras
+    # judged, a fold that keeps origins, standing detection over what remains (a set or an accepted draft)
+    segs = [{"id": f"s{k}", "index": k, "text": f"line {k}", "start": float(2 * k), "end": float(2 * k + 1)} for k in range(20)]
+    unit = {"source": {"source_id": "lec", "title": "Lecture"}, "segments": segs, "strata": [],
+            "speakers": {f"s{k}": "Alice" for k in range(20)}}
+    tprops = {"key": "lecture-notes", "information_policy": {"stratum_roles": {}}}
+    whole = build_notes_pack(unit, tprops)
+
+    def ingest(rows, arm, model):
+        return write_notes_propset(whole, proposals_from_point_rows(validate_point_rows(rows, whole), whole),
+                                   out_root=tmp_path, proposer={"kind": "t", "name": f"{arm}-{model}", "model": model}, arm=arm)["set_id"]
+
+    def claim(a, b, text, **kw):
+        return {"kind": "claim", "from_i": a, "to_i": b, "text": text, **kw}
+    ingest([claim(0, 3, "A"), {"kind": "example", "from_i": 2, "to_i": 5, "text": "a1", "parent": 0}, claim(8, 9, "B"), claim(12, 15, "C")], "blind", "opus")
+    ingest([claim(0, 3, "A'"), claim(8, 9, "B'"), claim(10, 11, "B2"), claim(12, 13, "C'"), claim(14, 15, "C2")], "blind", "fable")
+    ingest([claim(0, 5, "A''"), claim(17, 19, "D")], "undivided", "opus")
+    sets = load_notes_propsets(tmp_path)
+    # (1) blocks: common seams are the boundaries no cell's SUBTREE spans (a1's run reaches past its parent's)
+    plan = plan_notes_blocks({"o": [(0, 5), (8, 9), (12, 15)], "f": [(0, 3), (8, 9), (10, 11), (12, 13), (14, 15)], "u": [(0, 5), (17, 19)]}, 20)
+    assert [(b["from_i"], b["to_i"]) for b in plan] == [(0, 5), (6, 6), (7, 7), (8, 9), (10, 11), (12, 15), (16, 16), (17, 19)]
+    assert all(b["seam"] == "common" for b in plan)
+    # a long block splits at the seam the FEWEST cells span (ties nearest the middle), both halves re-checked
+    split = plan_notes_blocks({"o": [(0, 9)], "f": [(0, 4), (6, 9)], "u": [(0, 9)]}, 10, max_lines=6)
+    assert [(b["from_i"], b["to_i"], b["seam"]) for b in split] == [(0, 4, "common"), (5, 9, "split:2")]
+    assert split[1]["spanned"] == ["o", "u"] and plan_notes_blocks({}, 0) == []
+    # (2) the block merge: one cell shown WHOLE per block, rotating by rows shown; the others match or become extras
+    res = merge_point_blocks(sets, whole)
+    rows = {r["text"]: r for r in res["proposals"]}
+    st = res["stats"]
+    assert st["blocks"] == 8 and st["merged"] == 5 and st["extras"] == 2 and st["inputs"] == 11
+    assert [b.get("shown") for b in res["blocks"]] == ["blind/fable", None, None, "blind/opus", "blind/fable", "blind/opus", None, "undivided/opus"]
+    assert sorted(t for t, r in rows.items() if not r.get("extra")) == ["A'", "B", "B2", "C", "D"]
+    assert sorted(t for t, r in rows.items() if r.get("extra")) == ["C2", "a1"]
+    assert sorted(o["text"] for o in rows["A'"]["origins"]) == ["A", "A'", "A''"]        # a compound over 0-5 still agrees at IoU 0.67
+    assert [o["how"] for o in rows["A'"]["origins"]] == ["shown", "matched", "matched"]
+    assert [o["text"] for o in rows["C"]["origins"]] == ["C", "C'"]                        # one row per cell per shown row: C2 is the extra
+    assert rows["a1"]["parent_key"] == rows["A'"]["proposal_id"] and rows["a1"]["block"] == 0 and rows["C2"]["block"] == 5
+    assert st["accounting"] == {"blind/opus": {"rows": 4, "shown": 2, "matched": 1, "extra": 1},
+                                "blind/fable": {"rows": 5, "shown": 2, "matched": 2, "extra": 1},
+                                "undivided/opus": {"rows": 2, "shown": 1, "matched": 1, "extra": 0}}
+    assert [e["text"] for e in points_index(res["proposals"])] == ["A'", "B", "B2", "C", "D"]   # extras are not points yet
+    xs = extra_list(res["proposals"])
+    assert [(x["key"], x["text"], x["parent"]) for x in xs] == [("x001", "a1", "p001"), ("x002", "C2", "")]
+    with pytest.raises(ValueError):
+        apply_outline(res["proposals"], [{"section": "S", "first": "p001"}, {"synopsis": "x"}], whole)   # judge first
+    # (3) the judge brief: blocks with extras only, the shown rows beside them
+    brief = render_judge_brief(res["proposals"], res["blocks"], set_id="x", source="Lecture")
+    assert "## Blocks (2 of 8 carry extras)" in brief and "### Block 0 — lines 0–5 · 00:00–00:11 · shown: blind/fable" in brief
+    assert "- `x001` [example] 00:04 (Alice) · blind/opus · under p001  a1" in brief and "- `p004` [claim] 00:24 (Alice)  C" in brief
+    assert "### Block 3" not in brief
+    # (4) the fold keeps provenance; a kept extra is a point with its pairing recorded on BOTH rows; ids survive
+    keys = {e["text"]: e["key"] for e in points_index(res["proposals"])}
+    done = apply_judgements(res["proposals"], [{"extra": "x001", "verdict": "related", "of": [keys["A'"]]},
+                                               {"extra": "x002", "verdict": "contains", "of": [keys["C"]]}])
+    out = {r["text"]: r for r in done["proposals"]}
+    assert (done["stats"]["points"], done["stats"]["folded"], done["stats"]["added"], done["stats"]["pending_extras"]) == (6, 1, 1, 0)
+    assert [(o["text"], o["how"]) for o in out["C"]["origins"]] == [("C", "shown"), ("C'", "matched"), ("C2", "contains")]
+    assert "C2" not in out and "extra" not in out["a1"] and out["a1"]["origins"][0]["how"] == "added"
+    assert out["a1"]["judged"] == [{"key": out["A'"]["proposal_id"], "verdict": "related"}]
+    assert out["A'"]["judged"] == [{"key": out["a1"]["proposal_id"], "verdict": "related"}]
+    assert [r["proposal_id"] for r in done["proposals"]][:2] == [rows["A'"]["proposal_id"], rows["a1"]["proposal_id"]]
+    assert done["stats"]["unjudged_pairs"] == 0 and unjudged_pairs(done["proposals"]) == []
+    for bad in ([{"extra": "x009", "verdict": "same", "of": keys["C"]}],
+                [{"extra": "x001", "verdict": "same", "of": [keys["A'"], keys["C"]]}],
+                [{"extra": "x001", "verdict": "same", "of": keys["C"]}, {"extra": "x001", "verdict": "same", "of": keys["C"]}],
+                [{"extra": "x002", "verdict": "maybe", "of": keys["C"]}],
+                [{"extra": "x002", "verdict": "contains", "of": [keys["C"]], "keep": "both"}]):
+        with pytest.raises(ValueError):
+            apply_judgements(res["proposals"], bad)
+    # (5) standing detection over rows: cross-origin, not nested, not judged — the pairs brief and its fold
+    def row(pid, text, seg, cell, **kw):
+        a, b = int(seg[0][1:]), int(seg[-1][1:])
+        return {"proposal_id": pid, "kind": "claim", "text": text, "lead": "", "segment_ids": seg, "from_i": a, "to_i": b,
+                "start_time": float(2 * a), "end_time": float(2 * b + 1), "heading_index": 0, "parent_key": "",
+                "refers_to": [], "speaker": "Alice",
+                "origins": [{"set_id": "s", "proposal_id": pid, "cell": cell, "how": "shown", "text": text}], **kw}
+    rows2 = [row("X", "X", ["s4", "s5"], "blind/opus"), row("Y", "Y", ["s5", "s6"], "undivided/fable"),
+             row("Z", "Z", ["s5"], "blind/opus", parent_key="X"), row("W", "W", ["s6"], "undivided/fable"),
+             row("V", "V", ["s6", "s7"], "blind/fable", judged=[{"key": "Y", "verdict": "different"}])]
+    qs = unjudged_pairs(rows2)
+    assert [(q["key"], q["a"]["text"], q["b"]["text"]) for q in qs] == [("q001", "X", "Y"), ("q002", "Z", "Y"), ("q003", "W", "V")]
+    pb = render_pairs_brief(rows2, set_id="x", source="Lecture")
+    assert "3 pair(s) of points" in pb and "- `q001` · 1 shared line(s)" in pb and "  - b: `p003` [claim] 00:10 (Alice) · undivided/fable  Y" in pb
+    done2 = apply_judgements(rows2, [{"pair": "q001", "verdict": "contains", "keep": "b"}, {"pair": "q002", "verdict": "different"},
+                                     {"pair": "q003", "verdict": "related"}])
+    out2 = {r["proposal_id"]: r for r in done2["proposals"]}
+    assert "X" not in out2 and out2["Z"]["parent_key"] == "Y"                              # X folded into Y; its child follows
+    assert [(o["proposal_id"], o["how"]) for o in out2["Y"]["origins"]] == [("Y", "shown"), ("X", "contains")]
+    assert out2["Z"]["judged"] == [{"key": "Y", "verdict": "different"}] and {"key": "Z", "verdict": "different"} in out2["Y"]["judged"]
+    assert done2["stats"]["unjudged_pairs"] == 0
+    with pytest.raises(ValueError):
+        apply_judgements(rows2, [{"pair": "q001", "verdict": "same"}])                     # a fold on a pair names keep
+    # (6) the same detection over ACCEPTED points: flagged = cross-origin, unnested, unjudged
+    pts = [dict(r, id=r["proposal_id"], key=r["proposal_id"]) for r in rows2]
+    pairs = overlapping_points(pts)
+    flags = {(p["a"]["key"], p["b"]["key"]): p["flagged"] for p in pairs}
+    assert flags == {("X", "Y"): True, ("X", "Z"): False, ("Y", "Z"): True, ("Y", "W"): False, ("Y", "V"): False, ("W", "V"): True}
+    assert next(p for p in pairs if p["a"]["key"] == "Y" and p["b"]["key"] == "V")["judged"] == "different"
 
 
 def test_outline_pass_reads_the_points_and_lands_as_section_and_synopsis_rows():
@@ -966,6 +1070,119 @@ def test_cli_pure_notes_lane_end_to_end_and_replay(tmp_path):
     assert r.returncode == 0, r.stderr or r.stdout
     r = _run("--graph-db-path", str(rep2 / "rep.db"), "read", note_id)
     assert r.stdout == staged3
+
+
+@pytest.mark.skipif(not _HAVE_GRAPH, reason=f"graph capability {DEFAULT_GRAPH_ID!r} not installed (CI)")
+def test_cli_block_merge_judge_accept_and_standing_detection_replay(tmp_path):
+    # ruling 1798a796 / work item 1561551e over the CLI: block merge -> judge -> accept (origins + judgements ride
+    # the points) -> standing detection on the accepted draft -> the judge over the draft (edits / a fold) -> replay
+    sib_dir, pri_dir = tmp_path / "sib", tmp_path / "pri"
+    sib_dir.mkdir(); pri_dir.mkdir()
+    sdb = str(sib_dir / "sib.db")
+    _build_sibling(sdb)
+    pdb, pj = str(pri_dir / "pri.db"), str(pri_dir / "writes.jsonl")
+    lane = pri_dir / "purenotes"
+    (pri_dir / "graph.config.json").write_text(json.dumps(
+        {"notes_profile": "quarto_post", "emit_root": str(pri_dir / "staging"), "sibling_graphs": {"tx": sdb}}))
+    base = ("--graph-db-path", pdb, "--journal-path", pj, "--source-journal-path", str(pri_dir / "source.jsonl"))
+    assert _run(*base, "notes-type", "pure-notes").returncode == 0
+    r = _run(*base, "new-note", "--slug", "the-learning-game/ch01", "--content", "---\ntitle: \"Ch 1\"\ndate: 2026-09-22\n---\n\nBorn.\n")
+    assert r.returncode == 0, r.stderr or r.stdout
+    r = _run(*base, "notes-pack", "--source", "Seven Dangerous")
+    assert r.returncode == 0, r.stderr or r.stdout
+    pack_json = next((lane / "packs").glob("npack_*.json"))
+
+    def ingest(name, arm, model, rows):
+        f = tmp_path / f"{name}.jsonl"
+        f.write_text("\n".join(json.dumps(x) for x in rows) + "\n")
+        r = _run(*base, "notes-ingest", "--pack", str(pack_json), "--rows", str(f), "--proposer", name, "--arm", arm, "--model", model)
+        assert r.returncode == 0, r.stderr or r.stdout
+
+    def claim(a, b, text, **kw):
+        return {"kind": "claim", "from_i": a, "to_i": b, "text": text, **kw}
+    quote = {"kind": "quotation", "from_i": 1, "to_i": 2, "text": "I teach confusion.", "attribution": "Gatto"}
+    ingest("bo", "blind", "opus", [claim(0, 0, "Gatto quit teaching in 1991.", lead="Gatto"), quote,
+                                   claim(3, 3, "Subjects taught in isolation."), claim(4, 4, "Kids never build a coherent picture.")])
+    ingest("bf", "blind", "fable", [claim(0, 0, "Gatto quit in 1991."), quote, claim(3, 4, "Isolation leaves no coherent picture.")])
+    ingest("uf", "undivided", "fable", [claim(0, 0, "Gatto left teaching in 1991."), claim(4, 4, "No coherent picture forms.")])
+    # (1) the block merge: 3 blocks, one cell shown whole per block, the rest matched or extras; the judge brief beside the set
+    r = _run(*base, "notes-merge", "--pack", str(pack_json), "--iou", "0.6")
+    assert r.returncode == 0 and "over 3 block(s)" in r.stdout and "**3** shown point(s) + **2** extra(s)" in r.stdout \
+        and "judge brief" in r.stdout, r.stderr or r.stdout
+    merged = pick_propset(load_notes_propsets(lane / "proposals"), None)
+    set_id = merged["manifest"]["proposal_set_id"]
+    assert merged["manifest"]["merge"]["blocks"][2]["shown"] == "undivided/fable" and len(merged["manifest"]["merged_from"]) == 3
+    judge_md = Path(merged["path"]).parent / "judge.md"
+    assert judge_md.exists() and "## Blocks (1 of 3 carry extras)" in judge_md.read_text()
+    r = _run(*base, "notes-accept", "--slug", "the-learning-game/ch01", "--set", set_id, "--accept-all")
+    assert r.returncode == 1 and "unjudged extra(s)" in r.stderr                       # extras are never walked
+    # (2) the judge: the compound folds into the shown row it contains (provenance kept); the lone claim is added
+    xs = {x["text"]: x["key"] for x in extra_list(merged["proposals"])}
+    ks = {e["text"]: e["key"] for e in points_index(merged["proposals"])}
+    ans = tmp_path / "judge.jsonl"
+    ans.write_text(json.dumps({"extra": xs["Isolation leaves no coherent picture."], "verdict": "contains",
+                               "of": [ks["No coherent picture forms."]], "keep": "shown"}) + "\n"
+                   + json.dumps({"extra": xs["Subjects taught in isolation."], "verdict": "different", "of": []}) + "\n")
+    r = _run(*base, "notes-judge", "--set", set_id, "--rows", str(ans), "--model", "fable")
+    assert r.returncode == 0 and "4 point(s): extras 2 (answered 2 · folded 1 · added 1 · pending 0)" in r.stdout \
+        and "unjudged pairs left: 0" in r.stdout, r.stderr or r.stdout
+    judged = pick_propset(load_notes_propsets(lane / "proposals"), None)
+    jid = judged["manifest"]["proposal_set_id"]
+    assert judged["manifest"]["judged_from"] == set_id and judged["manifest"]["judges"][0]["model"] == "fable"
+    rows = {p["text"]: p for p in judged["proposals"]}
+    assert [(o["cell"], o["how"]) for o in rows["No coherent picture forms."]["origins"]] == \
+        [("undivided/fable", "shown"), ("blind/opus", "matched"), ("blind/fable", "contains")]
+    assert rows["Subjects taught in isolation."]["origins"][0]["how"] == "added" and not any(p.get("extra") for p in judged["proposals"])
+    bad = tmp_path / "bad.jsonl"
+    bad.write_text(json.dumps({"extra": "x009", "verdict": "same", "of": "p001"}) + "\n")
+    r = _run(*base, "notes-judge", "--set", set_id, "--rows", str(bad), "--model", "opus")   # a second judge, refused loudly
+    assert r.returncode == 1 and "unknown extra" in r.stderr
+    # (3) accept: origins ride the points (in the journaled accept op); the draft is CLEAN
+    r = _run(*base, "notes-accept", "--slug", "the-learning-game/ch01", "--set", jid, "--accept-all")
+    assert r.returncode == 0 and "accepted 4" in r.stdout, r.stderr or r.stdout
+    ops = [o for o in read_journal(pj) if o["verb"] == "accept-point"]
+    origins = {o["args"]["point"]["text"]: o["args"]["point"].get("origins") for o in ops}
+    assert [x["how"] for x in origins["Gatto quit in 1991."]] == ["shown", "matched", "matched"]
+    r = _run(*base, "notes-overlap", "--slug", "the-learning-game/ch01")
+    assert r.returncode == 0 and "CLEAN" in r.stdout and "0 overlapping pair(s)" in r.stdout, r.stderr or r.stdout
+    # (4) a later solo point over the same lines (no origins = unknown) flags the draft UNCLEAN; --brief names the pairs
+    ingest("solo", "", "", [claim(3, 4, "Isolation → an incoherent picture.")])
+    solo = pick_propset(load_notes_propsets(lane / "proposals"), None)
+    r = _run(*base, "notes-accept", "--slug", "the-learning-game/ch01", "--set", solo["manifest"]["proposal_set_id"], "--accept-all")
+    assert r.returncode == 0 and "accepted 1" in r.stdout, r.stderr or r.stdout
+    brief = tmp_path / "pairs.md"
+    r = _run(*base, "notes-overlap", "--slug", "the-learning-game/ch01", "--brief", str(brief))
+    assert r.returncode == 0 and "UNCLEAN — 2 unjudged cross-origin pair(s)" in r.stdout, r.stderr or r.stdout
+    text = brief.read_text()
+    assert "2 pair(s) of points" in text and "- `q001`" in text and "- `q002`" in text
+    # (5) the judge over the ACCEPTED draft: verdicts land as journaled edit-point ops; clean again; replay agrees
+    ans2 = tmp_path / "judge2.jsonl"
+    ans2.write_text(json.dumps({"pair": "q001", "verdict": "different"}) + "\n" + json.dumps({"pair": "q002", "verdict": "related"}) + "\n")
+    r = _run(*base, "notes-overlap", "--slug", "the-learning-game/ch01", "--rows", str(ans2))
+    assert r.returncode == 0 and "3 point(s) edited · 0 retracted" in r.stdout and "unjudged pairs left: 0" in r.stdout, r.stderr or r.stdout
+    assert len([o for o in read_journal(pj) if o["verb"] == "edit-point"]) == 3
+    r = _run(*base, "notes-overlap", "--slug", "the-learning-game/ch01")
+    assert "CLEAN" in r.stdout and "2 judged" in r.stdout, r.stderr or r.stdout
+    # (6) a fold over the accepted draft: the duplicate is retracted (journaled), the survivor stands; replay converges
+    ingest("solo2", "", "", [claim(0, 0, "Gatto quit teaching, 1991.")])
+    solo2 = pick_propset(load_notes_propsets(lane / "proposals"), None)
+    r = _run(*base, "notes-accept", "--slug", "the-learning-game/ch01", "--set", solo2["manifest"]["proposal_set_id"], "--accept-all")
+    assert r.returncode == 0 and "accepted 1" in r.stdout, r.stderr or r.stdout
+    r = _run(*base, "notes-overlap", "--slug", "the-learning-game/ch01", "--brief", str(brief))
+    assert "UNCLEAN — 1 unjudged cross-origin pair(s)" in r.stdout, r.stderr or r.stdout
+    side = next(l.strip()[2] for l in brief.read_text().splitlines() if "Gatto quit in 1991." in l and l.strip()[:3] in ("- a", "- b"))
+    ans3 = tmp_path / "judge3.jsonl"
+    ans3.write_text(json.dumps({"pair": "q001", "verdict": "same", "keep": side}) + "\n")
+    r = _run(*base, "notes-overlap", "--slug", "the-learning-game/ch01", "--rows", str(ans3))
+    assert r.returncode == 0 and "0 point(s) edited · 1 retracted" in r.stdout, r.stderr or r.stdout
+    assert len([o for o in read_journal(pj) if o["verb"] == "retract-point"]) == 1
+    r = _run(*base, "notes-overlap", "--slug", "the-learning-game/ch01")
+    assert "CLEAN" in r.stdout and "_5 points" in r.stdout, r.stderr or r.stdout
+    rep = tmp_path / "rep"; rep.mkdir()
+    r = _run("--graph-db-path", str(rep / "rep.db"), "--journal-path", pj, "replay")
+    assert r.returncode == 0, r.stderr or r.stdout
+    r = _run("--graph-db-path", str(rep / "rep.db"), "notes-overlap", "--slug", "the-learning-game/ch01")
+    assert "CLEAN" in r.stdout and "_5 points" in r.stdout and "2 judged" in r.stdout, r.stderr or r.stdout
 
 
 @pytest.mark.skipif(not _HAVE_GRAPH, reason=f"graph capability {DEFAULT_GRAPH_ID!r} not installed (CI)")

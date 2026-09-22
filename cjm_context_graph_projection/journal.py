@@ -301,7 +301,8 @@ async def _apply_op(gx: GraphHandle, op: Dict[str, Any]) -> str:
         f = a.get("fields") or {}
         await edit_point(gx, a["point_id"], text=f.get("text"), lead=f.get("lead"),
                          parent=f.get("parent_key"), heading=f.get("heading"),
-                         heading_index=f.get("heading_index"), actor=a.get("actor", "user:cli"))
+                         heading_index=f.get("heading_index"), refers_to=f.get("refers_to"),
+                         origins=f.get("origins"), judged=f.get("judged"), actor=a.get("actor", "user:cli"))
     elif verb == "render-notes":
         # The body is a FUNCTION of the Points: replay re-derives the same Sections graph-only
         # (write_md=False — the staging file is emit's job), landing after the accepts in

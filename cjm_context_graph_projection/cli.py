@@ -1612,10 +1612,11 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
                                             "model": args.model}, arm=getattr(args, "arm", None))
         print(render("notes-ingest", res, args.format))
         return 0
-    if cmd in ("notes-index", "notes-merge", "notes-close", "notes-outline"):
-        # The drafting experiment's set verbs (work item 3a2c94eb): files in, files out — no graph write.
-        from .purenotes import (apply_outline, close_open_refs, merge_point_proposals, open_reference_list,
-                                render_outline_brief, render_reconcile_brief, with_points_index)
+    if cmd in ("notes-index", "notes-merge", "notes-close", "notes-outline", "notes-judge"):
+        # The drafting experiment's set verbs (work item 3a2c94eb) and the judge (1561551e): files in, files out — no graph write.
+        from .purenotes import (apply_judgements, apply_outline, close_open_refs, extra_list, merge_point_blocks,
+                                merge_point_proposals, open_reference_list, render_judge_brief, render_outline_brief,
+                                render_pairs_brief, render_reconcile_brief, unjudged_pairs, with_points_index)
         root = _notes_lane_root(args)
         every = load_notes_propsets(root / "proposals")
 
@@ -1646,6 +1647,57 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
                                       arm=m.get("arm"), extra={"closed_from": m.get("proposal_set_id"),
                                                                "merged_from": m.get("merged_from"), "close": res["stats"]})
             print(render("notes-close", {**out, "stats": res["stats"]}, args.format))
+            return 0
+        if cmd == "notes-judge":
+            # The duplicate judge (ruling 1798a796 (2)-(3); work item 1561551e): without --rows, write the brief beside
+            # the set — the EXTRAS brief while extras are pending (--pairs forces the pairs brief), else the PAIRS brief
+            # over what standing detection flags; with --rows, apply the verdicts mechanically -> a NEW set (survivors
+            # keep their ids), and the next brief beside it while anything is left to judge.
+            chosen = _pick([args.set])
+            if chosen is None:
+                return 1
+            m, rows = chosen[0]["manifest"], chosen[0]["proposals"]
+            src_title = str((m.get("source") or {}).get("title") or (m.get("source") or {}).get("source_id") or "")
+            set_id = str(m.get("proposal_set_id") or "")
+            blocks = list((m.get("merge") or {}).get("blocks") or [])
+
+            def _briefs(rows: list, set_dir: Path, sid: str, *, force_pairs: bool = False) -> dict:
+                got: dict = {}
+                if extra_list(rows) and not force_pairs:
+                    p = set_dir / "judge.md"
+                    p.write_text(render_judge_brief(rows, blocks, set_id=sid, source=src_title))
+                    got["extras"] = str(p)
+                elif unjudged_pairs(rows):
+                    p = set_dir / "pairs.md"
+                    p.write_text(render_pairs_brief(rows, set_id=sid, source=src_title))
+                    got["pairs"] = str(p)
+                if open_reference_list(rows):
+                    p = set_dir / "reconcile.md"
+                    p.write_text(render_reconcile_brief(rows, set_id=sid))
+                    got["reconcile"] = str(p)
+                return got
+            if not args.rows:
+                got = _briefs(rows, Path(chosen[0]["path"]).parent, set_id, force_pairs=bool(args.pairs))
+                print(render("notes-judge", {"set_id": set_id, "brief": got.get("extras") or got.get("pairs"),
+                                             "mode": ("extras" if got.get("extras") else "pairs"),
+                                             "extras": len(extra_list(rows)), "pairs": len(unjudged_pairs(rows))}, args.format))
+                return 0
+            try:
+                res = apply_judgements(rows, _read_rows_file(Path(args.rows).expanduser()))
+            except (ValueError, json.JSONDecodeError) as e:
+                print(f"error: {e}", file=sys.stderr)
+                return 1
+            shell = {"pack_id": (m.get("pack") or {}).get("pack_id"), "digest": (m.get("pack") or {}).get("digest"),
+                     "type": m.get("type"), "source": m.get("source"), "window": m.get("window"),
+                     "segments": [None] * int((m.get("pack") or {}).get("segments") or 0)}
+            out = write_notes_propset(shell, res["proposals"], out_root=root / "proposals",
+                                      proposer={"kind": "judge", "name": "notes-judge", "model": args.model},
+                                      arm=m.get("arm"), extra={"judged_from": set_id, "merged_from": m.get("merged_from"),
+                                                               "merge": m.get("merge"), "judge": res["stats"],
+                                                               "judges": list(m.get("judges") or [])
+                                                               + [{"set": set_id, "model": args.model, "rows": str(args.rows), **res["stats"]}]})
+            got = _briefs(res["proposals"], Path(out["set_dir"]), out["set_id"])
+            print(render("notes-judge", {**out, "stats": res["stats"], "folded": len(res["folded"]), "briefs": got}, args.format))
             return 0
         pack = json.loads(Path(args.pack).expanduser().read_text())
         if cmd == "notes-outline":
@@ -1692,7 +1744,8 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
             if chosen is None:
                 return 1
         else:
-            chosen = [s for s in every if s["manifest"].get("arm") and pack["pack_id"] in (
+            # drafted sets only: a merge product (merged / judged / outlined — `merged_from` on the manifest) is never an input
+            chosen = [s for s in every if s["manifest"].get("arm") and not s["manifest"].get("merged_from") and pack["pack_id"] in (
                 (s["manifest"].get("plan") or {}).get("whole_pack_id"), (s["manifest"].get("pack") or {}).get("pack_id"))]
         if not chosen:
             print(f"error: no arm-tagged proposal set over pack `{pack['pack_id']}` — ingest with --arm, or name --set",
@@ -1704,19 +1757,30 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
                          for k in (True, False) for v in (0.5, 0.7, 0.9)]
                 print(render("notes-merge-sweep", {"pack_id": pack["pack_id"], "sets": len(chosen), "table": table}, args.format))
                 return 0
-            res = merge_point_proposals(chosen, pack, iou=float(args.iou), same_kind=not args.any_kind)
+            if args.row_level:
+                res = merge_point_proposals(chosen, pack, iou=float(args.iou), same_kind=not args.any_kind)
+            else:
+                # the lane's merge (ruling 1798a796): blocks of source, ONE cell shown whole per block, extras for the judge
+                res = merge_point_blocks(chosen, pack, max_lines=int(args.block_max), iou=float(args.iou),
+                                         same_kind=not args.any_kind)
         except ValueError as e:
             print(f"error: {e}", file=sys.stderr)
             return 1
         out = write_notes_propset(pack, res["proposals"], out_root=root / "proposals",
                                   proposer={"kind": "merge", "name": "notes-merge", "model": None}, arm="merged",
                                   extra={"merged_from": [s["manifest"].get("proposal_set_id") for s in chosen],
-                                         "merge": res["stats"]})
-        brief = None
+                                         "merge": {**res["stats"], **({"blocks": res["blocks"]} if res.get("blocks") else {})}})
+        briefs: dict = {}
+        if extra_list(res["proposals"]):
+            p = Path(out["set_dir"]) / "judge.md"
+            p.write_text(render_judge_brief(res["proposals"], res.get("blocks") or [], set_id=out["set_id"],
+                                            source=str((pack.get("source") or {}).get("title") or "")))
+            briefs["judge"] = str(p)
         if open_reference_list(res["proposals"]):
-            brief = Path(out["set_dir"]) / "reconcile.md"
-            brief.write_text(render_reconcile_brief(res["proposals"], set_id=out["set_id"]))
-        print(render("notes-merge", {**out, "stats": res["stats"], "reconcile_brief": (str(brief) if brief else None)},
+            p = Path(out["set_dir"]) / "reconcile.md"
+            p.write_text(render_reconcile_brief(res["proposals"], set_id=out["set_id"]))
+            briefs["reconcile"] = str(p)
+        print(render("notes-merge", {**out, "stats": res["stats"], "briefs": briefs, "reconcile_brief": briefs.get("reconcile")},
                      args.format))
         return 0
     if cmd == "notes-accept":
@@ -1728,6 +1792,12 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
             return 1
         manifest, proposals = chosen["manifest"], chosen["proposals"]
         set_id = str(manifest.get("proposal_set_id") or "")
+        pending_x = sum(1 for p in proposals if p.get("extra"))
+        if pending_x:
+            # a block merge's extras are not points until judged (ruling 1798a796 (2)): never walked, never accepted
+            print(f"error: set `{set_id}` still carries {pending_x} unjudged extra(s) — `notes-judge --set {set_id[:20]}` "
+                  f"first, then accept the judged set", file=sys.stderr)
+            return 1
         source = dict(manifest.get("source") or {})
         key = _sibling_key(args.sibling or source.get("graph"))
         if not key:
@@ -1791,7 +1861,10 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
                              "end_time": p.get("end_time"), "unit": unit,
                              "parent_key": p.get("parent_key") or "",
                              "speaker": p.get("speaker") or "", "speakers": list(p.get("speakers") or []),
-                             "refers_to": list(p.get("refers_to") or [])}
+                             "refers_to": list(p.get("refers_to") or []),
+                             # the fold's provenance and the judge's verdicts ride the point (ruling 1798a796)
+                             **({"origins": list(p["origins"])} if p.get("origins") else {}),
+                             **({"judged": list(p["judged"])} if p.get("judged") else {})}
                     res = await accept_point(gx, args.slug, point, observations=obs["observations"],
                                              actor=args.actor, proposal_set_id=set_id)
                     if res.get("error") and res.get("skippable"):
@@ -1836,9 +1909,30 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
         print(render("notes-coverage", res, args.format))
         return 1 if res.get("error") else 0
     if cmd == "notes-overlap":
+        from .purenotes import judge_points, points_as_proposals, render_pairs_brief
         points = await load_points(gx, note_node_id(args.slug))
-        print(render("notes-overlap", {"slug": args.slug, "points": len(points),
-                                       "pairs": overlapping_points(points)}, args.format))
+        if args.rows:
+            # the judge over an ACCEPTED draft (ruling 1798a796; 1561551e (4)): the same fold, landed as edits + retracts
+            try:
+                res = await judge_points(gx, args.slug, _read_rows_file(Path(args.rows).expanduser()), actor=args.actor)
+            except (ValueError, json.JSONDecodeError) as e:
+                print(f"error: {e}", file=sys.stderr)
+                return 1
+            if args.journal_path:
+                for e in res.get("edited") or []:
+                    if e.get("written"):
+                        append_write(args.journal_path, "edit-point", e["args"])
+                for d in res.get("retracted") or []:
+                    if d.get("deleted"):
+                        append_write(args.journal_path, "retract-point", d["args"])
+            print(render("notes-judge-draft", res, args.format))
+            return 1 if res.get("error") else 0
+        if args.brief:
+            unit = next((p.get("unit") or {} for p in points if p.get("unit")), {})
+            Path(args.brief).expanduser().write_text(render_pairs_brief(points_as_proposals(points), set_id=args.slug,
+                                                                          source=str(unit.get("title") or "")))
+        print(render("notes-overlap", {"slug": args.slug, "points": len(points), "pairs": overlapping_points(points),
+                                       "brief": args.brief}, args.format))
         return 0
     if cmd == "notes-check":
         res = await point_check(gx, args.point, siblings=siblings, manifests_dir=args.manifests_dir)
@@ -1967,7 +2061,21 @@ def _add_notes_lane_parsers(sub) -> None:
                    help="A proposal set id / prefix (repeatable; default: every arm-tagged set over this pack or its windows)")
     p.add_argument("--iou", type=float, default=0.5, help="Line IoU at/above which two rows are one point")
     p.add_argument("--any-kind", action="store_true", help="Agreement ignores the kind (default: same kind only)")
-    p.add_argument("--sweep", action="store_true", help="Write nothing: the collapse table at IoU 0.5 / 0.7 / 0.9, with and without same-kind")
+    p.add_argument("--sweep", action="store_true", help="Write nothing: the collapse table at IoU 0.5 / 0.7 / 0.9, with and without same-kind (row-level)")
+    p.add_argument("--block-max", type=int, default=40, help="A block longer than this many lines splits at the seam the fewest cells span")
+    p.add_argument("--row-level", action="store_true",
+                   help="The first experiment's row-level collapse instead of the block merge (rows as the unit; no extras, no judge)")
+    p.add_argument("--out-dir", default=None, help="Lane root (default: <journal dir>/purenotes)")
+
+    p = sub.add_parser("notes-judge", help="The duplicate JUDGE (ruling 1798a796; item 1561551e): without --rows, write the brief beside "
+                                           "the set — the EXTRAS of a block merge beside the shown rows of their block, else the unjudged "
+                                           "cross-origin PAIRS standing detection flags; with --rows, apply the verdicts mechanically "
+                                           "(a folded row becomes an origin of its survivor; kept pairs are recorded on both rows) — a "
+                                           "NEW set with the same proposal ids, and the next brief beside it while anything is left")
+    p.add_argument("--set", required=True, help="The (block-merged or judged) proposal set id / prefix")
+    p.add_argument("--rows", default=None, help="The judge's JSONL rows ({extra, verdict, of, keep} | {pair, verdict, keep})")
+    p.add_argument("--pairs", action="store_true", help="Without --rows: write the PAIRS brief even while extras are pending")
+    p.add_argument("--model", default=None, help="The judge's model (provenance)")
     p.add_argument("--out-dir", default=None, help="Lane root (default: <journal dir>/purenotes)")
 
     p = sub.add_parser("notes-outline", help="The whole-source OUTLINE PASS (ruling bc62c727): without --rows, write the brief "
@@ -2029,8 +2137,14 @@ def _add_notes_lane_parsers(sub) -> None:
     p.add_argument("--sibling", default=None)
     p.add_argument("--skeleton", default=None)
 
-    p = sub.add_parser("notes-overlap", help="Review: pairs of points whose segment runs intersect (same-kind = duplication flag)")
+    p = sub.add_parser("notes-overlap", help="Review + STANDING DETECTION (ruling 1798a796): pairs of points whose segment runs "
+                                             "intersect; a cross-origin pair with no recorded judgement flags the draft UNCLEAN. "
+                                             "--brief writes the pairs brief for ONE whole-source reader; --rows applies the "
+                                             "judge's verdicts to the accepted draft (journaled edit-point / retract-point)")
     p.add_argument("--slug", required=True)
+    p.add_argument("--brief", default=None, help="Write the overlap judge's brief (the flagged pairs + the points) to this path")
+    p.add_argument("--rows", default=None, help="The judge's JSONL rows ({pair, verdict, keep}) to apply to the accepted draft")
+    p.add_argument("--actor", default=os.environ.get("CJM_ACTOR") or "user:cli")
 
     p = sub.add_parser("notes-check", help="Review: one point beside its segments' LIVE text in the sibling (fidelity spot-check)")
     p.add_argument("point", help="The Point id (or unique prefix)")
