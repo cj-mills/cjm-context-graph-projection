@@ -2316,7 +2316,7 @@ def point_from_args(
     actor: str = "agent:session",
 ) -> PointNode:  # The PointNode the accept op describes
     """The op-args -> PointNode mapping the live accept AND replay share."""
-    return PointNode(note_id=note_id, key=str(p["key"]), kind=str(p["kind"]), text=str(p["text"]),
+    return PointNode(owner_id=note_id, key=str(p["key"]), kind=str(p["kind"]), text=str(p["text"]),
                      ordinal=int(p.get("ordinal") or 0), lead=str(p.get("lead") or ""),
                      heading=str(p.get("heading") or ""), heading_index=int(p.get("heading_index") or 0),
                      segment_ids=list(p.get("segment_ids") or []),
