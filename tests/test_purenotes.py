@@ -27,7 +27,7 @@ from cjm_context_graph_projection.purenotes import (apply_judgements, apply_outl
                                                     derived_description, overlapping_points, pack_digest, plan_notes_windows,
                                                     proposals_from_point_rows, pure_notes_type, speaker_labels,
                                                     render_notes_pack, render_points, stratum_role_policy,
-                                                    render_source_card, synopsis_of, unit_label,
+                                                    render_source_card, synopsis_of, unit_label, lecture_title, date_phrase,
                                                     unit_title_header, validate_point_rows,
                                                     _frontmatter_fields, render_works_table,
                                                     _replace_frontmatter_lines, derive_work_frontmatter,
@@ -599,8 +599,8 @@ def test_render_timestamps_policy_always_addressable_never():
     for p in pts:
         p["unit"] = {"public_url": "https://www.youtube.com/watch?v=abc"}
     addressable = render_points(pts)
-    assert "Quit in 1991. [(00:02–00:05)](https://www.youtube.com/watch?v=abc&t=2s) [§]" in addressable
-    assert "> — Gatto [(00:07–00:09)](https://www.youtube.com/watch?v=abc&t=7s) [§]" in addressable
+    assert "Quit in 1991. [(00:02–00:05)](https://www.youtube.com/watch?v=abc&t=2s){.src-ref} [§]" in addressable   # a linked span carries the quiet class (read 9d301b5a)
+    assert "> — Gatto [(00:07–00:09)](https://www.youtube.com/watch?v=abc&t=7s){.src-ref} [§]" in addressable
     assert "(00:" not in render_points(pts, timestamps="never")
     assert _time_link("https://youtu.be/abc", 65.9) == "https://youtu.be/abc?t=65"
     assert _time_link("https://pod.example/ep1.mp3", 5) == "https://pod.example/ep1.mp3#t=5"
@@ -778,6 +778,46 @@ def test_source_card_folds_resolved_references_and_a_dangling_target_renders_as_
     assert render_source_card({}, [{"label": "x", "href": "y"}]) == ""    # no work metadata -> no card at all
 
 
+def test_lecture_source_card_series_title_and_date_phrases():
+    """Finding baa640e8 + ruling de9c4cda (H7): a lecture unit (no work metadata) renders the LECTURE
+    card — the public title, the series, the dates at their precision, the speakers by label
+    (anonymous voices left out), the talk's paraphrase sentence, the watch link first among the
+    resources; the `series-lecture-notes` title policy continues the hand-notes naming; `date_phrase`
+    says exactly as much as is known; a unit with neither series nor lecture title has no card."""
+    unit = dict(_lecture_points()[0]["unit"])
+    assert render_source_card(unit) == ""                                                   # no series, no public title: nothing yet
+    unit.update(series=["GPU MODE"], lecture_title="Bonus Lecture: CUDA C++ llm.cpp",
+                published_at="2024-04-27", recorded_at="2024-04-27", recorded_at_precision="around")
+    card = render_source_card(unit, [{"label": "llm.c", "href": "https://github.com/karpathy/llm.c"}, {"label": "slides", "href": ""}])
+    assert card == ("::: {.callout-note appearance=\"simple\" icon=false}\n"
+                    "Notes on **Bonus Lecture: CUDA C++ llm.cpp**, a *GPU MODE* lecture — recorded around Apr 27, 2024, "
+                    "published Apr 27, 2024. Speakers: Georgii, Mark, Audience member. The points paraphrase the talk "
+                    "in the order it was given; only the quotations are verbatim.\n\n"
+                    "Resources: [Watch on YouTube](https://www.youtube.com/watch?v=abc) · [llm.c](https://github.com/karpathy/llm.c) · slides\n:::\n")
+    assert "Speaker 1" not in card and "SPEAKER_" not in card
+    same = render_source_card({**unit, "recorded_at_precision": "day"})
+    assert "— recorded and published Apr 27, 2024." in same
+    only_pub = render_source_card({k: v for k, v in unit.items() if not k.startswith("recorded")}, [])
+    assert "— published Apr 27, 2024. Speakers" in only_pub and "Resources: [Watch on YouTube](https://www.youtube.com/watch?v=abc)\n:::" in only_pub
+    no_dates = render_source_card({k: v for k, v in unit.items() if k not in ("recorded_at", "recorded_at_precision", "published_at", "public_url")}, [])
+    assert "Notes on **Bonus Lecture: CUDA C++ llm.cpp**, a *GPU MODE* lecture. Speakers:" in no_dates and "Resources" not in no_dates
+    # the on-disk title's fullwidth colon folds back when no public title was bound
+    assert lecture_title({"title": "Bonus Lecture： CUDA C++  llm.cpp"}) == "Bonus Lecture: CUDA C++ llm.cpp"
+    assert lecture_title({"title": "PTX⧸SASS review", "lecture_title": ""}) == "PTX/SASS review"
+    assert [date_phrase("2024-04-27", p) for p in ("day", "around", "month", "year")] == ["Apr 27, 2024", "around Apr 27, 2024", "Apr 2024", "2024"]
+    assert date_phrase("20240427") == "" and date_phrase("2024-13-01") == ""
+    # the title policy: the series + the lecture's label, `notes` after the label, the topic after the colon
+    fm = '---\ntitle: "old"\ndate: 2026-09-21\ncategories: [gpu-mode, notes]\n---\n'
+    pts = _lecture_points()
+    policy = {"title": "series-lecture-notes", "description": "derived"}
+    d = derive_frontmatter(fm, pts, policy, unit=unit)
+    assert d.startswith('---\ntitle: "GPU MODE Bonus Lecture notes: CUDA C++ llm.cpp"\ndescription: "') and d.endswith('date: 2026-09-21\ncategories: [gpu-mode, notes]\n---\n')
+    assert derive_frontmatter(fm, pts, policy, unit={**unit, "lecture_title": "Profiling tools"}).startswith('---\ntitle: "GPU MODE Profiling tools notes"\n')
+    assert derive_frontmatter(fm, pts, policy, unit={**unit, "series": [], "lecture_title": "Lecture 12: Flash Attention"}).startswith('---\ntitle: "Lecture 12 notes: Flash Attention"\n')
+    assert derive_frontmatter(d, pts, policy, unit=unit) == d                               # idempotent
+    assert derive_frontmatter(fm, pts, policy).startswith('---\ntitle: "Bonus Lecture notes"\n')   # the snapshot alone (no series, no public title): the Source title, folded
+
+
 # ---------------------------------------------------------------- the CLI chain
 
 def _build_sibling(sdb: str):
@@ -830,6 +870,39 @@ def _edit_sibling_segment(sdb: str, seg_id: str, text: str):
     async def go():
         async with open_graph(sdb) as sg:
             await graph_task(sg.queue, sg.graph_id, "update_node", node_id=seg_id, properties={"text": text})
+    asyncio.run(go())
+
+
+def _build_lecture_sibling(sdb: str):
+    """A FAKE transcription graph for a LECTURE: one Source in a confirmed Collection (the series)
+    with a bound public URL (+ the playlist title the binding matched), the dates
+    `bind-source-dates` lands, a short spine, and no work structure — the shape the source card
+    and the series title read (finding baa640e8)."""
+    async def go():
+        async with open_graph(sdb) as sg:
+            nodes = [{"id": "src-lec", "label": "Source", "sources": [],
+                      "properties": {"title": "Bonus Lecture： CUDA C++ llm.cpp", "media_type": "audio",
+                                     "public_url": "https://www.youtube.com/watch?v=abc",
+                                     "public_url_evidence": {"kind": "playlist-metadata", "playlist_title": "Bonus Lecture: CUDA C++ llm.cpp"},
+                                     "published_at": "2024-04-27", "recorded_at": "2024-04-27", "recorded_at_precision": "around"}},
+                     {"id": "coll-gm", "label": "Collection", "sources": [], "properties": {"title": "GPU MODE", "status": "confirmed"}},
+                     {"id": "coll-old", "label": "Collection", "sources": [], "properties": {"title": "GPU MODE_OLD", "status": "retired"}},
+                     {"id": "aseg-l", "label": "AudioSegment", "sources": [], "properties": {"index": 0}},
+                     {"id": "rend-l", "label": "AudioRendition", "sources": [],
+                      "properties": {"chain": [], "is_raw": True, "preprocessing": None}}]
+            for i, (t, a, b) in enumerate([("Thrust wraps CUB.", 0.0, 4.0),
+                                           ("CUB is the device layer.", 4.0, 8.0),
+                                           ("Kernels launch through it.", 8.0, 12.0)]):
+                nodes.append({"id": f"lseg-{i}", "label": "Segment", "sources": [],
+                              "properties": {"text": t, "index": i, "start_time": a, "end_time": b,
+                                             "source_id": "src-lec", "rendition_id": "rend-l"}})
+            edges = [{"id": "e-l-coll", "source_id": "src-lec", "target_id": "coll-gm", "relation_type": "PART_OF", "properties": {}},
+                     {"id": "e-l-old", "source_id": "src-lec", "target_id": "coll-old", "relation_type": "PART_OF", "properties": {}},
+                     {"id": "e-l-aseg", "source_id": "aseg-l", "target_id": "src-lec", "relation_type": "PART_OF", "properties": {}},
+                     {"id": "e-l-rend", "source_id": "rend-l", "target_id": "aseg-l", "relation_type": "DERIVED_FROM", "properties": {}}]
+            edges += [{"id": f"e-lseg-{i}", "source_id": f"lseg-{i}", "target_id": "rend-l", "relation_type": "PART_OF", "properties": {}}
+                      for i in range(3)]
+            await extend_graph(sg.queue, sg.graph_id, nodes, edges)
     asyncio.run(go())
 
 
@@ -1381,6 +1454,81 @@ def test_cli_references_render_into_the_source_card_and_replay(tmp_path):
     assert _run("--graph-db-path", rep, "read", note_id).stdout == staged2
 
 
+@pytest.mark.skipif(not _HAVE_GRAPH, reason=f"graph capability {DEFAULT_GRAPH_ID!r} not installed (CI)")
+def test_cli_lecture_page_reads_series_dates_and_style_live_and_replays(tmp_path):
+    """Finding baa640e8 + ruling de9c4cda end to end: a lecture type whose policy asks for the
+    series title, the lecture card and the head/start render style renders the series-lecture
+    title, the card (series, dates at precision, watch link) and quiet start-time spans with
+    head permalinks — the series and dates read LIVE from the sibling (the accepted point's
+    snapshot predates a date bound later); the render op journals the facts it observed, and a
+    replay onto a fresh db with NO sibling reproduces the live text byte for byte."""
+    sib_dir, pri_dir = tmp_path / "sib", tmp_path / "pri"
+    sib_dir.mkdir(); pri_dir.mkdir()
+    sdb = str(sib_dir / "sib.db")
+    _build_lecture_sibling(sdb)
+    pdb, pj = str(pri_dir / "pri.db"), str(pri_dir / "writes.jsonl")
+    (pri_dir / "graph.config.json").write_text(json.dumps(
+        {"notes_profile": "quarto_post", "emit_root": str(pri_dir / "staging"), "sibling_graphs": {"tx": sdb}}))
+    base = ("--graph-db-path", pdb, "--journal-path", pj, "--source-journal-path", str(pri_dir / "source.jsonl"))
+    policy = tmp_path / "lecture.policy.json"
+    policy.write_text(json.dumps({"title": "Lecture notes (test)",
+                                  "information_policy": pure_notes_type("test").information_policy,   # the read policy is pure-notes'; only the presentation differs
+                                  "presentation_policy": {
+                                      "frontmatter": {"title": "series-lecture-notes", "description": "derived"},
+                                      "source_card": "lecture", "render_style": {"span": "start", "anchor": "head"}, "public": "expanded"}}))
+    assert _run(*base, "notes-type", "lecture-notes", "--policy-file", str(policy)).returncode == 0
+    post = "---\ntitle: \"placeholder\"\ndate: 2026-09-21\ncategories: [gpu-mode, notes]\n---\n\nPreamble.\n"
+    r = _run(*base, "new-note", "--slug", "gpu-mode-notes/bonus", "--content", post)
+    assert r.returncode == 0, r.stderr or r.stdout
+    note_id = [o for o in read_journal(pj) if o["verb"] == "assert"][-1]["args"]["subject"]
+    # the accepted point's unit snapshot is taken BEFORE the dates exist on the Source: strip them first
+    async def strip_dates():
+        async with open_graph(sdb) as sg:
+            await graph_task(sg.queue, sg.graph_id, "update_node", node_id="src-lec",
+                             properties={"published_at": "", "recorded_at": "", "recorded_at_precision": ""})
+    asyncio.run(strip_dates())
+    r = _run(*base, "notes-pack", "--source", "llm.cpp", "--type", "lecture-notes")
+    assert r.returncode == 0, r.stderr or r.stdout
+    pack_json = next(l.split(None, 1)[1].strip() for l in r.stdout.splitlines() if l.strip().startswith("json"))
+    pack = json.loads(Path(pack_json).read_text())
+    assert pack["source"]["series"] == ["GPU MODE"] and pack["source"]["lecture_title"] == "Bonus Lecture: CUDA C++ llm.cpp"   # the snapshot carries the series, never the retired collection
+    assert "published_at" not in pack["source"]
+    rows = tmp_path / "rows.jsonl"
+    rows.write_text("\n".join(json.dumps(x) for x in [
+        {"kind": "section", "from_i": 0, "to_i": 0, "text": "The core libraries"},
+        {"kind": "claim", "from_i": 0, "to_i": 0, "text": "Thrust wraps CUB.", "lead": "Thrust"},
+        {"kind": "claim", "from_i": 1, "to_i": 2, "text": "CUB is the device layer; kernels launch through it."}]) + "\n")
+    assert _run(*base, "notes-ingest", "--pack", pack_json, "--rows", str(rows), "--proposer", "test").returncode == 0
+    r = _run(*base, "notes-accept", "--slug", "gpu-mode-notes/bonus", "--accept-all", "--type", "lecture-notes")   # the first accept binds the type
+    assert r.returncode == 0 and "accepted 3" in r.stdout, r.stderr or r.stdout
+    # the dates land AFTER the accept (bind-source-dates); the render reads them live all the same
+    async def bind_dates():
+        async with open_graph(sdb) as sg:
+            await graph_task(sg.queue, sg.graph_id, "update_node", node_id="src-lec",
+                             properties={"published_at": "2024-04-27", "recorded_at": "2024-04-27", "recorded_at_precision": "around"})
+    asyncio.run(bind_dates())
+    r = _run(*base, "notes-render", "--slug", "gpu-mode-notes/bonus")
+    assert r.returncode == 0, r.stderr or r.stdout
+    staged_path = pri_dir / "staging" / "gpu-mode-notes" / "bonus" / "index.md"
+    staged = staged_path.read_text()
+    assert staged.startswith('---\ntitle: "GPU MODE Bonus Lecture notes: CUDA C++ llm.cpp"\ndescription: "')
+    assert ("Notes on **Bonus Lecture: CUDA C++ llm.cpp**, a *GPU MODE* lecture — recorded around Apr 27, 2024, "
+            "published Apr 27, 2024. The points paraphrase the talk in the order it was given; only the quotations are verbatim."
+            "\n\nResources: [Watch on YouTube](https://www.youtube.com/watch?v=abc)\n:::") in staged
+    assert "## The core libraries\n\n- [§](#pt-" in staged and "){.src-ref}\n" in staged and "(00:00–00:04)" not in staged
+    assert "[00:00](https://www.youtube.com/watch?v=abc&t=0s){.src-ref}" in staged
+    ops = [o for o in read_journal(pj) if o["verb"] == "render-notes"]
+    assert len(ops) == 1 and ops[0]["args"]["facts"] == {
+        "series": ["GPU MODE"], "lecture_title": "Bonus Lecture: CUDA C++ llm.cpp", "public_url": "https://www.youtube.com/watch?v=abc",
+        "published_at": "2024-04-27", "recorded_at": "2024-04-27", "recorded_at_precision": "around"}
+    live = _run("--graph-db-path", pdb, "read", note_id).stdout
+    assert live == staged
+    rep = str(tmp_path / "rep.db")
+    r = _run("--graph-db-path", rep, "--journal-path", pj, "replay")
+    assert r.returncode == 0, r.stderr or r.stdout
+    assert _run("--graph-db-path", rep, "read", note_id).stdout == staged
+
+
 def test_work_page_renderers_are_pure_and_the_type_is_data():
     # Item ebb77107 (ruling a7ca900d (2)): the work card carries the work-level content, the
     # chapters section is the TOC that is also the executive summary (a born chapter links to
@@ -1619,7 +1767,7 @@ def test_render_lecture_sections_speakers_questions_glossary_and_code():
     assert "SPEAKER_" not in out                                                                      # a diarization cluster id is never printed
     assert "## Questions from the chat\n\n- **Q** (*Chris*, relayed by *Mark*): Does it support AMD?" in body
     assert (f"\n  - *Georgii:* Only through HIP. (see [§ Thrust](#pt-c1c1c1c1), [§ 00:20](#pt-c2c2c2c2)) "
-            f"[(00:44–00:48)](https://www.youtube.com/watch?v=abc&t=44s) {_glyph('a1a1a1a1')}\n") in body   # the unaccepted target renders nothing
+            f"[(00:44–00:48)](https://www.youtube.com/watch?v=abc&t=44s){{.src-ref}} {_glyph('a1a1a1a1')}\n") in body   # the unaccepted target renders nothing
     assert "deadbeef" not in out
     assert "(see [§ Thrust](#pt-c1c1c1c1), [§ CUB is the device…](#pt-c2c2c2c2))" in render_points(_lecture_points(), timestamps="never")   # no lead, no rendered time: the opening words
     assert "\n- `cub::DeviceReduce` sums on device. *(unverified)*" in body                           # same speaker as the answer: no label
@@ -1650,6 +1798,41 @@ def test_render_lecture_retracted_section_falls_into_the_previous_and_relayed_ch
     bare = [{**p, "unit": {}} for p in pts]
     assert "- *SPEAKER_07:* Kernels launch through it." in render_points(bare)                        # no roster: the string stands (pre-roster points carry names)
     assert derived_description(_lecture_points()).startswith("Notes: The core libraries · Questions from the chat.")
+
+
+def test_render_style_start_spans_head_anchors_and_intra_section_back_links_left_out():
+    """Ruling de9c4cda + read 9d301b5a on the lecture fixture: with the lecture type's render style
+    the span is the START time alone as a quiet `src-ref` link and the permalink sits at the HEAD
+    of the item (the anchor a wrapped point scrolls to is its first line); a back-link whose target
+    sits in the point's own section renders nothing while one into another section stands; the
+    glossary closer and a quotation follow the same style; the book defaults are byte-identical
+    to a call with no style at all."""
+    pts = _lecture_points()
+    pts.append({**pts[0], "id": "b1b1b1b1-0", "key": "b1b1b1b1-0", "kind": "quotation", "text": "Thrust is CUB with manners.",
+                "attribution": "", "start_time": 12.0, "end_time": 15.0, "ordinal": 12, "lead": ""})
+    pts.append({**pts[0], "id": "5ec00003-0", "key": "5ec00003-0", "kind": "section", "text": "The device layer", "speaker": "",
+                "start_time": 20.0, "end_time": 24.0, "ordinal": 20, "lead": ""})
+    plain = render_points(pts)
+    assert render_points(pts, style={}) == plain and render_points(pts, style={"span": "range", "anchor": "tail"}) == plain
+    assert "[(00:10–00:14)](https://www.youtube.com/watch?v=abc&t=10s){.src-ref} [§](#pt-c1c1c1c1){#pt-c1c1c1c1 .pt-anchor}" in plain   # the default: range at the tail, quiet class
+    styled = render_points(pts, style={"span": "start", "anchor": "head"})
+    assert ("## The core libraries\n\n- [§](#pt-c1c1c1c1){#pt-c1c1c1c1 .pt-anchor} *Georgii:* **Thrust** wraps CUB. "
+            "[00:10](https://www.youtube.com/watch?v=abc&t=10s){.src-ref}\n") in styled
+    assert "(00:10–00:14)" not in styled and styled.count("{#pt-c1c1c1c1") == 1
+    # the answer (in 'Questions from the chat') leans on c1 (section 1) and c2 (moved into 'The device layer' by
+    # the new mark) — both stand — and on the question right above it, in its OWN section: left out
+    a1 = next(p for p in pts if p["key"] == "a1a1a1a1-0")
+    a1["refers_to"] = ["c1c1c1c1-0", "c2c2c2c2-0", "99990001-0"]
+    for out in (render_points(pts, style={"span": "start", "anchor": "head"}), render_points(pts)):
+        line = next(l for l in out.splitlines() if "Only through HIP" in l)
+        assert "(see [§ Thrust](#pt-c1c1c1c1), [§ 00:20](#pt-c2c2c2c2))" in line and "pt-99990001" not in line
+    styled = render_points(pts, style={"span": "start", "anchor": "head"})
+    # the quotation: permalink at the head of the quote line, the span on the attribution line
+    assert "> [§](#pt-b1b1b1b1){#pt-b1b1b1b1 .pt-anchor} Thrust is CUB with manners.\n> [00:12](https://www.youtube.com/watch?v=abc&t=12s){.src-ref}\n" in styled
+    closer = styled.split("## Glossary\n")[1]
+    assert closer.startswith("\n- [§](#pt-90550002){#pt-90550002 .pt-anchor} **CCCL** — The CUDA C++ Core Libraries. [01:10]")
+    outline = render_points(pts, rendering="outline", style={"span": "start", "anchor": "head"})
+    assert "src-ref" not in outline and ".pt-anchor" not in outline                       # the scan view carries neither
 
 
 def test_lecture_row_contract_section_anchor_relayed_question_and_prefix_leads():

@@ -33,13 +33,15 @@ import json
 import os
 import re
 import time
+import unicodedata
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import yaml
 from cjm_context_graph_layer.ops import extend_graph, graph_task
-from cjm_context_graph_primitives.query import EdgeQuery, NodeQuery, PropertyPredicate
+from cjm_context_graph_primitives.query import (EdgeQuery, NodeQuery, PropertyPredicate,
+                                                RelationPredicate)
 from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.identity import note_node_id, point_node_id
 from cjm_dev_graph_schema.nodes import (DeliverableTypeNode, POINT_KIND_GLOSSES, PointNode,
@@ -358,11 +360,15 @@ async def read_source_unit(
     # only then does the public rendering carry timestamps, as links (ruling e1fd4d64 (D)).
     public_url = str(sp.get("public_url") or sp.get("url") or "").strip()
     # Human-added resource links ride the unit snapshot too (item ae103970) — the pack brief
-    # shows them and a render with no sibling at hand falls back to this snapshot.
+    # shows them and a render with no sibling at hand falls back to this snapshot. So do the
+    # source FACTS a lecture's title and card read (series, public title, dates — baa640e8);
+    # `pack_digest` leaves them out like the roster, so a pack digests as it did before them.
     references = await read_source_references(sg, source_id)
+    facts = {k: v for k, v in (await read_source_facts(sg, source_id)).items() if k in SOURCE_FACT_KEYS}
     return {"source": {"source_id": source_id, "title": str(sp.get("title") or ""),
                        "work_structure": sp.get("work_structure"), "skeleton_hash": chosen,
                        **({"public_url": public_url} if public_url else {}),
+                       **facts,
                        **({"references": references} if references else {}),
                        **({"speaker_roster": list(roster.values())} if roster else {})},
             "skeleton_hash": chosen, "segments": segments, "strata": strata,
@@ -387,6 +393,42 @@ async def read_source_references(
         out.append({"id": d.get("id"), "label": str(p.get("label") or ""), "url": str(p.get("url") or ""),
                     "notes_slug": str(p.get("notes_slug") or ""), "role": str(p.get("role") or "")})
     out.sort(key=lambda r: (r["role"], r["label"]))
+    return out
+
+
+async def read_source_facts(
+    sg: GraphHandle,   # The sibling (transcription) graph
+    source_id: str,    # The Source whose card-level facts to read
+) -> Dict[str, Any]:  # {series: [titles], lecture_title?, public_url?, published_at?, recorded_at?, recorded_at_precision?} — empties omitted
+    """The Source-level facts a rendering's title and card read LIVE from the sibling (finding
+    baa640e8; ruling de9c4cda (H7)): the SERIES = the titles of the confirmed Collections
+    holding the Source (PART_OF, inbound; a retired collection is not a series), the
+    lecture's PUBLIC title (the playlist row the URL binding matched — the on-disk Source
+    title carries the characters a filename cannot spell), the public URL, and the dates
+    `bind-source-dates` landed: `published_at` (exact) and `recorded_at` with its precision.
+    Read live like the references (ae103970) so an accepted point's frozen unit snapshot
+    never hides a fact bound after the accept (the b542896b class); the render op journals
+    what it observed and replay renders from that."""
+    src = await graph_task(sg.queue, sg.graph_id, "get_node", node_id=source_id)
+    if src is None:
+        return {}
+    sp = dict(F.props(src))
+    out: Dict[str, Any] = {}
+    cq = NodeQuery(label="Collection", related=RelationPredicate("PART_OF", direction="in", node_id=source_id),
+                   project=["title", "status"])
+    res = await graph_task(sg.queue, sg.graph_id, "query_nodes", query=cq.to_dict())
+    series = sorted({str(r.get("title") or "").strip() for r in (getattr(res, "rows", None) or [])
+                     if str(r.get("status") or "confirmed") != "retired" and str(r.get("title") or "").strip()})
+    if series:
+        out["series"] = series
+    ev = sp.get("public_url_evidence") if isinstance(sp.get("public_url_evidence"), dict) else {}
+    lecture_title = str((ev or {}).get("playlist_title") or "").strip()
+    if lecture_title:
+        out["lecture_title"] = lecture_title
+    for k in ("public_url", "published_at", "recorded_at", "recorded_at_precision"):
+        v = str(sp.get(k) or "").strip()
+        if v:
+            out[k] = v
     return out
 
 
@@ -436,8 +478,10 @@ def pack_digest(pack: Dict[str, Any]) -> str:  # "sha256:<hex>" over the read co
     and the roster is how a label PRINTS, not what was read. A window pack's read-only
     `context` was read too, so it joins the digest when the pack carries one."""
     source = pack.get("source")
-    if isinstance(source, dict) and "speaker_roster" in source:
-        source = {k: v for k, v in source.items() if k != "speaker_roster"}
+    if isinstance(source, dict):
+        # the roster and the source FACTS (series, public title, dates — baa640e8) are how a page
+        # PRINTS, not what was read: a pack digests as it did before either existed
+        source = {k: v for k, v in source.items() if k != "speaker_roster" and k not in SOURCE_FACT_KEYS}
     body = {"source": source,
             "headers": [[h["i_before"], h["text"]] for h in pack.get("headers") or []],
             "segments": [[r["i"], r["id"], r["start"], r["end"], r["text"]] for r in pack.get("segments") or []]}
@@ -2902,20 +2946,25 @@ def _time_link(url: str, start: float) -> str:  # a public URL addressed at `sta
     return f"{url}#t={s}"
 
 
-def _span(p: Dict[str, Any], timestamps: str = "addressable") -> str:  # " (mm:ss–mm:ss)" | " [(mm:ss–mm:ss)](url)" | ""
+def _span(p: Dict[str, Any], timestamps: str = "addressable", ctx: Optional[Dict[str, Any]] = None) -> str:  # " (mm:ss–mm:ss)" | " [(mm:ss–mm:ss)](url){.src-ref}" | " [mm:ss](url){.src-ref}" | ""
     """The source span: `always` = plain; `addressable` = ONLY when the unit carries a public
     time-addressable URL, rendered as a LINK into it (ruling e1fd4d64 (D) — an audiobook span
-    resolves against nobody else's file split); `never` = none. Review verbs show spans
-    regardless — this governs the rendered post."""
+    resolves against nobody else's file split); `never` = none. A linked span carries the
+    `src-ref` class (read 9d301b5a: the site styles provenance quietly and can hide it — the
+    default link blue drew the eye off the content). Style `span: start` (ruling de9c4cda for
+    the standalone lecture page) prints the start time alone: the link leaves the site, so
+    the range served only the walk; the range stays on the point for a video-centred
+    surface. Review verbs show spans regardless — this governs the rendered post."""
     if p.get("start_time") is None or timestamps == "never":
         return ""
-    text = f"({_fmt_ts(p.get('start_time'))}–{_fmt_ts(p.get('end_time'))})"
+    start_only = bool(ctx) and str((ctx.get("style") or {}).get("span")) == "start"
+    text = _fmt_ts(p.get("start_time")) if start_only else f"({_fmt_ts(p.get('start_time'))}–{_fmt_ts(p.get('end_time'))})"
     if timestamps == "always":
         return " " + text
     url = str((p.get("unit") or {}).get("public_url") or "").strip()
     if not url:
         return ""
-    return f" [{text}]({_time_link(url, float(p.get('start_time') or 0.0))})"
+    return f" [{text}]({_time_link(url, float(p.get('start_time') or 0.0))}){{.src-ref}}"
 
 
 def _bold_in_place(text: str, lead: str) -> str:  # bold the FIRST occurrence of `lead` inside `text` (case-insensitive)
@@ -3031,8 +3080,24 @@ def nest_points(
     return [(n["p"], [c["p"] for c in n["kids"]]) for n in build_point_tree(points)]
 
 
-def _tail(p: Dict[str, Any], timestamps: str) -> str:  # " (span) [§](#pt-x){…}"
-    return f"{_span(p, timestamps)} {_anchor_link(p)}"
+def _tail(p: Dict[str, Any], timestamps: str, ctx: Optional[Dict[str, Any]] = None) -> str:  # " (span) [§](#pt-x){…}"
+    return f"{_span(p, timestamps, ctx)} {_anchor_link(p)}"
+
+
+def _item(
+    p: Dict[str, Any],
+    text: str,                          # the point's line text (`_point_text` output)
+    timestamps: str,
+    ctx: Optional[Dict[str, Any]],      # _render_ctx output (None = the book path's old shape: text + tail)
+) -> str:  # the list item's content: text + span + permalink, in the style's order
+    """One item's content in the type's ANCHOR style. `tail` (the default, the book shapes):
+    `text (span) §` — the glyph at the end. `head` (ruling de9c4cda for the standalone lecture
+    page; read 9d301b5a): `§ text (span)` — the permalink, which IS the item's anchor id,
+    sits at the head of the item, so a link to a point that wraps lands the reader on its
+    first line instead of below it, and the glyph reads as the bullet's own mark."""
+    if ctx is not None and str((ctx.get("style") or {}).get("anchor")) == "head":
+        return f"{_anchor_link(p)} {text}{_span(p, timestamps, ctx)}"
+    return f"{text}{_tail(p, timestamps, ctx)}"
 
 
 def speaker_labels(
@@ -3063,13 +3128,20 @@ def speaker_labels(
 def _render_ctx(
     pts: List[Dict[str, Any]],   # every point the page renders (no synopsis)
     unit: Dict[str, Any],        # the points' unit snapshot (carries `speaker_roster` when the source has speakers)
-) -> Dict[str, Any]:  # {labels, prev, by_key} — one per rendering pass (the outline and the body each track their own speaker)
+    style: Optional[Dict[str, Any]] = None,   # the type's render_style: {"span": "range" | "start", "anchor": "tail" | "head"}
+) -> Dict[str, Any]:  # {labels, prev, by_key, style, section_of} — one per rendering pass (the outline and the body each track their own speaker)
     """The state one rendering pass threads through its points: the reader-facing speaker
     labels, the speaker of the previous rendered point (a label prints only where it
-    changes), and the STANDING points a back-link may target (a section is a heading, never
-    a target)."""
+    changes), the STANDING points a back-link may target (a section is a heading, never a
+    target), the type's RENDER STYLE (ruling de9c4cda / read 9d301b5a: a lecture page shows a
+    point's START time and puts the permalink at the HEAD of the item; the book shapes keep
+    the range and the tail — the defaults), and `section_of` (point key -> section index),
+    filled by `render_points` once the sections are known so a back-link inside its own
+    section can be left out."""
     return {"labels": speaker_labels(unit.get("speaker_roster")), "prev": "",
-            "by_key": {str(p.get("key")): p for p in pts if str(p.get("kind")) != SECTION_KIND}}
+            "by_key": {str(p.get("key")): p for p in pts if str(p.get("kind")) != SECTION_KIND},
+            "style": {"span": "range", "anchor": "tail", **{k: v for k, v in (style or {}).items() if v}},
+            "section_of": {}}
 
 
 def _question_lead(
@@ -3112,18 +3184,26 @@ def _back_links(
     p: Dict[str, Any],
     ctx: Dict[str, Any],   # _render_ctx output
     timestamps: str,
-) -> str:  # " (see [§ label](#pt-x), …)" | "" — only the referred points that STAND
+) -> str:  # " (see [§ label](#pt-x), …)" | "" — only the referred points that STAND, outside this point's own section
     """A point's `refers_to` as anchors into the page (ruling ba341c72 (2); work item e370e5db
     (2)): a referred point that was never accepted, or was retracted since, renders nothing —
-    never a dangling anchor. The link reads as the target's lead term, else its start time
-    where the page renders spans at all, else its opening words — never a bare glyph a
-    reader cannot tell from the next one."""
+    never a dangling anchor. A target INSIDE the point's own section renders nothing either
+    (read 9d301b5a: 36 of the Bonus page's 163 cross-references pointed a few lines up; the
+    section already holds both ends, so the link cost space and gave no route) — `section_of`
+    is filled by `render_points` once the sections are known; a page with no sections keeps
+    every standing link. The link reads as the target's lead term, else its start time where
+    the page renders spans at all, else its opening words — never a bare glyph a reader
+    cannot tell from the next one."""
     links: List[str] = []
+    section_of = ctx.get("section_of") or {}
+    own = section_of.get(str(p.get("key")))
     for rk in p.get("refers_to") or []:
         t = ctx["by_key"].get(str(rk))
         if t is None or str(t.get("key")) == str(p.get("key")):
             continue
-        label = str(t.get("lead") or "").strip() or (_fmt_ts(t.get("start_time")) if _span(t, timestamps) else "")
+        if own is not None and section_of.get(str(t.get("key"))) == own:
+            continue
+        label = str(t.get("lead") or "").strip() or (_fmt_ts(t.get("start_time")) if _span(t, timestamps, ctx) else "")
         if not label:
             words = str(t.get("text") or "").split()
             label = " ".join(words[:BACK_LINK_WORDS]).rstrip(".,;:") + ("…" if len(words) > BACK_LINK_WORDS else "")
@@ -3199,11 +3279,13 @@ def _glossary_lines(
     *,
     outline: bool = False,         # the scan view: no spans, no anchors of its own
     link: bool = False,            # outline lines link to the body's anchors (rendering "both")
+    ctx: Optional[Dict[str, Any]] = None,   # _render_ctx output: the render style (span + anchor placement)
 ) -> List[str]:  # the closer's list lines, alphabetical by term
     """The DERIVED closing section (work item e370e5db (3)): every glossary point, by term —
     `**Term** — the source's usage` — with the transcript's surface form kept beside the term
     when it differed (nickel -> NCCL: the pair is the fidelity chain's evidence, f9d0fd93). A
-    text that opens with its own term never prints it twice."""
+    text that opens with its own term never prints it twice. The span and the permalink
+    follow the type's render style like every other item (`_item`)."""
     out: List[str] = []
     for p in sorted(gloss, key=lambda q: (str(q.get("lead") or q.get("text") or "").casefold(), _sort_key(q))):
         term, text = str(p.get("lead") or "").strip(), str(p.get("text") or "").strip()
@@ -3214,7 +3296,7 @@ def _glossary_lines(
         if outline:
             out.append(f"- [{line}](#{_anchor(p)})" if link else f"- {line}")
         else:
-            out.append(f"- {line}{_tail(p, timestamps)}")
+            out.append(f"- {_item(p, line, timestamps, ctx)}")
     return out
 
 
@@ -3222,7 +3304,7 @@ def _render_node(
     node: Dict[str, Any],   # {"p", "kids"} from build_point_tree
     indent: str,            # the item's own indent ("" at top level); children indent to the item's CONTENT column
     timestamps: str,
-    ctx: Optional[Dict[str, Any]] = None,   # _render_ctx output: speaker labels + back-link targets (None = neither)
+    ctx: Optional[Dict[str, Any]] = None,   # _render_ctx output: speaker labels + back-link targets + render style (None = neither)
 ) -> List[str]:  # markdown lines for the point and its subtree
     """One point as a list item at `indent`, its children beneath it. Block kinds keep their
     shapes at every depth: a `quotation` is a `>` block (blank-line-separated, indented to
@@ -3232,10 +3314,14 @@ def _render_node(
     CONTENT column of the enclosing item ("- " = 2, "1. " = 3), the only way Pandoc keeps a
     nested block inside the item. With a `ctx` the line text is `_point_text` — the speaker
     label where it changes, a question's lead, a code point's identifier, the back-links; a
-    quotation nobody attributed takes a changed speaker as its attribution."""
+    quotation nobody attributed takes a changed speaker as its attribution. The span and the
+    permalink sit where the type's render style puts them (`_item`): at the tail (books) or
+    the permalink at the head (the lecture page); a quotation in the head style carries its
+    permalink at the head of its first line and its span on the attribution line."""
     p, kids = node["p"], node["kids"]
     kind = str(p.get("kind") or "claim")
     sub = indent + "  "          # content column of a "- " item
+    head = ctx is not None and str((ctx.get("style") or {}).get("anchor")) == "head"
     out: List[str] = []
     if kind == "quotation":
         who = str(p.get("attribution") or "").strip()
@@ -3247,22 +3333,22 @@ def _render_node(
             ctx["prev"] = sp
         if indent:
             out.append("")
-        out.append(f"{indent}> {text}")
+        out.append(f"{indent}> {_anchor_link(p)} {text}" if head else f"{indent}> {text}")
         out.append(f"{indent}>" + (f" — {who}" if who else "") + (_back_links(p, ctx, timestamps) if ctx is not None else "")
-                   + _tail(p, timestamps))
+                   + (_span(p, timestamps, ctx) if head else _tail(p, timestamps, ctx)))
         out.append("")
         for k in kids:
             out += _render_node(k, indent, timestamps, ctx)   # a quotation's support sits at the quotation's own indent
         return out
     if kind == "sequence":
-        out.append(f"{indent}- {_point_text(p, ctx, timestamps)}{_tail(p, timestamps)}")
+        out.append(f"{indent}- {_item(p, _point_text(p, ctx, timestamps), timestamps, ctx)}")
         events = [k for k in kids if str(k["p"].get("kind")) == "event"]
         others = [k for k in kids if str(k["p"].get("kind")) != "event"]
         n = 1
         for ev in events:
             q = ev["p"]
             when = str((q.get("data") or {}).get("when") or "").strip()
-            out.append(f"{sub}{n}. " + (f"**{when}** — " if when else "") + f"{_point_text(q, ctx, timestamps)}{_tail(q, timestamps)}")
+            out.append(f"{sub}{n}. " + _item(q, (f"**{when}** — " if when else "") + _point_text(q, ctx, timestamps), timestamps, ctx))
             for g in ev["kids"]:
                 out += _render_node(g, sub + "   ", timestamps, ctx)   # the ordered item's content column
             n += 1
@@ -3272,7 +3358,7 @@ def _render_node(
             out += _render_node(k, sub, timestamps, ctx)
         return out
     if kind == "comparison":
-        out.append(f"{indent}- {_point_text(p, ctx, timestamps)}{_tail(p, timestamps)}")
+        out.append(f"{indent}- {_item(p, _point_text(p, ctx, timestamps), timestamps, ctx)}")
         out.append("")
         out += _render_table(dict(p.get("data") or {}), sub)
         out.append("")
@@ -3281,9 +3367,9 @@ def _render_node(
         return out
     if kind == "event":
         when = str((p.get("data") or {}).get("when") or "").strip()
-        out.append(f"{indent}- " + (f"**{when}** — " if when else "") + f"{_point_text(p, ctx, timestamps)}{_tail(p, timestamps)}")
+        out.append(f"{indent}- " + _item(p, (f"**{when}** — " if when else "") + _point_text(p, ctx, timestamps), timestamps, ctx))
     else:
-        out.append(f"{indent}- {_point_text(p, ctx, timestamps)}{_tail(p, timestamps)}")
+        out.append(f"{indent}- {_item(p, _point_text(p, ctx, timestamps), timestamps, ctx)}")
     for k in kids:
         out += _render_node(k, sub, timestamps, ctx)
     return out
@@ -3295,6 +3381,7 @@ def render_points(
     rendering: str = "expanded",    # "outline" | "expanded" | "both"
     timestamps: str = "addressable",  # "always" | "addressable" | "never" (see _span)
     outline_title: str = "At a glance",
+    style: Optional[Dict[str, Any]] = None,   # the type's render_style: {"span": "range" | "start", "anchor": "tail" | "head"} (None = the book defaults)
 ) -> str:  # The body markdown (after the preamble)
     """Render the body from the Points — deterministic, so a replayed `render-notes` derives
     the same Sections. EXPANDED (the public post): under the derived headings (`group_points`:
@@ -3306,21 +3393,37 @@ def render_points(
     page): one line per point, same headings. THE LECTURE SHAPES (work item e370e5db): a
     speaker label only where the speaker changes — and again at each heading, so a reader
     who lands on a section knows who is speaking — a `question` led by who asked it with its
-    answers nested beneath, `refers_to` as back-link anchors to the points that stand, a
-    `code` point's identifier in inline code, and every `glossary` point in ONE derived
-    closing section, alphabetically, never in the body. Every input is a Point field (the
-    derived speaker, the back-link keys, the unit's speaker roster), so the labels and the
-    anchors replay from the accept ops alone."""
+    answers nested beneath, `refers_to` as back-link anchors to the points that stand OUTSIDE
+    the point's own section (read 9d301b5a), a `code` point's identifier in inline code, and
+    every `glossary` point in ONE derived closing section, alphabetically, never in the body.
+    THE RENDER STYLE (ruling de9c4cda; type data `presentation_policy.render_style`): the span
+    as a range or the start time alone, the permalink at the item's tail or its head — the
+    book shapes keep the defaults byte for byte. Every input is a Point field or type data
+    (the derived speaker, the back-link keys, the unit's speaker roster, the style), so the
+    labels and the anchors replay from the accept ops and the type alone."""
     pts = [p for p in sorted(points, key=_sort_key) if str(p.get("kind")) != "synopsis"]
     unit = dict((pts[0].get("unit") or {}) if pts else {})
     gloss = [p for p in pts if str(p.get("kind")) == GLOSSARY_KIND]
     groups = group_points([p for p in pts if str(p.get("kind")) != GLOSSARY_KIND], unit)
+    # point key -> section index: a back-link whose target sits in the same SYNTHESIZED section renders
+    # nothing (read 9d301b5a); a captured-heading page (the book shapes) keeps every standing link
+    section_of: Dict[str, int] = {}
+
+    def _index(node: Dict[str, Any], gi: int) -> None:
+        section_of[str(node["p"].get("key"))] = gi
+        for k in node["kids"]:
+            _index(k, gi)
+    if any(str(p.get("kind")) == SECTION_KIND for p in pts):
+        for gi, (_h, tree) in enumerate(groups):
+            for n in tree:
+                _index(n, gi)
     lines: List[str] = []
     want_outline = rendering in ("outline", "both")
     want_expanded = rendering in ("expanded", "both")
 
     if want_outline:
-        octx = _render_ctx(pts, unit)
+        octx = _render_ctx(pts, unit, style)
+        octx["section_of"] = section_of
         lines += [f"## {outline_title}", ""]
         for h, tree in groups:
             if h:
@@ -3338,10 +3441,11 @@ def render_points(
                 _walk(n, 0)
             lines.append("")
         if gloss:
-            lines += [f"**{GLOSSARY_HEADING}**", ""] + _glossary_lines(gloss, timestamps, outline=True, link=want_expanded) + [""]
+            lines += [f"**{GLOSSARY_HEADING}**", ""] + _glossary_lines(gloss, timestamps, outline=True, link=want_expanded, ctx=octx) + [""]
 
     if want_expanded:
-        ctx = _render_ctx(pts, unit)
+        ctx = _render_ctx(pts, unit, style)
+        ctx["section_of"] = section_of
         block_kinds = ("step", "quotation")
         for h, tree in groups:
             if h:
@@ -3357,7 +3461,7 @@ def render_points(
                     n = 1
                     while i < len(tree) and str(tree[i]["p"].get("kind")) == "step":
                         q = tree[i]["p"]
-                        lines.append(f"{n}. {_point_text(q, ctx, timestamps)}{_tail(q, timestamps)}")
+                        lines.append(f"{n}. {_item(q, _point_text(q, ctx, timestamps), timestamps, ctx)}")
                         for k in tree[i]["kids"]:
                             lines += _render_node(k, "   ", timestamps, ctx)   # the "1. " content column
                         n += 1
@@ -3372,7 +3476,7 @@ def render_points(
         if gloss:
             if lines and lines[-1] != "":
                 lines.append("")
-            lines += [f"## {GLOSSARY_HEADING}", ""] + _glossary_lines(gloss, timestamps) + [""]
+            lines += [f"## {GLOSSARY_HEADING}", ""] + _glossary_lines(gloss, timestamps, ctx=ctx) + [""]
     text = "\n".join(lines).rstrip("\n") + "\n"
     return text if text.strip() else ""
 
@@ -3394,38 +3498,95 @@ def unit_label(unit: Dict[str, Any]) -> str:  # "Ch. 1" | "Part 2" | the unit ti
     return str(ws.get("title") or "").strip()
 
 
-def render_source_card(
-    unit: Dict[str, Any],  # A point's `unit` (carries work_structure incl. `work`)
-    references: Optional[List[Dict[str, Any]]] = None,  # RESOLVED human-added links [{label, href}] (ae103970); none = no Resources line
-) -> str:  # A Quarto callout naming the work, author, and unit; "" without work metadata
-    """The reader-facing provenance (second-read ruling (1)): a derived one-line callout under
-    the title so the post is never mistaken for the source — the work, its author, the
-    part/chapter, and the paraphrase/verbatim rule. Nothing of the lane's vocabulary. The
-    Source's human-added resource links (ruling a7ca900d (3)) render as a `Resources:` line
-    INSIDE the card — derived from Reference nodes, never authored into the body; a link
-    with no resolvable target renders as its label alone (never an empty link)."""
-    ws = dict((unit or {}).get("work_structure") or {})
-    work = dict(ws.get("work") or {})
-    if not work.get("title"):
+def lecture_title(unit: Dict[str, Any]) -> str:  # the lecture's public title: the playlist row's, else the Source title with its on-disk substitutes undone
+    """The title a reader knows the lecture by. The URL binding kept the playlist row's title as
+    evidence (`lecture_title` on the unit's facts); without it the Source title — a file name —
+    is folded through NFKC (a fullwidth '：' becomes ':') with the slash substitutes undone and
+    whitespace collapsed, the inverse of the fold the binding joined on."""
+    t = str((unit or {}).get("lecture_title") or "").strip()
+    if t:
+        return t
+    t = unicodedata.normalize("NFKC", str((unit or {}).get("title") or "")).replace("⧸", "/").replace("／", "/")
+    return " ".join(t.split()).strip()
+
+
+def date_phrase(iso: str, precision: str = "day") -> str:  # "Apr 27, 2024" | "around Apr 27, 2024" | "Apr 2024" | "2024" | "" (malformed)
+    """A date as the card prints it, at the precision it is KNOWN to (ruling de9c4cda (H7)): `day`
+    the full day; `around` the day with the hedge said out loud (a re-uploaded live stream is
+    known to within days); `month` and `year` drop what is not known. Locale-free."""
+    m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", str(iso or "").strip())
+    if not m:
         return ""
-    who = f" by {work['author']}" if work.get("author") else ""
-    where_bits: List[str] = []
-    if ws.get("part") is not None:
-        where_bits.append(f"Part {ws['part']}" + (f" ({ws['part_title']})" if ws.get("part_title") else ""))
-    if ws.get("kind") == "chapter" and ws.get("chapter") is not None:
-        where_bits.append(f"Chapter {ws['chapter']}")
-    where = " · ".join(where_bits)
-    title = str(ws.get("title") or "").strip()
-    place = (f" — {where}" if where else "") + (f", *{title}*" if title else "")
+    y, mo, d = m.group(1), int(m.group(2)), int(m.group(3))
+    months = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+    if not 1 <= mo <= 12:
+        return ""
+    p = str(precision or "day").strip()
+    if p == "year":
+        return y
+    if p == "month":
+        return f"{months[mo - 1]} {y}"
+    full = f"{months[mo - 1]} {d}, {y}"
+    return f"around {full}" if p == "around" else full
+
+
+def render_source_card(
+    unit: Dict[str, Any],  # A point's `unit` (carries work_structure incl. `work`), merged with the source facts for a lecture (series, lecture_title, dates, public_url, speaker_roster)
+    references: Optional[List[Dict[str, Any]]] = None,  # RESOLVED human-added links [{label, href}] (ae103970); none = no Resources line
+) -> str:  # A Quarto callout naming the work, author, and unit — or the lecture, its series, dates and speakers; "" without either
+    """The reader-facing provenance (second-read ruling (1)): a derived one-line callout under
+    the title so the post is never mistaken for the source. THE WORK SHAPE (books): the work,
+    its author, the part/chapter, and the paraphrase/verbatim rule. THE LECTURE SHAPE (finding
+    baa640e8; rulings de9c4cda (H2) (H7)): the lecture's public title, the series it belongs to
+    (the Collection), when it was recorded and published — at the precision each is known to,
+    because a standalone page's claims describe the world as of that date — the speakers by
+    the labels the page uses (names and roles; an anonymous voice is not card material), the
+    paraphrase rule reworded for a talk, and the WATCH link first among the resources when
+    the source is addressable. Nothing of the lane's vocabulary. The Source's human-added
+    resource links (ruling a7ca900d (3)) render as a `Resources:` line INSIDE the card —
+    derived from Reference nodes, never authored into the body; a link with no resolvable
+    target renders as its label alone (never an empty link)."""
+    u = dict(unit or {})
+    ws = dict(u.get("work_structure") or {})
+    work = dict(ws.get("work") or {}) if isinstance(ws.get("work"), dict) else {}
     refs = [r for r in (references or []) if str(r.get("label") or "").strip()]
-    resources = ""
-    if refs:
-        parts = [(f"[{str(r['label']).strip()}]({r['href']})" if str(r.get("href") or "").strip()
-                  else str(r["label"]).strip()) for r in refs]
-        resources = "\n\nResources: " + " · ".join(parts)
+    parts = [(f"[{str(r['label']).strip()}]({r['href']})" if str(r.get("href") or "").strip()
+              else str(r["label"]).strip()) for r in refs]
+    if work.get("title"):
+        who = f" by {work['author']}" if work.get("author") else ""
+        where_bits: List[str] = []
+        if ws.get("part") is not None:
+            where_bits.append(f"Part {ws['part']}" + (f" ({ws['part_title']})" if ws.get("part_title") else ""))
+        if ws.get("kind") == "chapter" and ws.get("chapter") is not None:
+            where_bits.append(f"Chapter {ws['chapter']}")
+        where = " · ".join(where_bits)
+        title = str(ws.get("title") or "").strip()
+        place = (f" — {where}" if where else "") + (f", *{title}*" if title else "")
+        resources = ("\n\nResources: " + " · ".join(parts)) if parts else ""
+        return ("::: {.callout-note appearance=\"simple\" icon=false}\n"
+                f"Notes on **{work['title']}**{who}{place}. The points paraphrase the {ws.get('kind') or 'source'} "
+                "in its own order; only the quotations are verbatim." + resources + "\n:::\n")
+    series = [str(s).strip() for s in (u.get("series") or []) if str(s).strip()]
+    if not series and not str(u.get("lecture_title") or "").strip():
+        return ""
+    title = lecture_title(u)
+    of = f", a *{' / '.join(series)}* lecture" if series else ""
+    rec = date_phrase(str(u.get("recorded_at") or ""), str(u.get("recorded_at_precision") or "day"))
+    pub = date_phrase(str(u.get("published_at") or ""))
+    if rec and pub:
+        when = (f"recorded and published {pub}" if rec == pub else f"recorded {rec}, published {pub}")
+    else:
+        when = f"recorded {rec}" if rec else (f"published {pub}" if pub else "")
+    labels = speaker_labels(u.get("speaker_roster"))
+    speakers = [labels[str(r.get("speaker"))] for r in (u.get("speaker_roster") or [])
+                if str(r.get("speaker") or "") in labels and (str(r.get("name") or "").strip() or str(r.get("role") or "").strip())]
+    spoken = (" Speakers: " + ", ".join(dict.fromkeys(speakers)) + ".") if speakers else ""
+    url = str(u.get("public_url") or "").strip()
+    watch = ([f"[Watch on YouTube]({url})"] if "youtube.com/" in url or "youtu.be/" in url else [f"[Watch]({url})"]) if url else []
+    resources = ("\n\nResources: " + " · ".join(watch + parts)) if (watch or parts) else ""
     return ("::: {.callout-note appearance=\"simple\" icon=false}\n"
-            f"Notes on **{work['title']}**{who}{place}. The points paraphrase the {ws.get('kind') or 'source'} "
-            "in its own order; only the quotations are verbatim." + resources + "\n:::\n")
+            f"Notes on **{title}**{of}" + (f" — {when}" if when else "") + f".{spoken} The points paraphrase the talk "
+            "in the order it was given; only the quotations are verbatim." + resources + "\n:::\n")
 
 
 def derived_description(
@@ -3456,20 +3617,27 @@ def derived_description(
 def derive_frontmatter(
     fm_raw: str,                    # The authored frontmatter block ("---\\n…\\n---\\n")
     points: List[Dict[str, Any]],   # load_points output
-    policy: Dict[str, Any],         # presentation_policy["frontmatter"] ({"title": "work-unit-notes" | "unit-title", "description": "synopsis" | "derived"})
+    policy: Dict[str, Any],         # presentation_policy["frontmatter"] ({"title": "work-unit-notes" | "unit-title" | "series-lecture-notes", "description": "synopsis" | "derived"})
     *,
     synopsis: str = "",             # The accepted synopsis point's text (policy "synopsis"; derived headings as fallback)
+    unit: Optional[Dict[str, Any]] = None,   # The unit the title reads (default: the first point's snapshot); a render passes the snapshot MERGED with the live source facts
 ) -> str:  # The frontmatter with the policy-owned lines replaced (or inserted after title)
     """The type may OWN the title and the description — the rest of the authored frontmatter
     (date, categories, …) stays. Title `work-unit-notes` (second-read ruling (1), the short
     shape) = "<work>, Ch. n notes", falling back to the unit title without work metadata;
-    `unit-title` = the unit title alone. Description `synopsis` = the accepted synopsis
-    point (ruling (2)), falling back to the derived headings; `derived` = the headings.
-    Idempotent: a re-derive over derived lines yields the same bytes."""
+    `unit-title` = the unit title alone; `series-lecture-notes` (finding baa640e8) = the
+    series and the lecture's public title with `notes` after the lecture's own label —
+    "GPU MODE Bonus Lecture notes: CUDA C++ llm.cpp" when the title splits at a colon, else
+    "<series> <title> notes" — continuing the pre-graph post naming so the born post sits
+    beside the hand-written lecture notes in the listing (PROVISIONAL: the standalone
+    resource's title is the type design sitting's to rule, d645392f). Description `synopsis`
+    = the accepted synopsis point (ruling (2)), falling back to the derived headings;
+    `derived` = the headings. Idempotent: a re-derive over derived lines yields the same
+    bytes."""
     if not fm_raw.startswith("---") or not points:
         return fm_raw
     pts = sorted(points, key=_sort_key)
-    unit = dict(pts[0].get("unit") or {})
+    unit = dict(unit if unit is not None else (pts[0].get("unit") or {}))
     ws = dict(unit.get("work_structure") or {})
     work = dict(ws.get("work") or {}) if isinstance(ws.get("work"), dict) else {}
     want: Dict[str, str] = {}
@@ -3479,6 +3647,15 @@ def derive_frontmatter(
         want["title"] = f"{work['title']}, {lab} notes" if lab else f"{work['title']} notes"
     elif tpol in ("unit-title", "work-unit-notes") and str(ws.get("title") or "").strip():
         want["title"] = str(ws.get("title")).strip()
+    elif tpol == "series-lecture-notes":
+        lec = lecture_title(unit)
+        series = " / ".join(str(s).strip() for s in (unit.get("series") or []) if str(s).strip())
+        if lec:
+            head, sep, rest = lec.partition(": ")
+            if sep and head.strip() and rest.strip():
+                want["title"] = f"{series} {head.strip()} notes: {rest.strip()}".strip()
+            else:
+                want["title"] = f"{series} {lec} notes".strip()
     dpol = policy.get("description")
     if dpol == "synopsis" and synopsis.strip():
         want["description"] = synopsis.strip()
@@ -3497,10 +3674,11 @@ async def render_notes(
     timestamps: str = "addressable",    # "always" | "addressable" | "never"
     write_md: bool = True,              # Write the staging `.md` (replay passes False)
     actor: str = "agent:session",
-    siblings: Optional[Dict[str, str]] = None,        # {graph key: db path} — read the unit's LIVE Reference nodes from the sibling (ae103970)
+    siblings: Optional[Dict[str, str]] = None,        # {graph key: db path} — read the unit's LIVE Reference nodes + source facts from the sibling (ae103970, baa640e8)
     graph_key: Optional[str] = None,                  # Sibling key (default: the points' unit graph, else the sole key)
     manifests_dir: Optional[str] = None,              # Capability manifests dir
     references: Optional[List[Dict[str, Any]]] = None,  # Raw Reference rows to render (REPLAY passes the journaled ones; None = read live, else the unit snapshot)
+    facts: Optional[Dict[str, Any]] = None,             # The source facts to render (REPLAY passes the journaled ones; None = read live, else the unit snapshot)
 ) -> Dict[str, Any]:  # {slug, points, added, updated, removed, written, text} | {error}
     """Derive the Note's body from its Points and APPLY it: the authored preamble stays, the
     frontmatter's type-owned lines (title / description) are re-derived per the type's
@@ -3511,7 +3689,13 @@ async def render_notes(
     a7ca900d (3)): read LIVE from the sibling when one is at hand, else the points' unit
     snapshot; the op JOURNALS the rows it observed so replay renders the same card with no
     sibling open (the accept-point observations pattern), and the substance digest covers
-    the RESOLVED hrefs so a re-render after a cross-work target is born lands a new op."""
+    the RESOLVED hrefs so a re-render after a cross-work target is born lands a new op. A
+    type that asks for the SOURCE FACTS (finding baa640e8: `frontmatter.title =
+    series-lecture-notes` or `source_card = "lecture"`) reads them the same way — series,
+    public title, public URL, dates — merges them over the unit snapshot for the title and
+    the card, journals them, and digests them; a book type never asks, so its ops and
+    digests are the ones it always had. The type's `render_style` reaches the body the same
+    way and rides the digest when set."""
     from .authoring import _note_section_wires
     from .structure import _apply_note_text
     note_id = note_node_id(slug)
@@ -3536,29 +3720,43 @@ async def render_notes(
     tprops = await load_deliverable_type(gx, tkey) or {}
     ppol = dict(tprops.get("presentation_policy") or {})
     fm_policy = dict(ppol.get("frontmatter") or {})
+    style = {k: v for k, v in dict(ppol.get("render_style") or {}).items() if v}
     syn = synopsis_of(points)
-    fm = derive_frontmatter(str(F.prop(note, "frontmatter_raw") or ""), points, fm_policy, synopsis=syn)
+    unit0 = dict(sorted(points, key=_sort_key)[0].get("unit") or {}) if points else {}
+    want_card = bool(ppol.get("source_card", True)) and bool(points)
+    wants_facts = bool(points) and (fm_policy.get("title") == "series-lecture-notes" or ppol.get("source_card") == "lecture")
+    # The sibling is opened ONCE for whatever the type reads live: explicit rows (replay) > the
+    # sibling's LIVE nodes > the unit snapshot.
+    live_refs: Optional[List[Dict[str, Any]]] = None
+    live_facts: Optional[Dict[str, Any]] = None
+    need_refs, need_facts = want_card and references is None, wants_facts and facts is None
+    if (need_refs or need_facts) and unit0.get("source_id"):
+        key = graph_key or str(unit0.get("graph") or "")
+        if siblings and (key in siblings or len(siblings) == 1):
+            key = key if key in siblings else next(iter(siblings))
+            try:
+                async with open_graph(siblings[key], manifests_dir or DEFAULT_MANIFESTS, readonly=True) as sg:
+                    if need_refs:
+                        live_refs = await read_source_references(sg, str(unit0["source_id"]))
+                    if need_facts:
+                        live_facts = await read_source_facts(sg, str(unit0["source_id"]))
+            except RuntimeError:
+                live_refs, live_facts = None, None   # sibling unavailable -> the snapshot below
+    if want_card and references is None:
+        references = live_refs if live_refs is not None else list(unit0.get("references") or [])
+    if wants_facts and facts is None:
+        facts = live_facts if live_facts is not None else {k: unit0[k] for k in SOURCE_FACT_KEYS + ("public_url",) if unit0.get(k)}
+    facts = dict(facts or {})
+    unit_card = {**unit0, **facts}
+    fm = derive_frontmatter(str(F.prop(note, "frontmatter_raw") or ""), points, fm_policy, synopsis=syn, unit=unit_card)
     card = ""
     resolved: List[Dict[str, Any]] = []
-    if ppol.get("source_card", True) and points:
+    if want_card:
         # The reader-facing provenance (second-read ruling (1)) — derived from the unit's work
-        # metadata, rendered above the body, never authored. Its Resources line (ae103970):
-        # explicit rows (replay) > the sibling's LIVE Reference nodes > the unit snapshot.
-        unit0 = dict(sorted(points, key=_sort_key)[0].get("unit") or {})
-        if references is None:
-            key = graph_key or str(unit0.get("graph") or "")
-            if siblings and (key in siblings or len(siblings) == 1) and unit0.get("source_id"):
-                key = key if key in siblings else next(iter(siblings))
-                try:
-                    async with open_graph(siblings[key], manifests_dir or DEFAULT_MANIFESTS, readonly=True) as sg:
-                        references = await read_source_references(sg, str(unit0["source_id"]))
-                except RuntimeError:
-                    references = None   # sibling unavailable -> the snapshot below
-            if references is None:
-                references = list(unit0.get("references") or [])
-        resolved = await resolve_references(gx, references)
-        card = render_source_card(unit0, resolved)
-    body = render_points(points, rendering=rendering, timestamps=timestamps)
+        # metadata or the lecture's facts, rendered above the body, never authored.
+        resolved = await resolve_references(gx, references or [])
+        card = render_source_card(unit_card, resolved)
+    body = render_points(points, rendering=rendering, timestamps=timestamps, style=style)
     if pre and not pre.endswith("\n\n"):
         pre = pre.rstrip("\n") + "\n\n"
     new_text = fm + pre + BODY_MARKER + "\n\n" + (card + "\n" if card else "") + body
@@ -3578,19 +3776,22 @@ async def render_notes(
     # cross-work target is born, and that re-render must land as a new op, not dedup away.
     # What the LECTURE shapes print rides it as well (work item e370e5db (6)): a point's derived
     # speaker and its back-link keys, and the unit's speaker roster — appended only where a point
-    # carries them, so a book's digest is the one it always had.
-    roster0 = list(dict(sorted(points, key=_sort_key)[0].get("unit") or {}).get("speaker_roster") or []) if points else []
+    # carries them, so a book's digest is the one it always had. The source FACTS and the render
+    # STYLE join the same way (baa640e8): only when the type asked for them.
+    roster0 = list(unit0.get("speaker_roster") or []) if points else []
     digest = hashlib.sha256(json.dumps(
         [[[p.get("key"), p.get("kind"), p.get("text"), p.get("lead"), p.get("heading"), p.get("data"),
            p.get("parent_key")] + ([p.get("speaker"), list(p.get("refers_to") or [])]
                                    if p.get("speaker") or p.get("refers_to") else []) for p in points],
-         [[r.get("label"), r.get("href")] for r in resolved]] + ([roster0] if roster0 else []),
+         [[r.get("label"), r.get("href")] for r in resolved]] + ([roster0] if roster0 else [])
+        + ([facts] if facts else []) + ([style] if style else []),
         sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")).hexdigest()
     res.update(points=len(points), rendering=rendering, timestamps=timestamps, text=new_text,
-               references=resolved,
+               references=resolved, facts=facts,
                args={"slug": slug, "rendering": rendering, "timestamps": timestamps, "actor": actor,
                      "substance": f"sha256:{digest}",
-                     **({"references": [dict(r) for r in references]} if references else {})})
+                     **({"references": [dict(r) for r in references]} if references else {}),
+                     **({"facts": facts} if facts else {})})
     return res
 
 
@@ -4218,6 +4419,7 @@ SECTION_KIND = "section"                # a SYNTHESIZED section (bc62c727 (A)): 
 GLOSSARY_KIND = "glossary"              # renders ONLY in the derived closing section, alphabetically
 GLOSSARY_HEADING = "Glossary"
 BACK_LINK_WORDS = 4                     # a back-link to a point with no lead and no rendered time reads as its opening words
+SOURCE_FACT_KEYS = ("series", "lecture_title", "published_at", "recorded_at", "recorded_at_precision")   # the Source facts a lecture page reads live (baa640e8); OUT of the pack digest
 STRUCTURE_KINDS = ("synopsis", "section")   # points that carry structure, never coverage
 LEAD_PREFIX_KINDS = ("definition", "glossary", "code")   # term-then-gloss kinds: the text may lack the lead
 SPEAKER_ROLES = ("presenter", "host", "audience member", "chat")   # the closed per-source role slate (bc62c727 (B1))

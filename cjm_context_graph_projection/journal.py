@@ -311,10 +311,13 @@ async def _apply_op(gx: GraphHandle, op: Dict[str, Any]) -> str:
         # References (ae103970): the op journals the resource links it OBSERVED in the sibling,
         # so replay renders the same source card without opening it (an op from before the
         # field renders none, as it did live).
+        # The source FACTS (baa640e8: series, public title, dates) replay the same way — an op from
+        # before the field renders none, as it did live.
         await render_notes(gx, a["slug"], rendering=a.get("rendering", "both"),
                            timestamps=a.get("timestamps", "always"),   # pre-e1fd4d64 ops rendered every span
                            write_md=False, actor=a.get("actor", "agent:session"),
-                           references=list(a.get("references") or []))
+                           references=list(a.get("references") or []),
+                           facts=dict(a.get("facts") or {}))
     elif verb == "render-work-page":
         # The work page (ebb77107): the body is a function of the sibling's structure map (the
         # journaled OBSERVATION — replay never opens the sibling) and of the born chapter notes

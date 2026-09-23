@@ -248,11 +248,12 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `apply_judgements` _function_ — THE FOLD (ruling 1798a796 (3)): apply a judge's answers mechanically, loud on the first
 - `apply_outline` _function_ — Turn the outline pass's answers into STRUCTURE rows on the set (ruling bc62c727 (A)) —
 - `born_notes_by_unit` _function_ — Which source UNITS carry a born deliverable on this graph, with its state and synopsis:
-- `build_notes_pack` _function_ — Apply the type's INFORMATION POLICY (a stratum query) to the unit and number what a
+- `build_notes_pack` _function_ — Apply the type's INFORMATION POLICY (a stratum query read as ROLES — ruling e1e096fa)
 - `build_point_tree` _function_ — Nest by `parent_key` (second-read ruling (4): depth TWO in practice, the tree is generic).
 - `choose_spine` _function_ — Pick the SKELETON spine to read (the correction core's `spine_where_for` rule, pure):
 - `close_open_refs` _function_ — Apply a reconciler's answers to a set's hinted references — mechanically checked, loud
 - `coverage_gaps` _function_ — Pure: the unreferenced-lines query — every content line the type includes that no
+- `date_phrase` _function_ — A date as the card prints it, at the precision it is KNOWN to (ruling de9c4cda (H7)): `day`
 - `derive_frontmatter` _function_ — The type may OWN the title and the description — the rest of the authored frontmatter
 - `derive_work_frontmatter` _function_ — The work-page type OWNS the title and description: `notes-on-work` = "Notes on *<work>*"
 - `derived_description` _function_ — What the unit CONTAINS, from data the rendering already uses: the work (when the
@@ -260,18 +261,19 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `extra_list` _function_ — Every EXTRA still pending in a set, keyed `x001`… in the set's order — the ids the judge
 - `group_points` _function_ — The page's sections. SYNTHESIZED (ruling bc62c727 (A)): when the points include
 - `judge_points` _function_ — Apply an overlap judge's answers to an ACCEPTED draft (ruling 1798a796; work item
+- `lecture_title` _function_ — The title a reader knows the lecture by. The URL binding kept the playlist row's title as
 - `load_deliverable_type` _function_ — Read a DeliverableType profile off the graph (None = `notes-type <key>` first).
 - `load_notes_propsets` _function_ — Every notes proposal set under `root` (optionally for one source), newest first.
 - `load_points` _function_ — A Note's Points, in source order (start_time, then pack ordinal, then key).
 - `merge_point_blocks` _function_ — The BLOCK merge (ruling 1798a796, fork 1; work item 1561551e): the unit of agreement is
-- `merge_point_proposals` _function_ — Fold the window sets of several ARMS (and drafter models) over one unit into ONE
+- `merge_point_proposals` _function_ — The ROW-LEVEL merge (work item 3a2c94eb (2); the filter lane's `merge_filter_proposals`
 - `mint_deliverable_type` _function_ — UPSERT a DeliverableType by slug (the display-rule pattern: last journaled op wins).
 - `nest_points` _function_ — The one-level view of `build_point_tree` (kept for callers that only need parent -> children).
 - `note_deliverable_type` _function_ — The Note's bound type slug (the active `deliverable_type` fact).
 - `note_publish_states` _function_ — The publish_state facts as a map: every deliverable's active values. One value is the
 - `observe_segments` _function_ — Observe each segment in the sibling READ-ONLY (label + properties hash + title) — the
 - `open_reference_list` _function_ — Every hinted reference still open in a set, keyed `r01`… in the order of `points_index`
-- `overlapping_points` _function_ — Pure: the duplication candidates — two points deriving from a shared segment. A
+- `overlapping_points` _function_ — Pure: the duplication candidates — two points deriving from a shared segment — and
 - `pack_digest` _function_ — Digest the READ content (source binding + numbered lines + headers) — what a proposal
 - `pick_propset` _function_ — Choose a proposal set: newest by default, else the unique id/prefix match.
 - `plan_notes_blocks` _function_ — Cut the whole pack into BLOCKS (ruling 1798a796, fork 1): a block runs between COMMON
@@ -283,6 +285,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `points_index` _function_ — Key a set of proposal rows for a reader that cannot see their lines: `p001`… in source
 - `proposals_from_point_rows` _function_ — Resolve validated rows to proposal rows: a minted proposal id (the point's future
 - `pure_notes_type` _function_ — The pure-notes profile as data: information policy = a stratum query, presentation
+- `read_source_facts` _function_ — The Source-level facts a rendering's title and card read LIVE from the sibling (finding
 - `read_source_references` _function_ — The Source's human-added resource links (`Reference` nodes minted by the transcription
 - `read_source_unit` _function_ — Read one source unit: the EFFECTIVE spine (layer-0 + applied corrections, via the
 - `read_work_structure` _function_ — The WORK as the sibling holds it: every Source whose structure map names the work, in
