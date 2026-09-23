@@ -353,8 +353,21 @@ async def review_frontier(
         sections_of.setdefault(n, []).append(s)
     # A typed deliverable's Points are components too (a7262fe7): their DERIVED_FROM edges to
     # the segment References are the Note's provenance, so the walk starts from them as well.
-    for n, p in await F.load_edge_pairs(gx, DevRelations.HAS_POINT):
-        sections_of.setdefault(n, []).append(p)
+    # Ruling 96be1528 (P): a SUBSTANCE point is owned by the PointSet of its (Source, unit)
+    # that the Note RENDERS, so the Note's components are its own points plus every rendered
+    # set's — a segment edit reaches every deliverable sharing the set.
+    points_of: Dict[str, List[str]] = {}
+    for o, p in await F.load_edge_pairs(gx, DevRelations.HAS_POINT):
+        points_of.setdefault(o, []).append(p)
+    renders_of: Dict[str, List[str]] = {}
+    for n, s in await F.load_edge_pairs(gx, DevRelations.RENDERS):
+        renders_of.setdefault(n, []).append(s)
+    for n in set(points_of) | set(renders_of):
+        owned = list(points_of.get(n, []))
+        for s in renders_of.get(n, []):
+            owned += points_of.get(s, [])
+        if owned:
+            sections_of.setdefault(n, []).extend(owned)
 
     # Active assertions per subject (the governing-fact change source) + acknowledgments.
     acks: Dict[str, Set[str]] = {}

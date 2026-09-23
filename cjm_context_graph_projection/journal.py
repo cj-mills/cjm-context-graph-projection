@@ -75,7 +75,7 @@ JOURNAL_VERBS = ("decide", "alias", "assert", "link", "unlink", "section", "new-
                  "retract-session", "pull-transcript", "mint-messages", "edit-message",
                  "derive-message", "procedure", "propose",
                  "deliverable-type", "accept-point", "retract-point", "edit-point", "render-notes",
-                 "render-work-page")
+                 "render-work-page", "rehome-points")
 
 
 def m3_baseline_import(
@@ -287,9 +287,13 @@ async def _apply_op(gx: GraphHandle, op: Dict[str, Any]) -> str:
         # Substance (a7262fe7): re-land the Point + its References from the journaled
         # observations — self-contained; the sibling graph is never opened on replay.
         from .purenotes import accept_point
+        # The op NAMES the owner (96be1528 (P)): `point_set` lands substance under the
+        # (Source, unit)'s PointSet; an op from before the re-home has none and lands under
+        # the Note as it did live, for the journaled `rehome-points` op to move.
         await accept_point(gx, a["slug"], a["point"], observations=a.get("observations") or [],
                            actor=a.get("actor", "user:cli"),
-                           proposal_set_id=a.get("proposal_set_id", ""))
+                           proposal_set_id=a.get("proposal_set_id", ""),
+                           point_set=a.get("point_set"))
     elif verb == "retract-point":
         # The compensating op: replayed after the accept it undoes; missing = tolerated no-op.
         from .purenotes import retract_point
@@ -303,6 +307,12 @@ async def _apply_op(gx: GraphHandle, op: Dict[str, Any]) -> str:
                          parent=f.get("parent_key"), heading=f.get("heading"),
                          heading_index=f.get("heading_index"), refers_to=f.get("refers_to"),
                          origins=f.get("origins"), judged=f.get("judged"), actor=a.get("actor", "user:cli"))
+    elif verb == "rehome-points":
+        # The re-home (96be1528 (P)): the Note's substance moves to the PointSet of its
+        # (Source, unit) — replayed after the pre-re-home accepts it moves (an accept op that
+        # carries `point_set` lands under the set directly); a no-op when nothing is left.
+        from .purenotes import rehome_points
+        await rehome_points(gx, a["slug"], actor=a.get("actor", "user:cli"))
     elif verb == "render-notes":
         # The body is a FUNCTION of the Points: replay re-derives the same Sections graph-only
         # (write_md=False — the staging file is emit's job), landing after the accepts in
@@ -468,7 +478,7 @@ def touched_node_ids(
     elif verb in ("retract-point", "edit-point"):
         if a.get("point_id"):
             out.append(a["point_id"])
-    elif verb in ("render-notes", "render-work-page"):
+    elif verb in ("render-notes", "render-work-page", "rehome-points"):
         if a.get("slug"):
             out.append(note_node_id(a["slug"]))
     elif a.get("repo_key") and a.get("module_path"):

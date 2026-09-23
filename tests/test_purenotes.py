@@ -1146,6 +1146,176 @@ def test_cli_pure_notes_lane_end_to_end_and_replay(tmp_path):
 
 
 @pytest.mark.skipif(not _HAVE_GRAPH, reason=f"graph capability {DEFAULT_GRAPH_ID!r} not installed (CI)")
+def test_cli_points_belong_to_the_source_rehome_and_replay_parity(tmp_path):
+    """Ruling 96be1528 (P) over the CLI (the re-home piece of 81d6e669): an accept lands
+    SUBSTANCE under the PointSet of its (Source, unit) — minted on first use, the Note RENDERS
+    it, the op names it — and the Note's own points (a section) under the Note; a journal of
+    PRE-re-home accepts (no `point_set` on the op) replays under the Note and ONE journaled
+    `rehome-points` op moves them: same keys, same References in the same order, the nesting
+    and back-link edges re-derived, the render byte-identical; the whole journal replays onto
+    a fresh db to the same ids and bytes (the migration oracle); a second re-home is a no-op;
+    a shared set refuses the clean-slate retract."""
+    from cjm_context_graph_primitives.query import NodeQuery
+    from cjm_context_graph_projection.purenotes import (accept_point, deliverable_owns, ensure_point_set, load_points,
+                                                        rehome_points, retract_note_points)
+    from cjm_dev_graph_schema.identity import note_node_id, point_set_node_id
+    sib_dir, pri_dir = tmp_path / "sib", tmp_path / "pri"
+    sib_dir.mkdir(); pri_dir.mkdir()
+    sdb = str(sib_dir / "sib.db")
+    _build_sibling(sdb)
+    pdb, pj = str(pri_dir / "pri.db"), str(pri_dir / "writes.jsonl")
+    (pri_dir / "graph.config.json").write_text(json.dumps(
+        {"notes_profile": "quarto_post", "emit_root": str(pri_dir / "staging"), "sibling_graphs": {"tx": sdb}}))
+    base = ("--graph-db-path", pdb, "--journal-path", pj, "--source-journal-path", str(pri_dir / "source.jsonl"))
+    slug = "the-learning-game/ch01"
+    assert _run(*base, "notes-type", "pure-notes").returncode == 0
+    post = "---\ntitle: \"The Learning Game, Chapter 1\"\ndate: 2026-09-07\ncategories: [book, notes]\n---\n\nPreamble.\n"
+    r = _run(*base, "new-note", "--slug", slug, "--content", post)
+    assert r.returncode == 0, r.stderr or r.stdout
+    note_id = note_node_id(slug)
+    r = _run(*base, "notes-pack", "--source", "Seven Dangerous")
+    assert r.returncode == 0, r.stderr or r.stdout
+    pack_json = next((pri_dir / "purenotes" / "packs").glob("npack_*.json"))
+    rows = tmp_path / "rows.jsonl"
+    rows.write_text("\n".join(json.dumps(x) for x in [
+        {"kind": "claim", "from_i": 0, "to_i": 0, "text": "Gatto quit teaching in 1991.", "lead": "Gatto"},
+        {"kind": "quotation", "from_i": 1, "to_i": 2, "text": "I teach confusion.", "attribution": "Gatto"},
+        {"kind": "claim", "from_i": 3, "to_i": 3, "text": "Subjects taught in isolation."},
+        {"kind": "claim", "from_i": 3, "to_i": 4, "text": "Isolation = no coherent picture.", "lead": "coherent", "parent": 2,
+         "refers_to": [0]},
+        {"kind": "synopsis", "from_i": 0, "to_i": 4, "text": "Gatto quit in 1991; school teaches confusion by isolating subjects."},
+    ]) + "\n")
+    r = _run(*base, "notes-ingest", "--pack", str(pack_json), "--rows", str(rows), "--proposer", "test")
+    assert r.returncode == 0, r.stderr or r.stdout
+    r = _run(*base, "notes-accept", "--slug", slug, "--accept-all")
+    assert r.returncode == 0 and "accepted 5" in r.stdout, r.stderr or r.stdout
+    ops = [o for o in read_journal(pj) if o["verb"] == "accept-point"]
+    set_id = point_set_node_id("tx", "src-1", "")
+    assert len(ops) == 5 and all(o["args"]["point_set"] == {"graph": "tx", "source_id": "src-1", "unit": ""} for o in ops)
+    r = _run(*base, "notes-render", "--slug", slug)
+    assert r.returncode == 0 and "from 5 point(s)" in r.stdout, r.stderr or r.stdout
+    staged = (pri_dir / "staging" / "the-learning-game" / "ch01" / "index.md").read_text()
+    assert "## Lesson 1. Confusion" in staged and "(see [§ Gatto](#pt-" in staged
+
+    async def _shape(db):   # the graph's point structure: sets, owners, ids, keys, edge multiset
+        async with open_graph(db) as g:
+            res = await graph_task(g.queue, g.graph_id, "query_nodes", query=NodeQuery(label="PointSet").to_dict())
+            sets = sorted(n.id for n in (res.nodes or []))
+            res = await graph_task(g.queue, g.graph_id, "query_nodes", query=NodeQuery(label="Point").to_dict())
+            pts = {n.id: dict(n.properties) for n in (res.nodes or [])}
+            edges = []
+            for rel in ("HAS_POINT", "DERIVED_FROM", "ELABORATES", "REFERENCES", "RENDERS"):
+                res = await graph_task(g.queue, g.graph_id, "query_edges", query=EdgeQuery(relation_type=rel).to_dict())
+                rows = [e.to_dict() if hasattr(e, "to_dict") else dict(e) for e in (getattr(res, "edges", None) or res.rows or [])]
+                edges += sorted((rel, e["source_id"], e["target_id"], json.dumps(e.get("properties") or {}, sort_keys=True)) for e in rows)
+            return {"sets": sets, "owners": sorted({p["owner_id"] for p in pts.values()}), "ids": sorted(pts),
+                    "keys": sorted(p["key"] for p in pts.values()), "edges": edges,
+                    "note_id_on_wire": any("note_id" in p for p in pts.values())}
+    live = asyncio.run(_shape(pdb))
+    assert live["sets"] == [set_id] and live["owners"] == [set_id] and not live["note_id_on_wire"]
+    assert ("RENDERS", note_id, set_id, "{}") in live["edges"]
+    assert all(s == set_id for rel, s, t, _ in live["edges"] if rel == "HAS_POINT")
+    assert sum(1 for e in live["edges"] if e[0] == "ELABORATES") == 1
+    assert sum(1 for e in live["edges"] if e[0] == "REFERENCES") == 1
+    assert sum(1 for e in live["edges"] if e[0] == "DERIVED_FROM") == 11        # 1 + 2 + 1 + 2 + 5 segment References
+    assert _run("--graph-db-path", pdb, "read", note_id).stdout == staged
+
+    # (2) a PRE-re-home journal: the same ops without `point_set` land under the NOTE, as they did live
+    legacy = pri_dir / "legacy.jsonl"
+    with legacy.open("w") as fh:
+        for line in Path(pj).read_text().splitlines():
+            o = json.loads(line)
+            if o["verb"] == "accept-point":
+                o["args"] = {k: v for k, v in o["args"].items() if k != "point_set"}
+            fh.write(json.dumps(o, ensure_ascii=False) + "\n")
+    ldb = str(pri_dir / "legacy.db")
+    r = _run("--graph-db-path", ldb, "--journal-path", str(legacy), "replay")
+    assert r.returncode == 0, r.stderr or r.stdout
+    old = asyncio.run(_shape(ldb))
+    assert old["sets"] == [] and old["owners"] == [note_id] and old["keys"] == live["keys"] and old["ids"] != live["ids"]
+    assert _run("--graph-db-path", ldb, "read", note_id).stdout == staged
+    # (3) ONE journaled re-home: the points move to the set; ids, owners and edges converge on the live graph
+    lbase = ("--graph-db-path", ldb, "--journal-path", str(legacy), "--source-journal-path", str(pri_dir / "lsource.jsonl"))
+    r = _run(*lbase, "notes-rehome", "--slug", slug)
+    assert r.returncode == 0 and "5 substance point(s) re-homed" in r.stdout, r.stderr or r.stdout
+    assert len([o for o in read_journal(str(legacy)) if o["verb"] == "rehome-points"]) == 1
+    assert asyncio.run(_shape(ldb)) == live
+    r = _run(*lbase, "notes-rehome", "--slug", slug)
+    assert r.returncode == 0 and "nothing to move" in r.stdout
+    assert len([o for o in read_journal(str(legacy)) if o["verb"] == "rehome-points"]) == 1   # the no-op journals nothing
+    # the render is byte-identical (the body is a function of the substance, not the owner) and lands no new op
+    r = _run(*lbase, "notes-render", "--slug", slug)
+    assert r.returncode == 0, r.stderr or r.stdout
+    assert (pri_dir / "staging" / "the-learning-game" / "ch01" / "index.md").read_text() == staged
+    assert len([o for o in read_journal(str(legacy)) if o["verb"] == "render-notes"]) == 1
+    # (4) the migrated journal replays onto a fresh db to the same ids, edges and bytes — the oracle
+    rdb = str(pri_dir / "rep.db")
+    r = _run("--graph-db-path", rdb, "--journal-path", str(legacy), "replay")
+    assert r.returncode == 0, r.stderr or r.stdout
+    assert asyncio.run(_shape(rdb)) == live
+    assert _run("--graph-db-path", rdb, "read", note_id).stdout == staged
+    # an edit by prefix on a set-owned point re-parents under the set; replay agrees
+    child_key = ops[3]["args"]["point"]["key"]
+    r = _run("--graph-db-path", ldb, "--format", "agent", "locate", child_key[:8])
+    child_id = [m for m in json.loads(r.stdout)["matches"] if m.get("label") == "Point"][0]["id"]
+    r = _run(*lbase, "notes-edit", child_id[:8], "--parent", "none")
+    assert r.returncode == 0 and "parent_key changed" in r.stdout, r.stderr or r.stdout
+    r = _run(*lbase, "notes-edit", child_id[:8], "--parent", ops[2]["args"]["point"]["key"])
+    assert r.returncode == 0, r.stderr or r.stdout
+    assert asyncio.run(_shape(ldb)) == live
+    rdb2 = str(pri_dir / "rep2.db")
+    assert _run("--graph-db-path", rdb2, "--journal-path", str(legacy), "replay").returncode == 0
+    assert asyncio.run(_shape(rdb2)) == live
+
+    # (5) the deliverable's OWN points: a `section` lands under the Note even with a point_set on the op;
+    #     the re-home leaves it; a second deliverable sharing the set refuses the clean-slate retract
+    async def _own(db):
+        async with open_graph(db) as g:
+            sec = {"key": "sec-1", "kind": "section", "text": "Lesson one", "ordinal": 0, "start_time": 0.0,
+                   "segment_ids": [], "unit": ops[0]["args"]["point"]["unit"]}
+            assert deliverable_owns(sec) and not deliverable_owns(ops[0]["args"]["point"])
+            r = await accept_point(g, slug, sec, observations=[], actor="user:test",
+                                   point_set={"graph": "tx", "source_id": "src-1", "unit": ""})
+            assert r["owner_id"] == note_id and r["set_id"] == set_id and r["written"], r
+            pts = await load_points(g, note_id)
+            assert len(pts) == 6 and {p["owner_id"] for p in pts} == {note_id, set_id}
+            r = await rehome_points(g, slug, actor="user:test")
+            assert not r["written"] and r["moved"] == 0 and r["kept"] == 1 and r["set_id"] == set_id
+            # a sibling deliverable renders the same set: the set's points are the source's, not this Note's to wipe
+            other = "the-learning-game/ch01-distilled"
+            await extend_graph(g.queue, g.graph_id, [{"id": note_node_id(other), "label": "Note",
+                                                      "properties": {"slug": other, "title": other, "root_kind": "asserted"},
+                                                      "sources": []}], [])
+            assert await ensure_point_set(g, note_node_id(other), ops[0]["args"]["point"]["unit"]) == set_id
+            assert len(await load_points(g, note_node_id(other))) == 5
+            r = await retract_note_points(g, slug, actor="user:test")
+            assert r.get("error") and "also rendered" in r["error"] and r["retracted"] == []
+    asyncio.run(_own(pdb))
+
+
+def test_frontmatter_lecture_label_leads_title_and_subtitle():
+    """Ruling 96be1528 (9): the standalone lecture resource's title is the lecture's OWN label;
+    the series and the lecture's slot move to a `subtitle` line — inserted after the title,
+    replaced in place on a re-derive, untouched under the companion policy."""
+    fm = '---\ntitle: "old"\ndate: 2026-09-22\ncategories: [gpu-mode]\n---\n'
+    unit = {"graph": "tx", "source_id": "s", "title": "Bonus Lecture: CUDA C++ llm.cpp", "series": ["GPU MODE"]}
+    pts = [{"key": "k", "kind": "claim", "text": "t", "start_time": 1.0, "ordinal": 0, "unit": unit}]
+    out = derive_frontmatter(fm, pts, {"title": "lecture-label-leads", "description": "synopsis"}, synopsis="What it shows.", unit=unit)
+    assert out == ('---\ntitle: "CUDA C++ llm.cpp"\nsubtitle: "Notes on the GPU MODE Bonus Lecture"\n'
+                   'description: "What it shows."\ndate: 2026-09-22\ncategories: [gpu-mode]\n---\n')
+    assert derive_frontmatter(out, pts, {"title": "lecture-label-leads", "description": "synopsis"}, synopsis="What it shows.", unit=unit) == out
+    # the companion policy keeps the pre-graph naming and never writes a subtitle
+    comp = derive_frontmatter(fm, pts, {"title": "series-lecture-notes"}, unit=unit)
+    assert comp.startswith('---\ntitle: "GPU MODE Bonus Lecture notes: CUDA C++ llm.cpp"\ndate:') and "subtitle" not in comp
+    # a label that already names the series is not doubled in the subtitle
+    doubled = derive_frontmatter(fm, pts, {"title": "lecture-label-leads"}, unit={**unit, "title": "GPU MODE Lecture 12: Flash Attention"})
+    assert doubled.startswith('---\ntitle: "Flash Attention"\nsubtitle: "Notes on the GPU MODE Lecture 12"\n')
+    # a title with no colon: the whole title leads, the subtitle names the series lecture
+    plain = derive_frontmatter(fm, pts, {"title": "lecture-label-leads"}, unit={**unit, "title": "Building a GPU kernel"})
+    assert plain.startswith('---\ntitle: "Building a GPU kernel"\nsubtitle: "Notes on the GPU MODE"\n')
+
+
+@pytest.mark.skipif(not _HAVE_GRAPH, reason=f"graph capability {DEFAULT_GRAPH_ID!r} not installed (CI)")
 def test_cli_block_merge_judge_accept_and_standing_detection_replay(tmp_path):
     # ruling 1798a796 / work item 1561551e over the CLI: block merge -> judge -> accept (origins + judgements ride
     # the points) -> standing detection on the accepted draft -> the judge over the draft (edits / a fold) -> replay

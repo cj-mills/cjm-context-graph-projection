@@ -254,16 +254,20 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `close_open_refs` _function_ — Apply a reconciler's answers to a set's hinted references — mechanically checked, loud
 - `coverage_gaps` _function_ — Pure: the unreferenced-lines query — every content line the type includes that no
 - `date_phrase` _function_ — A date as the card prints it, at the precision it is KNOWN to (ruling de9c4cda (H7)): `day`
+- `deliverable_owns` _function_ — Ruling 96be1528 (P): a source's points are the source's points — a SUBSTANCE point is
 - `derive_frontmatter` _function_ — The type may OWN the title and the description — the rest of the authored frontmatter
 - `derive_work_frontmatter` _function_ — The work-page type OWNS the title and description: `notes-on-work` = "Notes on *<work>*"
 - `derived_description` _function_ — What the unit CONTAINS, from data the rendering already uses: the work (when the
 - `edit_point` _function_ — Edit an accepted point IN PLACE — the per-point repair the ch. 2 staging read demanded
+- `ensure_point_set` _function_ — Mint the (Source, unit)'s PointSet on first use and assert the Note RENDERS it — both
 - `extra_list` _function_ — Every EXTRA still pending in a set, keyed `x001`… in the set's order — the ids the judge
 - `group_points` _function_ — The page's sections. SYNTHESIZED (ruling bc62c727 (A)): when the points include
 - `judge_points` _function_ — Apply an overlap judge's answers to an ACCEPTED draft (ruling 1798a796; work item
+- `key_owner` _function_ — Cross-point keys name SUBSTANCE points: for a set-owned point that is its own set; for
 - `lecture_title` _function_ — The title a reader knows the lecture by. The URL binding kept the playlist row's title as
 - `load_deliverable_type` _function_ — Read a DeliverableType profile off the graph (None = `notes-type <key>` first).
 - `load_notes_propsets` _function_ — Every notes proposal set under `root` (optionally for one source), newest first.
+- `load_owned_points` _function_ — The points ONE owner holds (HAS_POINT owner -> point), in source order — the owner's
 - `load_points` _function_ — A Note's Points, in source order (start_time, then pack ordinal, then key).
 - `merge_point_blocks` _function_ — The BLOCK merge (ruling 1798a796, fork 1; work item 1561551e): the unit of agreement is
 - `merge_point_proposals` _function_ — The ROW-LEVEL merge (work item 3a2c94eb (2); the filter lane's `merge_filter_proposals`
@@ -281,6 +285,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `point_check` _function_ — The CHECK review: one point beside its segments' LIVE text from the sibling — the
 - `point_coverage` _function_ — The COVERAGE review: re-read the unit per the Note's type policy and list the content
 - `point_from_args` _function_ — The op-args -> PointNode mapping the live accept AND replay share.
+- `point_set_of` _function_ — The PointSet a unit snapshot addresses (ruling 96be1528 (P)): identity = (sibling graph
 - `points_as_proposals` _function_ — An accepted draft read as a proposal set — a point's key IS its accepted proposal id, so
 - `points_index` _function_ — Key a set of proposal rows for a reader that cannot see their lines: `p001`… in source
 - `proposals_from_point_rows` _function_ — Resolve validated rows to proposal rows: a minted proposal id (the point's future
@@ -290,6 +295,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `read_source_unit` _function_ — Read one source unit: the EFFECTIVE spine (layer-0 + applied corrections, via the
 - `read_work_structure` _function_ — The WORK as the sibling holds it: every Source whose structure map names the work, in
 - `rehead_points` _function_ — Re-derive every Point's captured heading / heading_index from its segment run against a
+- `rehome_points` _function_ — THE RE-HOME (ruling 96be1528 (P); the migration of a deliverable born before PointSets):
 - `render_judge_brief` _function_ — The brief of the bounded JUDGEMENT (ruling 1798a796 (2)): ONE whole-source reader works
 - `render_notes` _function_ — Derive the Note's body from its Points and APPLY it: the authored preamble stays, the
 - `render_notes_pack` _function_ — Render a pack as the brief a proposer reads: the unit, the kind slate, the headers
@@ -303,6 +309,8 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `render_work_chapters` _function_ — The TOC that is also the executive summary (checks 2d01fe1e + 34f73e46): the units in
 - `render_work_page` _function_ — Derive the WORK PAGE's body and APPLY it (item ebb77107; ruling a7ca900d (2)): the
 - `render_works_table` _function_ — Pure: the per-work promotion condition as the staging site's works table (item
+- `rendered_sets` _function_ — The Note's RENDERS edges (ruling 96be1528 (P)) — where its substance lives. A node that
+- `renderers_of` _function_ — The inverse of `rendered_sets`: every deliverable sharing the set's substance — what a
 - `resolve_references` _function_ — Resolve human-added links for rendering (ae103970): a cross-work link naming a
 - `resolve_sibling_source` _function_ — Resolve a Source in the sibling graph: id prefix first (the shared seam), then a
 - `retract_note_points` _function_ — Retract EVERY point of a Note (the re-drive's clean slate — ruling e1fd4d64 (5)): one

@@ -308,7 +308,7 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
     if kind in ("notes-type", "notes-pack", "notes-ingest", "notes-accept", "notes-retract", "notes-retract-all",
                 "notes-coverage", "notes-overlap", "notes-check", "notes-edit", "notes-rehead", "notes-render",
                 "notes-promotion", "notes-staging-index", "notes-index", "notes-merge", "notes-merge-sweep",
-                "notes-close", "notes-outline", "notes-judge", "notes-judge-draft"):
+                "notes-close", "notes-outline", "notes-judge", "notes-judge-draft", "notes-rehome"):
         return _render_notes_lane(kind, obj)
     if kind == "confirm-proposal":
         if obj.get("error"):
@@ -1527,6 +1527,13 @@ def _render_notes_lane(kind: str, obj: Dict[str, Any]) -> str:
         done = obj.get("retracted") or []
         return (f"**retract-point ×{len(done)}** — every point of `{obj.get('slug')}` retracted "
                 f"(one journaled op each; render to drop the body)")
+    if kind == "notes-rehome":
+        if not obj.get("written"):
+            return (f"**rehome-points** `{obj.get('slug')}` — nothing to move ({obj.get('kept', 0)} deliverable-owned point(s) stay"
+                    + (f"; renders set `{str(obj.get('set_id'))[:8]}`" if obj.get("set_id") else "") + "; no op journaled)")
+        return (f"**rehome-points** `{obj.get('slug')}` — {obj.get('moved')} substance point(s) re-homed to set "
+                f"`{str(obj.get('set_id') or '')[:8]}` · {obj.get('kept', 0)} kept by the deliverable (journaled)\n"
+                "  next: `notes-render --slug <post>` — the body must not change")
     if kind == "notes-coverage":
         gaps = obj.get("gaps") or []
         lines = [f"## Coverage — `{obj.get('slug')}` ({obj.get('type')})",

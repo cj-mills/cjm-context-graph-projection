@@ -45,7 +45,7 @@ from cjm_context_graph_primitives.query import (EdgeQuery, NodeQuery, PropertyPr
 from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.identity import note_node_id, point_node_id
 from cjm_dev_graph_schema.nodes import (DeliverableTypeNode, POINT_KIND_GLOSSES, PointNode,
-                                        ReferenceNode)
+                                        PointSetNode, ReferenceNode)
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 
 from . import factlayer as F
@@ -2305,18 +2305,13 @@ def apply_outline(
                                         "smallest": min(sizes), "largest": max(sizes), "synopsis_words": len(synopsis.split())}}
 
 
-# --------------------------------------------------------------------------------------
-# Accept / retract (the journaled substance writes)
-# --------------------------------------------------------------------------------------
-
-
 def point_from_args(
-    note_id: str,           # The deliverable Note id
+    owner_id: str,          # The node that OWNS the point (ruling 96be1528 (P)): the (Source, unit)'s PointSet for substance, the deliverable Note for its own (`section`, `research`)
     p: Dict[str, Any],      # The journaled point args (key/kind/text/…)
     actor: str = "agent:session",
 ) -> PointNode:  # The PointNode the accept op describes
-    """The op-args -> PointNode mapping the live accept AND replay share."""
-    return PointNode(owner_id=note_id, key=str(p["key"]), kind=str(p["kind"]), text=str(p["text"]),
+    """The op-args -> PointNode mapping the live accept, the replay AND the re-home share."""
+    return PointNode(owner_id=owner_id, key=str(p["key"]), kind=str(p["kind"]), text=str(p["text"]),
                      ordinal=int(p.get("ordinal") or 0), lead=str(p.get("lead") or ""),
                      heading=str(p.get("heading") or ""), heading_index=int(p.get("heading_index") or 0),
                      segment_ids=list(p.get("segment_ids") or []),
@@ -2326,7 +2321,116 @@ def point_from_args(
                      speaker=str(p.get("speaker") or ""), speakers=list(p.get("speakers") or []),
                      refers_to=list(p.get("refers_to") or []),
                      origins=[dict(o) for o in (p.get("origins") or [])], judged=[dict(j) for j in (p.get("judged") or [])],
+                     provenance=str(p.get("provenance") or "source"),
+                     citations=[dict(c) for c in (p.get("citations") or [])], expands=str(p.get("expands") or ""),
                      actor=actor)
+
+
+def deliverable_owns(
+    point: Dict[str, Any],  # Point args or node props (`kind`, `provenance`)
+) -> bool:  # True when the DELIVERABLE owns the point; False when the PointSet of its (Source, unit) does
+    """Ruling 96be1528 (P): a source's points are the source's points — a SUBSTANCE point is
+    owned by the PointSet of its (Source, unit) and shared by every deliverable that renders
+    the set; a deliverable owns only its OWN points: a `section` (the synthesized outline,
+    bc62c727 (A)) and a `research` point (provenance = research, 96be1528 (4)). The synopsis
+    is substance — what the source argues — so a sibling deliverable shares it."""
+    return (str(point.get("kind") or "") == SECTION_KIND
+            or str(point.get("provenance") or "source") == "research")
+
+
+def point_set_of(
+    unit: Dict[str, Any],           # A point's unit snapshot ({graph, source_id, title, …}), merged with an op's `point_set` ({graph, source_id, unit}) when one rides it
+    actor: str = "agent:session",   # Who mints the set (the first accept into it)
+) -> Optional[PointSetNode]:  # The set the unit addresses; None when the snapshot names no Source
+    """The PointSet a unit snapshot addresses (ruling 96be1528 (P)): identity = (sibling graph
+    key, Source id, unit key). Every Source the lane reads today is ONE unit — a book chapter
+    is its own Source, a lecture is one video — so the unit key is "" unless the snapshot
+    carries `unit`; the address is the Source's, never the deliverable's, so a re-draft, a
+    re-accept and a second deliverable type converge on the same set. The set keeps the
+    unit's ADDRESS for display (source, unit, title, the work structure), not the whole
+    snapshot — the substance rides the points."""
+    graph, sid = str(unit.get("graph") or ""), str(unit.get("source_id") or "")
+    if not graph or not sid:
+        return None
+    address = {k: unit[k] for k in ("source_id", "unit", "title", "work_structure") if unit.get(k)}
+    return PointSetNode(graph=graph, source_id=sid, unit=str(unit.get("unit") or ""),
+                        title=str(unit.get("title") or ""), unit_address=address, actor=actor)
+
+
+async def _edge_rows(
+    gx: GraphHandle,
+    query: EdgeQuery,  # An UNPROJECTED edge query (the rows come back as whole edges)
+) -> List[Dict[str, Any]]:  # [{id, source_id, target_id, relation_type, properties}] — the matching edges as plain dicts
+    """Whole edges as dicts, whichever shape the store hands back (edge objects or rows)."""
+    res = await graph_task(gx.queue, gx.graph_id, "query_edges", query=query.to_dict())
+    raw = getattr(res, "edges", None) or getattr(res, "rows", None) or []
+    return [e.to_dict() if hasattr(e, "to_dict") else dict(e) for e in raw]
+
+
+async def rendered_sets(
+    gx: GraphHandle,
+    note_id: str,  # The deliverable Note
+) -> List[str]:  # The PointSet ids the Note RENDERS from (today at most one)
+    """The Note's RENDERS edges (ruling 96be1528 (P)) — where its substance lives. A node that
+    is not a Note (a set, a point) renders nothing and gets an empty list."""
+    rows = await _edge_rows(gx, EdgeQuery(source_ids=[note_id], relation_type=DevRelations.RENDERS))
+    return sorted(str(r["target_id"]) for r in rows if r.get("target_id"))
+
+
+async def renderers_of(
+    gx: GraphHandle,
+    set_id: str,  # A PointSet
+) -> List[str]:  # The Note ids that RENDER from the set
+    """The inverse of `rendered_sets`: every deliverable sharing the set's substance — what a
+    retract of the set's points would reach beyond the Note at hand."""
+    rows = await _edge_rows(gx, EdgeQuery(target_ids=[set_id], relation_type=DevRelations.RENDERS))
+    return sorted(str(r["source_id"]) for r in rows if r.get("source_id"))
+
+
+async def ensure_point_set(
+    gx: GraphHandle,
+    note_id: str,                 # The deliverable Note that renders the set
+    unit: Dict[str, Any],         # The unit snapshot (merged with the op's `point_set`) the set is addressed by
+    *,
+    actor: str = "agent:session",
+) -> Optional[str]:  # The set's id — minted if absent, the RENDERS edge landed; None when the unit names no Source
+    """Mint the (Source, unit)'s PointSet on first use and assert the Note RENDERS it — both
+    idempotent (deterministic ids: a present set is left as minted; a present edge is a
+    verified no-op), so every accept and the re-home call it without a presence check."""
+    ps = point_set_of(unit, actor=actor)
+    if ps is None:
+        return None
+    have = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=ps.id)
+    await extend_graph(gx.queue, gx.graph_id, [] if have is not None else [ps.to_graph_node()],
+                       [ps.renders_edge(note_id)])
+    return ps.id
+
+
+async def key_owner(
+    gx: GraphHandle,
+    owner_id: str,  # The owner of the point whose cross-point KEYS are being resolved
+) -> str:  # The owner `refers_to` / `expands` keys resolve under
+    """Cross-point keys name SUBSTANCE points: for a set-owned point that is its own set; for
+    a deliverable-owned point (a research point leaning on the lecture, 96be1528 (4)) it is
+    the set the deliverable RENDERS — the `target_owner_id` the schema's edge builders take.
+    A Note that renders no set yet (a deliverable before its re-home) resolves under itself."""
+    sets = await rendered_sets(gx, owner_id)
+    return sets[0] if sets else owner_id
+
+
+async def load_owned_points(
+    gx: GraphHandle,
+    owner_id: str,  # A PointSet or a deliverable Note
+) -> List[Dict[str, Any]]:  # Point property dicts (+ id), source order
+    """The points ONE owner holds (HAS_POINT owner -> point), in source order — the owner's
+    loader every Note-level read goes through (ruling 61624f40)."""
+    out: List[Dict[str, Any]] = []
+    for n in await F.load_label_where(gx, DevNodeKinds.POINT, [PropertyPredicate("owner_id", "eq", owner_id)]):
+        d = dict(F.props(n))
+        d["id"] = F.nid(n)
+        out.append(d)
+    out.sort(key=_sort_key)
+    return out
 
 
 async def observe_segments(
@@ -2370,11 +2474,17 @@ async def accept_point(
     observations: List[Dict[str, Any]],     # One journaled observation per segment id (segment order)
     actor: str = "user:cli",                # Who confirmed (the human — the accept IS the confirmation)
     proposal_set_id: str = "",              # Provenance: the set the point came from
-) -> Dict[str, Any]:  # {point_id, note_id, existing, args, written} | {error}
+    point_set: Optional[Dict[str, Any]] = None,  # The (Source, unit) the substance belongs to ({graph, source_id, unit}); None = the Note owns it (an op journaled before the re-home)
+) -> Dict[str, Any]:  # {point_id, owner_id, note_id, set_id, existing, args, written} | {error}
     """Land ONE accepted point: the Point node, its segment References (from observations —
-    live accept observed them a moment ago, replay carries them), `HAS_POINT` from the Note,
-    `DERIVED_FROM` to each Reference. Idempotent: deterministic ids make a re-accept a
-    verified no-op; a moved observation refreshes the stand-in in place (as `link` does)."""
+    live accept observed them a moment ago, replay carries them), `HAS_POINT` from its OWNER,
+    `DERIVED_FROM` to each Reference. THE OWNER (ruling 96be1528 (P)): a SUBSTANCE point is
+    owned by the PointSet of its (Source, unit) — `point_set` names it, the set is minted on
+    first use and the Note asserts RENDERS -> set — while a `section` or a `research` point
+    is the deliverable's own. The op CARRIES `point_set`, so an op journaled before the
+    re-home replays under the Note exactly as it landed live and the journaled `rehome-points`
+    op moves it. Idempotent: deterministic ids make a re-accept a verified no-op; a moved
+    observation refreshes the stand-in in place (as `link` does)."""
     note_id = note_node_id(slug)
     note = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=note_id)
     if note is None:
@@ -2382,18 +2492,26 @@ async def accept_point(
                 "slug": slug, "written": False}
     if len(observations) != len(point.get("segment_ids") or []):
         return {"error": "observations must match segment_ids one-to-one", "slug": slug, "written": False}
-    node = point_from_args(note_id, point, actor=str(point.get("actor") or actor))
+    set_id: Optional[str] = None
+    if point_set:
+        set_id = await ensure_point_set(gx, note_id, {**dict(point.get("unit") or {}), **dict(point_set)}, actor=actor)
+        if set_id is None:
+            return {"error": "point_set names no Source (it needs `graph` + `source_id`)", "slug": slug, "written": False}
+    owner = note_id if deliverable_owns(point) or set_id is None else set_id
+    ref_owner = set_id or await key_owner(gx, note_id)   # cross-point keys name substance: the set once one stands
+    node = point_from_args(owner, point, actor=str(point.get("actor") or actor))
     if node.parent_key:
-        # ONE level of nesting: the parent must already stand (accept order = the set's order,
+        # The parent must already stand under the same owner (accept order = the set's order,
         # children after their parent); a missing parent is a SKIP the caller reports, not a
-        # dangling edge.
+        # dangling edge. Depth two is the notes TYPES' presentation policy for SUBSTANCE
+        # (776c13d3 (b)); a `section` nests as deep as the outline has parents.
         parent = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=node.parent_id)
         if parent is None:
             return {"error": f"parent point `{node.parent_key[:8]}` is not accepted yet (accept it first)",
                     "skippable": True, "slug": slug, "written": False}
         gp_key = str(F.prop(parent, "parent_key") or "")
-        if gp_key:
-            gp = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=point_node_id(note_id, gp_key))
+        if gp_key and node.kind != SECTION_KIND:
+            gp = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=point_node_id(owner, gp_key))
             if gp is not None and str(F.prop(gp, "parent_key") or ""):
                 return {"error": f"parent point `{node.parent_key[:8]}` is already a grandchild — two levels at most",
                         "skippable": True, "slug": slug, "written": False}
@@ -2404,7 +2522,8 @@ async def accept_point(
         new_props = node.to_graph_node()["properties"]
         changed = any(F.prop(existing, k) != new_props.get(k)
                       for k in ("text", "kind", "lead", "attribution", "heading", "data", "parent_key",
-                                "speaker", "speakers", "refers_to", "origins", "judged"))
+                                "speaker", "speakers", "refers_to", "origins", "judged",
+                                "provenance", "citations", "expands"))
         if changed:
             # A re-accept with edited content (the human's edit-on-accept) lands as a property
             # update — same id, the journal carries the new state, last op wins on replay.
@@ -2425,20 +2544,29 @@ async def accept_point(
         edges.append(nest)
     # Back-links (ruling ba341c72 (2)): an edge to every referred Point that already stands. A
     # target not accepted (yet, or ever) is REPORTED, never a dangling edge — the key stays on
-    # the point and a re-accept lands the edge once the target stands.
+    # the point and a re-accept lands the edge once the target stands. The same for the
+    # source point a `research` point expands (96be1528 (4)).
     standing: List[str] = []
     for rk in node.refers_to:
-        if await graph_task(gx.queue, gx.graph_id, "get_node", node_id=point_node_id(note_id, rk)) is not None:
+        if await graph_task(gx.queue, gx.graph_id, "get_node", node_id=point_node_id(ref_owner, rk)) is not None:
             standing.append(rk)
-    edges += node.refers_to_edges(standing)
+    edges += node.refers_to_edges(standing, target_owner_id=ref_owner)
     refers_missing = [rk for rk in node.refers_to if rk not in standing]
+    expands_missing = False
+    if node.expands:
+        if await graph_task(gx.queue, gx.graph_id, "get_node", node_id=point_node_id(ref_owner, node.expands)) is not None:
+            edges.append(node.expands_edge(target_owner_id=ref_owner))
+        else:
+            expands_missing = True
     res = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
     args = {"slug": slug, "point": {**point, "key": node.key}, "observations": list(observations),
-            "actor": actor, "proposal_set_id": proposal_set_id}
-    return {"point_id": node.id, "note_id": note_id, "key": node.key, "kind": node.kind,
-            "text": node.text, "existing": existing is not None, "changed": changed,
+            "actor": actor, "proposal_set_id": proposal_set_id,
+            **({"point_set": dict(point_set)} if point_set else {})}
+    return {"point_id": node.id, "owner_id": owner, "note_id": note_id, "set_id": set_id, "key": node.key,
+            "kind": node.kind, "text": node.text, "existing": existing is not None, "changed": changed,
             "references": ref_ids, "nodes_added": res.nodes_added, "edges_added": res.edges_added,
             **({"refers_to_missing": refers_missing} if refers_missing else {}),
+            **({"expands_missing": node.expands} if expands_missing else {}),
             "args": args, "written": True}
 
 
@@ -2447,10 +2575,11 @@ async def retract_point(
     point_ref: str,                 # The Point id (or unique prefix)
     *,
     actor: str = "user:cli",
-) -> Dict[str, Any]:  # {point_id, note_id, key, deleted, args, written} | {error}
+) -> Dict[str, Any]:  # {point_id, owner_id, key, deleted, args, written} | {error}
     """Retract a point: delete the node (its edges cascade). The compensating op of accept —
     journaled, replayed in append order after the accept it undoes; a missing point is a
-    tolerated no-op so a rebuild converges with the point absent."""
+    tolerated no-op so a rebuild converges with the point absent. A set-owned point is the
+    SOURCE's (96be1528 (P)): retracting it reaches every deliverable rendering the set."""
     from .projection import ambiguity_error, resolve_node_ref
     r = await resolve_node_ref(gx, point_ref)
     if "candidates" in r:
@@ -2461,9 +2590,9 @@ async def retract_point(
                 "args": {"point_id": point_ref, "actor": actor}}
     if F.label(node) != DevNodeKinds.POINT:
         return {"error": f"`{point_ref}` is a {F.label(node)}, not a Point", "written": False}
-    pid, note_id, key = F.nid(node), str(F.prop(node, "note_id") or ""), str(F.prop(node, "key") or "")
+    pid, owner_id, key = F.nid(node), str(F.prop(node, "owner_id") or ""), str(F.prop(node, "key") or "")
     await graph_task(gx.queue, gx.graph_id, "delete_nodes", node_ids=[pid], cascade=True)
-    return {"point_id": pid, "note_id": note_id, "key": key, "deleted": True, "written": True,
+    return {"point_id": pid, "owner_id": owner_id, "key": key, "deleted": True, "written": True,
             "args": {"point_id": pid, "slug": "", "key": key, "actor": actor}}
 
 
@@ -2472,11 +2601,21 @@ async def retract_note_points(
     slug: str,                      # The deliverable Note's slug
     *,
     actor: str = "user:cli",
-) -> Dict[str, Any]:  # {slug, retracted: [retract results], written}
-    """Retract EVERY point of a Note (the re-drive's clean slate — ruling e1fd4d64 (5)): one
-    `retract_point` per point, children before parents so no ELABORATES edge ever dangles;
-    the caller journals one `retract-point` op per result (replay-identical to singles)."""
-    points = await load_points(gx, note_node_id(slug))
+) -> Dict[str, Any]:  # {slug, retracted: [retract results], written} | {error}
+    """Retract EVERY point a Note renders (the re-drive's clean slate — ruling e1fd4d64 (5)):
+    its own AND the substance of the set it renders — the slate is the SOURCE's (96be1528
+    (P)), so a set another deliverable also renders is REFUSED, naming the sharers (the case
+    that needs a shared re-drive names its own verb). One `retract_point` per point, children
+    before parents so no ELABORATES edge ever dangles; the caller journals one `retract-point`
+    op per result (replay-identical to singles)."""
+    note_id = note_node_id(slug)
+    for sid in await rendered_sets(gx, note_id):
+        others = [n for n in await renderers_of(gx, sid) if n != note_id]
+        if others:
+            return {"error": f"the set `{sid[:8]}` is also rendered by {len(others)} other deliverable(s) "
+                             f"({', '.join(o[:8] for o in others)}) — its points are the source's, not this Note's to retract",
+                    "slug": slug, "retracted": [], "written": False}
+    points = await load_points(gx, note_id)
     keys = {str(p.get("key")): p for p in points}
 
     def _depth(p: Dict[str, Any]) -> int:
@@ -2495,32 +2634,102 @@ async def retract_note_points(
     return {"slug": slug, "retracted": out, "written": bool(out)}
 
 
+async def rehome_points(
+    gx: GraphHandle,
+    slug: str,                      # The deliverable Note's slug
+    *,
+    actor: str = "user:cli",
+) -> Dict[str, Any]:  # {slug, note_id, set_id, moved, kept, args, written} | {error}
+    """THE RE-HOME (ruling 96be1528 (P); the migration of a deliverable born before PointSets):
+    every SUBSTANCE point the Note owns moves to the PointSet of its (Source, unit) — the set
+    minted if absent, RENDERS asserted — with its key, text and every cross-point field
+    unchanged: a new node under the new owner (the id changes with the owner, nothing else),
+    HAS_POINT from the set, the same DERIVED_FROM References in the same order, ELABORATES
+    and the `refers_to` REFERENCES re-derived under the set, then the old node deleted (its
+    edges cascade). The deliverable's OWN points (sections, research) stay, their back-links
+    and expansions re-targeted to the set. Journaled as `rehome-points` and replayed in
+    append order after the accepts it moves, so a journal of pre-re-home accepts converges
+    on the same graph as the live one; idempotent — a Note with nothing left to move is a
+    no-op that journals nothing."""
+    note_id = note_node_id(slug)
+    note = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=note_id)
+    if note is None:
+        return {"error": f"no note `{slug}`", "slug": slug, "written": False}
+    own = await load_owned_points(gx, note_id)
+    moving = [p for p in own if not deliverable_owns(p)]
+    kept = [p for p in own if deliverable_owns(p)]
+    args = {"slug": slug, "actor": actor}
+    if not moving:
+        sets = await rendered_sets(gx, note_id)
+        return {"slug": slug, "note_id": note_id, "set_id": sets[0] if sets else None, "moved": 0,
+                "kept": len(kept), "args": args, "written": False}
+    units = {(str((p.get("unit") or {}).get("graph") or ""), str((p.get("unit") or {}).get("source_id") or ""))
+             for p in moving}
+    if len(units) != 1 or not all(next(iter(units))):
+        return {"error": f"the Note's points name {len(units)} source unit(s) — a Note renders ONE set per "
+                         f"(Source, unit), and every point must carry its unit's graph + source_id",
+                "slug": slug, "written": False}
+    set_id = await ensure_point_set(gx, note_id, dict(moving[0].get("unit") or {}), actor=actor)
+    moved_keys = {str(p.get("key")) for p in moving}
+    nodes: List[Dict[str, Any]] = []
+    edges: List[Dict[str, Any]] = []
+    for p in moving:
+        pn = point_from_args(set_id, {k: v for k, v in p.items() if k != "id"}, actor=str(p.get("actor") or actor))
+        nodes.append(pn.to_graph_node())
+        edges.append(pn.has_point_edge())
+        # the same References in the same order — what the accept observed, never re-observed
+        rows = await _edge_rows(gx, EdgeQuery(source_ids=[p["id"]], relation_type=DevRelations.DERIVED_FROM))
+        rows.sort(key=lambda e: int((e.get("properties") or {}).get("order") or 0))
+        edges += pn.derived_from_edges([str(e["target_id"]) for e in rows if e.get("target_id")])
+        nest = pn.elaborates_edge()
+        if nest is not None and pn.parent_key in moved_keys:
+            edges.append(nest)
+        edges += pn.refers_to_edges([k for k in pn.refers_to if k in moved_keys])
+    for p in kept:
+        # a deliverable-owned point leaning on the moved substance re-targets the set
+        pn = point_from_args(note_id, {k: v for k, v in p.items() if k != "id"}, actor=str(p.get("actor") or actor))
+        if not (pn.refers_to or pn.expands):
+            continue
+        rows = await _edge_rows(gx, EdgeQuery(source_ids=[p["id"]], relation_type=DevRelations.REFERENCES))
+        stale = [str(e["id"]) for e in rows if e.get("id")]
+        if stale:
+            await graph_task(gx.queue, gx.graph_id, "delete_edges", edge_ids=stale)
+        edges += pn.refers_to_edges([k for k in pn.refers_to if k in moved_keys], target_owner_id=set_id)
+        if pn.expands in moved_keys:
+            edges.append(pn.expands_edge(target_owner_id=set_id))
+    res = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
+    await graph_task(gx.queue, gx.graph_id, "delete_nodes", node_ids=[p["id"] for p in moving], cascade=True)
+    return {"slug": slug, "note_id": note_id, "set_id": set_id, "moved": len(moving), "kept": len(kept),
+            "nodes_added": res.nodes_added, "edges_added": res.edges_added, "args": args, "written": True}
+
+
 async def edit_point(
     gx: GraphHandle,
     point_ref: str,                     # The Point id (or unique prefix)
     *,
     text: Optional[str] = None,         # New statement text (None = keep)
     lead: Optional[str] = None,         # New lead term ("" clears; None = keep)
-    parent: Optional[str] = None,       # New parent: a Point key, id or prefix in the same Note; "" = top level; None = keep
+    parent: Optional[str] = None,       # New parent: a Point key, id or prefix under the same OWNER; "" = top level; None = keep
     heading: Optional[str] = None,      # Re-derived section heading (the rehead pass; None = keep)
     heading_index: Optional[int] = None,  # Its order within the unit (None = keep)
     refers_to: Optional[List[str]] = None,   # New back-link keys (the judge's fold; None = keep) — REFERENCES edges re-derived to the standing targets
     origins: Optional[List[Dict[str, Any]]] = None,  # New provenance list (the judge's fold; None = keep)
     judged: Optional[List[Dict[str, Any]]] = None,   # New overlap judgements (the judge; None = keep)
     actor: str = "user:cli",
-) -> Dict[str, Any]:  # {point_id, note_id, key, changed: {field: [old, new]}, args, written} | {error}
+) -> Dict[str, Any]:  # {point_id, owner_id, key, changed: {field: [old, new]}, args, written} | {error}
     """Edit an accepted point IN PLACE — the per-point repair the ch. 2 staging read demanded
     (ruling 5625b74e; the lane gap named in b542896b (b) and 5fdeb80c): text, lead, parent —
     and, for the overlap judge over an accepted draft (ruling 1798a796), the back-links,
-    origins and judgements. Identity is (note, key), so the node, its `pt-` anchor and its
+    origins and judgements. Identity is (owner, key), so the node, its `pt-` anchor and its
     References all stand; a parent change rewires the ELABORATES edge under the accept-time
-    rules (same Note, an accepted parent, depth two at most — a point with children cannot
-    become a grandchild — and never a descendant of the point itself); a back-link change
-    re-derives the REFERENCES edges to the targets that stand (a missing target keeps its
-    key, as at accept). The lead and arrow contracts of ingest hold on the edited text.
-    Journaled as `edit-point` with the FIELD SET applied; replay re-applies it after the
-    accept it edits (a missing point is a tolerated no-op — the accept may have been
-    retracted later in the journal). Unchanged fields land nothing."""
+    rules (the same owner, an accepted parent, depth two at most for substance — a point
+    with children cannot become a grandchild — never a descendant of the point itself; a
+    `section` nests as deep as the outline has parents, 776c13d3); a back-link change
+    re-derives the REFERENCES edges to the targets that stand under the key owner (a missing
+    target keeps its key, as at accept). The lead and arrow contracts of ingest hold on the
+    edited text. Journaled as `edit-point` with the FIELD SET applied; replay re-applies it
+    after the accept it edits (a missing point is a tolerated no-op — the accept may have
+    been retracted later in the journal). Unchanged fields land nothing."""
     from .projection import ambiguity_error, resolve_node_ref
     r = await resolve_node_ref(gx, point_ref)
     if "candidates" in r:
@@ -2531,11 +2740,12 @@ async def edit_point(
                 "args": {"point_id": point_ref, "fields": {}, "actor": actor}}
     if F.label(node) != DevNodeKinds.POINT:
         return {"error": f"`{point_ref}` is a {F.label(node)}, not a Point", "written": False}
-    pid, note_id, key = F.nid(node), str(F.prop(node, "note_id") or ""), str(F.prop(node, "key") or "")
+    pid, owner_id, key = F.nid(node), str(F.prop(node, "owner_id") or ""), str(F.prop(node, "key") or "")
     cur = {k: F.prop(node, k) for k in ("text", "kind", "lead", "attribution", "heading", "heading_index",
                                         "segment_ids", "start_time", "end_time", "data", "unit",
                                         "parent_key", "ordinal", "actor", "speaker", "speakers", "refers_to",
-                                        "origins", "judged")}
+                                        "origins", "judged", "provenance", "citations", "expands")}
+    capped = str(cur.get("kind")) != SECTION_KIND   # the depth cap is substance policy, never a section's
     fields: Dict[str, Any] = {}
     if text is not None:
         if not text.strip():
@@ -2570,7 +2780,7 @@ async def edit_point(
         new_parent_key = ""
         if parent != "":
             # A key first (what the journal carries), then an id / prefix (what a reader holds).
-            pnode = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=point_node_id(note_id, parent))
+            pnode = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=point_node_id(owner_id, parent))
             if pnode is None:
                 pr = await resolve_node_ref(gx, parent)
                 if "candidates" in pr:
@@ -2578,23 +2788,24 @@ async def edit_point(
                 pnode = pr.get("node")
             if pnode is None or F.label(pnode) != DevNodeKinds.POINT:
                 return {"error": f"parent `{parent}` is not an accepted Point", "written": False}
-            if str(F.prop(pnode, "note_id") or "") != note_id:
-                return {"error": f"parent `{parent[:8]}` belongs to another deliverable", "written": False}
+            if str(F.prop(pnode, "owner_id") or "") != owner_id:
+                return {"error": f"parent `{parent[:8]}` belongs to another owner (a point nests under its own "
+                                 f"set's points; a section under its own deliverable's sections)", "written": False}
             if F.nid(pnode) == pid:
                 return {"error": "a point cannot elaborate itself", "written": False}
             new_parent_key = str(F.prop(pnode, "key") or "")
             # Depth: the parent's ancestry decides the point's depth; its own children ride along.
             gp_key = str(F.prop(pnode, "parent_key") or "")
             if gp_key:
-                gp = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=point_node_id(note_id, gp_key))
-                if gp is not None and str(F.prop(gp, "parent_key") or ""):
+                gp = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=point_node_id(owner_id, gp_key))
+                if capped and gp is not None and str(F.prop(gp, "parent_key") or ""):
                     return {"error": f"parent `{new_parent_key[:8]}` is already a grandchild — two levels at most",
                             "written": False}
                 if gp_key == key:
                     return {"error": f"parent `{new_parent_key[:8]}` is this point's own child (cycle)", "written": False}
-            siblings = await load_points(gx, note_id)
+            siblings = await load_owned_points(gx, owner_id)
             children = [p for p in siblings if str(p.get("parent_key") or "") == key]
-            if gp_key and children:
+            if capped and gp_key and children:
                 return {"error": f"`{key[:8]}` has {len(children)} child point(s) — under `{new_parent_key[:8]}` they would "
                                  f"sit at depth three; re-parent them first", "written": False}
             if any(str(p.get("parent_key") or "") == key and str(p.get("key")) == new_parent_key for p in siblings):
@@ -2602,10 +2813,10 @@ async def edit_point(
         if new_parent_key != old_parent_key:
             fields["parent_key"] = new_parent_key
     if not fields:
-        return {"point_id": pid, "note_id": note_id, "key": key, "changed": {}, "written": False,
+        return {"point_id": pid, "owner_id": owner_id, "key": key, "changed": {}, "written": False,
                 "args": {"point_id": pid, "key": key, "fields": {}, "actor": actor}}
     merged = {**{k: v for k, v in cur.items() if v is not None}, **fields, "key": key}
-    pn = point_from_args(note_id, merged, actor=str(cur.get("actor") or actor))
+    pn = point_from_args(owner_id, merged, actor=str(cur.get("actor") or actor))
     props = pn.to_graph_node()["properties"]
     props.update(fields)   # update_node MERGES: a cleared lead / parent_key / list lands explicitly, never by absence
     await graph_task(gx.queue, gx.graph_id, "update_node", node_id=pid, properties=props)
@@ -2619,17 +2830,17 @@ async def edit_point(
         if nest is not None:
             await extend_graph(gx.queue, gx.graph_id, [], [nest])
     if "refers_to" in fields:
-        q = EdgeQuery(source_ids=[pid], relation_type=DevRelations.REFERENCES, project=["id"])
-        res = await graph_task(gx.queue, gx.graph_id, "query_edges", query=q.to_dict())
-        old_edges = [row["id"] for row in (res.rows or []) if row.get("id")]
+        ref_owner = await key_owner(gx, owner_id)
+        rows = await _edge_rows(gx, EdgeQuery(source_ids=[pid], relation_type=DevRelations.REFERENCES))
+        old_edges = [str(e["id"]) for e in rows if e.get("id") and (e.get("properties") or {}).get("role") == "refers_to"]
         if old_edges:
             await graph_task(gx.queue, gx.graph_id, "delete_edges", edge_ids=old_edges)
         standing = [rk for rk in pn.refers_to
-                    if await graph_task(gx.queue, gx.graph_id, "get_node", node_id=point_node_id(note_id, rk)) is not None]
+                    if await graph_task(gx.queue, gx.graph_id, "get_node", node_id=point_node_id(ref_owner, rk)) is not None]
         if standing:
-            await extend_graph(gx.queue, gx.graph_id, [], pn.refers_to_edges(standing))
+            await extend_graph(gx.queue, gx.graph_id, [], pn.refers_to_edges(standing, target_owner_id=ref_owner))
     changed = {k: [cur.get(k) if cur.get(k) is not None else "", v] for k, v in fields.items()}
-    return {"point_id": pid, "note_id": note_id, "key": key, "changed": changed, "text": pn.text, "written": True,
+    return {"point_id": pid, "owner_id": owner_id, "key": key, "changed": changed, "text": pn.text, "written": True,
             "args": {"point_id": pid, "key": key, "fields": dict(fields), "actor": actor}}
 
 
@@ -2749,12 +2960,13 @@ async def load_points(
     gx: GraphHandle,
     note_id: str,  # The deliverable Note
 ) -> List[Dict[str, Any]]:  # Point property dicts (+ id), source order
-    """A Note's Points, in source order (start_time, then pack ordinal, then key)."""
-    out: List[Dict[str, Any]] = []
-    for n in await F.load_label_where(gx, DevNodeKinds.POINT, [PropertyPredicate("note_id", "eq", note_id)]):
-        d = dict(F.props(n))
-        d["id"] = F.nid(n)
-        out.append(d)
+    """What a Note RENDERS (ruling 96be1528 (P)): its OWN points (sections, research) plus the
+    substance points of every PointSet it RENDERS from, one list in source order (start time,
+    then pack ordinal, then key). Which of the set's points a type SHOWS is the render's
+    call (the `point_role` facts + the type's role map), never the loader's."""
+    out = await load_owned_points(gx, note_id)
+    for sid in await rendered_sets(gx, note_id):
+        out += await load_owned_points(gx, sid)
     out.sort(key=_sort_key)
     return out
 
@@ -3617,7 +3829,7 @@ def derived_description(
 def derive_frontmatter(
     fm_raw: str,                    # The authored frontmatter block ("---\\n…\\n---\\n")
     points: List[Dict[str, Any]],   # load_points output
-    policy: Dict[str, Any],         # presentation_policy["frontmatter"] ({"title": "work-unit-notes" | "unit-title" | "series-lecture-notes", "description": "synopsis" | "derived"})
+    policy: Dict[str, Any],         # presentation_policy["frontmatter"] ({"title": "work-unit-notes" | "unit-title" | "series-lecture-notes" | "lecture-label-leads", "description": "synopsis" | "derived"})
     *,
     synopsis: str = "",             # The accepted synopsis point's text (policy "synopsis"; derived headings as fallback)
     unit: Optional[Dict[str, Any]] = None,   # The unit the title reads (default: the first point's snapshot); a render passes the snapshot MERGED with the live source facts
@@ -3628,12 +3840,14 @@ def derive_frontmatter(
     `unit-title` = the unit title alone; `series-lecture-notes` (finding baa640e8) = the
     series and the lecture's public title with `notes` after the lecture's own label —
     "GPU MODE Bonus Lecture notes: CUDA C++ llm.cpp" when the title splits at a colon, else
-    "<series> <title> notes" — continuing the pre-graph post naming so the born post sits
-    beside the hand-written lecture notes in the listing (PROVISIONAL: the standalone
-    resource's title is the type design sitting's to rule, d645392f). Description `synopsis`
-    = the accepted synopsis point (ruling (2)), falling back to the derived headings;
-    `derived` = the headings. Idempotent: a re-derive over derived lines yields the same
-    bytes."""
+    "<series> <title> notes" — the companion-post naming; `lecture-label-leads` (ruling
+    96be1528 (9), the STANDALONE lecture resource) = the lecture's OWN label as the title —
+    "CUDA C++ llm.cpp" — with the series and the lecture's slot moved to a `subtitle` line
+    ("Notes on the GPU MODE Bonus Lecture") and the card, because a standalone resource is a
+    different situation from the chapters of one book, where the work leads. Description
+    `synopsis` = the accepted synopsis point (ruling (2)), falling back to the derived
+    headings; `derived` = the headings. Idempotent: a re-derive over derived lines yields the
+    same bytes."""
     if not fm_raw.startswith("---") or not points:
         return fm_raw
     pts = sorted(points, key=_sort_key)
@@ -3647,15 +3861,20 @@ def derive_frontmatter(
         want["title"] = f"{work['title']}, {lab} notes" if lab else f"{work['title']} notes"
     elif tpol in ("unit-title", "work-unit-notes") and str(ws.get("title") or "").strip():
         want["title"] = str(ws.get("title")).strip()
-    elif tpol == "series-lecture-notes":
+    elif tpol in ("series-lecture-notes", "lecture-label-leads"):
         lec = lecture_title(unit)
         series = " / ".join(str(s).strip() for s in (unit.get("series") or []) if str(s).strip())
         if lec:
             head, sep, rest = lec.partition(": ")
-            if sep and head.strip() and rest.strip():
-                want["title"] = f"{series} {head.strip()} notes: {rest.strip()}".strip()
+            split = bool(sep and head.strip() and rest.strip())
+            if tpol == "series-lecture-notes":
+                want["title"] = (f"{series} {head.strip()} notes: {rest.strip()}" if split else f"{series} {lec} notes").strip()
             else:
-                want["title"] = f"{series} {lec} notes".strip()
+                want["title"] = rest.strip() if split else lec.strip()
+                label = head.strip() if split else ""
+                # a lecture whose own label already names the series ("GPU MODE Lecture 12") is not doubled
+                slot = label if series and label.lower().startswith(series.lower()) else " ".join(s for s in (series, label) if s)
+                want["subtitle"] = f"Notes on the {slot}" if slot else "Lecture notes"
     dpol = policy.get("description")
     if dpol == "synopsis" and synopsis.strip():
         want["description"] = synopsis.strip()
@@ -3784,7 +4003,7 @@ async def render_notes(
            p.get("parent_key")] + ([p.get("speaker"), list(p.get("refers_to") or [])]
                                    if p.get("speaker") or p.get("refers_to") else []) for p in points],
          [[r.get("label"), r.get("href")] for r in resolved]] + ([roster0] if roster0 else [])
-        + ([facts] if facts else []) + ([style] if style else []),
+        + ([facts] if facts else []) + ([style] if style else []) + ([fm_policy] if wants_facts else []),
         sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")).hexdigest()
     res.update(points=len(points), rendering=rendering, timestamps=timestamps, text=new_text,
                references=resolved, facts=facts,
@@ -4126,24 +4345,30 @@ async def born_notes_by_unit(
     gx: GraphHandle,
 ) -> Dict[str, List[Dict[str, Any]]]:  # {source id: [{note_id, slug, states, born, synopsis}]} — every typed deliverable, keyed by the unit its Points derive from
     """Which source UNITS carry a born deliverable on this graph, with its state and synopsis:
-    a Note's unit rides its Points (the first point's unit names the Source), its state is the
-    publish_state fact — born = draft or better (a fixture, a retired page, or a Note without
-    the fact does not count) — and its synopsis is the accepted `synopsis` point's text. One
-    pass over the Points; the promotion condition and the work page both read it."""
+    a Note's unit rides the points it RENDERS (a set's points count for every Note rendering
+    the set; a Note's own for the Note — ruling 96be1528 (P)), its state is the publish_state
+    fact — born = draft or better (a fixture, a retired page, or a Note without the fact does
+    not count) — and its synopsis is the accepted `synopsis` point's text. One pass over the
+    Points; the promotion condition and the work page both read it."""
     live = {P.PUBLISH_DRAFT, P.PUBLISH_REVIEWED, P.PUBLISH_PUBLISHED}
     states = await note_publish_states(gx)
+    renders: Dict[str, List[str]] = {}   # set id -> the Notes that RENDER it
+    for e in await _edge_rows(gx, EdgeQuery(relation_type=DevRelations.RENDERS)):
+        if e.get("source_id") and e.get("target_id"):
+            renders.setdefault(str(e["target_id"]), []).append(str(e["source_id"]))
     unit_of_note: Dict[str, Dict[str, Any]] = {}
     synopsis_of_note: Dict[str, str] = {}
     for n in await F.load_label(gx, DevNodeKinds.POINT):
         pr = F.props(n)
-        nid_ = str(pr.get("note_id") or "")
-        if not nid_:
+        owner = str(pr.get("owner_id") or "")
+        if not owner:
             continue
         unit = dict(pr.get("unit") or {})
-        if nid_ not in unit_of_note and unit.get("source_id"):
-            unit_of_note[nid_] = unit
-        if str(pr.get("kind")) == "synopsis" and nid_ not in synopsis_of_note:
-            synopsis_of_note[nid_] = str(pr.get("text") or "").strip()
+        for nid_ in renders.get(owner) or [owner]:
+            if nid_ not in unit_of_note and unit.get("source_id"):
+                unit_of_note[nid_] = unit
+            if str(pr.get("kind")) == "synopsis" and nid_ not in synopsis_of_note:
+                synopsis_of_note[nid_] = str(pr.get("text") or "").strip()
     out: Dict[str, List[Dict[str, Any]]] = {}
     for nid_, unit in unit_of_note.items():
         st = states.get(nid_) or []
@@ -4274,11 +4499,12 @@ def render_work_chapters(
 
 def _replace_frontmatter_lines(
     fm_raw: str,             # The authored frontmatter block ("---\n…\n---\n")
-    want: Dict[str, str],    # {key: value} — the policy-owned lines to replace (or insert after title)
+    want: Dict[str, str],    # {key: value} — the policy-owned lines to replace (or insert in title order)
 ) -> str:  # The frontmatter with those lines replaced; unchanged when the block is malformed or nothing is wanted
     """Pure: the line surgery shared by every type's frontmatter derivation — replace a top-level
-    key's line in place, insert a missing `title` first and a missing `description` right after
-    the title, keep everything else (date, categories, aliases, …) verbatim. Idempotent."""
+    key's line in place; insert a missing `title` first, a missing `subtitle` after the title
+    and a missing `description` after those; keep everything else (date, categories, aliases,
+    …) verbatim. Idempotent."""
     if not want or not fm_raw.startswith("---"):
         return fm_raw
     lines = fm_raw.split("\n")
@@ -4294,9 +4520,11 @@ def _replace_frontmatter_lines(
             seen.add(key)
         else:
             out.append(ln)
-    for key in ("title", "description"):
+    order = ("title", "subtitle", "description")
+    for key in order:
         if key in want and key not in seen:
-            at = next((i for i, l in enumerate(out) if l.startswith("title:")), 0) + 1 if key == "description" else 1
+            before = order[:order.index(key)]
+            at = max([i + 1 for i, l in enumerate(out) if l.split(":", 1)[0].strip() in before] or [1])
             out.insert(at, f"{key}: {json.dumps(want[key], ensure_ascii=False)}")
     return "\n".join(out + lines[end:])
 

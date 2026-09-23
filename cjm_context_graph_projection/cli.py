@@ -1840,6 +1840,9 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
                               "actor": args.actor, "evidence": None, "supersede": None,
                               "subject_content_hash": st.get("subject_content_hash")})
         accepted: list = []
+        # ruling 96be1528 (P): substance lands under the (Source, unit)'s PointSet — the op NAMES it, so a
+        # pre-re-home op (no point_set) replays under the Note as it landed; every Source is one unit today
+        point_set = {"graph": key, "source_id": str(source.get("source_id") or ""), "unit": ""}
         unit = {"graph": key, "source_id": source.get("source_id"), "title": source.get("title"),
                 "skeleton_hash": source.get("skeleton_hash"), "work_structure": source.get("work_structure")}
         if source.get("public_url"):
@@ -1866,7 +1869,7 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
                              **({"origins": list(p["origins"])} if p.get("origins") else {}),
                              **({"judged": list(p["judged"])} if p.get("judged") else {})}
                     res = await accept_point(gx, args.slug, point, observations=obs["observations"],
-                                             actor=args.actor, proposal_set_id=set_id)
+                                             actor=args.actor, proposal_set_id=set_id, point_set=point_set)
                     if res.get("error") and res.get("skippable"):
                         skipped.append({"proposal_id": p["proposal_id"], "reason": res["error"]})
                         continue
@@ -1902,6 +1905,15 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
             return 1
         if args.journal_path and res.get("deleted"):
             append_write(args.journal_path, "retract-point", res["args"])
+        return 0
+    if cmd == "notes-rehome":
+        from .purenotes import rehome_points
+        res = await rehome_points(gx, args.slug, actor=args.actor)
+        print(render("notes-rehome", res, args.format))
+        if res.get("error"):
+            return 1
+        if args.journal_path and res.get("written"):
+            append_write(args.journal_path, "rehome-points", res["args"])
         return 0
     if cmd == "notes-coverage":
         res = await point_coverage(gx, args.slug, siblings=siblings, graph_key=args.sibling,
@@ -2113,6 +2125,13 @@ def _add_notes_lane_parsers(sub) -> None:
     p.add_argument("point", nargs="?", default=None, help="The Point id (or unique prefix)")
     p.add_argument("--slug", default=None, help="With --all: the post whose points are all retracted")
     p.add_argument("--all", action="store_true", help="Retract every point of --slug (children before parents)")
+    p.add_argument("--actor", default=os.environ.get("CJM_ACTOR") or "user:cli")
+
+    p = sub.add_parser("notes-rehome", help="Re-home a deliverable's SUBSTANCE points to the PointSet of their "
+                                             "(Source, unit) (ruling 96be1528 (P)): the set minted, RENDERS asserted, "
+                                             "every point re-keyed under the set with its key and edges kept; "
+                                             "journaled `rehome-points`; idempotent. Then `notes-render` (the body must not change)")
+    p.add_argument("--slug", required=True, help="The deliverable Note's slug")
     p.add_argument("--actor", default=os.environ.get("CJM_ACTOR") or "user:cli")
 
     p = sub.add_parser("notes-edit", help="Edit an accepted point IN PLACE — text / lead / parent (same node, same "
