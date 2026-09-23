@@ -28,6 +28,7 @@ from cjm_python_decompose_core.emit import emit_module_from_nodes
 from . import factlayer as F
 from .authoring import _module_node, _module_region_wires, _stale_wires_error
 from .refactor_ops import _emission_for, _get
+from .relive import relive_modules
 from .runtime import GraphHandle
 from .source_state import journaled_emit
 
@@ -300,8 +301,8 @@ async def rename_symbol(
     The single-pair surface over `rename_symbols` (one wire snapshot, one emit,
     stale-wires guarded — finding 889b3025): scoped-renames the defining module
     (def site + internal refs), then each importer, with an `ast.parse` gate before
-    any write. The symbol's id changes with its name, so the graph re-derives on
-    the next `ingest` (Fork-1(a))."""
+    any write. The symbol KEEPS its id and the graph is updated live (36f649d3) — the
+    renamed symbol resolves under the same id the moment the verb returns."""
     res = await rename_symbols(gx, [(symbol_id, new_name)],
                                write=write, source_journal_path=source_journal_path)
     if res.get("error") or not res.get("renames"):
@@ -309,7 +310,8 @@ async def rename_symbol(
     one = res["renames"][0]
     return {**res, "old_name": one["from"], "new_name": one["to"],
             "symbol_kind": one["kind"], "module": one["module"],
-            "note": "the symbol id changes with its name — re-ingest to re-derive the graph"}
+            "note": "the symbol keeps its id (36f649d3) — the graph is updated live, "
+                    "no rebuild needed"}
 
 
 async def rename_symbols(
@@ -327,7 +329,12 @@ async def rename_symbols(
     emissions — guarded by `_stale_wires_error` on first touch — and the whole set
     lands in one `journaled_emit`, so rename k cannot revert rename j by
     construction. Chained renames (a pair's new name being another pair's old name
-    in the same module) are ambiguous and refused."""
+    in the same module) are ambiguous and refused.
+
+    IDENTITY IS KEPT (36f649d3): the op rides the journal with `identity: keep`, so a
+    renamed symbol keeps the id it was born with (`locate` still finds it, every journaled
+    edge survives), and the graph is updated LIVE from the new texts (`relive_modules`) —
+    no rebuild stands between this rename and the next author edit."""
     if not renames:
         return {"error": "no renames given", "written": False}
     plans: List[Dict[str, Any]] = []
@@ -418,13 +425,15 @@ async def rename_symbols(
               "def_site_edits": def_site_edits,
               "modules_updated": sorted(dict.fromkeys(modules_updated)),
               "diagnostics": diagnostics, "files": [f for f, _ in files], "written": False,
-              "note": "symbol ids change with their names — re-ingest to re-derive the graph"}
+              "note": "symbol ids are KEPT (36f649d3) and the graph is updated live — "
+                      "no rebuild needed"}
     emissions = [_emission_for(mnodes[mid], texts[mid]) for mid in changed]
     if any(e is None for e in emissions):
         return {**result, "error": "cannot derive a source-journal key for an affected "
                 "module (notebook-backed importer?) — refusing to write unjournaled"}
     op: Dict[str, Any] = {"op": "rename-symbol",
-                          "renames": [{"from": pl["old"], "to": pl["new"]} for pl in plans]}
+                          "renames": [{"from": pl["old"], "to": pl["new"]} for pl in plans],
+                          "identity": "keep"}
     if len(plans) == 1:
         op["from"], op["to"] = plans[0]["old"], plans[0]["new"]
     rec = journaled_emit(source_journal_path, emissions=emissions, op=op, write=write)
@@ -432,4 +441,9 @@ async def rename_symbols(
         return {**result, "error": rec["error"]}
     result["journal"] = rec
     result["written"] = bool(write)
+    if write:
+        # Live: the graph reproduces the files now — the renamed symbols keep their ids
+        # (the identity map just learned this op from the journal); no rebuild needed.
+        result["live"] = await relive_modules(gx, [(mnodes[mid], texts[mid]) for mid in changed],
+                                              source_journal_path=source_journal_path)
     return result

@@ -28,7 +28,8 @@ from cjm_python_decompose_core.ingest import (corpus_graph_elements as code_corp
                                               resolve_import)
 
 from .seeds import aliases_for, conceptual_key, seed_elements
-from .source_state import graph_sourced_modules, is_test_module_path, latest_source_ops
+from .source_state import (graph_sourced_modules, is_test_module_path, latest_source_ops,
+                           symbol_identity_map)
 
 
 def memory_elements(
@@ -172,8 +173,15 @@ def code_elements(
     `journal_only_repos` (the golden-reference walk's MIXED window): a notebook
     repo's package dir is nbdev-export residue for its UNflipped notebooks, so it
     must not be scanned — but each module already flipped notebook->py IS a
-    graph-sourced `.py` key that ingests here, from the journal alone."""
+    graph-sourced `.py` key that ingests here, from the journal alone.
+
+    Symbol ids are CONTAINER-INDEPENDENT (36f649d3): the identity map derived from the
+    journal's keep-identity ops hands every renamed/re-homed symbol its birth address,
+    so a rebuild reproduces the id the symbol was born with (and its journaled edges)."""
     flipped, journaled = _sourcing_state(source_journal_path)
+    ident = (symbol_identity_map(source_journal_path, normalize=conceptual_key)
+             if source_journal_path else None)
+    hook = (lambda rk, mp: ident.for_module(rk, mp)) if ident else (lambda rk, mp: None)
     decomposed = []
     seen = set()
     repo_dirs_by_key = {}
@@ -187,12 +195,14 @@ def code_elements(
             continue
         repo_key = conceptual_key(d.name)
         repo_dirs_by_key[repo_key] = d
-        for dm in decompose_package(repo_key, str(pkg), repo_root=str(d)):
+        for dm in decompose_package(repo_key, str(pkg), repo_root=str(d),
+                                    symbol_identity_for=lambda mp, rk=repo_key: hook(rk, mp)):
             key = (repo_key, dm.module.module_path)
             if key in flipped and key in journaled:
                 a = journaled[key]
                 dm = decompose_text(repo_key, dm.module.module_path, dm.module.path,
-                                    a.get("text", ""), import_name=a.get("import_name"))
+                                    a.get("text", ""), import_name=a.get("import_name"),
+                                    symbol_identity=hook(repo_key, dm.module.module_path))
             seen.add(key)
             decomposed.append(dm)
     # A graph-sourced module ingests even when its artifact file is absent — the
@@ -206,7 +216,8 @@ def code_elements(
         a = journaled[key]
         path = str(repo_dirs_by_key[repo_key] / module_path)
         decomposed.append(decompose_text(repo_key, module_path, path, a.get("text", ""),
-                                         import_name=a.get("import_name")))
+                                         import_name=a.get("import_name"),
+                                         symbol_identity=hook(repo_key, module_path)))
     return code_corpus_elements(decomposed)
 
 
@@ -222,8 +233,12 @@ def test_elements(
     `.md` scenario files under tests_manual/ are deferred (not code). A test module
     past the N+3 Phase-2 cutover is GRAPH-SOURCED — its text comes from the SOURCE
     journal (same authority flip as `code_elements`), under the VERBATIM-import
-    canonicalization (`is_test_module_path`)."""
+    canonicalization (`is_test_module_path`). Symbol ids ride the same journal-derived
+    identity map as `code_elements` (36f649d3)."""
     flipped, journaled = _sourcing_state(source_journal_path)
+    ident = (symbol_identity_map(source_journal_path, normalize=conceptual_key)
+             if source_journal_path else None)
+    hook = (lambda rk, mp: ident.for_module(rk, mp)) if ident else (lambda rk, mp: None)
     decomposed = []
     seen = set()
     repo_dirs_by_key = {}
@@ -242,9 +257,11 @@ def test_elements(
                 try:
                     if key in flipped and key in journaled:
                         decomposed.append(decompose_text(repo_key, rel, str(f),
-                                                         journaled[key].get("text", "")))
+                                                         journaled[key].get("text", ""),
+                                                         symbol_identity=hook(repo_key, rel)))
                     else:
-                        decomposed.append(decompose_text(repo_key, rel, str(f), f.read_text()))
+                        decomposed.append(decompose_text(repo_key, rel, str(f), f.read_text(),
+                                                         symbol_identity=hook(repo_key, rel)))
                 except (SyntaxError, OSError):
                     continue  # unparseable/unreadable test file — skip (ingest stays robust)
     # A graph-sourced test module ingests even when its artifact file is absent —
@@ -256,7 +273,8 @@ def test_elements(
             continue
         d = repo_dirs_by_key[repo_key]
         decomposed.append(decompose_text(repo_key, module_path, str(d / module_path),
-                                         journaled[key].get("text", "")))
+                                         journaled[key].get("text", ""),
+                                         symbol_identity=hook(repo_key, module_path)))
     return code_corpus_elements(decomposed)
 
 

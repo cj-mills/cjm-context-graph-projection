@@ -52,8 +52,8 @@ from cjm_python_decompose_core.parse import parse_module
 from . import factlayer as F
 from .projection import ambiguity_error, resolve_node_ref
 from .runtime import GraphHandle
-from .seeds import repo_dir_name
-from .source_state import is_test_module_path, journaled_emit
+from .seeds import conceptual_key, repo_dir_name
+from .source_state import is_test_module_path, journaled_emit, symbol_identity_map
 
 
 async def _resolve_node(
@@ -765,7 +765,9 @@ async def add_symbol(
     AFTER the last top-level symbol and BEFORE any trailing CodeText run (a `__main__`
     dispatch stays last — DEC 0e590ca7), or immediately after an explicit `after`
     anchor; relational placement is still the composed-modules item's business. The node lands with the SAME
-    identity ingest derives (`code_symbol_node_id(module, qualname)`) plus its
+    identity ingest derives (`code_symbol_node_id(module, qualname)` — under the
+    journal-derived identity map, so a newcomer at an address a renamed/moved symbol
+    vacated is the next GENERATION, never the mover's kept id; 36f649d3) plus its
     DEFINES/CONTAINS edges, so the next rebuild re-derives it in place rather than
     conflicting. Derived overlays (USES/CALLS edges, a new class's method children) are
     left to the next ingest — the same contract as `author`. Import bindings are bound
@@ -799,13 +801,13 @@ async def add_symbol(
     stale = _stale_projection_error(module, wires, "add-symbol")
     if stale:
         return {"error": stale, "written": False}
+    module_path = str(F.prop(module, "module_path") or "")
     # The stale-wires guard (finding 889b3025): wires must reproduce the file (in either
     # emission form) before this emit may treat them as current truth.
     stale_w = _stale_wires_error(
         module, emit_module_from_nodes(wires), "add-symbol",
         converged_text=emit_module_from_nodes(
-            wires, module_node=module,
-            derive_imports=not is_test_module_path(str(F.prop(module, "module_path") or ""))))
+            wires, module_node=module, derive_imports=not is_test_module_path(module_path)))
     if stale_w:
         return {"error": stale_w, "written": False}
     dup = next((w for w in wires if w["label"] == DevNodeKinds.CODE_SYMBOL
@@ -822,6 +824,12 @@ async def add_symbol(
     # region-text import lines included (_available_bindings).
     ps = parse_module(text).symbols[0]
     available = _available_bindings(module, wires)
+    # Identity (36f649d3): a newcomer at an address a live symbol vacated is the next
+    # generation — the same answer ingest derives from the journal.
+    birth: Dict[str, Any] = {}
+    if source_journal_path:
+        ident = symbol_identity_map(source_journal_path, normalize=conceptual_key)
+        birth = ident.birth(str(F.prop(module, "repo_key") or ""), module_path, qualname) or {}
     sym = CodeSymbolNode(
         module_id=module_id, qualname=qualname,
         symbol_kind="class" if isinstance(tree.body[0], ast.ClassDef) else "function",
@@ -831,9 +839,9 @@ async def add_symbol(
         body=text, body_hash=SourceRef.compute_hash(text.encode("utf-8")),
         order_index=order,
         properties={"decorators": list(ps.decorators)} if ps.decorators else {},
+        **birth,
     )
     gn = sym.to_graph_node()
-    module_path = str(F.prop(module, "module_path") or "")
     emitted = emit_module_from_nodes(
         wires + [gn], module_node=module,
         derive_imports=not is_test_module_path(module_path))

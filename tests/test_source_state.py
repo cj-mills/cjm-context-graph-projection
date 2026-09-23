@@ -156,6 +156,60 @@ def test_absorb_authored_text_canonicalizes_and_keeps_file_in_sync():
         assert source_check(j, repos)["regen_clean"]
 
 
+def test_symbol_identity_map_keeps_ids_across_rename_move_and_module_rename():
+    # The container-independent identity map (36f649d3), derived from op provenance alone.
+    from cjm_context_graph_projection.source_state import symbol_identity_map
+    with tempfile.TemporaryDirectory() as d:
+        j = str(Path(d) / "source.jsonl")
+        a0 = "def alpha():\n    return 1\n\n\nclass K:\n    def m(self):\n        return 2\n"
+        append_source(j, "demo", "demo/a.py", "demo.a", a0)
+        # rename alpha -> beta (keep identity); the importer record carries the SAME op but
+        # defines neither name, so it registers nothing.
+        keep = {"op": "rename-symbol", "from": "alpha", "to": "beta", "identity": "keep"}
+        append_source(j, "demo", "demo/a.py", "demo.a", a0.replace("alpha", "beta"), op_meta=keep)
+        append_source(j, "demo", "demo/uses.py", "demo.uses",
+                      "from demo.a import beta\n\n\ndef use():\n    return beta()\n", op_meta=keep)
+        ident = symbol_identity_map(j)
+        assert ident.birth("demo", "demo/a.py", "beta") == {
+            "birth_repo_key": "demo", "birth_module_path": "demo/a.py",
+            "birth_qualname": "alpha", "generation": 0}
+        assert ident.birth("demo", "demo/uses.py", "use") is None
+        assert ident.birth("demo", "demo/a.py", "alpha") == {"generation": 1}  # a newcomer at the vacated name
+        # move K (with its method) into demo/b.py: the source record lands first, then the target.
+        mv = {"op": "move", "symbols": ["K"], "to_module": "demo.b", "identity": "keep"}
+        append_source(j, "demo", "demo/a.py", "demo.a", "def beta():\n    return 1\n", op_meta=mv)
+        append_source(j, "demo", "demo/b.py", "demo.b",
+                      "class K:\n    def m(self):\n        return 2\n", op_meta=mv)
+        ident = symbol_identity_map(j)
+        assert ident.birth("demo", "demo/b.py", "K")["birth_module_path"] == "demo/a.py"
+        assert ident.birth("demo", "demo/b.py", "K.m") == {
+            "birth_repo_key": "demo", "birth_module_path": "demo/a.py",
+            "birth_qualname": "K.m", "generation": 0}
+        assert ident.birth("demo", "demo/a.py", "K.m") == {"generation": 1}  # a new K in a.py: its methods too
+        # rename-module b.py -> c.py re-registers every name from the retired path.
+        append_source(j, "demo", "demo/c.py", "demo.c",
+                      "class K:\n    def m(self):\n        return 2\n",
+                      op_meta={"op": "rename-module", "from": "demo/b.py", "to": "demo/c.py",
+                               "identity": "keep"})
+        ident = symbol_identity_map(j)
+        assert ident.birth("demo", "demo/c.py", "K")["birth_module_path"] == "demo/a.py"
+        # a pre-scheme op (no marker) registers nothing: the symbol is born at its new name.
+        append_source(j, "demo", "demo/c.py", "demo.c",
+                      "class Q:\n    def m(self):\n        return 2\n",
+                      op_meta={"op": "rename-symbol", "from": "K", "to": "Q"})
+        assert symbol_identity_map(j).birth("demo", "demo/c.py", "Q") is None
+        # the normalizer maps the journal's dir-name keys into the graph's key space.
+        norm = symbol_identity_map(j, normalize=lambda k: "X-" + k)
+        assert norm.birth("X-demo", "demo/c.py", "K")["birth_repo_key"] == "X-demo"
+        # back home: renaming beta -> alpha again returns the plain derivation.
+        append_source(j, "demo", "demo/a.py", "demo.a", "def alpha():\n    return 1\n",
+                      op_meta={"op": "rename-symbol", "from": "beta", "to": "alpha",
+                               "identity": "keep"})
+        ident = symbol_identity_map(j)
+        assert ident.birth("demo", "demo/a.py", "alpha") is None
+        assert ident.birth("demo", "demo/a.py", "beta") == {"generation": 1}
+
+
 # --- Notebook-sourced modules (the nbdev transition window) ---
 
 import json

@@ -250,6 +250,133 @@ def graph_sourced_modules(
     return flipped
 
 
+class SymbolIdentity:
+    """Container-independent CodeSymbol identity, DERIVED from the source journal (36f649d3).
+
+    A symbol's id is its BIRTH address (module, qualname[, generation]). A keep-identity
+    op (rename-symbol / move / regroup / rename-module whose op provenance carries
+    `identity: keep`) records that the symbol living at one address now lives at another;
+    this map replays those records so ingest, the live verbs and add-symbol all derive the
+    SAME id for a symbol wherever it lives now. Two tables: `living` = current address ->
+    birth (repo_key, module_path, qualname, generation) for every re-homed or renamed
+    symbol; `vacated` = address -> how many times a live symbol left it, so a NEWCOMER born
+    at a freed address is generation n and never collides with the mover's kept id. Nested
+    symbols follow their top-level parent (a moved class carries its methods). Keys live in
+    whatever repo-key space the builder normalized to (ingest: the conceptual key). Nothing
+    here is stored — the journal reproduces the map on every rebuild (test 7, REPLAY)."""
+
+    def __init__(self):
+        self.living: Dict[Tuple[str, str, str], Tuple[str, str, str, int]] = {}
+        self.vacated: Dict[Tuple[str, str, str], int] = {}
+
+    def birth_of(self, addr: Tuple[str, str, str]) -> Tuple[str, str, str, int]:
+        """The birth (repo_key, module_path, qualname, generation) of the symbol living at `addr`."""
+        hit = self.living.get(addr)
+        return hit if hit is not None else (addr[0], addr[1], addr[2], self.vacated.get(addr, 0))
+
+    def vacate(self, addr: Tuple[str, str, str]) -> None:
+        """A live symbol left `addr`: the next symbol born there is one generation later."""
+        self.living.pop(addr, None)
+        self.vacated[addr] = self.vacated.get(addr, 0) + 1
+
+    def register(self, old_addr: Tuple[str, str, str], new_addr: Tuple[str, str, str]) -> None:
+        """The symbol living at `old_addr` now lives at `new_addr` (a rename, a move, a module rename)."""
+        birth = self.birth_of(old_addr)
+        if old_addr != new_addr:
+            self.vacate(old_addr)
+        self.living[new_addr] = birth
+
+    def birth(self, repo_key: str, module_path: str, qualname: str) -> Optional[Dict[str, Any]]:
+        """The birth fields (CodeSymbolNode kwargs) for the symbol at this address, or None
+        when it is simply born here — the first symbol at an address nothing vacated."""
+        addr = (repo_key, module_path, qualname)
+        top = qualname.split(".", 1)[0]
+        hit = self.living.get(addr)
+        if hit is None and top != qualname:
+            parent = self.living.get((repo_key, module_path, top))
+            if parent is not None:  # nested under a re-homed/renamed parent: its birth module, prefixed name
+                hit = (parent[0], parent[1], parent[2] + qualname[len(top):], parent[3])
+        if hit is not None:
+            if hit == (repo_key, module_path, qualname, 0):
+                return None  # back home at its birth address: the plain derivation
+            return {"birth_repo_key": hit[0], "birth_module_path": hit[1],
+                    "birth_qualname": hit[2], "generation": hit[3]}
+        gen = self.vacated.get(addr, 0)
+        if not gen and top != qualname:
+            gen = self.vacated.get((repo_key, module_path, top), 0)  # a new class at a vacated name: its methods too
+        return {"generation": gen} if gen else None
+
+    def for_module(self, repo_key: str, module_path: str) -> Any:
+        """The per-module hook `decompose_text(symbol_identity=...)` takes: qualname -> birth fields."""
+        return lambda qualname: self.birth(repo_key, module_path, qualname)
+
+
+def _top_level_names(
+    text: str,  # A module's source text
+) -> set:  # The top-level def/class names it defines (empty when it does not parse)
+    """The top-level def/class names a module text defines — what a keep-identity op is
+    read against (which module lost or gained which symbol)."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return set()
+    return {n.name for n in tree.body
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+
+
+def symbol_identity_map(
+    path: str,             # Source-journal file path (JSONL)
+    normalize: Any = None,  # Optional repo-key normalizer (ingest passes `conceptual_key`; None = the journal's dir-name keys)
+) -> SymbolIdentity:  # The derived identity map (see `SymbolIdentity`)
+    """Derive the container-independent symbol identity map from the source journal (36f649d3).
+
+    Walks the segment family in append order keeping each module key's latest text; at
+    every `source` record whose op provenance says `identity: keep`, the top-level names
+    of the previous vs the new text say what happened to WHICH module — a rename-symbol
+    record on the DEFINING module (old name gone, new name present; importer records carry
+    the same op but define neither), a move/regroup SOURCE (a named symbol gone; its birth
+    goes in flight) or TARGET (present, and its birth is in flight — sources land first),
+    a rename-module's new key (every name re-registered from the retired path). Records
+    without the marker replay exactly as before the scheme: a pre-scheme move re-keyed,
+    and the edges journaled after it name the NEW id — retroactive identity would orphan
+    those instead of healing anything, so the op names the choice (the 9170669e pattern)."""
+    ident = SymbolIdentity()
+    latest_text: Dict[Tuple[str, str], str] = {}
+    in_flight: Dict[str, Tuple[str, str, str, int]] = {}  # moved symbol -> its birth (source landed, target pending)
+    norm = normalize or (lambda k: k)
+    for rec in read_source_journal(path):
+        a = rec.get("args", {})
+        key = (norm(a.get("repo_key")), a.get("module_path"))
+        verb = rec.get("verb")
+        if verb == "retire":
+            latest_text.pop(key, None)
+            continue
+        if verb != "source":
+            continue
+        text = a.get("text", "")
+        op = rec.get("op") or {}
+        if op.get("identity") == "keep":
+            prev, new = _top_level_names(latest_text.get(key, "")), _top_level_names(text)
+            kind = op.get("op")
+            if kind == "rename-symbol":
+                renames = op.get("renames") or [{"from": op.get("from"), "to": op.get("to")}]
+                for r in renames:
+                    if r.get("from") in prev and r.get("to") in new and r.get("from") not in new:
+                        ident.register((key[0], key[1], r["from"]), (key[0], key[1], r["to"]))
+            elif kind in ("move", "regroup"):
+                for s in op.get("symbols") or []:
+                    if s in prev and s not in new:      # this record is a SOURCE: the symbol left
+                        in_flight[s] = ident.birth_of((key[0], key[1], s))
+                        ident.vacate((key[0], key[1], s))
+                    elif s in new and s not in prev and s in in_flight:  # the TARGET: it arrived
+                        ident.living[(key[0], key[1], s)] = in_flight.pop(s)
+            elif kind == "rename-module" and op.get("from") and key[1] == op.get("to"):
+                for s in sorted(new):
+                    ident.register((key[0], op["from"], s), (key[0], key[1], s))
+        latest_text[key] = text
+    return ident
+
+
 def append_retire(
     path: str,                            # Source-journal file path (JSONL)
     repo_key: str,                        # The repo's durable conceptual slug

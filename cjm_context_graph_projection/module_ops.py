@@ -41,6 +41,7 @@ from . import factlayer as F
 from .authoring import (_label_of, _module_node, _module_region_wires, _notebook_cell_wires,
                         _resolve_node)
 from .refactor_ops import _emission_for, _get, _relocate
+from .relive import relive_modules
 from .runtime import GraphHandle
 from .seeds import repo_dir_name
 from .source_state import (canonical_emit, graph_sourced_modules, is_test_module_path,
@@ -219,9 +220,11 @@ async def rename_module(
 ) -> Dict[str, Any]:  # The rename result (importer rewrites, files, or error)
     """Rename a `.py` module — re-emit its content at the new path, drop the old file, and
     rewrite every importer's `from old import …` / `import old` to the new name. Purely
-    import-level (no body touched). The graph's old subtree is dropped (the id embeds the
-    path, so the rename changes every contained symbol's id — the cascade `move` defers to
-    re-ingest); the renamed module is re-derived on the next `ingest`."""
+    import-level (no body touched). The MODULE re-keys (its id embeds the path — the
+    federation anchor) but its SYMBOLS keep their ids (36f649d3: the op rides the journal
+    with `identity: keep`, and the identity map re-registers every name from the retired
+    path): the new module node is minted live, the symbols are re-homed under it in place,
+    the old module node + its code-text regions are dropped — no rebuild needed."""
     M = await _module_node(gx, module_id)
     if M is None:
         return {"error": f"no module `{module_id}`", "written": False}
@@ -257,6 +260,7 @@ async def rename_module(
     import_pairs = await F.load_edge_pairs(gx, DevRelations.IMPORTS)
     importers = [s for s, t in import_pairs if t == module_id and s != module_id]
     caller_hits: List[str] = []
+    caller_items: List[Tuple[Any, str]] = []  # (importer node, new text) — re-derived live
     for mid in dict.fromkeys(importers):
         m = await _module_node(gx, mid)
         itext = emit_module_from_nodes(await _module_region_wires(gx, mid))
@@ -265,12 +269,14 @@ async def rename_module(
             files.append((F.prop(m, "path"), new_itext))
             emissions.append(_emission_for(m, new_itext))
             caller_hits.append(F.prop(m, "import_name", mid))
+            caller_items.append((m, new_itext))
 
     result = {"from_module": old_import, "to_module": new_import,
               "from_path": old_mp, "to_path": new_module_path,
               "caller_imports_rewritten": sorted(dict.fromkeys(caller_hits)),
               "files": [f for f, _ in files], "written": False,
-              "note": "graph subtree dropped; re-ingest to re-derive the renamed module"}
+              "note": "the module re-keys (path identity); its symbols keep their ids "
+                      "(36f649d3) and are re-homed live — no rebuild needed"}
     if any(e is None for e in emissions):
         return {**result, "error": "cannot derive a source-journal key for an affected "
                 "module (notebook-backed caller?) — refusing to write unjournaled"}
@@ -279,14 +285,26 @@ async def rename_module(
                                    "superseded_by": new_module_path}],
                          deletes=[old_path] if (old_path and Path(old_path) != Path(new_path))
                                  else [],
-                         op={"op": "rename-module", "from": old_mp, "to": new_module_path},
+                         op={"op": "rename-module", "from": old_mp, "to": new_module_path,
+                             "identity": "keep"},
                          write=write)
     if rec.get("error"):
         return {**result, "error": rec["error"]}
     result["journal"] = rec
     if write:
-        ids = await _module_subtree_ids(gx, module_id)
-        await graph_task(gx.queue, gx.graph_id, "delete_nodes", node_ids=ids, cascade=True)
+        new_node = CodeModuleNode(repo_key=repo_key, module_path=new_module_path, path=new_path,
+                                  content_hash=SourceRef.compute_hash(text.encode("utf-8")),
+                                  import_name=new_import)
+        new_wire = new_node.to_graph_node()
+        await graph_task(gx.queue, gx.graph_id, "add_nodes", nodes=[new_wire])
+        await graph_task(gx.queue, gx.graph_id, "add_edges", edges=[new_node.about_edge()])
+        # Re-home the regions under the new module (symbols keep their ids; the old
+        # module's code-text churns), then drop the old module node itself.
+        result["live"] = await relive_modules(gx, [(new_wire, text)] + caller_items,
+                                              source_journal_path=source_journal_path,
+                                              retired_module_ids=[module_id])
+        await graph_task(gx.queue, gx.graph_id, "delete_nodes", node_ids=[module_id], cascade=True)
+        result["module_id"] = new_id
         result["written"] = True
     return result
 

@@ -21,12 +21,12 @@ the true-B regenerate-from-graph step subsumes.
 import ast
 from typing import Any, Dict, List, Optional, Tuple
 
-from cjm_dev_graph_schema.identity import code_symbol_node_id
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 from cjm_python_decompose_core.emit import emit_module_from_nodes, synth_import
 
 from . import factlayer as F
 from .authoring import _module_node, _module_region_wires, _source_emission, _stale_wires_error
+from .relive import relive_modules
 from .runtime import GraphHandle
 from .source_state import is_test_module_path, journaled_emit, latest_source_ops
 
@@ -83,12 +83,12 @@ def rewrite_symbol_import(
 
 
 def _symbol_wire(node: Any, module_id: str, order_index: int) -> Dict[str, Any]:
-    """A re-keyed CodeSymbol wire dict placing the symbol under a new module + order."""
+    """A CodeSymbol wire dict placing the symbol under a new module + order — with the
+    symbol's OWN id (container-independent identity, 36f649d3: a move never re-keys)."""
     p = dict(F.props(node))
     p["module_id"] = module_id
     p["order_index"] = order_index
-    return {"id": code_symbol_node_id(module_id, p.get("qualname", "")),
-            "label": DevNodeKinds.CODE_SYMBOL, "properties": p}
+    return {"id": F.nid(node), "label": DevNodeKinds.CODE_SYMBOL, "properties": p}
 
 
 async def _relocate(
@@ -105,12 +105,17 @@ async def _relocate(
 
     The shared engine behind `move` (one symbol) and `regroup` (a batch, possibly from
     several source modules). It must compute the WHOLE batch in one emit pass per affected
-    module: `move` is file-driven and does NOT mutate the graph (Fork-1(a) — `ingest`
-    re-derives), so naively looping it would re-read the original graph each time and
-    resurrect already-moved symbols. Re-emits every affected source module (minus its moved
-    symbols) + the target (with all moved appended), and rewrites each importer's
-    `from A import S` to point at B. ZERO-RESIDUAL via the same USES-derived synthetics as
-    the single move, with the override spanning every moved subtree."""
+    module: the pre-op wires are read once, so naively looping the single move would
+    re-read the original graph each time and resurrect already-moved symbols. Re-emits
+    every affected source module (minus its moved symbols) + the target (with all moved
+    appended), and rewrites each importer's `from A import S` to point at B. ZERO-RESIDUAL
+    via the same USES-derived synthetics as the single move, with the override spanning
+    every moved subtree.
+
+    IDENTITY IS KEPT (36f649d3): the op rides the journal with `identity: keep`, so the
+    moved symbols keep the ids they were born with, and the graph is updated LIVE from the
+    new texts (`relive_modules`) — no rebuild stands between this move and the next author
+    edit, and every journaled edge onto a moved symbol survives."""
     B = target_node if target_node is not None else await _module_node(gx, target_module_id)
     if B is None:
         return {"error": f"no target module `{target_module_id}`", "written": False}
@@ -145,6 +150,7 @@ async def _relocate(
 
     files: List[Tuple[str, str]] = []
     emissions: List[Optional[Dict[str, Any]]] = []
+    live_items: List[Tuple[Any, str]] = []  # (module node, new text) — the live re-derivation set
     # Each affected SOURCE module, re-emitted without its moved symbols (imports re-derived).
     for src_module_id, items in by_src.items():
         A = await _module_node(gx, src_module_id)
@@ -162,6 +168,7 @@ async def _relocate(
                                         uses_derived=a_uses)
         files.append((F.prop(A, "path"), a_text))
         emissions.append(_emission_for(A, a_text))
+        live_items.append((A, a_text))
 
     # The TARGET module, re-emitted with every moved symbol appended in order.
     b_wires = await _module_region_wires(gx, target_module_id)
@@ -190,6 +197,7 @@ async def _relocate(
                         for e in emissions)):
             b_emission["cutover"] = True
     emissions.append(b_emission)
+    live_items.append((B, b_text))
 
     # Callers: modules importing a source; rewrite each `from a_import import S` to point at B.
     import_pairs = await F.load_edge_pairs(gx, DevRelations.IMPORTS)
@@ -216,6 +224,7 @@ async def _relocate(
                     return {"error": m_stale, "written": False}
                 files.append((F.prop(m, "path"), text))
                 emissions.append(_emission_for(m, text))
+                live_items.append((m, text))
                 caller_hits.append(F.prop(m, "import_name", mid))
 
     result = {
@@ -234,14 +243,20 @@ async def _relocate(
         return {**result, "error": "cannot derive a source-journal key for "
                 f"{bad} (notebook-backed caller?) — refusing to write unjournaled"}
     # The seam (journal-first): events for every affected module land BEFORE any file
-    # write; write=False is the uniform full preview.
+    # write; write=False is the uniform full preview. `identity: keep` names the choice
+    # the identity map replays (36f649d3).
     rec = journaled_emit(source_journal_path, emissions=emissions,
                          op={"op": op_name, "symbols": result["symbols"],
-                             "to_module": b_import}, write=write)
+                             "to_module": b_import, "identity": "keep"}, write=write)
     if rec.get("error"):
         return {**result, "error": rec["error"]}
     result["journal"] = rec
     result["written"] = bool(write)
+    if write:
+        # Live: the graph reproduces the files now — the moved symbols keep their ids
+        # (the identity map just learned this op from the journal); no rebuild needed.
+        result["live"] = await relive_modules(gx, live_items,
+                                              source_journal_path=source_journal_path)
     return result
 
 

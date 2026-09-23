@@ -157,6 +157,55 @@ def test_code_elements_ingests_graph_sourced_modules_from_the_journal(tmp_path):
     assert any(n["label"] == "CodeSymbol" and n["properties"]["name"] == "fa" for n in nodes)
 
 
+def test_code_elements_keeps_symbol_identity_across_a_keep_identity_rename(tmp_path):
+    """36f649d3: a rebuild reproduces the id a renamed symbol was BORN with (the identity map
+    replays the journal's keep-identity op), and a newcomer at the vacated name is the next
+    generation; a pre-scheme record (no marker) re-keys exactly as before."""
+    from cjm_context_graph_projection.devgraph import code_elements
+    from cjm_context_graph_projection.source_state import (append_source, cutover_module,
+                                                          flip_module)
+    from cjm_dev_graph_schema.identity import code_symbol_node_id
+
+    repo = tmp_path / "cjm-demo-lib"
+    pkg = repo / "cjm_demo_lib"
+    pkg.mkdir(parents=True)
+    (pkg / "a.py").write_text('"""A."""\n\n\ndef fa():\n    return 1\n')
+    j = str(tmp_path / "source.jsonl")
+    key = conceptual_key(repo.name)
+    flip_module(j, str(tmp_path), key, "cjm_demo_lib/a.py")
+    cutover_module(j, str(tmp_path), key, "cjm_demo_lib/a.py")
+    mid = code_module_node_id(key, "cjm_demo_lib/a.py")
+    born_id = code_symbol_node_id(mid, "fa")
+    nodes, _ = code_elements([str(repo)], source_journal_path=j)
+    assert any(n["id"] == born_id for n in nodes)
+
+    # A keep-identity rename lands (fa -> fa2) plus a newcomer named fa.
+    append_source(j, key, "cjm_demo_lib/a.py", "cjm_demo_lib.a",
+                  '"""A."""\n\n\ndef fa2():\n    return 1\n',
+                  op_meta={"op": "rename-symbol", "from": "fa", "to": "fa2", "identity": "keep"})
+    append_source(j, key, "cjm_demo_lib/a.py", "cjm_demo_lib.a",
+                  '"""A."""\n\n\ndef fa2():\n    return 1\n\n\ndef fa():\n    return 7\n',
+                  op_meta={"op": "add-symbol", "qualname": "fa"})
+    nodes, edges = code_elements([str(repo)], source_journal_path=j)
+    fa2 = next(n for n in nodes if n["label"] == "CodeSymbol" and n["properties"]["name"] == "fa2")
+    assert fa2["id"] == born_id                                     # the id survived the rename
+    assert fa2["properties"]["birth_qualname"] == "fa"
+    newcomer = next(n for n in nodes if n["label"] == "CodeSymbol" and n["properties"]["name"] == "fa")
+    assert newcomer["id"] == code_symbol_node_id(mid, "fa", 1)      # generation 1, never born_id
+    assert newcomer["id"] != born_id
+    # The structural edges name the kept id.
+    assert any(e["source_id"] == mid and e["target_id"] == born_id
+               and e["relation_type"] == DevRelations.DEFINES for e in edges)
+
+    # A pre-scheme rename (no marker) re-keys, as every rename before the scheme did.
+    append_source(j, key, "cjm_demo_lib/a.py", "cjm_demo_lib.a",
+                  '"""A."""\n\n\ndef fa3():\n    return 1\n\n\ndef fa():\n    return 7\n',
+                  op_meta={"op": "rename-symbol", "from": "fa2", "to": "fa3"})
+    nodes, _ = code_elements([str(repo)], source_journal_path=j)
+    fa3 = next(n for n in nodes if n["label"] == "CodeSymbol" and n["properties"]["name"] == "fa3")
+    assert fa3["id"] == code_symbol_node_id(mid, "fa3") and fa3["id"] != born_id
+
+
 def test_notebook_elements_scans_only_nbs_when_present(tmp_path):
     """quarto's `_proc` copies (and `dist/` etc.) share export targets with the real
     notebooks — scanning them ingests duplicate module identities. `nbs/` is the source."""
