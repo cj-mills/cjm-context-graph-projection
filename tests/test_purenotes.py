@@ -16,22 +16,9 @@ from cjm_context_graph_layer.grammar import make_edge
 from cjm_context_graph_layer.ops import extend_graph, graph_task
 from cjm_context_graph_primitives.journal import read_journal
 from cjm_context_graph_primitives.query import EdgeQuery
-from cjm_context_graph_projection.purenotes import (apply_judgements, apply_outline, extra_list, merge_point_blocks,
-                                                    plan_notes_blocks, render_judge_brief, render_outline_brief,
-                                                    render_pairs_brief, unjudged_pairs,
-                                                    close_open_refs, load_notes_propsets, merge_point_proposals,
-                                                    open_reference_list, pick_propset, points_index,
-                                                    render_reconcile_brief, with_points_index, write_notes_propset,
-                                                    _time_link, build_notes_pack, build_point_tree,
-                                                    choose_spine, coverage_gaps, derive_frontmatter,
-                                                    derived_description, overlapping_points, pack_digest, plan_notes_windows,
-                                                    proposals_from_point_rows, pure_notes_type, speaker_labels,
-                                                    render_notes_pack, render_points, stratum_role_policy,
-                                                    render_source_card, synopsis_of, unit_label, lecture_title, date_phrase,
-                                                    unit_title_header, validate_point_rows,
-                                                    _frontmatter_fields, render_works_table,
-                                                    _replace_frontmatter_lines, derive_work_frontmatter,
-                                                    render_work_card, render_work_chapters, work_page_type)
+from cjm_context_graph_projection.purenotes import apply_judgements, extra_list, merge_point_blocks, plan_notes_blocks, render_judge_brief, render_pairs_brief, unjudged_pairs, close_open_refs, load_notes_propsets, merge_point_proposals, open_reference_list, pick_propset, points_index, render_reconcile_brief, with_points_index, write_notes_propset, _time_link, build_notes_pack, build_point_tree, choose_spine, coverage_gaps, derive_frontmatter, derived_description, overlapping_points, pack_digest, plan_notes_windows, proposals_from_point_rows, pure_notes_type, speaker_labels, render_notes_pack, render_points, stratum_role_policy, render_source_card, synopsis_of, unit_label, lecture_title, date_phrase, unit_title_header, validate_point_rows, _frontmatter_fields, render_works_table, _replace_frontmatter_lines, derive_work_frontmatter, render_work_card, render_work_chapters, work_page_type
+from cjm_context_graph_projection.notes_outline import apply_outline
+from cjm_context_graph_projection.notes_outline import render_outline_brief
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
 
 _HAVE_GRAPH = (Path(DEFAULT_MANIFESTS) / f"{DEFAULT_GRAPH_ID}.json").exists()
@@ -435,7 +422,7 @@ def test_outline_pass_reads_the_points_and_lands_as_section_and_synopsis_rows():
         ("synopsis", "Launches warm the cache; streams stay per rank.")]
     assert rows[3]["from_i"] == rows[3]["to_i"] == 4 and rows[3]["speaker"] == ""      # an anchor at its first point; nobody's line
     assert [r["proposal_id"] for r in rows if r["kind"] not in ("section", "synopsis")] == [p["proposal_id"] for p in props]
-    assert res["stats"] == {"sections": 2, "points": 4, "smallest": 2, "largest": 2, "synopsis_words": 8}
+    assert res["stats"] == {"sections": 2, "nested": 0, "depth": 0, "points": 4, "smallest": 2, "largest": 2, "synopsis_words": 8}
     page = render_points([{**r, "key": r["proposal_id"], "ordinal": r["from_i"]} for r in rows])
     assert page.index("Kernel launches") < page.index("Kernels launch twice") < page.index("Streams per rank") < page.index("Why per rank?")
     for bad in ([{"section": "A", "first": "p002"}, {"synopsis": "s"}],                     # a child cannot open a section

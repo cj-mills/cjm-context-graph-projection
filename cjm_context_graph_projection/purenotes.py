@@ -44,8 +44,8 @@ from cjm_context_graph_primitives.query import (EdgeQuery, NodeQuery, PropertyPr
                                                 RelationPredicate)
 from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.identity import note_node_id, point_node_id
-from cjm_dev_graph_schema.nodes import (DeliverableTypeNode, POINT_KIND_GLOSSES, PointNode,
-                                        PointSetNode, ReferenceNode)
+from cjm_dev_graph_schema.nodes import (DeliverableTypeNode, placed_edge, POINT_KIND_GLOSSES,
+                                        PointNode, PointSetNode, ReferenceNode)
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 
 from . import factlayer as F
@@ -1001,13 +1001,15 @@ def validate_point_rows(
             raise ValueError(f"row {k}: run {fi}..{ti} crosses a header (a point never spans sections)")
         if kind == SECTION_KIND:
             # A synthesized section (ruling bc62c727 (A1)): an anchor at the first line of the first
-            # point it covers — the title is its text, and a title carries nothing else.
+            # point it covers — the title is its text; the only other field is `parent`, an earlier
+            # SECTION row it nests under (776c13d3 (a): depth is the chain, never a stored level).
             if fi != ti:
                 raise ValueError(f"row {k}: a section is an anchor, not a run — from_i = to_i = the first line "
                                  f"of the first point it covers")
-            extra = [f for f in ("lead", "parent", "refers_to", "attribution", "data") if raw.get(f) not in (None, "", [], {})]
+            extra = [f for f in ("lead", "refers_to", "attribution", "data") if raw.get(f) not in (None, "", [], {})]
             if extra:
-                raise ValueError(f"row {k}: a section carries its title as `text` and nothing else (got {', '.join(extra)})")
+                raise ValueError(f"row {k}: a section carries its title as `text` (and at most a `parent` section row), "
+                                 f"nothing else (got {', '.join(extra)})")
         text = str(raw.get("text") or "").strip()
         if not text:
             raise ValueError(f"row {k}: text is empty")
@@ -1037,13 +1039,23 @@ def validate_point_rows(
                 raise ValueError(f"row {k}: parent {parent} is not an EARLIER row (0..{k - 2})")
             if kind == "synopsis":
                 raise ValueError(f"row {k}: a synopsis is never nested")
-            if out[parent]["kind"] == SECTION_KIND:
-                raise ValueError(f"row {k}: parent row {parent} is a section — a section is a heading, nothing nests under it")
-            gp = out[parent].get("parent")
-            if gp is not None and out[gp].get("parent") is not None:
-                raise ValueError(f"row {k}: parent row {parent} is already a grandchild — two levels at most")
-            if segs[out[parent]["from_i"]]["h"] != segs[fi]["h"]:
-                raise ValueError(f"row {k}: parent row {parent} is under another header")
+            if kind == SECTION_KIND:
+                # A section nests under a SECTION only, one anchored at or before its own line
+                # (776c13d3 (a)); the chain runs as deep as the outline has parents — no cap, no
+                # header rule (a parent section spans headers by design).
+                if out[parent]["kind"] != SECTION_KIND:
+                    raise ValueError(f"row {k}: a section's parent is a section row, not a {out[parent]['kind']}")
+                if out[parent]["from_i"] > fi:
+                    raise ValueError(f"row {k}: parent section row {parent} opens after this section (line "
+                                     f"{out[parent]['from_i']} > {fi}) — a parent covers its children")
+            else:
+                if out[parent]["kind"] == SECTION_KIND:
+                    raise ValueError(f"row {k}: parent row {parent} is a section — a section is a heading, nothing nests under it")
+                gp = out[parent].get("parent")
+                if gp is not None and out[gp].get("parent") is not None:
+                    raise ValueError(f"row {k}: parent row {parent} is already a grandchild — two levels at most")
+                if segs[out[parent]["from_i"]]["h"] != segs[fi]["h"]:
+                    raise ValueError(f"row {k}: parent row {parent} is under another header")
         if kind == "event":
             # An event is one item of a sequence, as a CHILD point (second-read ruling (4)).
             if parent is None or out[parent]["kind"] != "sequence":
@@ -1199,6 +1211,10 @@ def proposals_from_point_rows(
     def _key(p: Dict[str, Any]) -> Tuple[int, int, int, List[int]]:
         path = _path(p)
         root = rows_in_order[path[0]]
+        if p["kind"] == SECTION_KIND:
+            # A nested section sorts at its OWN anchor — its parent opens earlier, or on the same
+            # line where the path puts the parent first — never up beside its parent (776c13d3 (a)).
+            return (0, p["from_i"], p["to_i"], path)
         return (1 if p["kind"] == "synopsis" else 0, root["from_i"], root["to_i"], path)
     out.sort(key=_key)
     return out
@@ -2199,112 +2215,6 @@ def close_open_refs(
                                         "unanswered": len(refs) - len(seen)}}
 
 
-def render_outline_brief(
-    proposals: List[Dict[str, Any]],  # One proposal set's rows (normally the merged set)
-    pack: Dict[str, Any],             # The whole-unit pack (its source line heads the brief)
-    *,
-    set_id: str = "",                 # The set the brief is about (printed only)
-) -> str:  # The outline pass's brief (markdown)
-    """The brief of the whole-source OUTLINE PASS (ruling bc62c727 (A)): after the window merge,
-    one reader proposes the SECTIONS — each a title anchored at the first point it covers —
-    and the unit's synopsis. It reads the keyed Points, never the spine (design 6752db0a (6));
-    slide titles are not the basis (the ruling), the points' own content is."""
-    src = pack.get("source") or {}
-    index = points_index(proposals)
-    tops = sum(1 for e in index if not e["depth"])
-    lines = [f"# Outline pass — set `{set_id}`", "",
-             f"Source: **{src.get('title') or src.get('source_id')}**", "",
-             f"Below are the {len(index)} points drafted from this source ({tops} top-level; children indented), in source "
-             "order, each with a key, its kind, the time it starts and who says it. They will render as ONE page of "
-             "notes. Propose the page's SECTIONS and its SYNOPSIS.", "",
-             "## Output contract", "",
-             "ONE JSON object per line: the sections in source order, then the synopsis LAST.", "",
-             '    {"section": "<title>", "first": "p017"}',
-             '    {"synopsis": "<one or two sentences>"}', "",
-             "* A section is a stretch of the source a returning reader would JUMP to: one topic, one demonstration, "
-             "one question-and-answer block. `first` is the key of the FIRST point it covers — a TOP-LEVEL point (never "
-             "an indented child); the section runs until the next section's `first`. The first section's `first` is "
-             "the first top-level point, so every point falls under a heading.",
-             "* Cut where the SUBJECT changes, judged by what the points say — never at even intervals, never one "
-             "section per speaker turn. A run of questions on one subject is one section; a long topic with a clear "
-             "internal turn is two. Sections of very different lengths are fine when the source is like that.",
-             "* Title: a short noun phrase in the source's own terms, naming what the section is ABOUT (\"Replacing "
-             "raw pointers with mdspan\"), never a generic label (\"Introduction\", \"Part 2\", \"Discussion\"), never a "
-             "sentence, no trailing period, no numbering. A Q&A section's title names the subject asked about.",
-             "* `synopsis`: one or two sentences, under 30 words, on what the source ARGUES or SHOWS — its claim and its "
-             "move, in its own terms; never a list of the section titles. It becomes the page's description.",
-             "* Rows only — no prose, no code fences.", "",
-             "## Points", ""]
-    return "\n".join(lines + render_points_index(index)) + "\n"
-
-
-def apply_outline(
-    proposals: List[Dict[str, Any]],  # One proposal set's rows (normally the merged set)
-    answers: List[Dict[str, Any]],    # The outline pass's rows: {"section", "first"}… then {"synopsis"}
-    pack: Dict[str, Any],             # The whole-unit pack the set's rows are numbered in
-) -> Dict[str, Any]:  # {"proposals": rows + the section and synopsis rows in accept order, "stats": {...}}
-    """Turn the outline pass's answers into STRUCTURE rows on the set (ruling bc62c727 (A)) —
-    mechanically checked, loud on the first bad row: each `first` a TOP-LEVEL point of this
-    set's index, the sections in strictly rising order, the first one at the first top-level
-    point, one synopsis. A section becomes a `section` row anchored at the first line of its
-    first point (validated by the same contract a drafter's row meets), placed directly
-    before that point; the synopsis spans the unit and goes last. A set that already carries
-    structure rows is refused — the outline is proposed once, over points."""
-    if any(p.get("kind") in STRUCTURE_KINDS for p in proposals):
-        raise ValueError("the set already carries section / synopsis rows — outline a set of points")
-    pending = sum(1 for p in proposals if p.get("extra"))
-    if pending:
-        raise ValueError(f"the set still carries {pending} unjudged extra(s) — `notes-judge` first, then outline the judged set")
-    index = points_index(proposals)
-    order = {e["key"]: n for n, e in enumerate(index)}
-    entry = {e["key"]: e for e in index}
-    by_id = {p["proposal_id"]: p for p in proposals}
-    tops = [e["key"] for e in index if not e["depth"]]
-    rows: List[Dict[str, Any]] = []
-    firsts: List[str] = []
-    synopsis = ""
-    for n, a in enumerate(answers, start=1):
-        if not isinstance(a, dict):
-            raise ValueError(f"outline row {n}: not an object")
-        if a.get("synopsis"):
-            if synopsis:
-                raise ValueError(f"outline row {n}: a second synopsis — one per unit")
-            synopsis = str(a["synopsis"]).strip()
-            continue
-        title, first = str(a.get("section") or "").strip(), str(a.get("first") or "").strip()
-        if not title or not first:
-            raise ValueError(f"outline row {n}: a section row carries `section` (the title) and `first` (a point key)")
-        if synopsis:
-            raise ValueError(f"outline row {n}: the synopsis goes LAST")
-        if first not in order:
-            raise ValueError(f"outline row {n}: `first` {first!r} is not a point of this set")
-        if entry[first]["depth"]:
-            raise ValueError(f"outline row {n}: `first` {first} is a child point — a section opens on a TOP-LEVEL point")
-        if firsts and order[first] <= order[firsts[-1]]:
-            raise ValueError(f"outline row {n}: sections run in source order — {first} does not follow {firsts[-1]}")
-        firsts.append(first)
-        line = int(by_id[entry[first]["proposal_id"]]["from_i"])
-        rows.append({"kind": SECTION_KIND, "from_i": line, "to_i": line, "text": title.rstrip(".")})
-    if not firsts:
-        raise ValueError("the outline proposes no section")
-    if tops and firsts[0] != tops[0]:
-        raise ValueError(f"the first section opens on {firsts[0]}, not the first top-level point {tops[0]} — points would fall under no heading")
-    if not synopsis:
-        raise ValueError("the outline carries no synopsis")
-    rows.append({"kind": "synopsis", "from_i": 0, "to_i": len(pack.get("segments") or []) - 1, "text": synopsis})
-    made = {(p["kind"], p["from_i"], p["text"]): p for p in proposals_from_point_rows(validate_point_rows(rows, pack), pack)}
-    before = {entry[k]["proposal_id"]: made[(SECTION_KIND, r["from_i"], r["text"])] for k, r in zip(firsts, rows)}
-    out: List[Dict[str, Any]] = []
-    for p in proposals:
-        if p["proposal_id"] in before:
-            out.append(before[p["proposal_id"]])
-        out.append(p)
-    out.append(made[("synopsis", 0, synopsis)])
-    sizes = [(order[firsts[k + 1]] if k + 1 < len(firsts) else len(index)) - order[firsts[k]] for k in range(len(firsts))]
-    return {"proposals": out, "stats": {"sections": len(firsts), "points": len(index),
-                                        "smallest": min(sizes), "largest": max(sizes), "synopsis_words": len(synopsis.split())}}
-
-
 def point_from_args(
     owner_id: str,          # The node that OWNS the point (ruling 96be1528 (P)): the (Source, unit)'s PointSet for substance, the deliverable Note for its own (`section`, `research`)
     p: Dict[str, Any],      # The journaled point args (key/kind/text/…)
@@ -2971,6 +2881,139 @@ async def load_points(
     return out
 
 
+async def load_point_roles(
+    gx: GraphHandle,
+    points: List[Dict[str, Any]],  # load_points output
+) -> Dict[str, str]:  # {point key: the ACTIVE point_role value} — only the points that carry a fact
+    """The `point_role` facts on the draft's points (ruling 96be1528 (1)): the active value per
+    point, read through the fact layer (supersession honoured), keyed by point key. A point
+    with no fact is absent here — `effective_roles` inherits the parent's, else `content`."""
+    ids = {str(p.get("id") or ""): str(p.get("key") or "") for p in points if p.get("id")}
+    rows = await F.load_label_where(gx, DevNodeKinds.ASSERTION, [PropertyPredicate("predicate", "eq", P.POINT_ROLE)])
+    by_subject: Dict[str, List[Any]] = {}
+    for a in rows:
+        sid = str(F.prop(a, "subject_id") or "")
+        if sid in ids:
+            by_subject.setdefault(sid, []).append(a)
+    if not by_subject:
+        return {}
+    supers = await F.load_supersedes(gx)
+    out: Dict[str, str] = {}
+    for sid, slot in by_subject.items():
+        active = F.active_assertions(slot, supers)
+        if active:
+            out[ids[sid]] = str(F.prop(active[-1], "value"))
+    return out
+
+
+def effective_roles(
+    points: List[Dict[str, Any]],  # load_points output
+    roles: Dict[str, str],         # load_point_roles output (the facts)
+) -> Dict[str, str]:  # {point key: content | meta | aside} for every substance point
+    """Each point's role (ruling 96be1528 (1)): its own fact, else its parent's effective
+    role, else `content` — so a role on a question reaches its answers, and a draft with no
+    facts renders exactly as before. Pure; the type's ROLE MAP decides what a role means."""
+    by_key = {str(p.get("key")): p for p in points}
+    memo: Dict[str, str] = {}
+
+    def _role(k: str, seen: frozenset) -> str:
+        if k in memo:
+            return memo[k]
+        own = roles.get(k)
+        if own in P.POINT_ROLES:
+            memo[k] = str(own)
+            return memo[k]
+        pk = str((by_key.get(k) or {}).get("parent_key") or "")
+        r = _role(pk, seen | {k}) if pk and pk in by_key and pk not in seen else P.POINT_ROLE_CONTENT
+        memo[k] = r
+        return r
+    return {str(p.get("key")): _role(str(p.get("key")), frozenset())
+            for p in points if str(p.get("kind")) not in STRUCTURE_KINDS}
+
+
+async def load_placements(
+    gx: GraphHandle,
+    note_id: str,                  # The deliverable Note
+    points: List[Dict[str, Any]],  # load_points output (its `section` points are the PLACED targets)
+) -> Dict[str, Dict[str, Any]]:  # {point key: {"section": section key, "after": key | None, "refs_shown": [keys] | None, "edge_id"}}
+    """The deliverable's PER-POINT OVERLAY (ruling 96be1528 (3)/(7)): every PLACED edge from a
+    point the Note renders to one of the Note's OWN `section` points — the move (`after`) and
+    the cross-reference verdicts (`refs_shown`) — keyed by the placed point's key. Per
+    deliverable by construction: the target is a section only this Note owns."""
+    secs = {str(p.get("id")): str(p.get("key")) for p in points if str(p.get("kind")) == SECTION_KIND and p.get("id")}
+    if not secs:
+        return {}
+    keys = {str(p.get("id")): str(p.get("key")) for p in points if p.get("id")}
+    out: Dict[str, Dict[str, Any]] = {}
+    for e in await _edge_rows(gx, EdgeQuery(target_ids=sorted(secs), relation_type=DevRelations.PLACED)):
+        pk = keys.get(str(e.get("source_id") or ""))
+        if not pk:
+            continue
+        props = dict(e.get("properties") or {})
+        out[pk] = {"section": secs[str(e.get("target_id"))], "after": props.get("after"),
+                   "refs_shown": (list(props["refs_shown"]) if props.get("refs_shown") is not None else None),
+                   "edge_id": str(e.get("id") or "")}
+    return out
+
+
+async def place_point(
+    gx: GraphHandle,
+    slug: str,                       # The deliverable Note's slug
+    key: str,                        # The placed point's key (a substance point of a rendered set, or the Note's own research point)
+    section_key: str,                # The Note's OWN `section` point the point is placed in; "" = remove the overlay
+    *,
+    after: Optional[str] = None,     # The key it renders after ("" = the section's end; None = keep what stands — with nothing standing, the derived slot)
+    refs_shown: Optional[List[str]] = None,  # The cross-reference verdicts (None = keep what stands)
+    actor: str = "user:cli",
+) -> Dict[str, Any]:  # {point_id, section_id, placed, removed, properties, args, written} | {error}
+    """Land the deliverable's overlay on ONE point (ruling 96be1528 (3)/(7)): ONE `PLACED` edge
+    from the point to the Note's section point, carrying `after` (the placement pass's move)
+    and `refs_shown` (the cross-reference pass's verdicts) — each pass sets its own field
+    and keeps the other's (None = keep), so the two passes confirm one journaled record each
+    and replay lands the same edge. A point is placed in ONE section per deliverable: the
+    standing edge to any of the Note's sections is deleted first, and the edge id is
+    deterministic on the triple, so a changed property re-lands the edge cleanly.
+    `section_key` "" removes the overlay (the compensating form). Journaled as
+    `place-point`; a missing point or section is a tolerated no-op (retracted later in the
+    journal), never a dangling edge."""
+    note_id = note_node_id(slug)
+    if await graph_task(gx.queue, gx.graph_id, "get_node", node_id=note_id) is None:
+        return {"error": f"no note `{slug}`", "slug": slug, "written": False}
+    points = await load_points(gx, note_id)
+    by_key = {str(p.get("key")): p for p in points}
+    # `at` = when the human confirmed this placement: content of the event, and what keeps a re-placement
+    # after an undo distinct from the first (the journal dedups an op identical in verb + args)
+    args = {"slug": slug, "key": key, "section_key": section_key, "actor": actor, "at": round(time.time(), 3),
+            **({"after": after} if after is not None else {}),
+            **({"refs_shown": list(refs_shown)} if refs_shown is not None else {})}
+    point = by_key.get(key)
+    if point is None:
+        return {"point_id": None, "placed": False, "removed": False, "missing": True, "written": False, "args": args}
+    if str(point.get("kind")) in STRUCTURE_KINDS:
+        return {"error": f"`{key[:8]}` is a {point.get('kind')} — only a substance or research point is placed", "written": False}
+    secs = {str(p.get("key")): p for p in points if str(p.get("kind")) == SECTION_KIND}
+    sec_ids = {str(p.get("id")) for p in secs.values()}
+    pid = str(point.get("id"))
+    standing = [e for e in await _edge_rows(gx, EdgeQuery(source_ids=[pid], relation_type=DevRelations.PLACED))
+                if str(e.get("target_id")) in sec_ids]
+    kept = dict((standing[0].get("properties") or {})) if standing else {}
+    if standing:
+        await graph_task(gx.queue, gx.graph_id, "delete_edges", edge_ids=[str(e["id"]) for e in standing])
+    if not section_key:
+        return {"point_id": pid, "section_id": None, "placed": False, "removed": bool(standing), "properties": {},
+                "args": args, "written": bool(standing)}
+    sec = secs.get(section_key)
+    if sec is None:
+        return {"point_id": pid, "section_id": None, "placed": False, "removed": bool(standing), "missing": True,
+                "args": args, "written": bool(standing)}
+    edge = placed_edge(pid, str(sec.get("id")),
+                       after=(after if after is not None else kept.get("after")),
+                       refs_shown=(list(refs_shown) if refs_shown is not None else kept.get("refs_shown")))
+    await extend_graph(gx.queue, gx.graph_id, [], [edge])
+    return {"point_id": pid, "section_id": str(sec.get("id")), "placed": True, "removed": bool(standing),
+            "properties": dict(edge["properties"]), "args": args, "written": True}
+
+
 def overlapping_points(
     points: List[Dict[str, Any]],  # load_points output
 ) -> List[Dict[str, Any]]:  # [{a, b, shared: [segment ids], same_kind, nested, cross_origin, judged, flagged}] — pairs whose segment runs intersect
@@ -3454,25 +3497,92 @@ def _point_text(
 def group_points(
     pts: List[Dict[str, Any]],   # the body's points, source order (no synopsis, no glossary)
     unit: Dict[str, Any],        # the points' unit snapshot (its title suppresses a header that restates it)
-) -> List[Tuple[str, List[Dict[str, Any]]]]:  # [(heading, build_point_tree roots)] in page order; "" = no heading
+    placements: Optional[Dict[str, Dict[str, Any]]] = None,  # load_placements output: the deliverable's moves (a `section` key + `after`) — None = order-derived membership only
+) -> List[Tuple[str, List[Dict[str, Any]], int]]:  # [(heading, build_point_tree roots, depth)] in page order; "" = no heading; depth 0 = a top-level section
     """The page's sections. SYNTHESIZED (ruling bc62c727 (A)): when the points include
     `section` points the structure is theirs — a section sorts immediately before the first
     point it covers, and membership is DERIVED: every root point from one section's anchor
-    to the next, children following their parent wherever they fall. A section left with no
-    points (its points were retracted, or the next section starts where it does) renders
-    nothing, so retracting a section drops its points into the previous one. CAPTURED (the
+    to the next AT ANY LEVEL, children following their parent wherever they fall. A section
+    NESTS by naming its parent section in `parent_key` (776c13d3 (a)): its depth is the
+    length of that chain, derived here and never stored — ancestors sort first on a shared
+    anchor, and a parent anchored earlier than its first child holds the points before it
+    directly. THE PLACED OVERLAY (96be1528 (3)) overrides the derived slot: a root whose
+    placement names a standing section and an `after` renders in THAT section after the
+    root it names (a child key names its root; "" = the section's end; an unknown key = the
+    end), its subtree with it, in source order among the points placed after the same key.
+    A section left with no points (its points were retracted or moved out, or the next
+    section starts where it does) renders nothing — unless a nested section beneath it still
+    holds points, since a parent that opens where its first child opens has none of its
+    own — so retracting a section drops its points into the previous one. CAPTURED (the
     book path, unchanged): consecutive points sharing the read-aloud header captured at
     propose time; a header that restates the unit's own title is suppressed (e1fd4d64 (C))."""
     marks = [p for p in pts if str(p.get("kind")) == SECTION_KIND]
     if marks:
-        groups: List[Tuple[str, List[Dict[str, Any]]]] = [("", [])]
+        by_key = {str(m.get("key")): m for m in marks}
+
+        def _depth(m: Dict[str, Any]) -> int:
+            d, cur, seen = 0, m, {str(m.get("key"))}
+            while str(cur.get("parent_key") or "") in by_key and str(cur.get("parent_key")) not in seen and d < 8:
+                cur = by_key[str(cur["parent_key"])]
+                seen.add(str(cur.get("key")))
+                d += 1
+            return d
+        depth = {str(m.get("key")): _depth(m) for m in marks}
+        marks.sort(key=lambda m: (_sort_key(m)[0], _sort_key(m)[2], depth[str(m.get("key"))], _sort_key(m)[3]))
+        groups: List[Tuple[str, List[Dict[str, Any]], int]] = [("", [], 0)]
+        gkeys: List[str] = [""]
+        moved: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
         k = 0
         for node in build_point_tree([p for p in pts if str(p.get("kind")) != SECTION_KIND]):
             while k < len(marks) and _sort_key(marks[k]) <= _sort_key(node["p"]):
-                groups.append((str(marks[k].get("text") or ""), []))
+                groups.append((str(marks[k].get("text") or ""), [], depth[str(marks[k].get("key"))]))
+                gkeys.append(str(marks[k].get("key")))
                 k += 1
-            groups[-1][1].append(node)
-        return [(h, tree) for h, tree in groups if tree]
+            pl = (placements or {}).get(str(node["p"].get("key")))
+            if pl and pl.get("after") is not None and str(pl.get("section") or "") in by_key:
+                moved.append((node, pl))   # its derived slot is given up; it lands below
+            else:
+                groups[-1][1].append(node)
+        while k < len(marks):   # sections after the last point: empty groups, a move may fill one
+            groups.append((str(marks[k].get("text") or ""), [], depth[str(marks[k].get("key"))]))
+            gkeys.append(str(marks[k].get("key")))
+            k += 1
+        root_of: Dict[str, str] = {}   # any key -> its root's key, for an `after` naming a child
+
+        def _index_tree(node: Dict[str, Any], root: str) -> None:
+            root_of[str(node["p"].get("key"))] = root
+            for c in node["kids"]:
+                _index_tree(c, root)
+        for _h, tree, _d in groups:
+            for n in tree:
+                _index_tree(n, str(n["p"].get("key")))
+        for n, _pl in moved:
+            _index_tree(n, str(n["p"].get("key")))
+        landed: Dict[Tuple[int, str], int] = {}   # (group, after) -> how many already landed there (source order kept)
+        for node, pl in moved:
+            gi = gkeys.index(str(pl["section"]))
+            lst = groups[gi][1]
+            after = str(pl.get("after") or "")
+            anchor = root_of.get(after, "") if after else ""
+            at = len(lst)
+            if anchor:
+                pos = next((i for i, n in enumerate(lst) if str(n["p"].get("key")) == anchor), None)
+                if pos is not None:
+                    at = pos + 1 + landed.get((gi, anchor), 0)
+                    landed[(gi, anchor)] = landed.get((gi, anchor), 0) + 1
+            lst.insert(at, node)
+        out: List[Tuple[str, List[Dict[str, Any]], int]] = []
+        for i, (h, tree, d) in enumerate(groups):
+            if tree:
+                out.append((h, tree, d))
+                continue
+            # an empty heading stands only over a nested heading that holds points
+            j = i + 1
+            while j < len(groups) and groups[j][2] > d and not groups[j][1]:
+                j += 1
+            if h and j < len(groups) and groups[j][2] > d:
+                out.append((h, tree, d))
+        return out
     runs: List[Tuple[str, List[Dict[str, Any]]]] = []
     for p in pts:
         h = str(p.get("heading") or "")
@@ -3482,7 +3592,7 @@ def group_points(
             runs[-1][1].append(p)
         else:
             runs.append((h, [p]))
-    return [(h, build_point_tree(ps)) for h, ps in runs]
+    return [(h, build_point_tree(ps), 0) for h, ps in runs]
 
 
 def _glossary_lines(
@@ -3594,11 +3704,15 @@ def render_points(
     timestamps: str = "addressable",  # "always" | "addressable" | "never" (see _span)
     outline_title: str = "At a glance",
     style: Optional[Dict[str, Any]] = None,   # the type's render_style: {"span": "range" | "start", "anchor": "tail" | "head"} (None = the book defaults)
+    roles: Optional[Dict[str, str]] = None,   # load_point_roles output: the `point_role` facts (None = every point is content)
+    role_map: Optional[Dict[str, Any]] = None,  # the type's `point_roles` map: role -> "body" | "front-section" | "omit" (+ front_section_title); None = every role renders in the body
+    placements: Optional[Dict[str, Dict[str, Any]]] = None,  # load_placements output: this deliverable's moves (None = order-derived membership)
 ) -> str:  # The body markdown (after the preamble)
     """Render the body from the Points — deterministic, so a replayed `render-notes` derives
     the same Sections. EXPANDED (the public post): under the derived headings (`group_points`:
     the SYNTHESIZED section points when the points carry them — ruling bc62c727 (A) — else the
-    captured read-aloud headers) each root point with its permalink glyph and its subtree
+    captured read-aloud headers; a nested section's heading depth follows its parent chain,
+    776c13d3 (a)) each root point with its permalink glyph and its subtree
     (depth two in practice), spans only when the source is addressable; block kinds keep
     their shapes at every depth; consecutive top-level `step`s are ONE ordered list; the
     `synopsis` never renders in the body (it is the description). OUTLINE (review / the work
@@ -3615,8 +3729,39 @@ def render_points(
     labels and the anchors replay from the accept ops and the type alone."""
     pts = [p for p in sorted(points, key=_sort_key) if str(p.get("kind")) != "synopsis"]
     unit = dict((pts[0].get("unit") or {}) if pts else {})
+    # THE ROLE MAP (96be1528 (1)): each point's effective role (its fact, else its parent's, else
+    # content) through the type's map — `omit` drops the point and its subtree, `front-section`
+    # gathers the root's whole subtree into ONE derived section before the outline, in source
+    # order; a draft with no facts, or a type with no map, renders every point in the body as
+    # it always did.
+    rmap = {k: v for k, v in dict(role_map or {}).items() if not str(k).startswith("_")}
+    front_title = str(rmap.get("front_section_title") or "About this lecture")
+    front_pts: List[Dict[str, Any]] = []
+    if roles and rmap:
+        role_of = effective_roles(pts, roles)
+        by_key = {str(p.get("key")): p for p in pts}
+
+        def _root_role(p: Dict[str, Any]) -> str:   # the ROOT's role decides where the subtree renders
+            cur, hops = p, 0
+            while str(cur.get("parent_key") or "") in by_key and hops < 8:
+                cur, hops = by_key[str(cur["parent_key"])], hops + 1
+            return role_of.get(str(cur.get("key")), P.POINT_ROLE_CONTENT)
+        kept: List[Dict[str, Any]] = []
+        for p in pts:
+            if str(p.get("kind")) in STRUCTURE_KINDS or str(p.get("kind")) == GLOSSARY_KIND:
+                kept.append(p)
+                continue
+            if rmap.get(role_of.get(str(p.get("key")), P.POINT_ROLE_CONTENT)) == "omit":
+                continue   # an aside, or a child inheriting it: out of this deliverable
+            if rmap.get(_root_role(p)) == "front-section":
+                front_pts.append(p)
+            else:
+                kept.append(p)
+        pts = kept
     gloss = [p for p in pts if str(p.get("kind")) == GLOSSARY_KIND]
-    groups = group_points([p for p in pts if str(p.get("kind")) != GLOSSARY_KIND], unit)
+    groups = group_points([p for p in pts if str(p.get("kind")) != GLOSSARY_KIND], unit, placements)
+    if front_pts:
+        groups = [(front_title, build_point_tree(front_pts), 0)] + groups
     # point key -> section index: a back-link whose target sits in the same SYNTHESIZED section renders
     # nothing (read 9d301b5a); a captured-heading page (the book shapes) keeps every standing link
     section_of: Dict[str, int] = {}
@@ -3626,7 +3771,7 @@ def render_points(
         for k in node["kids"]:
             _index(k, gi)
     if any(str(p.get("kind")) == SECTION_KIND for p in pts):
-        for gi, (_h, tree) in enumerate(groups):
+        for gi, (_h, tree, _d) in enumerate(groups):
             for n in tree:
                 _index(n, gi)
     lines: List[str] = []
@@ -3637,9 +3782,9 @@ def render_points(
         octx = _render_ctx(pts, unit, style)
         octx["section_of"] = section_of
         lines += [f"## {outline_title}", ""]
-        for h, tree in groups:
+        for h, tree, d in groups:
             if h:
-                lines += [f"**{_heading_text(h)}**", ""]
+                lines += [f"**{'› ' * d}{_heading_text(h)}**", ""]   # the scan view marks a nested section's depth with a quiet prefix
             octx["prev"] = ""
 
             def _walk(node: Dict[str, Any], depth: int) -> None:
@@ -3651,7 +3796,8 @@ def render_points(
                     _walk(k, depth + 1)
             for n in tree:
                 _walk(n, 0)
-            lines.append("")
+            if tree:
+                lines.append("")   # an empty parent heading (its first child opens where it does) already ends on its own blank line
         if gloss:
             lines += [f"**{GLOSSARY_HEADING}**", ""] + _glossary_lines(gloss, timestamps, outline=True, link=want_expanded, ctx=octx) + [""]
 
@@ -3659,9 +3805,9 @@ def render_points(
         ctx = _render_ctx(pts, unit, style)
         ctx["section_of"] = section_of
         block_kinds = ("step", "quotation")
-        for h, tree in groups:
+        for h, tree, d in groups:
             if h:
-                lines += [f"## {_heading_text(h)}", ""]
+                lines += [f"{'#' * (2 + d)} {_heading_text(h)}", ""]   # heading depth DERIVED from the section's parent chain (776c13d3 (a))
             # a unit with no section headers renders its points with no heading at all (a lone
             # "## Notes" says nothing to a reader; the source card already names the unit)
             ctx["prev"] = ""
@@ -3926,6 +4072,11 @@ async def render_notes(
     if timestamps not in ("always", "addressable", "never"):
         return {"error": f"timestamps must be always | addressable | never, got {timestamps!r}", "written": False}
     points = await load_points(gx, note_id)
+    # The placement pass's facts and overlay (96be1528 (1)/(3)): the `point_role` facts on the
+    # points and this Note's PLACED edges — read live from the graph, so replay (the asserts and
+    # place-point ops land before the render op) re-derives the same page with nothing journaled.
+    roles = await load_point_roles(gx, points)
+    placements = await load_placements(gx, note_id, points)
     wires = await _note_section_wires(gx, note_id)
     pre = ""
     for w in wires:
@@ -3975,7 +4126,9 @@ async def render_notes(
         # metadata or the lecture's facts, rendered above the body, never authored.
         resolved = await resolve_references(gx, references or [])
         card = render_source_card(unit_card, resolved)
-    body = render_points(points, rendering=rendering, timestamps=timestamps, style=style)
+    role_map = {k: v for k, v in dict(ppol.get("point_roles") or {}).items() if not str(k).startswith("_")}
+    body = render_points(points, rendering=rendering, timestamps=timestamps, style=style,
+                         roles=roles, role_map=role_map, placements=placements)
     if pre and not pre.endswith("\n\n"):
         pre = pre.rstrip("\n") + "\n\n"
     new_text = fm + pre + BODY_MARKER + "\n\n" + (card + "\n" if card else "") + body
@@ -4003,7 +4156,11 @@ async def render_notes(
            p.get("parent_key")] + ([p.get("speaker"), list(p.get("refers_to") or [])]
                                    if p.get("speaker") or p.get("refers_to") else []) for p in points],
          [[r.get("label"), r.get("href")] for r in resolved]] + ([roster0] if roster0 else [])
-        + ([facts] if facts else []) + ([style] if style else []) + ([fm_policy] if wants_facts else []),
+        + ([facts] if facts else []) + ([style] if style else []) + ([fm_policy] if wants_facts else [])
+        # the placement pass's inputs join only once a draft carries them (96be1528 (1)/(3)), so every
+        # earlier digest is the one it always had
+        + ([sorted(roles.items())] if roles else [])
+        + ([sorted((k, v.get("section"), v.get("after"), v.get("refs_shown")) for k, v in placements.items())] if placements else []),
         sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")).hexdigest()
     res.update(points=len(points), rendering=rendering, timestamps=timestamps, text=new_text,
                references=resolved, facts=facts,

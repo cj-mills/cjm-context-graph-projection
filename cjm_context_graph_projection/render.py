@@ -308,7 +308,7 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
     if kind in ("notes-type", "notes-pack", "notes-ingest", "notes-accept", "notes-retract", "notes-retract-all",
                 "notes-coverage", "notes-overlap", "notes-check", "notes-edit", "notes-rehead", "notes-render",
                 "notes-promotion", "notes-staging-index", "notes-index", "notes-merge", "notes-merge-sweep",
-                "notes-close", "notes-outline", "notes-judge", "notes-judge-draft", "notes-rehome"):
+                "notes-close", "notes-outline", "notes-place", "notes-judge", "notes-judge-draft", "notes-rehome"):
         return _render_notes_lane(kind, obj)
     if kind == "confirm-proposal":
         if obj.get("error"):
@@ -1451,14 +1451,69 @@ def _render_notes_lane(kind: str, obj: Dict[str, Any]) -> str:
                 + f"\n  next: {nxt}")
     if kind == "notes-outline":
         if obj.get("brief"):
+            if obj.get("slug"):
+                return (f"**outline brief** — draft `{obj.get('slug')}` · {obj.get('points')} point(s) under {obj.get('sections')} "
+                        f"standing section(s)\n  {obj.get('brief')}\n"
+                        f"  next: hand it to ONE whole-source reader, then `notes-outline --slug {obj.get('slug')} --rows <jsonl>` "
+                        f"(the plan), `--apply` to land it, then `notes-render --slug {obj.get('slug')}`")
             return (f"**outline brief** — set `{obj.get('set_id')}` · {obj.get('points')} row(s)\n  {obj.get('brief')}\n"
                     f"  next: hand it to ONE whole-source reader, then `notes-outline --set {str(obj.get('set_id') or '')[:20]} "
                     f"--pack <whole pack json> --rows <jsonl>`")
+        if obj.get("plan"):
+            # the draft mode: the plan (dry), or the plan + what its apply landed
+            p, s = obj["plan"], (obj["plan"].get("stats") or {})
+            lines = [f"**outline plan** — draft `{obj.get('slug')}`: {s.get('sections')} section(s), {s.get('nested')} nested "
+                     f"(depth {s.get('depth')}) over {s.get('points')} point(s), against {s.get('standing')} standing — "
+                     f"keep {len(p.get('keep') or [])} · retitle {len(p.get('retitle') or [])} · add {len(p.get('add') or [])} · "
+                     f"re-parent {len(p.get('reparent') or [])} · retract {len(p.get('retract') or [])}"
+                     + (" · synopsis edited" if p.get("synopsis") else "")]
+            for a in p.get("add") or []:
+                lines.append(f"  + {a['section']} @ {a['first']}" + (f"  ⊂ {a['parent']}" if a.get("parent") else ""))
+            for r in p.get("retitle") or []:
+                lines.append(f"  ~ {r['old']} → {r['new']}")
+            for r in p.get("reparent") or []:
+                lines.append(f"  ⊂ {r.get('section')} → " + (f"under {r['new_title']}" if r.get("new_title") else "top level"))
+            for r in p.get("retract") or []:
+                lines.append(f"  − {r['section']}")
+            ap = obj.get("applied")
+            if ap:
+                lines.append(f"  **applied** {len(ap.get('ops') or [])} journaled op(s): −{len(ap.get('retracted') or [])} "
+                             f"+{len(ap.get('added') or [])} ~{len(ap.get('retitled') or [])} ⊂{len(ap.get('reparented') or [])}"
+                             + (" · synopsis" if ap.get("synopsis") else "")
+                             + (f"\n  error: {ap['error']}" if ap.get("error") else "")
+                             + f"\n  next: `notes-render --slug {obj.get('slug')}`")
+            else:
+                lines.append(f"  next: `notes-outline --slug {obj.get('slug')} --rows <the same jsonl> --apply`")
+            return "\n".join(lines)
         s = obj.get("stats") or {}
         return (f"**outlined set** `{obj.get('set_id')}` — {obj.get('proposals')} row(s): {s.get('sections')} section(s) over "
                 f"{s.get('points')} point(s) (smallest {s.get('smallest')} · largest {s.get('largest')}) + a synopsis of "
                 f"{s.get('synopsis_words')} word(s)\n  {obj.get('manifest_path')}\n"
                 f"  next: `notes-accept --slug <post> --set {str(obj.get('set_id') or '')[:20]} --list`")
+    if kind == "notes-place":
+        if obj.get("brief"):
+            return (f"**placement brief** — draft `{obj.get('slug')}` · {obj.get('points')} point(s), {obj.get('roles')} standing role(s), "
+                    f"{obj.get('moves')} standing move(s)\n  {obj.get('brief')}\n"
+                    f"  next: hand it to ONE whole-source reader, then `notes-place --slug {obj.get('slug')} --rows <jsonl>` (the plan), "
+                    f"`--apply` to land it, then `notes-render --slug {obj.get('slug')}`")
+        p, s = obj.get("plan") or {}, (obj.get("plan") or {}).get("stats") or {}
+        lines = [f"**placement plan** — draft `{obj.get('slug')}`: {s.get('rows')} row(s) over {s.get('points')} point(s) — "
+                 f"roles {s.get('roles')} (meta {s.get('meta')} · aside {s.get('aside')}) · moves {s.get('moves')} · undo {s.get('unmoves')}"
+                 f" → front section {s.get('front_after')} point(s), omitted {s.get('omitted_after')}"]
+        for r in p.get("roles") or []:
+            lines.append(f"  ◦ {r['point']} {r['old'] or 'content'} → {r['new']}" + (f"  ({r['why']})" if r.get("why") else "") + f"  — {r.get('text', '')}")
+        for m in p.get("moves") or []:
+            lines.append(f"  ↷ {m['point']} → {m['section_title']} after {m['after'] or 'the end'}  — {m.get('text', '')}")
+        for u in p.get("unmoves") or []:
+            lines.append(f"  ↶ {u['point']} back to its source slot")
+        ap = obj.get("applied")
+        if ap:
+            lines.append(f"  **applied** {len(ap.get('ops') or [])} journaled op(s): ◦{len(ap.get('roles') or [])} ↷{len(ap.get('moves') or [])} "
+                         f"↶{len(ap.get('unmoves') or [])}" + (f"\n  error: {ap['error']}" if ap.get("error") else "")
+                         + f"\n  next: `notes-render --slug {obj.get('slug')}`")
+        else:
+            lines.append(f"  next: `notes-place --slug {obj.get('slug')} --rows <the same jsonl> --apply`")
+        return "\n".join(lines)
     if kind == "notes-close":
         s = obj.get("stats") or {}
         return (f"**closed set** `{obj.get('set_id')}` — {obj.get('proposals')} point(s); references {s.get('references')}: "

@@ -25,6 +25,8 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - **`cjm_context_graph_projection.linkaudit`** — Link liveness audit — the derived worklist for the EXTERNAL links a note carries
 - **`cjm_context_graph_projection.listing`** — Structured enumeration: every node of a LABEL / assertion of a PREDICATE / edge of a RELATION.
 - **`cjm_context_graph_projection.module_ops`** — Module-edit ops — create / rename / delete / regroup a module as graph edge ops.
+- **`cjm_context_graph_projection.notes_outline`** — The OUTLINE PASS of the notes lane — the first of the standalone lecture resource's passes
+- **`cjm_context_graph_projection.notes_place`** — The PLACEMENT PASS of the notes lane — the second of the standalone lecture resource's
 - **`cjm_context_graph_projection.onboarding`** — Project the MEMORY onboarding surface from the graph's ASSERTED lead structure.
 - **`cjm_context_graph_projection.oracle`** — The version oracle: a programmatic Procedure that keeps `version` slots fresh.
 - **`cjm_context_graph_projection.projection`** — The projection core: schema / show / relevance / state over a context graph.
@@ -39,6 +41,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - **`cjm_context_graph_projection.refactor`** — Refactoring-candidate identification over the code graph (the IDENTIFY half of move).
 - **`cjm_context_graph_projection.refactor_ops`** — `move` — relocate a symbol between modules (the EXECUTE half of refactor-candidates).
 - **`cjm_context_graph_projection.registers`** — Register drift-check: each hub note's member-cache vs the active `role` assertions.
+- **`cjm_context_graph_projection.relive`** — Live re-derivation of a module's region nodes from its new text (36f649d3).
 - **`cjm_context_graph_projection.rename_ops`** — Symbol `rename` — the Ext-B increment: scoped identifier substitution INTO bodies.
 - **`cjm_context_graph_projection.render`** — Render projection results for a consumer: agent (JSON) or human (markdown).
 - **`cjm_context_graph_projection.review`** — The review frontier: which APPROVED deliverables have stale upstream — derived, never stored.
@@ -193,6 +196,21 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `rename_module` _function_ — Rename a `.py` module — re-emit its content at the new path, drop the old file, and
 - `rewrite_module_import` _function_ — Rewrite a module-RENAME across an importer: every `from old import …` and
 
+### `cjm_context_graph_projection.notes_outline`
+
+- `apply_outline` _function_ — Turn the outline pass's answers into STRUCTURE rows on a proposal SET (ruling bc62c727 (A);
+- `apply_outline_plan` _function_ — Land a plan as the journaled ops it names, in an order every step of which stands on its
+- `outline_of` _function_ — The draft's STANDING outline as rows in the pass's own contract, so a reader can keep,
+- `plan_outline` _function_ — The DRAFT mode's plan (81d6e669 (3); rulings 96be1528 (11) — a pass is a proposal set and a
+- `render_outline_brief` _function_ — The brief of the whole-source OUTLINE PASS (ruling bc62c727 (A); parents per 776c13d3 (a)):
+
+### `cjm_context_graph_projection.notes_place`
+
+- `apply_placement_plan` _function_ — Land a plan as the journaled ops it names: each role as ONE `assert` of `point_role` on
+- `gx_note_missing` _function_ — Whether the draft exists — the one graph read the apply makes before its first op.
+- `plan_placement` _function_ — The pass's plan, mutating nothing: each row resolved to a point key and compared with what
+- `render_place_brief` _function_ — The brief of the PLACEMENT PASS (rulings 96be1528 (1)/(3)): the keyed points laid out
+
 ### `cjm_context_graph_projection.onboarding`
 
 - `project_onboarding` _function_ — Project the onboarding surface by WALKING the asserted lead structure.
@@ -246,7 +264,6 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 
 - `accept_point` _function_ — Land ONE accepted point: the Point node, its segment References (from observations —
 - `apply_judgements` _function_ — THE FOLD (ruling 1798a796 (3)): apply a judge's answers mechanically, loud on the first
-- `apply_outline` _function_ — Turn the outline pass's answers into STRUCTURE rows on the set (ruling bc62c727 (A)) —
 - `born_notes_by_unit` _function_ — Which source UNITS carry a born deliverable on this graph, with its state and synopsis:
 - `build_notes_pack` _function_ — Apply the type's INFORMATION POLICY (a stratum query read as ROLES — ruling e1e096fa)
 - `build_point_tree` _function_ — Nest by `parent_key` (second-read ruling (4): depth TWO in practice, the tree is generic).
@@ -259,6 +276,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `derive_work_frontmatter` _function_ — The work-page type OWNS the title and description: `notes-on-work` = "Notes on *<work>*"
 - `derived_description` _function_ — What the unit CONTAINS, from data the rendering already uses: the work (when the
 - `edit_point` _function_ — Edit an accepted point IN PLACE — the per-point repair the ch. 2 staging read demanded
+- `effective_roles` _function_ — Each point's role (ruling 96be1528 (1)): its own fact, else its parent's effective
 - `ensure_point_set` _function_ — Mint the (Source, unit)'s PointSet on first use and assert the Note RENDERS it — both
 - `extra_list` _function_ — Every EXTRA still pending in a set, keyed `x001`… in the set's order — the ids the judge
 - `group_points` _function_ — The page's sections. SYNTHESIZED (ruling bc62c727 (A)): when the points include
@@ -268,7 +286,9 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `load_deliverable_type` _function_ — Read a DeliverableType profile off the graph (None = `notes-type <key>` first).
 - `load_notes_propsets` _function_ — Every notes proposal set under `root` (optionally for one source), newest first.
 - `load_owned_points` _function_ — The points ONE owner holds (HAS_POINT owner -> point), in source order — the owner's
-- `load_points` _function_ — A Note's Points, in source order (start_time, then pack ordinal, then key).
+- `load_placements` _function_ — The deliverable's PER-POINT OVERLAY (ruling 96be1528 (3)/(7)): every PLACED edge from a
+- `load_point_roles` _function_ — The `point_role` facts on the draft's points (ruling 96be1528 (1)): the active value per
+- `load_points` _function_ — What a Note RENDERS (ruling 96be1528 (P)): its OWN points (sections, research) plus the
 - `merge_point_blocks` _function_ — The BLOCK merge (ruling 1798a796, fork 1; work item 1561551e): the unit of agreement is
 - `merge_point_proposals` _function_ — The ROW-LEVEL merge (work item 3a2c94eb (2); the filter lane's `merge_filter_proposals`
 - `mint_deliverable_type` _function_ — UPSERT a DeliverableType by slug (the display-rule pattern: last journaled op wins).
@@ -280,11 +300,12 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `overlapping_points` _function_ — Pure: the duplication candidates — two points deriving from a shared segment — and
 - `pack_digest` _function_ — Digest the READ content (source binding + numbered lines + headers) — what a proposal
 - `pick_propset` _function_ — Choose a proposal set: newest by default, else the unique id/prefix match.
+- `place_point` _function_ — Land the deliverable's overlay on ONE point (ruling 96be1528 (3)/(7)): ONE `PLACED` edge
 - `plan_notes_blocks` _function_ — Cut the whole pack into BLOCKS (ruling 1798a796, fork 1): a block runs between COMMON
 - `plan_notes_windows` _function_ — Cut a whole-unit pack into `count` windows of near-equal line count at MECHANICAL
 - `point_check` _function_ — The CHECK review: one point beside its segments' LIVE text from the sibling — the
 - `point_coverage` _function_ — The COVERAGE review: re-read the unit per the Note's type policy and list the content
-- `point_from_args` _function_ — The op-args -> PointNode mapping the live accept AND replay share.
+- `point_from_args` _function_ — The op-args -> PointNode mapping the live accept, the replay AND the re-home share.
 - `point_set_of` _function_ — The PointSet a unit snapshot addresses (ruling 96be1528 (P)): identity = (sibling graph
 - `points_as_proposals` _function_ — An accepted draft read as a proposal set — a point's key IS its accepted proposal id, so
 - `points_index` _function_ — Key a set of proposal rows for a reader that cannot see their lines: `p001`… in source
@@ -299,7 +320,6 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `render_judge_brief` _function_ — The brief of the bounded JUDGEMENT (ruling 1798a796 (2)): ONE whole-source reader works
 - `render_notes` _function_ — Derive the Note's body from its Points and APPLY it: the authored preamble stays, the
 - `render_notes_pack` _function_ — Render a pack as the brief a proposer reads: the unit, the kind slate, the headers
-- `render_outline_brief` _function_ — The brief of the whole-source OUTLINE PASS (ruling bc62c727 (A)): after the window merge,
 - `render_pairs_brief` _function_ — The brief of the judgement over what standing detection flags (ruling 1798a796 (1)-(2)):
 - `render_points` _function_ — Render the body from the Points — deterministic, so a replayed `render-notes` derives
 - `render_points_index` _function_ — The index as a reader sees it: `p017 [claim] 12:03  **lead** — text`, nested by depth.
@@ -313,7 +333,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `renderers_of` _function_ — The inverse of `rendered_sets`: every deliverable sharing the set's substance — what a
 - `resolve_references` _function_ — Resolve human-added links for rendering (ae103970): a cross-work link naming a
 - `resolve_sibling_source` _function_ — Resolve a Source in the sibling graph: id prefix first (the shared seam), then a
-- `retract_note_points` _function_ — Retract EVERY point of a Note (the re-drive's clean slate — ruling e1fd4d64 (5)): one
+- `retract_note_points` _function_ — Retract EVERY point a Note renders (the re-drive's clean slate — ruling e1fd4d64 (5)):
 - `retract_point` _function_ — Retract a point: delete the node (its edges cascade). The compensating op of accept —
 - `speaker_labels` _function_ — Ruling bc62c727 (B): a speaker reads as its NAME, else its ROLE in the role's own words
 - `staging_index` _function_ — Project the staging site's LISTINGS from the publish_state facts (item 140981e9 (b)):
@@ -369,6 +389,11 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `classify_register_drift` _function_ — Pure: reconcile each register's cache against its membership ground truth.
 - `register_drift` _function_ — The derived register-cache reconciliation over `role` assertions + hub edges.
 
+### `cjm_context_graph_projection.relive`
+
+- `relive_module` _function_ — The single-module form of `relive_modules`.
+- `relive_modules` _function_ — Re-derive several modules' region nodes LIVE in one pass — the batch form a move
+
 ### `cjm_context_graph_projection.rename_ops`
 
 - `rename_symbol` _function_ — Rename a top-level free function/class everywhere it is referenced, graph-driven.
@@ -420,6 +445,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 
 ### `cjm_context_graph_projection.source_state`
 
+- `SymbolIdentity` _class_ — Container-independent CodeSymbol identity, DERIVED from the source journal (36f649d3).
 - `absorb_authored_text` _function_ — Absorb an `author` edit of a GRAPH-SOURCED module into the source journal.
 - `append_register` _function_ — Append a `register` event — repo inventory as JOURNAL DATA (DEC c47912f6).
 - `append_retire` _function_ — Append a `retire` op ending a module key's journal life.
@@ -436,6 +462,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `notebook_to_py_source` _function_ — Build a plain-`.py` module source from a notebook's EXPORT cells (the flip transform).
 - `read_source_journal` _function_ — Read every `source` op across the rotated SEGMENT FAMILY (one JSON object per
 - `source_check` _function_ — The soak instrument: for each shadow-sourced module, check two things.
+- `symbol_identity_map` _function_ — Derive the container-independent symbol identity map from the source journal (36f649d3).
 - `uncaptured_modules` _function_ — The uncaptured-module audit (build a6453f70) — the ac3d52f4 recipe as a verb.
 
 ### `cjm_context_graph_projection.structure`

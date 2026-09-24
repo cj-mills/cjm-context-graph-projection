@@ -234,6 +234,18 @@ async def assert_value(
                     "subject": subject, "predicate": predicate, "value": value,
                     "written": False}
         explicit_ids = list(m["ids"])
+        # REINSTATEMENT: the re-asserted value's node may already stand on the slot, DEMOTED by
+        # the very value it is now told to supersede (a flip back by one actor — point_role
+        # meta -> content -> meta; identity is (slot, value, actor), so the node is the same).
+        # Its demotion edge is lifted first: left standing, the two SUPERSEDES edges form a
+        # cycle and NEITHER value resolves active. Replay lands the same lift from the same op.
+        if any(F.nid(a) == assertion.id for a in slot_existing):
+            demoted_by = [tid for tid in explicit_ids if (tid, assertion.id) in set(supers)]
+            if demoted_by:
+                await graph_task(gx.queue, gx.graph_id, "delete_edges",
+                                 edge_ids=[make_edge(tid, assertion.id, DevRelations.SUPERSEDES)["id"] for tid in demoted_by])
+                supers = [p for p in supers if not (p[0] in demoted_by and p[1] == assertion.id)]
+                active_existing = F.active_assertions(slot_existing, supers)
 
     # Ordered predicate: newer auto-supersedes older active values (healthy evolution).
     if P.is_ordered(predicate):

@@ -1612,11 +1612,102 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
                                             "model": args.model}, arm=getattr(args, "arm", None))
         print(render("notes-ingest", res, args.format))
         return 0
+    if cmd == "notes-place":
+        # THE PLACEMENT PASS over a standing draft (81d6e669 (3); rulings 96be1528 (1)/(3)): no --rows = the brief
+        # (the page as it stands, keyed) under <lane>/passes/<slug>/place.md; --rows = the PLAN (role and move
+        # deltas against the standing facts + overlay) printed, nothing landed; --apply = journaled `assert`
+        # (point_role) + `place-point` ops — then `notes-render` re-derives the page.
+        from .notes_place import apply_placement_plan, plan_placement, render_place_brief
+        from .purenotes import (PURE_NOTES_KEY, load_deliverable_type, load_placements, load_point_roles,
+                                note_deliverable_type)
+        note_id = note_node_id(args.slug)
+        points = await load_points(gx, note_id)
+        if not points:
+            print(f"error: `{args.slug}` has no accepted points", file=sys.stderr)
+            return 1
+        roles = await load_point_roles(gx, points)
+        placements = await load_placements(gx, note_id, points)
+        tkey = await note_deliverable_type(gx, note_id) or PURE_NOTES_KEY
+        tprops = await load_deliverable_type(gx, tkey) or {}
+        role_map = dict((tprops.get("presentation_policy") or {}).get("point_roles") or {})
+        if not args.rows:
+            brief = Path(args.brief).expanduser() if args.brief else _notes_lane_root(args) / "passes" / args.slug / "place.md"
+            brief.parent.mkdir(parents=True, exist_ok=True)
+            brief.write_text(render_place_brief(points, slug=args.slug, roles=roles, placements=placements, role_map=role_map))
+            print(render("notes-place", {"slug": args.slug, "brief": str(brief), "points": len(points),
+                                         "roles": len(roles), "moves": sum(1 for v in placements.values() if v.get("after") is not None)},
+                         args.format))
+            return 0
+        try:
+            plan = plan_placement(points, _read_rows_file(Path(args.rows).expanduser()), roles=roles, placements=placements)
+        except (ValueError, json.JSONDecodeError) as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        if not args.apply:
+            print(render("notes-place", {"slug": args.slug, "plan": plan}, args.format))
+            return 0
+        res = await apply_placement_plan(gx, args.slug, plan, actor=args.actor)
+        if args.journal_path:
+            for verb, op_args in res.get("ops") or []:
+                append_write(args.journal_path, verb, op_args)
+        if res.get("error"):
+            print(f"error: {res['error']}", file=sys.stderr)
+        print(render("notes-place", {"slug": args.slug, "plan": plan, "applied": res}, args.format))
+        return 1 if res.get("error") else 0
+    if cmd == "notes-outline" and getattr(args, "slug", None):
+        # THE OUTLINE PASS over a STANDING DRAFT (81d6e669 (3); rulings 96be1528 (11), 776c13d3 (a)): no --rows =
+        # the brief (the live keyed points + the standing outline) under <lane>/passes/<slug>/; --rows = the PLAN
+        # (adds / retitles / re-parents / retracts, a synopsis edit) printed, nothing landed; --apply = the plan
+        # as journaled accept-point / edit-point / retract-point ops — then `notes-render` re-derives the page.
+        from .notes_outline import apply_outline_plan, outline_of, plan_outline, render_outline_brief
+        from .purenotes import STRUCTURE_KINDS, points_as_proposals, synopsis_of
+        if args.set:
+            print("error: --slug (a standing draft) and --set (a proposal set) are two modes — pass one", file=sys.stderr)
+            return 1
+        note_id = note_node_id(args.slug)
+        points = await load_points(gx, note_id)
+        if not points:
+            print(f"error: `{args.slug}` has no accepted points — outline its proposal set (--set + --pack) instead",
+                  file=sys.stderr)
+            return 1
+        unit = next((dict(p.get("unit") or {}) for p in points if p.get("unit")), {})
+        current = outline_of(points)
+        if not args.rows:
+            brief = Path(args.brief).expanduser() if args.brief else _notes_lane_root(args) / "passes" / args.slug / "outline.md"
+            brief.parent.mkdir(parents=True, exist_ok=True)
+            subs = [p for p in points if str(p.get("kind")) not in STRUCTURE_KINDS]
+            brief.write_text(render_outline_brief(points_as_proposals(subs), {"source": unit}, set_id=args.slug,
+                                                  current=current, synopsis=synopsis_of(points)))
+            print(render("notes-outline", {"slug": args.slug, "brief": str(brief), "points": len(subs),
+                                           "sections": len(current)}, args.format))
+            return 0
+        try:
+            plan = plan_outline(points, _read_rows_file(Path(args.rows).expanduser()))
+        except (ValueError, json.JSONDecodeError) as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        if not args.apply:
+            print(render("notes-outline", {"slug": args.slug, "plan": plan}, args.format))
+            return 0
+        key = _sibling_key(args.sibling or str(unit.get("graph") or ""))
+        if not key:
+            return 1
+        res = await apply_outline_plan(gx, args.slug, plan, siblings=siblings, manifests_dir=args.manifests_dir,
+                                       graph_key=key, actor=args.actor)
+        if args.journal_path:
+            # every op that landed is journaled, a later failure notwithstanding — the db and the journal never diverge
+            for verb, op_args in res.get("ops") or []:
+                append_write(args.journal_path, verb, op_args)
+        if res.get("error"):
+            print(f"error: {res['error']}", file=sys.stderr)
+        print(render("notes-outline", {"slug": args.slug, "plan": plan, "applied": res}, args.format))
+        return 1 if res.get("error") else 0
     if cmd in ("notes-index", "notes-merge", "notes-close", "notes-outline", "notes-judge"):
         # The drafting experiment's set verbs (work item 3a2c94eb) and the judge (1561551e): files in, files out — no graph write.
-        from .purenotes import (apply_judgements, apply_outline, close_open_refs, extra_list, merge_point_blocks,
-                                merge_point_proposals, open_reference_list, render_judge_brief, render_outline_brief,
-                                render_pairs_brief, render_reconcile_brief, unjudged_pairs, with_points_index)
+        from .notes_outline import apply_outline, render_outline_brief
+        from .purenotes import (apply_judgements, close_open_refs, extra_list, merge_point_blocks, merge_point_proposals,
+                                open_reference_list, render_judge_brief, render_pairs_brief, render_reconcile_brief,
+                                unjudged_pairs, with_points_index)
         root = _notes_lane_root(args)
         every = load_notes_propsets(root / "proposals")
 
@@ -1699,9 +1790,13 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
             got = _briefs(res["proposals"], Path(out["set_dir"]), out["set_id"])
             print(render("notes-judge", {**out, "stats": res["stats"], "folded": len(res["folded"]), "briefs": got}, args.format))
             return 0
+        if cmd == "notes-outline" and not (args.set and args.pack):
+            print("error: notes-outline takes --slug <draft> (the draft mode) or --set <proposal set> --pack <whole pack json> "
+                  "(the set mode)", file=sys.stderr)
+            return 1
         pack = json.loads(Path(args.pack).expanduser().read_text())
         if cmd == "notes-outline":
-            # The whole-source OUTLINE PASS (ruling bc62c727 (A)): no --rows = write the brief beside the set;
+            # The whole-source OUTLINE PASS over a SET (ruling bc62c727 (A); parents per 776c13d3 (a)): no --rows = write the brief beside the set;
             # --rows = apply the pass's answers -> a NEW set carrying the section + synopsis rows (point ids kept).
             chosen = _pick([args.set])
             if chosen is None:
@@ -1992,7 +2087,15 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
         if res.get("error"):
             return 1
         if args.journal_path and not args.no_write:
-            append_write(args.journal_path, "render-notes", res["args"])
+            # A re-render is journaled unless it repeats the LAST render of this draft (a true no-op). The
+            # journal dedups an op identical in verb + args over its WHOLE history (finding 4aa5d5b4), which
+            # would drop a render whose state toggled back to an earlier one, so the op carries `at`.
+            import time as _time
+            from cjm_context_graph_primitives.journal import read_journal as _read_journal
+            prev = [o for o in _read_journal(args.journal_path)
+                    if o.get("verb") == "render-notes" and (o.get("args") or {}).get("slug") == args.slug]
+            if not prev or (prev[-1].get("args") or {}).get("substance") != res["args"].get("substance"):
+                append_write(args.journal_path, "render-notes", {**res["args"], "at": round(_time.time(), 3)})
         return 0
     if cmd == "notes-promotion":
         res = await work_promotion_status(gx, siblings=siblings, graph_key=args.sibling,
@@ -2090,14 +2193,34 @@ def _add_notes_lane_parsers(sub) -> None:
     p.add_argument("--model", default=None, help="The judge's model (provenance)")
     p.add_argument("--out-dir", default=None, help="Lane root (default: <journal dir>/purenotes)")
 
-    p = sub.add_parser("notes-outline", help="The whole-source OUTLINE PASS (ruling bc62c727): without --rows, write the brief "
-                                             "(the set's keyed points + the section / synopsis contract) beside the set; with "
-                                             "--rows, apply the pass's answers — a NEW set with `section` + `synopsis` rows")
-    p.add_argument("--set", required=True, help="The (merged) proposal set id / prefix")
-    p.add_argument("--pack", required=True, help="The WHOLE-unit pack json the set's rows are numbered in")
-    p.add_argument("--rows", default=None, help="The outline pass's JSONL rows ({section, first}… then {synopsis})")
+    p = sub.add_parser("notes-outline", help="The whole-source OUTLINE PASS (rulings bc62c727 (A), 776c13d3 (a)): sections AND "
+                                             "their parents. On a proposal SET (--set + --pack): without --rows, write the brief "
+                                             "beside the set; with --rows, apply the answers — a NEW set with `section` + `synopsis` "
+                                             "rows. On a STANDING DRAFT (--slug): without --rows, write the brief (the live keyed "
+                                             "points + the standing outline); with --rows, print the PLAN (adds / retitles / "
+                                             "re-parents / retracts); with --apply, land it as journaled ops — then notes-render")
+    p.add_argument("--set", default=None, help="Set mode: the (merged) proposal set id / prefix")
+    p.add_argument("--pack", default=None, help="Set mode: the WHOLE-unit pack json the set's rows are numbered in")
+    p.add_argument("--slug", default=None, help="Draft mode: the standing draft's slug")
+    p.add_argument("--rows", default=None, help="The outline pass's JSONL rows ({section, first[, parent]}… then {synopsis})")
+    p.add_argument("--brief", default=None, help="Draft mode: where to write the brief (default <lane>/passes/<slug>/outline.md)")
+    p.add_argument("--apply", action="store_true", help="Draft mode: land the plan (journaled accept-point / edit-point / retract-point)")
+    p.add_argument("--sibling", default=None, help="Draft mode: the sibling graph key (default: the points' unit graph)")
     p.add_argument("--model", default=None, help="The outline pass's model (provenance)")
     p.add_argument("--out-dir", default=None, help="Lane root (default: <journal dir>/purenotes)")
+    p.add_argument("--actor", default=os.environ.get("CJM_ACTOR") or "user:cli")
+
+    p = sub.add_parser("notes-place", help="The PLACEMENT PASS over a standing draft (rulings 96be1528 (1)/(3)): roles (meta -> "
+                                           "the front section, aside -> omitted; facts on the shared point) and moves (a point "
+                                           "beside the topic it belongs with; the deliverable's PLACED overlay). Without --rows, "
+                                           "write the brief (the page as it stands, keyed); with --rows, print the PLAN (deltas); "
+                                           "with --apply, land it as journaled assert + place-point ops — then notes-render")
+    p.add_argument("--slug", required=True, help="The standing draft's slug")
+    p.add_argument("--rows", default=None, help="The pass's JSONL rows ({point, role, why} and {point, section, after} deltas)")
+    p.add_argument("--brief", default=None, help="Where to write the brief (default <lane>/passes/<slug>/place.md)")
+    p.add_argument("--apply", action="store_true", help="Land the plan (journaled assert / place-point ops)")
+    p.add_argument("--out-dir", default=None, help="Lane root (default: <journal dir>/purenotes)")
+    p.add_argument("--actor", default=os.environ.get("CJM_ACTOR") or "user:cli")
 
     p = sub.add_parser("notes-close", help="Apply a reconciler's closures ({ref, target} rows) to a merged set's hinted open "
                                            "references — mechanically checked; writes a new set with the SAME proposal ids")

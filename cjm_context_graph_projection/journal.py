@@ -75,7 +75,7 @@ JOURNAL_VERBS = ("decide", "alias", "assert", "link", "unlink", "section", "new-
                  "retract-session", "pull-transcript", "mint-messages", "edit-message",
                  "derive-message", "procedure", "propose",
                  "deliverable-type", "accept-point", "retract-point", "edit-point", "render-notes",
-                 "render-work-page", "rehome-points")
+                 "render-work-page", "rehome-points", "place-point")
 
 
 def m3_baseline_import(
@@ -313,6 +313,12 @@ async def _apply_op(gx: GraphHandle, op: Dict[str, Any]) -> str:
         # carries `point_set` lands under the set directly); a no-op when nothing is left.
         from .purenotes import rehome_points
         await rehome_points(gx, a["slug"], actor=a.get("actor", "user:cli"))
+    elif verb == "place-point":
+        # The deliverable's overlay on one point (96be1528 (3)/(7)): the PLACED edge re-landed
+        # from the journaled fields; a point or section retracted later = a tolerated no-op.
+        from .purenotes import place_point
+        await place_point(gx, a["slug"], a["key"], a.get("section_key", ""), after=a.get("after"),
+                          refs_shown=a.get("refs_shown"), actor=a.get("actor", "user:cli"))
     elif verb == "render-notes":
         # The body is a FUNCTION of the Points: replay re-derives the same Sections graph-only
         # (write_md=False — the staging file is emit's job), landing after the accepts in
@@ -478,7 +484,7 @@ def touched_node_ids(
     elif verb in ("retract-point", "edit-point"):
         if a.get("point_id"):
             out.append(a["point_id"])
-    elif verb in ("render-notes", "render-work-page", "rehome-points"):
+    elif verb in ("render-notes", "render-work-page", "rehome-points", "place-point"):
         if a.get("slug"):
             out.append(note_node_id(a["slug"]))
     elif a.get("repo_key") and a.get("module_path"):
