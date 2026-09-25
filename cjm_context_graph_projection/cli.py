@@ -1386,6 +1386,17 @@ async def _dispatch(args) -> int:
             # --out is the canonical surface; mirror_paths (config) are kept in sync
             # too (the M3 cutover: the auto-loaded MEMORY.md is a generated mirror).
             targets = [Path(args.out)] + [Path(p) for p in res.get("mirror_paths", [])]
+            # The surface budget is MEASURED on every write / check (surface_budget):
+            # per-section bytes and the lock bodies' share of the harness ceiling —
+            # the line the session-end ritual reads instead of a remembered number.
+            b = res.get("budget") or {}
+            sizes = " · ".join(f"{k} {v}" for k, v in (res.get("sizes") or {}).items())
+            budget_line = (f"onboarding budget: surface {b.get('total')} B of {b.get('ceiling')} "
+                           f"(headroom {b.get('headroom')}) · locks {b.get('lock_bytes')} B of "
+                           f"{b.get('lock_budget')} allowed"
+                           + (" ⚠ LOCK BODIES OVER BUDGET — compact the locks (promote to DECs)"
+                              if b.get("over") else "")
+                           + f"\n  sections: {sizes}")
             if args.check:
                 drift = any((t.read_text() if t.exists() else None) != res["markdown"]
                             for t in targets)
@@ -1393,6 +1404,7 @@ async def _dispatch(args) -> int:
                 print(f"onboarding: drift={drift} present={present} "
                       f"anchor={res['anchor']!r} missing_refs={res['missing_refs']} "
                       f"-> {', '.join(str(t) for t in targets)}")
+                print(budget_line)
                 return 1 if drift else 0
             if args.write:
                 for t in targets:
@@ -1400,6 +1412,7 @@ async def _dispatch(args) -> int:
                 print(f"onboarding: wrote {len(res['markdown'].encode())} bytes "
                       f"anchor={res['anchor']!r} missing_refs={res['missing_refs']} "
                       f"-> {', '.join(str(t) for t in targets)}")
+                print(budget_line)
                 return 0
             # Default: print the surface verbatim (the viewer — `onboarding > file` is faithful).
             sys.stdout.write(res["markdown"])

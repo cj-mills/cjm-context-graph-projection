@@ -93,6 +93,20 @@ def _load_mirror_paths(
     return []
 
 
+def _load_ceiling(
+    config_path: Optional[str],  # JSON config (optional key `surface_ceiling`, bytes)
+) -> int:  # The surface byte ceiling the budget meters against
+    """The harness's auto-memory ceiling for MEMORY.md — config DATA, default 24,400 bytes.
+
+    Absent key -> the default; present -> that number. Never a remembered
+    sentence in a lock body (the stale "<= ~8 KB" guardrail this replaces)."""
+    if config_path and Path(config_path).exists():
+        cfg = json.loads(Path(config_path).read_text())
+        if cfg.get("surface_ceiling"):
+            return int(cfg["surface_ceiling"])
+    return 24_400
+
+
 def _short(text: Any, limit: int = 70) -> str:
     """Cap a hub title to one bounded line."""
     s = " ".join(str(text or "").split())
@@ -169,6 +183,32 @@ async def _render_manual(
     return _render_manual_block(note_id, sections), note_id
 
 
+def surface_budget(
+    sizes: Dict[str, int],       # Rendered bytes per surface section (intro, manual, portfolio, anchor, frontier, sessions, coverage)
+    lock_bytes: int,             # Bytes of the hand-authored LOCK bodies (the only non-derived text)
+    ceiling: int = 24_400,       # The harness's auto-memory budget for MEMORY.md (bytes)
+    margin: int = 2_048,         # Headroom kept free for derived sections to grow between re-locks
+) -> Dict[str, Any]:  # {total, ceiling, derived, lock_bytes, lock_budget, headroom, over}
+    """Pure: the lock budget MEASURED from this projection, never remembered.
+
+    The surface has one hard constraint — the harness ceiling — and only the
+    lock bodies are hand-authored; everything else is derived and drifts (the
+    three recent-session titles alone moved ~2 KB in a sitting). A remembered
+    number ("the two lock bodies <= ~8 KB", written into the portfolio lock
+    when the config still carried a 7.7 KB manual) went stale the moment the
+    manual moved on-graph (47eec450), and was being exceeded silently. So the
+    budget is derived on every write: lock_budget = ceiling - (total bytes
+    that are NOT lock text) - margin; `over` when the locks exceed it, and
+    `headroom` = what the whole surface still has under the ceiling. Both
+    render on the CLI's --write / --check line (the ritual reads it anyway)."""
+    total = sum(int(v) for v in sizes.values())
+    derived = max(total - int(lock_bytes), 0)
+    lock_budget = max(int(ceiling) - derived - int(margin), 0)
+    return {"total": total, "ceiling": int(ceiling), "derived": derived,
+            "lock_bytes": int(lock_bytes), "lock_budget": lock_budget,
+            "headroom": int(ceiling) - total, "over": int(lock_bytes) > lock_budget}
+
+
 def _render_coverage(overview: Dict[str, Any]) -> str:
     """Render the one-line by-kind coverage roster (auto-derived).
 
@@ -231,8 +271,9 @@ async def project_onboarding(
         "mid-session — if this copy might predate the last `onboarding --write` "
         "(e.g. a harness snapshot from session start), re-read it from disk."
     )
+    lock_bytes: List[int] = []
     port_md, missing = await _render_anchor_lead(gx, portfolio_id, structure,
-                                                "## Portfolio (cross-cutting)")
+                                                "## Portfolio (cross-cutting)", lock_bytes)
     roster = ["**Anchors** (each carries its own lock + pins; enter one with `--anchor <slug>` "
               "or config `active_anchor` — only the ACTIVE anchor's lead renders below):"]
     for aid in anchor_ids:
@@ -248,7 +289,7 @@ async def project_onboarding(
     parts = [f"# Project Memory — Onboarding Surface\n\n{intro}", manual_md, port_md]
     if active_id != portfolio_id:
         a_md, a_missing = await _render_anchor_lead(
-            gx, active_id, structure, f"## Active anchor — {active_label}")
+            gx, active_id, structure, f"## Active anchor — {active_label}", lock_bytes)
         parts.append(a_md)
         missing = missing + a_missing
     frontier = await readiness(gx)
@@ -258,8 +299,17 @@ async def project_onboarding(
                                   active_label, structure["priority"]))
     parts.append(await _render_sessions(gx))
     parts.append(_render_coverage(await graph_overview(gx)))
+    # The budget is MEASURED from this projection (surface_budget): per-section
+    # bytes + the lock bodies' share, against the harness ceiling (config
+    # `surface_ceiling` overrides the default — data, not a remembered number).
+    names = ["intro", "manual", "portfolio", "anchor", "frontier", "sessions", "coverage"]
+    if active_id == portfolio_id:
+        names.remove("anchor")
+    sizes = {n: len(p.encode()) + 2 for n, p in zip(names, parts) if p}
+    budget = surface_budget(sizes, sum(lock_bytes), ceiling=_load_ceiling(config_path))
     return {"markdown": "\n\n".join(p for p in parts if p) + "\n",
             "anchor": active_label, "manual": manual_id, "missing_refs": missing,
+            "sizes": sizes, "budget": budget,
             "mirror_paths": _load_mirror_paths(config_path)}
 
 
@@ -358,12 +408,14 @@ async def _render_anchor_lead(
     anchor_id: str,             # The anchor node whose lead to render
     structure: Dict[str, Any],  # The _lead_structure result
     heading: str,               # The section heading (e.g. "## Portfolio (cross-cutting)")
+    lock_bytes: Optional[List[int]] = None,  # Accumulator: the rendered lock body's byte size (for surface_budget)
 ) -> Tuple[str, List[str]]:  # (markdown, missing ref ids)
     """Render one anchor's LEAD: lock body + pins grouped by role + pinned registers.
 
     A pin whose target no longer resolves renders as ⚠ MISSING and is returned in
     the missing list (the stale-pin signal) — never silently dropped; a lockless
-    anchor says so LOUDLY instead of falling back to hand-rolled prose."""
+    anchor says so LOUDLY instead of falling back to hand-rolled prose. The lock
+    body's size lands in `lock_bytes` — the hand-authored text the budget meters."""
     missing: List[str] = []
     lines: List[str] = [heading]
     lock_id = structure["lock_of"].get(anchor_id)
@@ -372,7 +424,10 @@ async def _render_anchor_lead(
         if res.get("error"):
             lines.append(f"_(lock note {lock_id[:8]} unreadable: {res['error']})_")
         else:
-            lines.append(_strip_frontmatter(str(res.get("text", ""))).strip())
+            body = _strip_frontmatter(str(res.get("text", ""))).strip()
+            lines.append(body)
+            if lock_bytes is not None:
+                lock_bytes.append(len(body.encode()))
     else:
         lines.append("_(NO LOCK NOTE asserted for this anchor — author a `role=lock` note ABOUT it)_")
     pin_list = structure["pins"].get(anchor_id, [])

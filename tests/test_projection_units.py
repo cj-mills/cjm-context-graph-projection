@@ -244,6 +244,28 @@ def test_render_manual_block_head_plus_index_and_budget():
     assert no_head.splitlines()[1].startswith("↳ `read deadbeef`")
 
 
+def test_surface_budget_is_measured_from_the_projection_not_remembered():
+    # The lock budget = ceiling - derived bytes - margin, re-derived on every
+    # write; the remembered "<= ~8 KB" sentence went stale the moment the
+    # manual moved on-graph (47eec450) and was exceeded silently.
+    from cjm_context_graph_projection.onboarding import surface_budget
+    sizes = {"intro": 500, "manual": 1_500, "portfolio": 6_000, "anchor": 6_500,
+             "frontier": 1_500, "sessions": 2_000, "coverage": 300}
+    b = surface_budget(sizes, lock_bytes=10_400, ceiling=24_400, margin=2_048)
+    assert b["total"] == 18_300 and b["derived"] == 7_900
+    assert b["lock_budget"] == 24_400 - 7_900 - 2_048 == 14_452
+    assert b["headroom"] == 6_100 and b["over"] is False
+    # Derived sections grow (three long session titles): the SAME locks are now over.
+    grown = dict(sizes, sessions=8_500)
+    b2 = surface_budget(grown, lock_bytes=10_400)
+    assert b2["derived"] == 14_400 and b2["lock_budget"] == 7_952 and b2["over"] is True
+    assert b2["headroom"] == 24_400 - 24_800 == -400
+    # A config ceiling override is honored; budgets never go negative.
+    b3 = surface_budget(sizes, lock_bytes=10_400, ceiling=12_000)
+    assert b3["lock_budget"] == 2_052 and b3["over"] is True
+    assert surface_budget({"a": 30_000}, lock_bytes=0)["lock_budget"] == 0
+
+
 def test_render_explore_complete_vs_refacet():
     complete = render("explore", {"task": "t", "filters": [{"axis": "kind", "value": "Decision"}],
                                   "total": 2, "complete": True,
