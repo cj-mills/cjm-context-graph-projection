@@ -16,10 +16,13 @@ from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.identity import note_node_id
 
 from .notes_outline import outline_of
-from .purenotes import (_fmt_ts, _sort_key, effective_roles, GLOSSARY_KIND, group_points,
-                        place_point, points_as_proposals, points_index, STRUCTURE_KINDS)
+from .purenotes import (_fmt_ts, _sort_key, effective_roles, elided_point, GLOSSARY_KIND,
+                        group_points, place_point, points_as_proposals, points_index,
+                        STRUCTURE_KINDS)
 from .runtime import GraphHandle
 from .write import assert_value
+
+ELIDED_TAG = "elided: no line on the page, its children stand in its place"   # the brief's tag on a point the type elides by kind (ruling 15657521 (2))
 
 
 def _page_index(
@@ -63,6 +66,7 @@ def render_place_brief(
     roles: Optional[Dict[str, str]] = None,             # load_point_roles output: the standing facts (shown as tags)
     placements: Optional[Dict[str, Dict[str, Any]]] = None,  # load_placements output: the standing moves (shown as tags; they shape the order too)
     role_map: Optional[Dict[str, Any]] = None,          # the type's `point_roles` map (the front section's title, what each role does)
+    kind_map: Optional[Dict[str, Any]] = None,          # the type's `point_kinds` map (an elided kind renders no line; tagged here so a reader can keep one)
 ) -> str:  # The placement pass's brief (markdown)
     """The brief of the PLACEMENT PASS (rulings 96be1528 (1)/(3)): the keyed points laid out
     UNDER THE CONFIRMED OUTLINE'S HEADINGS in the order the page renders them (the standing
@@ -71,16 +75,24 @@ def render_place_brief(
     the notes loses nothing by (aside — case by case, 6752db0a (10)), and which points sit
     away from the topic they belong with (a question held for the end, an answer to an
     earlier thread). Rows are DELTAS against what stands; content is the default and is
-    never listed except to undo a departure."""
+    never listed except to undo a departure. A point the type ELIDES by kind (ruling
+    15657521 (2): a question) keeps its place in the tree here, tagged, since the reader
+    may keep it with a `content` row — on the page it renders no line and its children
+    stand in its place."""
     index, by_key, _by_ikey = _page_index(points)
     unit = next((dict(p.get("unit") or {}) for p in points if p.get("unit")), {})
     rmap = {k: v for k, v in dict(role_map or {}).items() if not str(k).startswith("_")}
+    kmap = {k: v for k, v in dict(kind_map or {}).items() if not str(k).startswith("_")}
     front_title = str(rmap.get("front_section_title") or "About this lecture")
     tags = {k: [f"role: {v}"] for k, v in (roles or {}).items()}   # by POINT key; the index key prints
     for k, pl in (placements or {}).items():
         if pl.get("after") is not None:
             follows = by_key[str(pl["after"])]["key"] if str(pl.get("after") or "") in by_key else "the section end"
             tags.setdefault(k, []).append(f"moved after {follows}")
+    if kmap:
+        for p in points:
+            if elided_point(p, roles or {}, kmap):
+                tags.setdefault(str(p.get("key")), []).append(ELIDED_TAG)
     pts = [p for p in sorted(points, key=_sort_key) if str(p.get("kind")) not in ("synopsis", GLOSSARY_KIND)]
     groups = group_points(pts, unit, placements)
     out = [f"# Placement pass — draft `{slug}`", "",
@@ -107,10 +119,16 @@ def render_place_brief(
            "after, or \"\" for the section's end. The usual case is a question held for the end whose answer leans on "
            "an earlier point (its `→` back-links name the topic), or an answer to an earlier thread. Source order is "
            "the default and moving breaks the lecture's own flow, so a handful of moves is the expected outcome, "
-           "never a reshuffle; `\"section\": \"\"` undoes a standing move.",
-           "* Never move a section (a title is not a point) or an indented child (it moves with its parent). Rows "
-           "only — no prose, no code fences.", "",
-           "## The page as it stands", ""]
+           "never a reshuffle; `\"section\": \"\"` undoes a standing move."]
+    if kmap:
+        out.append(f"* ELIDED KINDS. A point tagged `{ELIDED_TAG.split(':')[0]}` ({', '.join(sorted(k for k, v in kmap.items() if v == 'elide'))}) "
+                   "renders NO line on this page — its value is the points beneath it, which stand in its place as "
+                   "TOP-LEVEL points (so one of them may be moved on its own key). `{\"role\": \"content\"}` on the "
+                   "elided point itself KEEPS its line — a question whose framing its answers need; any other role on it "
+                   "reaches its children as usual.")
+    out += ["* Never move a section (a title is not a point) or an indented child (it moves with its parent). Rows "
+            "only — no prose, no code fences.", "",
+            "## The page as it stands", ""]
     for h, tree, d in groups:
         if h:
             out += [f"{'#' * (2 + d)} {h}", ""]
@@ -124,13 +142,23 @@ def _read_place_rows(
     rows: List[Dict[str, Any]],            # The pass's rows: role deltas and move deltas
     index: List[Dict[str, Any]],           # points_index output — the keys the rows may name
     sections: List[Dict[str, Any]],        # outline_of output — the section titles a move may name
+    elided: Optional[set] = None,          # index keys of the points the type elides (their children are TOP-LEVEL on the page)
 ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:  # ({index key: {role, why}}, {index key: {section: section key | "", after}})
     """The pass's answer contract, checked loud on the first bad row: a row names a `point` of
     the index and carries EITHER a `role` (content | meta | aside, a `why` beside a departure)
     OR a `section` (the exact title of one section of the outline; "" = undo the standing
     move) with `after` (a TOP-LEVEL key of the index, or "" = the section's end); a move's
-    point is top-level; at most one role row and one move row per point."""
+    point is top-level; at most one role row and one move row per point. Top-level is what
+    the PAGE renders (ruling 15657521 (2)): a child of an elided point stands as a root there,
+    so it may move; a child of a shown point still moves with its parent."""
     entry = {e["key"]: e for e in index}
+    gone = set(elided or ())
+
+    def _shown_depth(k: str) -> int:   # the nesting the page gives the point: an elided parent makes it a root
+        par = str(entry[k].get("parent") or "")
+        if not par or par not in entry or par in gone:
+            return 0
+        return 1 + _shown_depth(par)
     by_title: Dict[str, List[Dict[str, Any]]] = {}
     for s in sections:
         by_title.setdefault(str(s["section"]).strip().casefold(), []).append(s)
@@ -154,7 +182,7 @@ def _read_place_rows(
             role_rows[key] = {"role": role, "why": str(a.get("why") or "").strip()}
             continue
         section = str(a.get("section") or "").strip()
-        if entry[key]["depth"]:
+        if _shown_depth(key):
             raise ValueError(f"placement row {n}: {key} is a child point — it moves with its parent")
         if key in move_rows:
             raise ValueError(f"placement row {n}: a second move for {key}")
@@ -171,7 +199,7 @@ def _read_place_rows(
         if after:
             if after not in entry:
                 raise ValueError(f"placement row {n}: `after` {after!r} is not a point of this draft")
-            if entry[after]["depth"]:
+            if _shown_depth(after):
                 raise ValueError(f"placement row {n}: `after` {after} is a child point — name a top-level point")
             if after == key:
                 raise ValueError(f"placement row {n}: {key} cannot follow itself")
@@ -185,23 +213,30 @@ def plan_placement(
     *,
     roles: Optional[Dict[str, str]] = None,                  # load_point_roles output: the standing facts
     placements: Optional[Dict[str, Dict[str, Any]]] = None,  # load_placements output: the standing overlay
+    kind_map: Optional[Dict[str, Any]] = None,               # the type's `point_kinds` map (an elided point's children are top-level; content on it is load-bearing)
 ) -> Dict[str, Any]:  # {"roles": [...], "moves": [...], "unmoves": [...], "stats"}
     """The pass's plan, mutating nothing: each row resolved to a point key and compared with what
     stands — a role equal to the standing FACT (not the inherited role) is a no-op, as is a
     move to the standing section after the standing key; `content` on a point with no fact is
-    a no-op too (content is the default). Reasons ride the plan for the journal's evidence."""
+    a no-op too (content is the default) — UNLESS the type elides the point by kind (ruling
+    15657521 (2)), where the explicit fact is what keeps its line. Reasons ride the plan for
+    the journal's evidence."""
     index, _by_pkey, entry = _page_index(points)
     sections = outline_of(points)
-    role_rows, move_rows = _read_place_rows(rows, index, sections)
     have_roles = dict(roles or {})
     have_moves = dict(placements or {})
     by_pid = {str(p.get("key")): p for p in points}
+    kmap = {k: v for k, v in dict(kind_map or {}).items() if not str(k).startswith("_")}
+    gone = {str(e["key"]) for e in index if elided_point(by_pid[str(e["proposal_id"])], have_roles, kmap)} if kmap else set()
+    role_rows, move_rows = _read_place_rows(rows, index, sections, elided=gone)
     role_plan: List[Dict[str, Any]] = []
     for k, r in role_rows.items():
         pk = str(entry[k]["proposal_id"])
         old = have_roles.get(pk)
-        if r["role"] == (old or P.POINT_ROLE_CONTENT) and (old is not None or r["role"] == P.POINT_ROLE_CONTENT):
-            continue
+        if old is not None and r["role"] == old:
+            continue   # already the standing fact
+        if old is None and r["role"] == P.POINT_ROLE_CONTENT and k not in gone:
+            continue   # content is the default — except on an elided point, where the fact keeps its line
         role_plan.append({"point": k, "key": pk, "id": str(by_pid[pk].get("id") or ""), "old": old or "", "new": r["role"],
                           "why": r["why"], "text": str(by_pid[pk].get("text") or "")[:80]})
     moves: List[Dict[str, Any]] = []
@@ -223,7 +258,7 @@ def plan_placement(
     return {"roles": role_plan, "moves": moves, "unmoves": unmoves,
             "stats": {"rows": len(rows), "roles": len(role_plan), "meta": sum(1 for r in role_plan if r["new"] == P.POINT_ROLE_META),
                       "aside": sum(1 for r in role_plan if r["new"] == P.POINT_ROLE_ASIDE),
-                      "moves": len(moves), "unmoves": len(unmoves), "points": len(index),
+                      "moves": len(moves), "unmoves": len(unmoves), "points": len(index), "elided": len(gone),
                       "front_after": sum(1 for k, v in eff.items() if v == P.POINT_ROLE_META),
                       "omitted_after": sum(1 for k, v in eff.items() if v == P.POINT_ROLE_ASIDE)}}
 

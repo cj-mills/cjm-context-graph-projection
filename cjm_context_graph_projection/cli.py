@@ -1630,16 +1630,19 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
         tkey = await note_deliverable_type(gx, note_id) or PURE_NOTES_KEY
         tprops = await load_deliverable_type(gx, tkey) or {}
         role_map = dict((tprops.get("presentation_policy") or {}).get("point_roles") or {})
+        kind_map = dict((tprops.get("presentation_policy") or {}).get("point_kinds") or {})   # ruling 15657521 (2): the elided kinds
         if not args.rows:
             brief = Path(args.brief).expanduser() if args.brief else _notes_lane_root(args) / "passes" / args.slug / "place.md"
             brief.parent.mkdir(parents=True, exist_ok=True)
-            brief.write_text(render_place_brief(points, slug=args.slug, roles=roles, placements=placements, role_map=role_map))
+            brief.write_text(render_place_brief(points, slug=args.slug, roles=roles, placements=placements, role_map=role_map,
+                                                kind_map=kind_map))
             print(render("notes-place", {"slug": args.slug, "brief": str(brief), "points": len(points),
                                          "roles": len(roles), "moves": sum(1 for v in placements.values() if v.get("after") is not None)},
                          args.format))
             return 0
         try:
-            plan = plan_placement(points, _read_rows_file(Path(args.rows).expanduser()), roles=roles, placements=placements)
+            plan = plan_placement(points, _read_rows_file(Path(args.rows).expanduser()), roles=roles, placements=placements,
+                                  kind_map=kind_map)
         except (ValueError, json.JSONDecodeError) as e:
             print(f"error: {e}", file=sys.stderr)
             return 1

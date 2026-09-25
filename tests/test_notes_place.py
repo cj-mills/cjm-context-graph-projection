@@ -172,3 +172,43 @@ def test_cli_placement_pass_lands_facts_and_overlay_and_replays_to_the_same_byte
     r = _run("--graph-db-path", rdb, "--journal-path", pj, "replay")
     assert r.returncode == 0, r.stderr or r.stdout
     assert _run("--graph-db-path", rdb, "read", note_node_id(slug)).stdout == final
+
+
+def test_an_elided_kind_renders_no_line_and_its_children_stand_in_its_place():
+    """Ruling 15657521 (2): the type's kind map elides a question — no line, its answers stand as
+    roots by their own roles, a fact on the question still flows down, an explicit content fact
+    keeps it, a back-link to it drops; the pass's brief tags it, its plan treats content on it
+    as load-bearing and its answers as top-level for a move; no map = the page unchanged."""
+    pts = _draft()
+    kind_map = {"question": "elide", "_gloss": "a question's value is the answer it drew"}
+    page = render_points(pts, timestamps="never", roles={}, role_map=ROLE_MAP, kind_map=kind_map)
+    assert "Why launch twice?" not in page and "\n## Streams\n\n- Streams do not share" in page
+    assert "\n- The warm-up." in page and "\n  - The warm-up." not in page                                    # the answer stands as a root
+    assert render_points(pts, timestamps="never") == render_points(pts, timestamps="never", kind_map={})    # no map: unchanged
+    kept = render_points(pts, timestamps="never", roles={"q": "content"}, role_map=ROLE_MAP, kind_map=kind_map)
+    assert "Why launch twice?" in kept and "\n  - The warm-up." in kept                                       # the escape hatch keeps the line and its nesting
+    front = render_points(pts, timestamps="never", roles={"q": "meta"}, role_map=ROLE_MAP, kind_map=kind_map)
+    assert front.startswith("## About this lecture\n\n- The warm-up.") and "Why launch twice?" not in front   # the fact flows to the answer
+    moved = render_points(pts, timestamps="never", roles={}, role_map=ROLE_MAP, kind_map=kind_map,
+                          placements={"q1": {"section": "S1", "after": ""}})
+    assert moved.index("The warm-up.") < moved.index("## Streams")                                            # a freed answer moves on its own key
+    carried = render_points(pts, timestamps="never", roles={}, role_map=ROLE_MAP, kind_map=kind_map,
+                            placements={"q": {"section": "S1", "after": ""}})
+    assert carried.index("The warm-up.") < carried.index("## Streams")                                        # the question's confirmed move carries its answer
+    linked = _draft() + [_pt("f", "claim", "As the question showed", 31)]
+    linked[-1]["refers_to"] = ["q"]
+    assert "(see" in render_points(linked, timestamps="never")
+    assert "(see" not in render_points(linked, timestamps="never", kind_map=kind_map)                         # a back-link to the elided point drops
+    brief = render_place_brief(pts, slug="x", roles={}, placements={}, role_map=ROLE_MAP, kind_map=kind_map)
+    assert "- `p006` [question] 00:24  Why launch twice?  [elided: no line on the page, its children stand in its place]" in brief
+    assert "* ELIDED KINDS. A point tagged `elided` (question)" in brief
+    plan = plan_placement(pts, [{"point": "p006", "role": "content"}, {"point": "p007", "section": "Kernel launches", "after": ""}],
+                          roles={}, placements={}, kind_map=kind_map)
+    assert [(r["key"], r["old"], r["new"]) for r in plan["roles"]] == [("q", "", "content")]                  # content on an elided question is load-bearing
+    assert [(m["key"], m["section"], m["after_key"]) for m in plan["moves"]] == [("q1", "S1", "")]            # the answer is top-level for a move
+    assert plan["stats"]["elided"] == 1
+    assert plan_placement(pts, [{"point": "p006", "role": "meta", "why": "logistics"}], roles={"q": "meta"}, placements={}, kind_map=kind_map)["roles"] == []
+    with pytest.raises(ValueError, match="child point"):
+        plan_placement(pts, [{"point": "p007", "section": "Kernel launches", "after": ""}], roles={}, placements={})   # no map: still a child
+    with pytest.raises(ValueError, match="child point"):
+        plan_placement(pts, [{"point": "p007", "section": "Kernel launches", "after": ""}], roles={"q": "content"}, placements={}, kind_map=kind_map)   # kept: a child again

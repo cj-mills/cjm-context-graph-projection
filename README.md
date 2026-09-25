@@ -277,6 +277,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `derived_description` _function_ — What the unit CONTAINS, from data the rendering already uses: the work (when the
 - `edit_point` _function_ — Edit an accepted point IN PLACE — the per-point repair the ch. 2 staging read demanded
 - `effective_roles` _function_ — Each point's role (ruling 96be1528 (1)): its own fact, else its parent's effective
+- `elided_point` _function_ — A point the TYPE elides by kind (ruling 15657521 (2)): the standalone lecture resource
 - `ensure_point_set` _function_ — Mint the (Source, unit)'s PointSet on first use and assert the Note RENDERS it — both
 - `extra_list` _function_ — Every EXTRA still pending in a set, keyed `x001`… in the set's order — the ids the judge
 - `group_points` _function_ — The page's sections. SYNTHESIZED (ruling bc62c727 (A)): when the points include

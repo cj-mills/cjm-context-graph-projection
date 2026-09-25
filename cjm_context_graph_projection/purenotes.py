@@ -2931,6 +2931,21 @@ def effective_roles(
             for p in points if str(p.get("kind")) not in STRUCTURE_KINDS}
 
 
+def elided_point(
+    p: Dict[str, Any],             # a load_points point
+    roles: Dict[str, str],         # load_point_roles output (the facts — not the inherited roles)
+    kind_map: Dict[str, Any],      # the type's `point_kinds` map: kind -> "elide" (any other value = shown)
+) -> bool:  # True = the type renders no line for this point; its children stand in its place
+    """A point the TYPE elides by kind (ruling 15657521 (2)): the standalone lecture resource
+    maps `question` to `elide` — a question's value to its reader is the answer it drew. The
+    escape hatch is the point's OWN explicit `content` fact (a question whose framing the
+    answers need keeps its line); any other fact on it flows to its children as usual, so a
+    meta question carries its answers to the front section without a line of its own. Pure."""
+    if str(kind_map.get(str(p.get("kind") or "")) or "") != "elide":
+        return False
+    return roles.get(str(p.get("key"))) != P.POINT_ROLE_CONTENT
+
+
 async def load_placements(
     gx: GraphHandle,
     note_id: str,                  # The deliverable Note
@@ -3707,6 +3722,7 @@ def render_points(
     roles: Optional[Dict[str, str]] = None,   # load_point_roles output: the `point_role` facts (None = every point is content)
     role_map: Optional[Dict[str, Any]] = None,  # the type's `point_roles` map: role -> "body" | "front-section" | "omit" (+ front_section_title); None = every role renders in the body
     placements: Optional[Dict[str, Dict[str, Any]]] = None,  # load_placements output: this deliverable's moves (None = order-derived membership)
+    kind_map: Optional[Dict[str, Any]] = None,  # the type's `point_kinds` map: kind -> "elide" (an elided point renders no line, its children stand in its place; None = every kind shown)
 ) -> str:  # The body markdown (after the preamble)
     """Render the body from the Points — deterministic, so a replayed `render-notes` derives
     the same Sections. EXPANDED (the public post): under the derived headings (`group_points`:
@@ -3733,13 +3749,29 @@ def render_points(
     # content) through the type's map — `omit` drops the point and its subtree, `front-section`
     # gathers the root's whole subtree into ONE derived section before the outline, in source
     # order; a draft with no facts, or a type with no map, renders every point in the body as
-    # it always did.
+    # it always did. THE KIND MAP (ruling 15657521 (2)): a kind the type ELIDES — the standalone
+    # resource's `question`, whose value to a reader is the answer it drew — renders no line;
+    # its children stand in its place as roots, each by its OWN effective role (a fact on the
+    # elided point still flows to them, so the roles are read BEFORE the elision), and a
+    # back-link to it drops with it. An explicit `content` fact on the point is the escape
+    # hatch (`elided_point`): a question whose framing the answers need keeps its line.
     rmap = {k: v for k, v in dict(role_map or {}).items() if not str(k).startswith("_")}
+    kmap = {k: v for k, v in dict(kind_map or {}).items() if not str(k).startswith("_")}
     front_title = str(rmap.get("front_section_title") or "About this lecture")
     front_pts: List[Dict[str, Any]] = []
+    role_of = effective_roles(pts, roles or {}) if roles else {}
+    if kmap:
+        gone = {str(p.get("key")) for p in pts if elided_point(p, roles or {}, kmap)}
+        pts = [p for p in pts if str(p.get("key")) not in gone]
+        if placements and gone:
+            # a child standing in an elided root's place inherits the root's PLACED move (its own wins),
+            # as its role does — so a confirmed move of a question carries its answers when the question goes
+            inherited = {str(p.get("key")): placements[str(p.get("parent_key"))] for p in pts
+                         if str(p.get("parent_key") or "") in gone and str(p.get("parent_key")) in placements
+                         and str(p.get("key")) not in placements}
+            placements = {**inherited, **placements}
     if roles and rmap:
-        role_of = effective_roles(pts, roles)
-        by_key = {str(p.get("key")): p for p in pts}
+        by_key = {str(p.get("key")): p for p in pts}   # the elided points are gone: their children are roots here
 
         def _root_role(p: Dict[str, Any]) -> str:   # the ROOT's role decides where the subtree renders
             cur, hops = p, 0
@@ -4127,8 +4159,9 @@ async def render_notes(
         resolved = await resolve_references(gx, references or [])
         card = render_source_card(unit_card, resolved)
     role_map = {k: v for k, v in dict(ppol.get("point_roles") or {}).items() if not str(k).startswith("_")}
+    kind_map = {k: v for k, v in dict(ppol.get("point_kinds") or {}).items() if not str(k).startswith("_")}
     body = render_points(points, rendering=rendering, timestamps=timestamps, style=style,
-                         roles=roles, role_map=role_map, placements=placements)
+                         roles=roles, role_map=role_map, placements=placements, kind_map=kind_map)
     if pre and not pre.endswith("\n\n"):
         pre = pre.rstrip("\n") + "\n\n"
     new_text = fm + pre + BODY_MARKER + "\n\n" + (card + "\n" if card else "") + body
