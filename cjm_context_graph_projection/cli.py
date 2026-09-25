@@ -3028,8 +3028,9 @@ def main() -> int:
     p_ob.add_argument("--out", default=f"{DEFAULT_REPOS}/cjm-substrate/.cjm/onboarding-surface.md",
                       help="Where to write/compare the surface")
     p_ob.add_argument("--config", default=f"{DEFAULT_REPOS}/cjm-substrate/.cjm/onboarding.config.json",
-                      help="JSON config (REQUIRED keys: active_anchor + how_to_query; optional "
-                           "mirror_paths) — no in-code fallback, fails loud (axis F)")
+                      help="JSON config (REQUIRED keys: active_anchor + how_to_query — a POINTER "
+                           "to the on-graph query manual Note (slug or id), never its text; "
+                           "optional mirror_paths) — no in-code fallback, fails loud (axis F)")
     p_ob.add_argument("--anchor", default=None,
                       help="Override the config's active_anchor (anchor slug or node id) — "
                            "topic selection precedes session start")

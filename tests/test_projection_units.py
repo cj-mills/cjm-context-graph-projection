@@ -7,6 +7,7 @@ from cjm_context_graph_projection.projection import (
     node_summary, node_title,
 )
 from cjm_context_graph_projection.onboarding import (
+    _render_manual_block,
     _load_seeds, _pin_target, _render_coverage, _render_frontier, _strip_frontmatter,
 )
 from cjm_context_graph_projection.render import _short, render
@@ -195,13 +196,52 @@ def test_load_seeds_fails_loud_never_falls_back(tmp_path):
     cfg.write_text(json.dumps({"active_anchor": "portfolio"}))
     with pytest.raises(RuntimeError, match="how_to_query"):
         _load_seeds(str(cfg))
-    cfg.write_text(json.dumps({"active_anchor": "portfolio", "how_to_query": "## Q",
+    cfg.write_text(json.dumps({"active_anchor": "portfolio", "how_to_query": "graph-query-manual",
                                "arc_lead": "LEGACY"}))
     with pytest.raises(RuntimeError, match="retired key"):
         _load_seeds(str(cfg))
-    cfg.write_text(json.dumps({"active_anchor": "portfolio", "how_to_query": "## Q",
+    # 47eec450: how_to_query is a POINTER (a Note slug or id) — prose there is REFUSED,
+    # because the manual's text lives on-graph and a config is for pointers only.
+    for prose in ("## The graphs & how to query\n- **dev-graph.db** …", "- a bullet", "`code`", "  "):
+        cfg.write_text(json.dumps({"active_anchor": "portfolio", "how_to_query": prose}))
+        with pytest.raises(RuntimeError, match="must be a POINTER"):
+            _load_seeds(str(cfg))
+    cfg.write_text(json.dumps({"active_anchor": "portfolio", "how_to_query": " graph-query-manual ",
                                "mirror_paths": ["/x"]}))
-    assert _load_seeds(str(cfg)) == ("portfolio", "## Q")
+    assert _load_seeds(str(cfg)) == ("portfolio", "graph-query-manual")
+    cfg.write_text(json.dumps({"active_anchor": "portfolio", "how_to_query": "cb2334cc"}))
+    assert _load_seeds(str(cfg)) == ("portfolio", "cb2334cc")
+
+
+def test_render_manual_block_head_plus_index_and_budget():
+    # 47eec450: the how-to-query block is the on-graph manual's preamble HEAD + a
+    # per-section `read <id>` index — never the config's text; document order
+    # (the `order` property) wins over list order, and an over-budget block gets
+    # a ⚠ line rather than a silent truncation (the size is authored on the note).
+    secs = [
+        {"id": "bbbbbbbb-2", "properties": {"anchor": "read-verbs", "title": "Read verbs — relevant · show",
+                                            "text": "- body", "order": 2}},
+        # raw is the lossless slot `author` writes; text is the Scope-A derivative that goes
+        # STALE after an author edit — the head must come from raw, never the stale text.
+        {"id": "aaaaaaaa-1", "properties": {"anchor": "_preamble", "title": "", "order": 0,
+                                            "raw": "**The split.** cg-read / cg-write.\n",
+                                            "text": "STALE pre-edit head"}},
+        {"id": "cccccccc-3", "properties": {"anchor": "env-truth", "title": "Env truth — envs-for",
+                                            "text": "- body", "order": 3}},
+    ]
+    out = _render_manual_block("deadbeef-0000", secs)
+    lines = out.splitlines()
+    assert lines[0] == "## The graphs & how to query"
+    assert lines[1] == "**The split.** cg-read / cg-write."
+    assert "`read deadbeef`" in lines[2]
+    assert lines[3] == "- `read bbbbbbbb` Read verbs — relevant · show"
+    assert lines[4] == "- `read cccccccc` Env truth — envs-for"
+    assert "⚠" not in out and "body" not in out  # section bodies never render on the surface
+    over = _render_manual_block("deadbeef-0000", secs, budget=40)
+    assert "⚠ how-to-query block" in over and "over its 40 B budget" in over
+    # No preamble on the note: the head is simply absent, the index still renders.
+    no_head = _render_manual_block("deadbeef-0000", secs[:1])
+    assert no_head.splitlines()[1].startswith("↳ `read deadbeef`")
 
 
 def test_render_explore_complete_vs_refacet():

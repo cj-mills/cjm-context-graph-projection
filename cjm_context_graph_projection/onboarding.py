@@ -19,7 +19,8 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from cjm_dev_graph_schema.vocab import DevRelations
+from cjm_context_graph_primitives.query import PropertyPredicate
+from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 
 from . import factlayer as F
 from .authoring import read_node
@@ -27,39 +28,35 @@ from .display import annotate_display, node_title
 from .projection import graph_overview
 from .readiness import readiness
 
+
 # --- Config contract (axis F: NO in-code seeds) ------------------------------
 # The surface DERIVES from the graph; the JSON config carries only data/pointers:
 #   active_anchor  REQUIRED  anchor note slug or node id (topic selection
 #                            precedes session start; the CLI --anchor overrides)
-#   how_to_query   REQUIRED  the substrate query-surface prose (cg-read/cg-write
-#                            wrappers + journal guardrails; routes to the
-#                            980a4b8e conventions endpoint when that ships)
+#   how_to_query   REQUIRED  a POINTER to the on-graph query manual (a memory
+#                            Note slug or node id / prefix — 47eec450): the
+#                            surface renders its preamble HEAD + a per-section
+#                            `read <id>` index; TEXT in this key is REFUSED
 #   mirror_paths   optional  extra --write targets (e.g. the auto-loaded MEMORY.md)
 # Retired keys (push_slugs / landmarks / arc_lead) FAIL LOUD in _load_seeds:
-# their content is ASSERTED on-graph now (locks / pins / priority facts).
-
-_HOW_TO_PULL = (
-    "## How to pull\n"
-    "1. At task start run `relevant \"<task>\"`; `explore` descends any facet IN FULL. "
-    "For PLANNING pulls, facet to `kind=Note` / `kind=Decision` — raw rankings are "
-    "code-symbol-dominated.\n"
-    "2. `show <id>` = structure; `read <id>` = verbatim body — pull BOTH before acting on a node.\n"
-    "3. Derived views: `readiness` (frontier) · `register-drift` · `filing` · `contradictions` · "
-    "`journal-window --session <key>` (the session lens).\n"
-    "4. Treat pulled content as the live source of truth; this surface is only the projected map."
-)
+# their content is ASSERTED on-graph now (locks / pins / priority facts). The
+# trailing "How to pull" block was in-code prose of the same class — it lives in
+# the manual Note's preamble now (47eec450), rendered by _render_manual_block.
 
 
 def _load_seeds(
     config_path: Optional[str],  # JSON config path (REQUIRED — no in-code fallback)
-) -> Tuple[str, str]:  # (active_anchor, how_to_query)
+) -> Tuple[str, str]:  # (active_anchor, how_to_query POINTER — a Note slug or id)
     """Load + validate the onboarding config; FAIL LOUD, never fall back.
 
     Axis F retired the in-code DEFAULT_* seeds: a stale fallback silently
     projects an old surface, so a missing file/key is an ERROR (the pin-miss
     doctrine) — and a RETIRED key still present is too, because push_slugs/
     landmarks/arc_lead content lives on-graph now (locks / pins / priority
-    facts, DEC 2a76a457)."""
+    facts, DEC 2a76a457). `how_to_query` must be a POINTER (one whitespace-free
+    token: a memory Note slug or a node id / prefix): the manual's TEXT lives
+    on-graph (47eec450) — a config carrying prose there is REFUSED, because a
+    config is for pointers and settings, never content."""
     if not config_path or not Path(config_path).exists():
         raise RuntimeError(f"onboarding config missing: {config_path!r} — axis F has no "
                            "in-code fallback; supply JSON with active_anchor + how_to_query")
@@ -73,7 +70,13 @@ def _load_seeds(
         raise RuntimeError(f"onboarding config {config_path}: retired key(s) {retired} — "
                            "the lead is ASSERTED on-graph now (lock notes / pin.<role> / "
                            "priority facts, DEC 2a76a457); delete them")
-    return str(cfg["active_anchor"]), str(cfg["how_to_query"])
+    pointer = str(cfg["how_to_query"]).strip()
+    if not pointer or len(pointer.split()) != 1 or pointer.startswith(("#", "-", "*", "`")):
+        raise RuntimeError(f"onboarding config {config_path}: how_to_query must be a POINTER "
+                           "(a memory Note slug or node id / prefix) — the manual's text lives "
+                           "on-graph (47eec450); author it with new-note / add-section and put "
+                           "its slug here")
+    return str(cfg["active_anchor"]), pointer
 
 
 def _load_mirror_paths(
@@ -96,6 +99,76 @@ def _short(text: Any, limit: int = 70) -> str:
     return (s[: limit - 1].rstrip() + "…") if len(s) > limit else s
 
 
+def _render_manual_block(
+    note_id: str,                    # The manual Note's id
+    sections: List[Dict[str, Any]],  # The Note's Section wire dicts ({id, properties:{anchor, title, text, order}})
+    budget: int = 1536,              # Byte budget for the rendered block (⚠ when over — never truncated)
+) -> str:
+    """Render the how-to-query block: the manual's preamble HEAD + a per-section index.
+
+    The manual lives ON-GRAPH as a reference Note (work item 47eec450): its
+    `_preamble` section is the head every session reads (the db list, the
+    cg-read / cg-write split, the pull recipe, the journals guardrail); every
+    other section is one verb family, rendered as `read <id>` + its title so an
+    agent pulls exactly the family it needs instead of a 7 KB manual at boot.
+    The config's text is never rendered — a config is for pointers (DERIVATIVE
+    NEVER MISTAKEN FOR SOURCE, 60681b4f). Over budget renders a ⚠ line: the size
+    is authored on the note, so the fix is an on-graph edit, never a projector
+    change."""
+    def _p(s: Dict[str, Any], key: str) -> Any:
+        return (s.get("properties") or {}).get(key, s.get(key))
+
+    ordered = sorted(sections, key=lambda s: int(_p(s, "order") or 0))
+    # `raw` is the lossless slot `author` writes (the preamble carries no heading line, so
+    # raw == the head); `text` is the Scope-A derivative and goes STALE after an author edit
+    # (finding: author on a Section rewrites raw + content_hash only) — read raw first.
+    head = next((str(_p(s, "raw") or _p(s, "text") or "")
+                 for s in ordered if _p(s, "anchor") == "_preamble"), "")
+    lines = ["## The graphs & how to query", head.strip(),
+             f"↳ `read {note_id[:8]}` = the whole manual; per verb family:"]
+    for s in ordered:
+        if _p(s, "anchor") == "_preamble":
+            continue
+        lines.append(f"- `read {str(s.get('id') or '')[:8]}` {_short(_p(s, 'title'), 100)}")
+    block = "\n".join(line for line in lines if line)
+    size = len(block.encode())
+    if size > budget:
+        block += (f"\n⚠ how-to-query block {size} B over its {budget} B budget — "
+                  "trim the manual's preamble on-graph")
+    return block
+
+
+async def _render_manual(
+    gx: Any,   # The open graph context
+    ref: str,  # The config's how_to_query POINTER: a Note slug, or a node id / >= 6-hex prefix
+) -> Tuple[str, str]:  # (the rendered how-to-query block, the manual Note's id)
+    """Resolve the how-to-query manual (config POINTER -> on-graph Note) and render its head.
+
+    Slug first (the memory-lane identity), then id / unique prefix. FAILS LOUD
+    when nothing resolves, the prefix is ambiguous, or the target is not a Note
+    — a silently empty how-to-query block would strand every next session (the
+    pin-miss doctrine; the same stance `_load_seeds` takes on the config)."""
+    from .authoring import _label_of
+    from .projection import ambiguity_error, resolve_node_ref
+    hits = await F.load_label_where(gx, DevNodeKinds.NOTE, [PropertyPredicate("slug", "eq", ref)])
+    node = hits[0] if hits else None
+    if node is None:
+        res = await resolve_node_ref(gx, ref)
+        if "candidates" in res:
+            raise RuntimeError(f"how_to_query pointer: {ambiguity_error(ref, res['candidates'])}")
+        node = res.get("node")
+    if node is None:
+        raise RuntimeError(f"how_to_query pointer {ref!r} resolves to no Note (slug or id) — "
+                           "the manual lives on-graph (47eec450); mint it with new-note first")
+    if _label_of(node) != DevNodeKinds.NOTE:
+        raise RuntimeError(f"how_to_query pointer {ref!r} resolves to a {_label_of(node)}, not a Note")
+    note_id = str(F.nid(node) or "")
+    sections = [{"id": F.nid(s), "properties": dict(F.props(s))}
+                for s in await F.load_label_where(
+                    gx, DevNodeKinds.SECTION, [PropertyPredicate("note_id", "eq", note_id)])]
+    return _render_manual_block(note_id, sections), note_id
+
+
 def _render_coverage(overview: Dict[str, Any]) -> str:
     """Render the one-line by-kind coverage roster (auto-derived).
 
@@ -111,19 +184,22 @@ def _render_coverage(overview: Dict[str, Any]) -> str:
 
 async def project_onboarding(
     gx: Any,                              # The open graph context (gx.queue / gx.graph_id)
-    config_path: Optional[str] = None,    # JSON config (REQUIRED: active_anchor + how_to_query)
+    config_path: Optional[str] = None,    # JSON config (REQUIRED: active_anchor + how_to_query pointer)
     anchor: Optional[str] = None,         # Override the config's active_anchor (slug or id)
-) -> Dict[str, Any]:  # {markdown, anchor, missing_refs, mirror_paths}
+) -> Dict[str, Any]:  # {markdown, anchor, manual, missing_refs, mirror_paths}
     """Project the onboarding surface by WALKING the asserted lead structure.
 
-    Renders: intro + how-to-query (config data) -> the PORTFOLIO lead (lock body +
-    pins + pinned registers) -> the ACTIVE anchor's lead -> the DERIVED frontier
-    (readiness scoped to the anchor, `priority` facts as tags, awaiting-user /
-    closable / drift called out) -> recent sessions -> auto-derived coverage.
-    Fails LOUD on: missing/retired config keys, no (or many) role=portfolio
-    nodes, an unresolvable active_anchor. A pin whose target is gone renders as
-    ⚠ MISSING and lands in `missing_refs` — never silently dropped."""
-    active_anchor, how_to_query = _load_seeds(config_path)
+    Renders: intro + the how-to-query block (the on-graph manual Note's preamble
+    HEAD + a per-section `read <id>` index — the config only POINTS at the note,
+    47eec450) -> the PORTFOLIO lead (lock body + pins + pinned registers) -> the
+    ACTIVE anchor's lead -> the DERIVED frontier (readiness scoped to the anchor,
+    `priority` facts as tags, awaiting-user / closable / drift called out) ->
+    recent sessions -> auto-derived coverage. Fails LOUD on: missing/retired
+    config keys, prose in the pointer key, an unresolvable manual pointer, no
+    (or many) role=portfolio nodes, an unresolvable active_anchor. A pin whose
+    target is gone renders as ⚠ MISSING and lands in `missing_refs` — never
+    silently dropped."""
+    active_anchor, manual_ref = _load_seeds(config_path)
     if anchor:
         active_anchor = anchor
     structure = await _lead_structure(gx)
@@ -168,7 +244,8 @@ async def project_onboarding(
         mark = " ← ACTIVE" if aid == active_id else ""
         roster.append(f"- `{slug}` — {lock_part} · pins {len(structure['pins'].get(aid, []))}{mark}")
     port_md = port_md + "\n\n" + "\n".join(roster)
-    parts = [f"# Project Memory — Onboarding Surface\n\n{intro}", how_to_query, port_md]
+    manual_md, manual_id = await _render_manual(gx, manual_ref)
+    parts = [f"# Project Memory — Onboarding Surface\n\n{intro}", manual_md, port_md]
     if active_id != portfolio_id:
         a_md, a_missing = await _render_anchor_lead(
             gx, active_id, structure, f"## Active anchor — {active_label}")
@@ -181,9 +258,8 @@ async def project_onboarding(
                                   active_label, structure["priority"]))
     parts.append(await _render_sessions(gx))
     parts.append(_render_coverage(await graph_overview(gx)))
-    parts.append(_HOW_TO_PULL)
     return {"markdown": "\n\n".join(p for p in parts if p) + "\n",
-            "anchor": active_label, "missing_refs": missing,
+            "anchor": active_label, "manual": manual_id, "missing_refs": missing,
             "mirror_paths": _load_mirror_paths(config_path)}
 
 
