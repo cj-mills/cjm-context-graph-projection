@@ -100,6 +100,10 @@ def test_journal_window_view_joins_via_bulk_read(tmp_path, monkeypatch):
     monkeypatch.setenv("CJM_SESSION", "w1")
     append_write(jp, "link", {"source_id": A, "target_id": B, "relation": "REFERENCES"})
     append_write(jp, "assert", {"subject": ABSENT, "predicate": "task_state", "value": "done"})
+    # 9efa2330: a ref touched ONLY by unlink ops that no longer resolves is a deliberate
+    # dead-target RETRACTION, not a missing endpoint — rendered apart, counted apart.
+    gone = "ffffffff-0000-5000-8000-0000000000ee"
+    append_write(jp, "unlink", {"source_id": A, "target_id": gone, "relation": "REFERENCES"})
 
     async def go():
         await _build(db)
@@ -110,7 +114,12 @@ def test_journal_window_view_joins_via_bulk_read(tmp_path, monkeypatch):
     by_ref = {t["ref"]: t for t in res["touched"]}
     assert by_ref[A]["title"] == "Alpha" and by_ref[A]["label"] == "Decision"
     assert by_ref[ABSENT].get("missing") is True   # the audit surface survives the refactor
-    assert res["missing"] == 1
+    assert by_ref[gone].get("retracted") is True and not by_ref[gone].get("missing")
+    assert res["missing"] == 1 and res["retracted"] == 1
+    from cjm_context_graph_projection.render import render
+    out = render("journal-window", res, "human")
+    assert "↩ RETRACTED" in out and "1 retracted (dead-target unlinks)" in out
+    assert out.count("⚠ MISSING") == 1
 
 
 def test_full_graph_view_every_node_every_edge_cheap_titles(tmp_path):

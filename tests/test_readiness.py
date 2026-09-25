@@ -257,3 +257,19 @@ def test_render_readiness_captures_view_and_count():
     assert "⏸ deferred — **CAPTURE: later** `c2`" in out
     assert "🚌 riding _WORK ITEM: host_ `w1-full` (open) — **CAPTURE: rider** `c3`" in out
     assert "no work-items" not in out
+
+
+def test_anchor_matches_by_id_prefix_title_substring_or_slug():
+    # `readiness --anchor program-substrate-foundations` returned EMPTY twice: the
+    # filter knew id prefixes and title substrings only, and the slug the surface,
+    # the config and the lock roster all use matched neither. The slug leg closes it.
+    from cjm_context_graph_projection.readiness import anchor_matches
+    aid = "cd2c0c6c-e5a3-5469-8e2a-d3c7f11ffde1"
+    title, slug = "Program Substrate Foundations", "program-substrate-foundations"
+    assert anchor_matches("cd2c0c", aid, title, slug)                        # id prefix
+    assert anchor_matches("substrate found", aid, title, slug)               # title substring
+    assert anchor_matches("PROGRAM-SUBSTRATE-FOUNDATIONS", aid, title, slug)  # slug, any case
+    assert not anchor_matches("program-substrate-foundations", aid, title, "")  # no slug -> no match
+    assert not anchor_matches("program-flywheel", aid, title, slug)
+    assert not anchor_matches("program-substrate", aid, title, slug)          # slug is exact, not prefix
+    assert anchor_matches("", aid, title, slug)                               # empty query = no filter

@@ -53,6 +53,17 @@ def classify_orphaned_links(
                         for op in link_ops
                         if op.get("source_id") in resolved_ids
                         and op.get("target_id") in resolved_ids}
+    # The same live triples keyed by the journaled endpoint NAME (97e5bb4b (2)): a
+    # hand-made re-link to a same-named successor heals the orphan even when the
+    # proposal would have pointed elsewhere — the healed check used to key on the
+    # proposal's id alone, so 65 exact-name remaps kept re-proposing every run.
+    live_by_name: Set[tuple] = set()
+    for op in link_ops:
+        if op.get("source_id") in resolved_ids and op.get("target_id") in resolved_ids:
+            if op.get("target_label"):
+                live_by_name.add((op.get("source_id"), op.get("relation"), "target", op["target_label"]))
+            if op.get("source_label"):
+                live_by_name.add((op.get("target_id"), op.get("relation"), "source", op["source_label"]))
     orphans: List[Dict[str, Any]] = []
     seen: Set[tuple] = set()
     for op in link_ops:
@@ -68,7 +79,15 @@ def classify_orphaned_links(
             entry: Dict[str, Any] = {"side": side, "id": oid,
                                      "label": op.get(f"{side}_label")}
             label = entry["label"]
-            if label and code_names and code_bodies:
+            if label and code_names and label in code_names:
+                # Exact-name tier FIRST (97e5bb4b): the most common re-home — a
+                # kit promotion, a core absorption, a module split — keeps the
+                # symbol's NAME and only moves it, so a live symbol of the SAME
+                # name is the successor by construction. The body-mention tier
+                # below filters `n != label` and so never proposed it.
+                entry["proposal"] = {"name": label, "id": code_names[label],
+                                     "score": 1.0, "evidence": "exact-name"}
+            if label and code_names and code_bodies and "proposal" not in entry:
                 # Content beats name-shape (f2a04bc5): a symbol whose BODY
                 # mentions the retired name (docstring lineage, a rewrite's
                 # successor) is stronger evidence than any fuzzy name match —
@@ -94,12 +113,19 @@ def classify_orphaned_links(
             missing.append(entry)
         if not missing:
             continue
-        healed = all(
-            "proposal" in m
-            and ((op.get("source_id"), op.get("relation"), m["proposal"]["id"]) in live
-                 if m["side"] == "target"
-                 else (m["proposal"]["id"], op.get("relation"), op.get("target_id")) in live)
-            for m in missing)
+        def _healed(m: Dict[str, Any]) -> bool:
+            rel = op.get("relation")
+            if m["side"] == "target":
+                by_id = ("proposal" in m
+                         and (op.get("source_id"), rel, m["proposal"]["id"]) in live)
+                by_name = (op.get("source_id"), rel, "target", m.get("label")) in live_by_name
+            else:
+                by_id = ("proposal" in m
+                         and (m["proposal"]["id"], rel, op.get("target_id")) in live)
+                by_name = (op.get("target_id"), rel, "source", m.get("label")) in live_by_name
+            return bool(by_id or (m.get("label") and by_name))
+
+        healed = all(_healed(m) for m in missing)
         if healed:
             continue  # the proposed remap edge already exists live — suppressed
         orphans.append({"source_id": op.get("source_id"), "target_id": op.get("target_id"),

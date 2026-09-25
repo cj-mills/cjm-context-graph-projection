@@ -606,7 +606,15 @@ async def journal_window_view(
         item = dict(rec)
         node = by_id.get(sg["resolved"].get(rec["ref"], ""))
         if node is None:  # unresolvable OR ambiguous prefix — both stay visible
-            item["missing"] = True
+            # 9efa2330: a ref the window touched ONLY through `unlink` ops and that no
+            # longer resolves is a RETRACTION (a deliberate dead-target unlink — the
+            # window's whole evidence about it is edge removals), not an endpoint that
+            # vanished under a live link; the two used to render alike as ⚠ MISSING,
+            # inflating the count. ⚠ MISSING stays for a ref with any other touch.
+            if set(rec.get("verbs") or {}) == {"unlink"}:
+                item["retracted"] = True
+            else:
+                item["missing"] = True
         else:
             item["id"] = node["id"]
             item["label"] = node.get("label")
@@ -618,6 +626,7 @@ async def journal_window_view(
         base["window"]["labels"] = sorted(label_set)
     base["touched"] = out
     base["missing"] = sum(1 for i in out if i.get("missing"))
+    base["retracted"] = sum(1 for i in out if i.get("retracted"))
     return base
 
 

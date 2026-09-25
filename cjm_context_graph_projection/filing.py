@@ -32,7 +32,7 @@ facts + edges; there is no write path here.
 import math
 import re
 from collections import Counter
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.vocab import DevRelations
@@ -46,6 +46,7 @@ from .runtime import GraphHandle
 ANCHOR_ROLES = ("program", "arc", "north-star")
 PART_OF = "PART_OF"
 SHAPES = "SHAPES"
+FILING_ACK_PREDICATE = "filing_ack"  # `assert <item> filing_ack <anchor-id>`: a considered no on a refile (60f21ee1)
 
 WEIGHT_DIRECT = 2.0  # the item's own neighborhood contains the anchor
 WEIGHT_VOTE = 1.0    # a neighbor FILED under the anchor votes for it
@@ -81,6 +82,7 @@ def classify_filing(
     filed_under: Dict[str, Set[str]],  # node id -> the anchors it is PART_OF (any node, not just items)
     neighbors: Dict[str, Set[str]],    # node id -> its REFERENCES/SHAPES neighborhood (undirected)
     top_k: int = 3,                    # proposals kept per item
+    acked: Optional[Dict[str, Set[str]]] = None,  # item id -> anchors whose refile proposal was ACKED (a considered no)
 ) -> Dict[str, Any]:  # {unfiled: [...], refile: [...], counts}
     """Pure: partition open items into filed/unfiled and score anchor proposals.
 
@@ -89,9 +91,15 @@ def classify_filing(
     WEIGHT_CITES per neighbor that merely cites it. Proposes only — confirming
     mints the PART_OF edge elsewhere. A refile is proposed when a filed item's
     best anchor STRICTLY outscores every anchor it currently carries (ties keep
-    the standing filing — re-filing is supersession, never churn)."""
+    the standing filing — re-filing is supersession, never churn). An ACKED
+    refile (60f21ee1: `assert <item> filing_ack <anchor-id>` — the item is
+    deliberately filed by what it BUILDS, ruling e301caa2) is suppressed while
+    the proposal still names that anchor; a re-neighborhooding that raises a
+    DIFFERENT anchor re-proposes loudly, because the ack is data about one
+    (item, anchor) pair, not a mute."""
     unfiled: List[Dict[str, Any]] = []
     refile: List[Dict[str, Any]] = []
+    acked_refiles = 0
     for item in sorted(open_items):
         current = filed_under.get(item, set()) & anchors
         hood = neighbors.get(item, set()) - {item}
@@ -122,6 +130,9 @@ def classify_filing(
             best_id, best_score = ranked[0]
             if best_id not in current and all(
                     best_score > scores.get(c, 0.0) for c in current):
+                if best_id in (acked or {}).get(item, set()):
+                    acked_refiles += 1
+                    continue
                 refile.append({
                     "id": item, "current": sorted(current),
                     "proposal": {"anchor_id": best_id, "score": round(best_score, 2),
@@ -129,7 +140,7 @@ def classify_filing(
     counts = {"open_items": len(open_items), "anchors": len(anchors),
               "filed": len(open_items) - len(unfiled), "unfiled": len(unfiled),
               "with_proposal": sum(1 for u in unfiled if u["proposals"]),
-              "refile": len(refile)}
+              "refile": len(refile), "acked": acked_refiles}
     return {"unfiled": unfiled, "refile": refile, "counts": counts}
 
 
@@ -166,7 +177,19 @@ async def filing(
             neighbors.setdefault(src, set()).add(tgt)
             neighbors.setdefault(tgt, set()).add(src)
 
-    report = classify_filing(open_items, anchors, filed_under, neighbors, top_k=top_k)
+    # 60f21ee1: a considered "no" on a refile proposal is a journaled FACT —
+    # `assert <item> filing_ack <anchor-id>` — read here so the acked (item,
+    # anchor) pair stops re-proposing; a different anchor still proposes loudly.
+    acked: Dict[str, Set[str]] = {}
+    for slot_assertions in F.group_by_slot(assertions).values():
+        if F.prop(slot_assertions[0], "predicate") != FILING_ACK_PREDICATE:
+            continue
+        subject = F.prop(slot_assertions[0], "subject_id")
+        for a in F.active_assertions(slot_assertions, supers):
+            if subject and F.prop(a, "value"):
+                acked.setdefault(subject, set()).add(str(F.prop(a, "value")))
+    report = classify_filing(open_items, anchors, filed_under, neighbors, top_k=top_k,
+                             acked=acked)
     touch = _last_touch(assertions)
     report["unfiled"].sort(key=lambda u: touch.get(u["id"], 0.0), reverse=True)
 

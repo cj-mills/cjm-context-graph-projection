@@ -15,7 +15,7 @@ def test_classify_unfiled_item_with_filed_neighbor_gets_vote_proposal():
     assert u["proposals"][0]["anchor_id"] == "prog"
     assert u["proposals"][0]["evidence"] == [{"kind": "vote", "via": "neighbor"}]
     assert out["counts"] == {"open_items": 1, "anchors": 1, "filed": 0,
-                             "unfiled": 1, "with_proposal": 1, "refile": 0}
+                             "unfiled": 1, "with_proposal": 1, "refile": 0, "acked": 0}
 
 
 def test_classify_direct_anchor_reference_outranks_single_vote():
@@ -74,6 +74,26 @@ def test_classify_refile_only_when_strictly_better():
         neighbors={"item": {"n1", "n2"}})
     assert out2["refile"] == []
     assert out2["counts"]["filed"] == 1
+
+
+def test_classify_acked_refile_is_suppressed_until_a_different_anchor_emerges():
+    # 60f21ee1: a considered "no" (the item is filed by what it BUILDS, ruling
+    # e301caa2) is a journaled `filing_ack` fact — the acked (item, anchor) pair
+    # stops re-proposing; a stronger DIFFERENT anchor still proposes loudly.
+    anchors = {"A", "B", "C"}
+    filed = {"item": {"A"}, "n1": {"B"}, "n2": {"B"}, "n3": {"B"}}
+    neighbors = {"item": {"n1", "n2", "n3"}}
+    base = classify_filing({"item"}, anchors, filed, neighbors)
+    assert [r["id"] for r in base["refile"]] == ["item"]
+    assert base["refile"][0]["proposal"]["anchor_id"] == "B" and base["counts"]["acked"] == 0
+    acked = classify_filing({"item"}, anchors, filed, neighbors, acked={"item": {"B"}})
+    assert acked["refile"] == [] and acked["counts"]["acked"] == 1
+    # The neighborhood shifts to C: the ack was about B, so C proposes.
+    filed_c = {"item": {"A"}, "n1": {"C"}, "n2": {"C"}, "n3": {"C"}}
+    shifted = classify_filing({"item"}, anchors, filed_c, neighbors, acked={"item": {"B"}})
+    assert shifted["refile"][0]["proposal"]["anchor_id"] == "C" and shifted["counts"]["acked"] == 0
+    out = render("filing", {**acked, "anchors": [{"id": "A", "role": "program", "label": "A"}]}, "human")
+    assert "acked 1" in out and "filing_ack" in out
 
 
 def test_classify_no_anchors_everything_unfiled_without_proposals():

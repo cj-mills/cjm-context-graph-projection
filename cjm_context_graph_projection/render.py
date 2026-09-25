@@ -152,12 +152,15 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                          else "to NOW (open — live)")
         touched = obj.get("touched", [])
         missing = f" · {obj['missing']} missing from graph" if obj.get("missing") else ""
+        retracted = (f" · {obj['retracted']} retracted (dead-target unlinks)"
+                     if obj.get("retracted") else "")
         lines = [f"## Journal window — {' · '.join(parts)}",
                  f"_{obj.get('entries', 0)} journaled op(s) · {len(touched)} node(s) "
-                 f"touched{missing}_", ""]
+                 f"touched{missing}{retracted}_", ""]
         for t in touched:
             verbs = ", ".join(f"{v}×{n}" for v, n in sorted(t.get("verbs", {}).items()))
-            mark = "⚠ MISSING " if t.get("missing") else ""
+            mark = ("⚠ MISSING " if t.get("missing")
+                    else "↩ RETRACTED " if t.get("retracted") else "")
             title = t.get("title") or t.get("ref")
             label = f" · _{t['label']}_" if t.get("label") else ""
             lines.append(f"- {mark}**{title}**{label} `{t.get('id', t['ref'])}`")
@@ -721,8 +724,10 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         lines = ["## Filing (PART_OF program anchors)",
                  f"_open items {c.get('open_items', 0)} · filed {c.get('filed', 0)} · "
                  f"unfiled {c.get('unfiled', 0)} · with proposal {c.get('with_proposal', 0)} · "
-                 f"refile {c.get('refile', 0)}_  (propose only — confirm: "
-                 "`link <item> PART_OF <anchor>`)", ""]
+                 f"refile {c.get('refile', 0)}"
+                 + (f" · acked {c['acked']}" if c.get("acked") else "")
+                 + "_  (propose only — confirm: `link <item> PART_OF <anchor>`; a considered "
+                 "no on a refile: `assert <item> filing_ack <anchor-id>`)", ""]
         anchors = obj.get("anchors", [])
         if anchors:
             lines.append("**Anchors (role-asserted):**")

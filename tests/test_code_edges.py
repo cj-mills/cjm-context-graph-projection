@@ -106,3 +106,29 @@ def test_classify_body_mention_outranks_fuzzy_name_and_heals():
     # Without bodies the fuzzy tier still proposes, tagged as name evidence.
     out3 = classify_orphaned_links(ops, {"dec-1"}, code_names)
     assert out3[0]["missing"][0]["proposal"]["evidence"] == "name-similarity"
+
+
+def test_classify_exact_name_successor_proposed_first_and_hand_relink_heals():
+    # 97e5bb4b: a kit promotion / core absorption keeps the symbol's NAME — the
+    # exact-name live symbol is the successor by construction, and it used to be
+    # invisible: the body-mention tier filters `n != label`, the fuzzy tier ranks
+    # near-names. (1) exact-name outranks both tiers; (2) a hand-made re-link to a
+    # same-named live target heals even when no proposal id would have matched.
+    ops = [{"source_id": "dec", "relation": "SHAPES", "target_id": "tui-id",
+            "target_label": "plan_chunk_insert"}]
+    code_names = {"plan_chunk_insert": "core-id", "plan_chunk_split": "split-id"}
+    bodies = {"plan_chunk_split": "def plan_chunk_split():\n    'sibling of plan_chunk_insert'"}
+    out = classify_orphaned_links(ops, {"dec"}, code_names, code_bodies=bodies)
+    pr = out[0]["missing"][0]["proposal"]
+    assert pr == {"name": "plan_chunk_insert", "id": "core-id", "score": 1.0,
+                  "evidence": "exact-name"}
+    # The hand re-link (triage d058df50) carries the journaled label of its live
+    # target: healed by NAME, even with no code_names universe to propose from.
+    healed = ops + [{"source_id": "dec", "relation": "SHAPES", "target_id": "core-id",
+                     "target_label": "plan_chunk_insert"}]
+    assert classify_orphaned_links(healed, {"dec", "core-id"}) == []
+    assert classify_orphaned_links(healed, {"dec", "core-id"}, code_names, code_bodies=bodies) == []
+    # A re-link to a DIFFERENTLY named live target does not heal by name.
+    other = ops + [{"source_id": "dec", "relation": "SHAPES", "target_id": "split-id",
+                    "target_label": "plan_chunk_split"}]
+    assert len(classify_orphaned_links(other, {"dec", "split-id"})) == 1

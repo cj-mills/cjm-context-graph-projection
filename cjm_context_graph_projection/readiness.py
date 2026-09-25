@@ -73,6 +73,27 @@ def classify_readiness(
     return {"done": done, "ready": ready, "blocked": blocked}
 
 
+def anchor_matches(
+    query: str,          # The `--anchor` argument, any case
+    anchor_id: str,      # The anchor the item is filed under (PART_OF target)
+    label: str,          # That anchor's display title
+    slug: str = "",      # That anchor's slug property ("" when it has none)
+) -> bool:
+    """Pure: does an `--anchor` query name this anchor? id prefix, title substring, or slug.
+
+    The slug leg is the fix for `readiness --anchor program-substrate-foundations`
+    returning EMPTY (sighted twice): the surface, the onboarding config's
+    active_anchor and the lock roster all name anchors by SLUG, while the
+    filter only knew id prefixes and title substrings — a hyphenated slug
+    matched neither."""
+    q = query.strip().lower()
+    if not q:
+        return True
+    return (anchor_id.lower().startswith(q)
+            or q in (label or "").lower()
+            or (slug or "").lower() == q)
+
+
 def summarize_checks(
     task_state: Dict[str, str],       # node id -> ACTIVE task_state (items AND checks)
     checks_of: Dict[str, List[str]],  # work-item id -> its Check ids (CHECKS edges)
@@ -160,10 +181,17 @@ async def readiness(
     from .filing import PART_OF, derive_anchors
     anchors, _roles = derive_anchors(assertions, supers)
     filed: Dict[str, str] = {}
+    anchor_slug: Dict[str, str] = {}
     if anchors:
         for p_src, p_tgt in await F.load_edge_pairs(gx, PART_OF):
             if p_tgt in anchors and p_src not in filed:
                 filed[p_src] = p_tgt
+        # `--anchor <slug>` returned EMPTY (sighted twice): the filter matched an id
+        # prefix or a title substring only, and a slug (`program-substrate-foundations`)
+        # is neither — the surface, the config's active_anchor and the lock roster all
+        # name anchors by slug, so the frontier must resolve it too.
+        anchor_slug = {aid: str(F.prop(n, "slug") or "").lower()
+                       for aid, n in (await F.load_nodes(gx, sorted(anchors))).items()}
 
     open_ids = [e["id"] for bucket in (parts["ready"], parts["blocked"]) for e in bucket]
     closable_ids = sorted(i for i in open_ids if i in dod and dod[i]["open"] == [])
@@ -213,7 +241,7 @@ async def readiness(
             return False
         if anchor_l is not None:
             a = filed.get(nid)
-            if not a or not (a.lower().startswith(anchor_l) or anchor_l in _label(a).lower()):
+            if not a or not anchor_matches(anchor_l, a, _label(a), anchor_slug.get(a, "")):
                 return False
         facts = item_facts.get(nid, {})
         return all(v in facts.get(k, []) for k, v in where_pairs)
