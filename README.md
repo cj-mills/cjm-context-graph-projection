@@ -214,6 +214,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 ### `cjm_context_graph_projection.onboarding`
 
 - `project_onboarding` _function_ — Project the onboarding surface by WALKING the asserted lead structure.
+- `surface_budget` _function_ — Pure: the lock budget MEASURED from this projection, never remembered.
 
 ### `cjm_context_graph_projection.oracle`
 
@@ -354,6 +355,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 
 ### `cjm_context_graph_projection.readiness`
 
+- `anchor_matches` _function_ — Pure: does an `--anchor` query name this anchor? id prefix, title substring, or slug.
 - `classify_readiness` _function_ — Pure: partition work-items into done / ready / blocked from authored ground truth.
 - `honored_closable` _function_ — Pure: open items a DONE Decision points at via EVIDENCE_FOR / SUPERSEDES — closable
 - `readiness` _function_ — The derived ready/blocked/done frontier over authored `task_state` + `GATED_BY` edges.
