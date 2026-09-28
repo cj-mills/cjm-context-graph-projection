@@ -165,6 +165,7 @@ async def assert_value(
     actor: str = "agent:session",       # Who is claiming it
     evidence: Optional[List[str]] = None,  # Source-note/session/evidence node ids supporting the claim
     supersede: Optional[List[str]] = None, # Prior assertion ids OR values this claim supersedes
+    superseded_by: Optional[List[str]] = None,  # Assertion ids OR values on this slot that supersede THIS claim (a back-filled prior value, born superseded)
     asserted_at: Optional[float] = None,   # Override the timestamp (oracle uses last_verified semantics)
     method: Optional[str] = None,          # Derivation method (oracle/programmatic)
     subject_content_hash: Optional[str] = None,  # The subject's content hash this claim binds to (design 40622922); None = compute live for content-bearing subjects (replay passes the journaled one)
@@ -173,7 +174,13 @@ async def assert_value(
 
     Auto-supersedes older values on ordered predicates; records CONTRADICTS +
     returns the conflict on unordered disagreement; reports a soft signal on
-    untyped disagreement. Idempotent on re-assertion of the same value+actor."""
+    untyped disagreement. Idempotent on re-assertion of the same value+actor.
+
+    `superseded_by` BACK-FILLS history (ruling 96aff70e: a path a page lived at before): the
+    claim lands born superseded by the named assertions on its slot, so an old value joins
+    the slot without ever standing active beside the current one (no false contradiction,
+    no invented order among prior values). The inverse of `supersede`, same resolution rules,
+    refused loudly on a miss; a back-fill supersedes nothing itself."""
     # Replay window fallback (0d50b921 residual): assertions minted INSIDE a
     # replayed verb (alias's aka, check's born-open task_state) carry no explicit
     # asserted_at — date them to the op's journaled ts, not rebuild time. Live
@@ -247,8 +254,34 @@ async def assert_value(
                 supers = [p for p in supers if not (p[0] in demoted_by and p[1] == assertion.id)]
                 active_existing = F.active_assertions(slot_existing, supers)
 
+    # Back-fill targets (ruling 96aff70e): the assertions that supersede THIS claim, resolved
+    # on this slot exactly like `supersede` and refused the same way on any miss. A back-fill
+    # writes history only, so the ordering and content-hash passes below never run for it.
+    backfill_ids: List[str] = []
+    if superseded_by:
+        m = _match_supersede_targets(superseded_by, slot_existing, predicate)
+        if m["unmatched"] or m["ambiguous"]:
+            details = [await _diagnose_supersede_miss(gx, t, slot.id)
+                       for t in m["unmatched"]]
+            details += [f"`{a['token']}` is ambiguous on this slot — candidates: "
+                        + ", ".join(a["candidates"]) for a in m["ambiguous"]]
+            return {"error": "--superseded-by refused (nothing written): " + "; ".join(details),
+                    "subject": subject, "predicate": predicate, "value": value,
+                    "written": False}
+        backfill_ids = [t for t in m["ids"] if t != assertion.id]
+        cyclic = [t for t in backfill_ids if (assertion.id, t) in set(supers) or t in explicit_ids]
+        if cyclic:
+            return {"error": "--superseded-by refused (nothing written): this claim already "
+                             "supersedes " + ", ".join(c[:8] for c in cyclic)
+                             + " — the edge back would form a supersession cycle",
+                    "subject": subject, "predicate": predicate, "value": value,
+                    "written": False}
+        for tid in backfill_ids:
+            edges.append(make_edge(tid, assertion.id, DevRelations.SUPERSEDES))
+        born_superseded = bool(backfill_ids)
+
     # Ordered predicate: newer auto-supersedes older active values (healthy evolution).
-    if P.is_ordered(predicate):
+    if P.is_ordered(predicate) and not backfill_ids:
         for old in active_existing:
             old_id, old_val = F.nid(old), F.prop(old, "value", "")
             if old_id == assertion.id:
@@ -266,7 +299,7 @@ async def assert_value(
     # Approval binds to content (design 40622922): re-asserting the SAME value over CHANGED
     # content is a new claim (the hash is in its identity) that supersedes the stale approval
     # of that value; same value on unchanged content is the idempotent no-op it always was.
-    if assertion.subject_content_hash:
+    if assertion.subject_content_hash and not backfill_ids:
         for old in active_existing:
             old_id = F.nid(old)
             if (old_id != assertion.id and old_id not in superseded_ids

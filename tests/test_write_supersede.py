@@ -12,6 +12,9 @@ from pathlib import Path
 
 import pytest
 
+from cjm_context_graph_projection import factlayer as F
+from cjm_context_graph_projection.cli import _assert_journaled
+from cjm_context_graph_projection.journal import replay_journal
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
 from cjm_context_graph_projection.write import _match_supersede_targets, assert_value, decide
 
@@ -184,3 +187,64 @@ def test_explicit_supersede_honors_a_demotion_and_retired_is_terminal(tmp_path):
             assert active_values(d) == ["reviewed"]
 
     asyncio.run(go())
+
+
+def test_superseded_by_backfills_history_without_contradiction(tmp_path):
+    # Ruling 96aff70e: a page's prior paths join its site_path slot BORN SUPERSEDED by the
+    # current one (the star shape): never two active paths, never a CONTRADICTS edge.
+    db = str(tmp_path / "g.db")
+
+    async def go():
+        async with open_graph(db) as gx:
+            item = await _mint(gx, "WORK ITEM: back-fill fixture")
+            cur = await assert_value(gx, item, "site_path", "/posts/x/")
+            olds = [await assert_value(gx, item, "site_path", v, superseded_by=["/posts/x/"])
+                    for v in ("/Notes-on-X/", "/log/2020/09/21/X")]
+            assert all(o["born_superseded"] and not o["conflict"] and not o["multi_active"]
+                       and o["superseded"] == [] for o in olds)
+            supers = await F.load_supersedes(gx)
+            assert {(cur["assertion_id"], o["assertion_id"]) for o in olds} <= set(supers)
+            assert not await F.load_contradicts(gx)
+            slot = [a for a in await F.load_assertions(gx)
+                    if F.prop(a, "slot_id") == cur["slot_id"]]
+            assert [F.prop(a, "value") for a in F.active_assertions(slot, supers)] == ["/posts/x/"]
+            # Idempotent re-run; a miss and a cycle both REFUSE with nothing written.
+            again = await assert_value(gx, item, "site_path", "/Notes-on-X/",
+                                       superseded_by=["/posts/x/"])
+            assert not again.get("error") and again["assertion_id"] == olds[0]["assertion_id"]
+            miss = await assert_value(gx, item, "site_path", "/y/", superseded_by=["/nowhere/"])
+            assert miss.get("written") is False and "--superseded-by refused" in miss["error"]
+            cyc = await assert_value(gx, item, "site_path", "/posts/x/",
+                                     superseded_by=["/Notes-on-X/"])
+            assert cyc.get("written") is False and "cycle" in cyc["error"]
+
+    asyncio.run(go())
+
+
+def test_backfill_journals_and_replays_to_the_same_history(tmp_path):
+    # The journaled back-fill (superseded_by rides the assert op) replays into a fresh db
+    # as the SAME slot: the same assertion ids, SUPERSEDES pairs and single active path.
+    jp = str(tmp_path / "writes.jsonl")
+
+    async def live(gx):
+        for v, by in (("/posts/x/", None), ("/Notes-on-X/", ["/posts/x/"]),
+                      ("/X-2020/", ["/posts/x/"])):
+            res = await _assert_journaled(gx, jp, "fixture-page", "site_path", v,
+                                          actor="agent:test", superseded_by=by)
+            assert not res.get("error")
+
+    async def replayed(gx):
+        await replay_journal(gx, jp)
+
+    async def shape(db, write):
+        async with open_graph(db) as gx:
+            await write(gx)
+            slot = [a for a in await F.load_assertions(gx) if F.prop(a, "predicate") == "site_path"]
+            ids = {F.nid(a) for a in slot}
+            supers = sorted(p for p in await F.load_supersedes(gx) if p[0] in ids and p[1] in ids)
+            return (sorted(ids), supers,
+                    [F.prop(a, "value") for a in F.active_assertions(slot, supers)])
+
+    a = asyncio.run(shape(str(tmp_path / "a.db"), live))
+    b = asyncio.run(shape(str(tmp_path / "b.db"), replayed))
+    assert a == b and a[2] == ["/posts/x/"] and len(a[1]) == 2

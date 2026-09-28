@@ -176,6 +176,7 @@ async def _apply_op(gx: GraphHandle, op: Dict[str, Any]) -> str:
         await assert_value(gx, a["subject"], a["predicate"], a["value"],
                            actor=a.get("actor", "agent:session"),
                            evidence=a.get("evidence"), supersede=a.get("supersede"),
+                           superseded_by=a.get("superseded_by"),
                            asserted_at=op.get("ts"), method=a.get("method"),
                            subject_content_hash=a.get("subject_content_hash"))
     elif verb == "link":

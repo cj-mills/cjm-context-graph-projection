@@ -245,3 +245,28 @@ def test_born_post_is_draft_at_birth_and_emit_post_gates_on_published(tmp_path):
     assert r.returncode == 0, r.stderr or r.stdout
     r = _run("--graph-db-path", str(tmp_path / "replay.db"), "emit-post", note_id, "--no-write")
     assert r.returncode == 0 and "gate-post" in r.stdout, r.stderr or r.stdout   # dry-run verdict
+
+
+def test_assert_batch_cli_validates_first_then_journals_one_assert_per_line(tmp_path):
+    # assert-batch (the site_path pass, ruling 96aff70e): a malformed file refuses before ANY
+    # write; a good one journals one ORDINARY assert op per line, superseded_by riding only
+    # on the lines that set it, so replay needs no new op kind.
+    db, journal = str(tmp_path / "dev.db"), str(tmp_path / "writes.jsonl")
+    bad = tmp_path / "bad.jsonl"
+    bad.write_text('{"subject": "fixture-page", "predicate": "site_path", "value": "/posts/x/"}\n'
+                   '{"subject": "fixture-page"}\n')
+    r = _run("--graph-db-path", db, "--journal-path", journal, "assert-batch", str(bad))
+    assert r.returncode == 2 and "line 2 lacks predicate, value" in r.stderr
+    assert not Path(journal).exists() or read_journal(journal) == []
+
+    good = tmp_path / "good.jsonl"
+    lines = [{"subject": "fixture-page", "predicate": "site_path", "value": "/posts/x/"},
+             {"subject": "fixture-page", "predicate": "site_path", "value": "/Notes-on-X/",
+              "superseded_by": ["/posts/x/"]}]
+    good.write_text("".join(json.dumps(line) + "\n" for line in lines))
+    r = _run("--graph-db-path", db, "--journal-path", journal, "assert-batch", str(good))
+    assert r.returncode == 0 and "2 of 2 landed" in r.stdout, r.stderr or r.stdout
+    ops = read_journal(journal)
+    assert [o["verb"] for o in ops] == ["assert", "assert"]
+    assert "superseded_by" not in ops[0]["args"]
+    assert ops[1]["args"]["superseded_by"] == ["/posts/x/"]

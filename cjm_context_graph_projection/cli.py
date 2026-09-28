@@ -188,6 +188,36 @@ def _will_write(args) -> bool:
     return not getattr(args, "no_write", False)
 
 
+async def _assert_journaled(
+    gx: Any,
+    journal_path: Optional[str],  # The write journal (None = an unjournaled write)
+    subject: str,
+    predicate: str,
+    value: str,
+    *,
+    actor: str,
+    evidence: Optional[list] = None,       # Supporting node ids
+    supersede: Optional[list] = None,      # Prior assertion ids OR values this claim supersedes
+    superseded_by: Optional[list] = None,  # Assertion ids OR values that supersede this claim (back-fill)
+) -> Dict[str, Any]:  # The assert_value result
+    """One assert and its journal op: the single write path `assert` and `assert-batch` share.
+
+    Never journals a REFUSED write (an ambiguous or typo'd subject, a supersede miss): replay
+    must not re-attempt it. The bound content hash rides the op (design 40622922) so replay
+    re-lands the SAME approval; `superseded_by` rides it only when set, so every other assert
+    op keeps its journaled shape."""
+    res = await assert_value(gx, subject, predicate, value, actor=actor, evidence=evidence,
+                             supersede=supersede, superseded_by=superseded_by)
+    if journal_path and not res.get("error"):
+        op = {"subject": subject, "predicate": predicate, "value": value, "actor": actor,
+              "evidence": evidence, "supersede": supersede,
+              "subject_content_hash": res.get("subject_content_hash")}
+        if superseded_by:
+            op["superseded_by"] = superseded_by
+        append_write(journal_path, "assert", op)
+    return res
+
+
 async def _resolve_capture(
     gx,                 # The open graph handle
     spec: str,          # The `--capture` spec: seed | deferred | riding:<item-id-or-prefix>
@@ -571,21 +601,53 @@ async def _dispatch(args) -> int:
         elif args.command == "worklist":
             print(render("worklist", await worklist(gx, args.memory_dir), args.format))
         elif args.command == "assert":
-            res = await assert_value(gx, args.subject, args.predicate, args.value,
-                                     actor=args.actor, evidence=args.evidence,
-                                     supersede=args.supersede)
+            res = await _assert_journaled(gx, args.journal_path, args.subject, args.predicate,
+                                          args.value, actor=args.actor, evidence=args.evidence,
+                                          supersede=args.supersede,
+                                          superseded_by=args.superseded_by)
             print(render("assert", res, args.format))
-            # Never journal a REFUSED write (ambiguous/typo'd id-shaped subject) —
-            # replay must not re-attempt it.
-            if args.journal_path and not res.get("error"):
-                append_write(args.journal_path, "assert",
-                             {"subject": args.subject, "predicate": args.predicate,
-                              "value": args.value, "actor": args.actor,
-                              "evidence": args.evidence, "supersede": args.supersede,
-                              # the bound content hash rides the op (design 40622922): replay
-                              # re-lands the SAME approval, never one recomputed post hoc
-                              "subject_content_hash": res.get("subject_content_hash")})
             return 1 if res.get("error") else (2 if res.get("conflict") else 0)
+        elif args.command == "assert-batch":
+            # Bulk facts (the site_path pass, then deliverable_type and licenses): every line
+            # runs the SAME write path as `assert` and journals an ordinary assert op, so replay
+            # is unchanged. The whole file is validated before the first write; the run stops at
+            # the first REFUSED line, and the lines before it stand (each is journaled).
+            specs = []
+            for i, line in enumerate(Path(args.batch_file).read_text().splitlines(), 1):
+                if not line.strip():
+                    continue
+                try:
+                    spec = json.loads(line)
+                except json.JSONDecodeError as e:
+                    print(f"error: line {i} is not JSON ({e}) — nothing written", file=sys.stderr)
+                    return 2
+                missing = [k for k in ("subject", "predicate", "value")
+                           if not isinstance(spec.get(k), str) or not spec[k]]
+                if missing:
+                    print(f"error: line {i} lacks {', '.join(missing)} — nothing written",
+                          file=sys.stderr)
+                    return 2
+                specs.append((i, spec))
+            landed = flagged = 0
+            for i, spec in specs:
+                res = await _assert_journaled(gx, args.journal_path, spec["subject"],
+                                              spec["predicate"], spec["value"],
+                                              actor=spec.get("actor", args.actor),
+                                              evidence=spec.get("evidence"),
+                                              supersede=spec.get("supersede"),
+                                              superseded_by=spec.get("superseded_by"))
+                if res.get("error"):
+                    print(f"line {i}: {res['error']}", file=sys.stderr)
+                    print(f"assert-batch: {landed} of {len(specs)} landed; stopped at line {i}")
+                    return 1
+                if res.get("conflict") or res.get("multi_active"):
+                    flagged += 1
+                    print(f"line {i}:")
+                    print(render("assert", res, args.format))
+                landed += 1
+            print(f"assert-batch: {landed} of {len(specs)} landed"
+                  + (f" · {flagged} flagged (conflict / multi-active, shown above)" if flagged else ""))
+            return 2 if flagged else 0
         elif args.command == "alias":
             actor = f"agent:session:{args.session}" if args.session else args.actor
             evidence = (args.evidence
@@ -2670,6 +2732,15 @@ def main() -> int:
     p_as.add_argument("--actor", default=_DEFAULT_ACTOR)
     p_as.add_argument("--evidence", action="append", help="Supporting node id (repeatable)")
     p_as.add_argument("--supersede", action="append", help="Prior assertion id OR value to supersede (repeatable)")
+    p_as.add_argument("--superseded-by", action="append", dest="superseded_by",
+                      help="BACK-FILL a prior value: the assertion id OR value on this slot that "
+                           "supersedes this claim, so it lands born superseded (repeatable; ruling 96aff70e)")
+
+    p_ab = sub.add_parser("assert-batch", help="Apply many asserts from a JSONL file, one journaled assert op each")
+    p_ab.add_argument("batch_file", help="JSONL: one {subject, predicate, value[, supersede, superseded_by, "
+                                          "evidence, actor]} object per line; every line is validated "
+                                          "before any write, and the run stops at the first refused line")
+    p_ab.add_argument("--actor", default=_DEFAULT_ACTOR, help="Default actor for lines that name none")
 
     p_al = sub.add_parser("alias", help="Confirm a drifted link slug as an alias of a real note")
     p_al.add_argument("drifted", help="The drifted `[[wiki-link]]` slug (resolves to no note)")
