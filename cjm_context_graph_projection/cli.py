@@ -60,6 +60,7 @@ from .runtime import DEFAULT_MANIFESTS, open_graph
 from .seeds import repo_dir_name
 from .series import mint_series, place_in_series, series_order, set_series_members
 from .serve import serve_graphs
+from .site import site_build
 from .sitelinks import DEFER_RESOLVE, resolve_site_links
 from .source_state import (absorb_authored_text, cutover_module, emit_source_artifact, flip_module,
                            graph_sourced_modules, source_check)
@@ -402,12 +403,16 @@ async def _dispatch(args) -> int:
                 print("error: ingest-notes needs --notes-corpus or a `notes_corpus` key in the "
                       "graph-sibling graph.config.json beside --graph-db-path", file=sys.stderr)
                 return 1
-            nodes, edges = notes_corpus_elements(args.notes_corpus, args.profile or "quarto_post")
+            # The site's own pages ride the same ingest (config DATA `site_pages`, relative to
+            # the site root) so every public page is a node its site_path fact can hold
+            site_pages = (load_graph_config(args.graph_db_path) or {}).get("site_pages") or None
+            nodes, edges = notes_corpus_elements(args.notes_corpus, args.profile or "quarto_post",
+                                                 site_root=args.website_root, site_pages=site_pages)
             res = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
             print(f"ingested notes: {res.nodes_added} nodes added / {res.nodes_verified} verified, "
                   f"{res.edges_added} edges added / {res.edges_existing} existing")
             if args.journal_path:
-                rc = await replay_journal(gx, args.journal_path)
+                rc = await replay_journal(gx, args.journal_path, emit_root=args.emit_root)
                 print(f"replayed journal: {rc}")
             return 0
         if args.command == "m3-baseline":
@@ -431,7 +436,8 @@ async def _dispatch(args) -> int:
             if not args.journal_path:
                 print("error: replay needs --journal-path", file=sys.stderr)
                 return 1
-            rc = await replay_journal(gx, args.journal_path, offset=args.offset)
+            rc = await replay_journal(gx, args.journal_path, offset=args.offset,
+                                      emit_root=args.emit_root)
             print(f"replayed journal: {rc}")
             return 0
         if args.command == "schema":
@@ -1298,12 +1304,15 @@ async def _dispatch(args) -> int:
             # byte-faithful round-trip; dedups on re-run via append_write. A born post's
             # profile + slug ride the op so replay reproduces the same identity + harvest.
             if args.journal_path and res.get("written") and not res.get("error"):
-                abspath = str(Path(path).resolve())
-                op = {"path": abspath, "content": Path(path).read_text(), "actor": "agent:session"}
+                op = {"content": Path(path).read_text(), "actor": "agent:session"}
                 if args.profile:
                     op["profile"] = args.profile
                 if slug:
+                    # A born post journals its SLUG, never a machine path: replay derives the
+                    # file location from the emit root (DEC 98293e72 (1))
                     op["slug"] = slug
+                else:
+                    op["path"] = str(Path(path).resolve())
                 append_write(args.journal_path, "new-note", op)
             # DRAFT AT BIRTH (user ruling 793f025e): a born POST is a public-facing
             # deliverable, so it carries publish_state=draft from the SAME invocation that
@@ -1336,6 +1345,31 @@ async def _dispatch(args) -> int:
                                   manifests_dir=args.manifests_dir)
             print(render("structure", res, args.format))
             return 1 if res.get("error") else 0
+        elif args.command == "site-build":
+            # The site's one build verb (DEC 98293e72 (2)): generated inputs, quarto render under
+            # the profile, the redirect projection from site_path facts, and (public) the
+            # publish guard. Not journaled — every output is derived from facts + source.
+            if not args.website_root:
+                print("error: site-build needs --website-root (or `website_root` in the "
+                      "graph-sibling graph.config.json)", file=sys.stderr)
+                return 1
+            cfg = load_graph_config(args.graph_db_path) or {}
+            staging_root = drafts_dir = None
+            if cfg.get("emit_root"):
+                # The drafts listings live beside the emit root (its parent), inside the site
+                staging_root = Path(cfg["emit_root"]).expanduser().resolve().parent
+                drafts_dir = staging_root.relative_to(Path(args.website_root).resolve()).as_posix()
+
+            async def _staging_index():
+                from .purenotes import staging_index
+                return await staging_index(gx, project_root=str(staging_root),
+                                           siblings=(sibling_graphs(cfg) or None),
+                                           manifests_dir=args.manifests_dir, write=True)
+            res = await site_build(gx, args.website_root, args.profile, render=not args.no_render,
+                                   drafts_dir=drafts_dir or "drafts",
+                                   staging_index_fn=_staging_index if staging_root else None)
+            print(render("site-build", res, args.format))
+            return 0 if res.get("ok") else 1
         elif args.command == "move":
             res = await move(gx, args.symbol_id, args.target_module_id, write=not args.no_write,
                              source_journal_path=args.source_journal_path)
@@ -2510,10 +2544,19 @@ def main() -> int:
     p_inn.add_argument("--profile", default=None,
                        help="Relationship-harvest profile (see the markdown core's PROFILES); default = "
                             "the sibling config's `notes_profile`, else quarto_post.")
+    p_inn.add_argument("--website-root", default=None,
+                       help="The site project root the config's `site_pages` live under "
+                            "(default: the sibling config's website_root)")
+    p_inn.add_argument("--emit-root", default=None,
+                       help="Where born posts live — replay derives each one's file location from it "
+                            "(default: the sibling config's emit_root; DEC 98293e72)")
 
     p_rp = sub.add_parser("replay", help="Replay the write journal onto the db (needs --journal-path)")
     p_rp.add_argument("--offset", type=int, default=0,
                       help="Skip the first N ops — the swap-rebuild delta lane (over-inclusion is safe; replay is idempotent)")
+    p_rp.add_argument("--emit-root", default=None,
+                      help="Where born posts live — replay derives each one's file location from it "
+                           "(default: the sibling config's emit_root; DEC 98293e72)")
 
     p_m3 = sub.add_parser("m3-baseline",
                           help="M3 genesis import: journal a per-note baseline `new-note` op "
@@ -3077,6 +3120,17 @@ def main() -> int:
                            "the post lands at <root>/posts/<slug>/index.md")
     p_ep.add_argument("--no-write", action="store_true",
                       help="Report the gate verdict + target path without writing")
+
+    p_sb = sub.add_parser("site-build",
+                          help="Build the site under a Quarto profile: generated inputs, quarto render, "
+                               "the redirect projection from site_path facts, and (public) the publish "
+                               "guard — exit 1 when the output is not fit to publish (DEC 98293e72)")
+    p_sb.add_argument("--profile", default="public", choices=("public", "staging"),
+                      help="The Quarto profile (public = the default; staging adds the drafts tree)")
+    p_sb.add_argument("--website-root", default=None,
+                      help="The site project root (default: the sibling config's website_root)")
+    p_sb.add_argument("--no-render", action="store_true",
+                      help="Skip quarto render: project redirects + run the guards on the existing output")
     g_nn = p_nn.add_mutually_exclusive_group(required=True)
     g_nn.add_argument("--content", help="The full note text (frontmatter + body)")
     g_nn.add_argument("--content-file", help="Read the full note text from a file")

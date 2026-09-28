@@ -281,7 +281,7 @@ def test_replay_offset_skips_applied_prefix(tmp_path, monkeypatch):
         journal_mod.append_write(p, "link", {"n": i})
     applied = []
 
-    async def fake_apply(gx, op):
+    async def fake_apply(gx, op, emit_root=None):
         applied.append(op["args"]["n"])
         return "link"
 

@@ -270,3 +270,56 @@ def test_assert_batch_cli_validates_first_then_journals_one_assert_per_line(tmp_
     assert [o["verb"] for o in ops] == ["assert", "assert"]
     assert "superseded_by" not in ops[0]["args"]
     assert ops[1]["args"]["superseded_by"] == ["/posts/x/"]
+
+
+def test_born_post_location_derives_from_emit_root_on_replay(tmp_path):
+    # DEC 98293e72 (1): a born post journals its slug, never a machine path, and replay
+    # DERIVES the file location from the config's emit root — so moving the drafts tree is a
+    # config change: the replayed Note records the NEW location, its ids unchanged. A legacy
+    # op still carrying an absolute path is ignored the same way; with no emit root the post
+    # projects UNPLACED (same ids, no location) rather than onto the journaled tree.
+    import sqlite3
+    old, new = tmp_path / "old" / "posts", tmp_path / "site" / "drafts" / "posts"
+    journal = str(tmp_path / "notes.writes.jsonl")
+    cfg = tmp_path / "graph.config.json"
+    cfg.write_text(json.dumps({"notes_profile": "quarto_post", "emit_root": str(old)}))
+    content = "---\ntitle: \"Moved post\"\ndate: 2026-09-28\n---\n\nLede.\n\n## One\n\nBody.\n"
+    r = _run("--graph-db-path", str(tmp_path / "notes.db"), "--journal-path", journal,
+             "new-note", "--slug", "work/moved-post", "--content", content)
+    assert r.returncode == 0, r.stderr or r.stdout
+    op = read_journal(journal)[0]["args"]
+    assert op["slug"] == "work/moved-post" and "path" not in op   # no machine path journaled
+
+    def note(db):
+        con = sqlite3.connect(str(db))
+        try:
+            rows = con.execute("select id, properties from nodes where label = 'Note'").fetchall()
+            ids = sorted(r[0] for r in con.execute("select id from nodes"))
+        finally:
+            con.close()
+        assert len(rows) == 1
+        return rows[0][0], json.loads(rows[0][1])["path"], ids
+
+    nid, path, ids = note(tmp_path / "notes.db")
+    assert path == str((old / "work" / "moved-post" / "index.md").resolve())
+    # The tree moves: the config names the new root, the journal is untouched
+    cfg.write_text(json.dumps({"notes_profile": "quarto_post", "emit_root": str(new)}))
+    r2 = _run("--graph-db-path", str(tmp_path / "replay.db"), "--journal-path", journal, "replay")
+    assert r2.returncode == 0, r2.stderr or r2.stdout
+    nid2, path2, ids2 = note(tmp_path / "replay.db")
+    assert nid2 == nid and ids2 == ids
+    assert path2 == str((new / "work" / "moved-post" / "index.md").resolve())
+    # A legacy op (absolute path journaled beside the slug) derives the same way
+    legacy = str(tmp_path / "legacy.writes.jsonl")
+    Path(legacy).write_text(json.dumps({"verb": "new-note", "args": dict(
+        op, path=str(old / "work" / "moved-post" / "index.md"))}) + "\n")
+    r3 = _run("--graph-db-path", str(tmp_path / "legacy.db"), "--journal-path", legacy, "replay")
+    assert r3.returncode == 0, r3.stderr or r3.stdout
+    nid3, path3, ids3 = note(tmp_path / "legacy.db")
+    assert nid3 == nid and path3 == path2
+    # No emit root: the born post projects unplaced — the same ids, no file location
+    cfg.write_text(json.dumps({"notes_profile": "quarto_post"}))
+    r4 = _run("--graph-db-path", str(tmp_path / "none.db"), "--journal-path", legacy, "replay")
+    assert r4.returncode == 0, r4.stderr or r4.stdout
+    nid4, path4, ids4 = note(tmp_path / "none.db")
+    assert nid4 == nid and ids4 == ids3 and not path4

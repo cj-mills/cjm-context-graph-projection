@@ -244,3 +244,14 @@ async def reconstruct_note(
         await resolve_after_write(gx, [note.id])
     return {"slug": note.slug, "path": path, "sections": len(note.sections),
             "nodes_added": r.nodes_added, "edges_added": r.edges_added}
+
+
+def born_post_path(
+    emit_root: str,  # The notes graph's emit root (config DATA: `emit_root` in graph.config.json)
+    slug: str,       # The born post's pinned permalink, relative to the emit root
+) -> str:  # The absolute `<emit_root>/<slug>/index.md` the post's file lives at
+    """Where a born post's file lives — DERIVED from the config's emit root and the slug, never
+    stored (DEC 98293e72 (1)). `new-note --slug` writes here and replay re-derives it, so moving
+    the drafts tree is a config change: a journaled absolute path was a machine-path leak that
+    pinned every born post to the tree it was minted in."""
+    return str(Path(emit_root).expanduser().resolve() / slug.strip("/") / "index.md")

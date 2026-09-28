@@ -349,3 +349,34 @@ def test_test_elements_ingests_graph_sourced_test_module_from_journal(tmp_path):
     cn, _ = code_elements([str(d)], source_journal_path=j)
     paths = {n["properties"]["module_path"] for n in cn if n["label"] == DevNodeKinds.CODE_MODULE}
     assert paths == {"cjm_bar/core.py"}
+
+
+def test_notes_corpus_elements_ingests_site_pages_by_their_path(tmp_path):
+    # The site's own pages ride the posts' ingest as archive Sources (ruling 96aff70e; user,
+    # 2026-09-28): identity = the path under the site root, a directory index named by its
+    # directory, the root index kept as "index"; lossless; a clash with a post refuses.
+    import pytest
+    from cjm_context_graph_projection.devgraph import site_page_slug
+    assert site_page_slug("about.qmd") == "about"
+    assert site_page_slug("index.qmd") == "index"
+    assert site_page_slug("series/notes/index.md") == "series/notes"
+    site = tmp_path / "site"
+    posts = site / "posts"
+    posts.mkdir(parents=True)
+    _post(posts, "a-post", "Body.")
+    (site / "about.qmd").write_text("---\ntitle: About\naliases:\n- /services\n---\n\nHello.\n")
+    (site / "series" / "notes").mkdir(parents=True)
+    (site / "series" / "notes" / "index.md").write_text("---\ntitle: Notes\n---\n")
+    nodes, edges = notes_corpus_elements(str(posts), site_root=str(site),
+                                         site_pages=["about.qmd", "series/notes/index.md"])
+    by_id = {n["id"]: n for n in nodes}
+    about = note_node_id("about")
+    assert {about, note_node_id("series/notes"), note_node_id("a-post")} <= set(by_id)
+    secs = sorted((by_id[e["target_id"]] for e in edges
+                   if e["relation_type"] == DevRelations.HAS_SECTION and e["source_id"] == about),
+                  key=lambda n: n["properties"]["order"])
+    assert (by_id[about]["properties"]["frontmatter_raw"] + "".join(n["properties"]["raw"] for n in secs)
+            == (site / "about.qmd").read_text())
+    (site / "a-post.qmd").write_text("---\ntitle: Clash\n---\n")
+    with pytest.raises(ValueError, match="collide with posts: a-post"):
+        notes_corpus_elements(str(posts), site_root=str(site), site_pages=["a-post.qmd"])

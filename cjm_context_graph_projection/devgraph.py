@@ -64,6 +64,9 @@ def notes_corpus_elements(
     corpus_root: str,                  # Root of an arbitrary markdown notes corpus (e.g. christianjmills/posts)
     profile: str = "quarto_post",      # Relationship-harvest profile (see the markdown core's PROFILES)
     note_aliases: Optional[Dict[str, str]] = None,  # Confirmed {drifted-slug: canonical-slug} link aliases
+    *,
+    site_root: Optional[str] = None,          # The site project root the pages live under
+    site_pages: Optional[List[str]] = None,   # The site's own pages, relative to site_root (config DATA)
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:  # (nodes, edges)
     """Decompose an arbitrary `<dir>/index.md` / `index.qmd` markdown corpus into graph elements.
 
@@ -86,6 +89,19 @@ def notes_corpus_elements(
     files = corpus_index_files(corpus_root)   # index.md + index.qmd, one per post dir
     notes = [note_from_file(str(p), corpus_root=str(root), profile=profile, lossless=True)
              for p in files]
+    # The site's own pages (about, the front page, the listing hubs …) ride the same ingest as
+    # archive Sources, so every public page is a node its site_path fact can hold (ruling
+    # 96aff70e; user, 2026-09-28). Identity = the page's path under the site root.
+    if site_pages:
+        if not site_root:
+            raise ValueError("site_pages need the site root they live under (`website_root`)")
+        posts = {n.slug for n in notes}
+        pages = [note_from_file(str(Path(site_root) / rel), corpus_root=str(site_root), profile=profile,
+                                lossless=True, slug=site_page_slug(rel)) for rel in site_pages]
+        clash = sorted(p.slug for p in pages if p.slug in posts)
+        if clash:
+            raise ValueError(f"site page identities collide with posts: {', '.join(clash)}")
+        notes += pages
     nodes, edges = corpus_graph_elements(notes, note_aliases)
     return stamp_note_profile(nodes, profile), edges   # the profile is READABLE at edit time (cbde404c)
 
@@ -497,3 +513,12 @@ def _sourcing_state(
     journaled = {(conceptual_key(rk), mp): a
                  for (rk, mp), a in latest_source_ops(source_journal_path).items()}
     return flipped, journaled
+
+
+def site_page_slug(
+    rel: str,  # A site page's path under the site root ("about.qmd", "series/notes/index.md")
+) -> str:  # Its identity: the path without the extension, a directory index named by its directory
+    """A site page's slug — "about.qmd" -> "about", "series/notes/index.md" -> "series/notes";
+    the root index keeps "index" (the empty path names no page)."""
+    stem = Path(rel).with_suffix("").as_posix()
+    return stem[: -len("/index")] if stem.endswith("/index") else stem

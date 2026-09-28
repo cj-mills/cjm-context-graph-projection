@@ -354,6 +354,32 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                 lines.append(f"⚠ unreached: `{c['member'][:8]}` follows "
                              f"`{(c.get('after') or '?')[:8]}`, which no walk from the head reaches")
         return "\n".join(lines)
+    if kind == "site-build":
+        verdict = "✅ fit to publish" if obj.get("ok") else "⛔ NOT fit to publish"
+        if obj.get("profile") != "public":
+            verdict = "✅ built" if obj.get("ok") else "⛔ build failed"
+        lines = [f"## Site build — profile `{obj.get('profile')}` → `{obj.get('output_dir', '?')}` · {verdict}"]
+        al = obj.get("aliases") or {}
+        if al:
+            lines.append(f"- front-matter aliases: {al.get('declared', 0)} on {al.get('checked', 0)} page(s), "
+                         "each checked against the site_path facts")
+        if obj.get("staging_index"):
+            si = obj["staging_index"]
+            lines.append(f"- drafts listings: {si.get('written', 0)} file(s) · "
+                         + " · ".join(f"{k} {v}" for k, v in sorted((si.get("counts") or {}).items())))
+        if obj.get("render"):
+            lines.append(f"- quarto render --profile {obj.get('profile')}: exit {obj['render'].get('returncode')}")
+        if obj.get("redirects"):
+            rd = obj["redirects"]
+            lines.append(f"- redirects from superseded site_path facts: {rd.get('stubs', 0)} "
+                         f"({rd.get('written', 0)} written, {rd.get('unchanged', 0)} already identical)")
+        if obj.get("guard"):
+            lines.append(f"- publish guard: {obj['guard'].get('scanned', 0)} output file(s) scanned")
+        for e in obj.get("errors") or []:
+            where = e.get("doc") or e.get("stub") or e.get("path") or e.get("slug") or e.get("subject") or ""
+            extra = e.get("alias") or e.get("match") or e.get("active") or e.get("detail") or ""
+            lines.append(f"  ⚠ [{e.get('kind')}] `{where}` {extra} — {e.get('why')}")
+        return "\n".join(lines)
     if kind == "site-links":
         lines = [f"## Site links — {obj.get('links', 0)} link(s) on {obj.get('notes', 0)} note(s): "
                  f"{obj.get('resolved', 0)} resolved"]

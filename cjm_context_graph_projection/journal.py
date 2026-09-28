@@ -34,7 +34,7 @@ from .lens import lens_node_id, set_lens
 from .runtime import GraphHandle
 from .series import mint_series, place_in_series, set_series_members
 from .sitelinks import DEFER_RESOLVE, resolve_site_links
-from .structure import add_section, reconstruct_note
+from .structure import add_section, born_post_path, reconstruct_note
 from .write import (add_check, alias, assert_value, author_section, decide, link, mint_procedure,
                     mint_proposal, register_session, retract_session, unlink)
 
@@ -153,7 +153,11 @@ def journal_sourced_note_paths(
     return out
 
 
-async def _apply_op(gx: GraphHandle, op: Dict[str, Any]) -> str:
+async def _apply_op(
+    gx: GraphHandle,
+    op: Dict[str, Any],
+    emit_root: Optional[str] = None,  # The notes graph's emit root: a born post's file location derives from it
+) -> str:
     """Apply one journaled op through its core verb; return the verb ('' = skipped)."""
     verb, a = op.get("verb"), op.get("args", {})
     if verb == "new-note":
@@ -162,8 +166,14 @@ async def _apply_op(gx: GraphHandle, op: Dict[str, Any]) -> str:
         # from the journal alone. Idempotent (deterministic ids -> verified no-op on rebuild).
         # profile + slug ride the op (a42c0f97): a born POST replays with the same harvest
         # profile and pinned permalink identity it was minted with; legacy memory ops carry
-        # neither and derive as before.
-        await reconstruct_note(gx, a["path"], a["content"],
+        # neither and derive as before. A born post's FILE LOCATION is derived from the emit
+        # root + slug, never the journaled path (DEC 98293e72 (1)); with no emit root (a scratch
+        # replay beside no config) the post projects UNPLACED — ids unchanged, no file location,
+        # so no writer can land it on a stale tree (_apply_note_text skips a path-less file).
+        path = a.get("path")
+        if a.get("slug"):
+            path = born_post_path(emit_root, a["slug"]) if emit_root else ""
+        await reconstruct_note(gx, path, a["content"],
                                profile=a.get("profile"), slug=a.get("slug"))
     elif verb == "decide":
         await decide(gx, a["statement"], actor=a.get("actor", "agent:session"),
@@ -374,6 +384,7 @@ async def replay_journal(
     gx: GraphHandle,
     path: str,       # Journal file path (JSONL)
     offset: int = 0,  # Skip the first N ops — the swap-rebuild DELTA lane (DEC 638782c9)
+    emit_root: Optional[str] = None,  # The notes graph's emit root (born posts' file locations derive from it)
 ) -> Dict[str, int]:  # Per-verb replay counts
     """Re-apply every journaled write through its core verb (idempotent).
 
@@ -417,7 +428,7 @@ async def replay_journal(
             # a ts (pre-ts journal era) fall back to capability now()-stamping.
             token = PROVENANCE_TS.set(op.get("ts"))
             try:
-                verb = await _apply_op(gx, op)
+                verb = await _apply_op(gx, op, emit_root)
             finally:
                 PROVENANCE_TS.reset(token)
             if verb:
@@ -486,7 +497,8 @@ def touched_node_ids(
         if a.get("canonical"):
             out.append(note_node_id(a["canonical"]))
     elif verb == "new-note":
-        slug = _note_slug(a.get("path"), a.get("content"))
+        # A born post's identity IS its pinned slug (a42c0f97); the path stem is 'index' there
+        slug = a.get("slug") or _note_slug(a.get("path"), a.get("content"))
         if slug:
             out.append(note_node_id(slug))
     elif verb in ("section", "add-section"):
