@@ -140,6 +140,7 @@ def pure_notes_type(
             "notes-render: derive the EXPANDED body (the public post; OUTLINE = review) + the type-owned frontmatter from the Points; Sections + staging file follow",
         ],
         actor=actor,
+        kind="notes", origin=P.ORIGIN_BORN,   # design amendment c64e07e7
     )
 
 
@@ -153,10 +154,17 @@ async def mint_deliverable_type(
     presentation_policy: Optional[Dict[str, Any]] = None,
     production_procedure: Optional[List[str]] = None,
     actor: str = "agent:session",
-) -> Dict[str, Any]:  # {type_id, key, created|updated, args, written}
+    kind: Optional[str] = None,                 # The navigation kind (P.DELIVERABLE_KINDS; design amendment c64e07e7)
+    origin: Optional[str] = None,               # archive | born (P.DELIVERABLE_ORIGINS)
+) -> Dict[str, Any]:  # {type_id, key, created|updated, args, written} | {error, written: False}
     """UPSERT a DeliverableType by slug (the display-rule pattern: last journaled op wins).
     An absent policy falls back to the type's code-carried defaults for the two built-in
-    profiles: `pure-notes` (a7262fe7) and `work-page` (ebb77107)."""
+    profiles: `pure-notes` (a7262fe7) and `work-page` (ebb77107). A kind or origin outside
+    its vocabulary refuses the whole write."""
+    if kind and kind not in P.DELIVERABLE_KINDS:
+        return {"error": f"kind `{kind}` is not one of {', '.join(P.DELIVERABLE_KINDS)}", "written": False}
+    if origin and origin not in P.DELIVERABLE_ORIGINS:
+        return {"error": f"origin `{origin}` is not one of {', '.join(P.DELIVERABLE_ORIGINS)}", "written": False}
     base = (pure_notes_type(actor) if key == PURE_NOTES_KEY
             else work_page_type(actor) if key == WORK_PAGE_KEY
             else DeliverableTypeNode(key=key, actor=actor))
@@ -165,7 +173,7 @@ async def mint_deliverable_type(
         information_policy=information_policy if information_policy is not None else base.information_policy,
         presentation_policy=presentation_policy if presentation_policy is not None else base.presentation_policy,
         production_procedure=production_procedure if production_procedure is not None else base.production_procedure,
-        actor=actor)
+        actor=actor, kind=kind or base.kind, origin=origin or base.origin)
     wire = node.to_graph_node()
     existing = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=node.id)
     if existing is None:
@@ -177,6 +185,9 @@ async def mint_deliverable_type(
     args = {"key": key, "title": node.title, "description": node.description,
             "information_policy": node.information_policy, "presentation_policy": node.presentation_policy,
             "production_procedure": node.production_procedure, "actor": actor}
+    for f in ("kind", "origin"):   # only once declared, so every earlier op keeps its shape
+        if getattr(node, f):
+            args[f] = getattr(node, f)
     return {"type_id": node.id, "key": key, "state": state, "args": args, "written": True}
 
 
@@ -187,6 +198,32 @@ async def load_deliverable_type(
     """Read a DeliverableType profile off the graph (None = `notes-type <key>` first)."""
     node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=DeliverableTypeNode(key=key).id)
     return dict(F.props(node)) if node is not None else None
+
+
+async def note_types(
+    gx: GraphHandle,
+) -> Dict[str, Dict[str, Any]]:  # {Note id: {type, kind, origin}} — typed Notes only
+    """Every typed Note's active type with that type's kind and origin (design amendment
+    c64e07e7: both are fields of the type, read through it, never stored on the Note). Two
+    active types on one Note (the predicate is unordered and STABLE, so that is a hard
+    contradiction) come back as `type: None` with the `conflict` listed."""
+    slot = [a for a in await F.load_assertions(gx) if F.prop(a, "predicate") == P.DELIVERABLE_TYPE]
+    active = F.active_assertions(slot, await F.load_supersedes(gx))
+    types = {str(F.prop(n, "key")): F.props(n) for n in await F.load_label(gx, DevNodeKinds.DELIVERABLE_TYPE)}
+    keys: Dict[str, List[str]] = {}
+    for a in active:
+        sid = str(F.prop(a, "subject_id") or "")
+        if sid:
+            keys.setdefault(sid, []).append(str(F.prop(a, "value") or ""))
+    out: Dict[str, Dict[str, Any]] = {}
+    for sid, vals in keys.items():
+        vals = sorted(set(vals))
+        if len(vals) > 1:
+            out[sid] = {"type": None, "kind": "", "origin": "", "conflict": vals}
+            continue
+        t = types.get(vals[0]) or {}
+        out[sid] = {"type": vals[0], "kind": str(t.get("kind") or ""), "origin": str(t.get("origin") or "")}
+    return out
 
 
 async def note_deliverable_type(
@@ -4464,6 +4501,7 @@ def work_page_type(
             "emit-post <note>: gated on publish_state=published AND every chapter page published (the whole work at once)",
         ],
         actor=actor,
+        kind="notes", origin=P.ORIGIN_BORN,   # a collection hub under Notes (design amendment c64e07e7)
     )
 
 

@@ -234,7 +234,8 @@ async def _apply_op(
         # Lens vocabulary (tier 2): upsert by deterministic per-slug id — replay
         # converges on the LAST authored spec per slug, like display-rule.
         await set_lens(gx, a["slug"], a["spec"], title=a.get("title"),
-                       description=a.get("description"), actor=a.get("actor", "agent:session"))
+                       description=a.get("description"), actor=a.get("actor", "agent:session"),
+                       date=a.get("date"))
     elif verb == "session":
         # Session spine: upsert the timestamp-keyed Session node (started_at/title are
         # last-op-wins on replay, like display-rule — sessions are data, not content).
@@ -299,7 +300,8 @@ async def _apply_op(
                                     information_policy=a.get("information_policy"),
                                     presentation_policy=a.get("presentation_policy"),
                                     production_procedure=a.get("production_procedure"),
-                                    actor=a.get("actor", "agent:session"))
+                                    actor=a.get("actor", "agent:session"),
+                                    kind=a.get("kind"), origin=a.get("origin"))
     elif verb == "accept-point":
         # Substance (a7262fe7): re-land the Point + its References from the journaled
         # observations — self-contained; the sibling graph is never opened on replay.

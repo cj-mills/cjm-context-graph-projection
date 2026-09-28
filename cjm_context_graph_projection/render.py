@@ -363,6 +363,12 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         if al:
             lines.append(f"- front-matter aliases: {al.get('declared', 0)} on {al.get('checked', 0)} page(s), "
                          "each checked against the site_path facts")
+        if obj.get("pages"):
+            pg = obj["pages"]
+            lines.append(f"- projected pages (Series + Lenses): {pg.get('planned', 0)} "
+                         f"({pg.get('written', 0)} written, {pg.get('unchanged', 0)} unchanged, "
+                         f"{len(pg.get('removed') or [])} removed)"
+                         + (f" · no site_path: {', '.join(pg['unpaged'])}" if pg.get("unpaged") else ""))
         if obj.get("staging_index"):
             si = obj["staging_index"]
             lines.append(f"- drafts listings: {si.get('written', 0)} file(s) · "
@@ -376,7 +382,8 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         if obj.get("guard"):
             lines.append(f"- publish guard: {obj['guard'].get('scanned', 0)} output file(s) scanned")
         for e in obj.get("errors") or []:
-            where = e.get("doc") or e.get("stub") or e.get("path") or e.get("slug") or e.get("subject") or ""
+            where = (e.get("doc") or e.get("stub") or e.get("source") or e.get("path") or e.get("slug")
+                     or e.get("key") or e.get("subject") or "")
             extra = e.get("alias") or e.get("match") or e.get("active") or e.get("detail") or ""
             lines.append(f"  ⚠ [{e.get('kind')}] `{where}` {extra} — {e.get('why')}")
         return "\n".join(lines)

@@ -4,8 +4,10 @@ The site is one Quarto project with two profiles (ruling 4d29dc2e; design 13753c
 `public` (the default) renders everything but the git-ignored drafts tree, `staging` adds it
 plus the review affordances. The build owns the pipeline and Quarto is one stage of it:
 
-1. generated inputs — under `staging`, the drafts listings (`staging_index`);
-2. `quarto render --profile <p>`;
+1. generated inputs — the PROJECTED PAGES, every series page from its Series and every topic
+   page from its Lens, under either profile (`sitepages`, design e240183f); under `staging`,
+   the drafts listings (`staging_index`);
+2. `quarto render --profile <p>`, then every projected page checked for its rendered page;
 3. the REDIRECT PROJECTION — a page's public path is a fact with history (ruling 96aff70e):
    every superseded `site_path` gets a redirect page to its page's active path, written into
    the output byte-identical to Quarto's own alias page. Quarto cannot be handed per-page
@@ -227,6 +229,18 @@ async def publish_guard(
         if slug and (out / "posts" / slug / "index.html").exists():
             errors.append({"kind": "unpublished", "slug": slug, "publish_state": vals,
                            "why": "a deliverable not published has a public page"})
+    # Design amendment c64e07e7: a post page with no publish_state is public only because its
+    # Note is of an ARCHIVE type — an untyped Note, or one of a born type, has no such standing
+    from .purenotes import note_types
+    types = await note_types(gx)
+    for n in await F.load_label(gx, DevNodeKinds.NOTE):
+        nid, slug = str(F.nid(n)), str(F.prop(n, "slug") or "")
+        if not slug or nid in states or not (out / "posts" / slug / "index.html").exists():
+            continue
+        t = types.get(nid) or {}
+        if t.get("origin") != P.ORIGIN_ARCHIVE:
+            errors.append({"kind": "unstanding", "slug": slug, "type": t.get("type"),
+                           "why": "a public post page whose Note has no publish_state and no archive type"})
     return {"scanned": scanned, "errors": errors}
 
 
@@ -263,9 +277,20 @@ async def site_build(
     """Build the site under one profile: generated inputs, render, the redirect projection,
     and (public) the publish guard. `ok` is False on any error row — the output is then not
     fit to publish, and the report names why."""
+    from .sitepages import check_page_outputs, project_pages
     rep: Dict[str, Any] = {"profile": profile, "errors": []}
     plan = await redirect_plan(gx)
     rep["errors"] += plan["errors"]
+    if rep["errors"]:
+        rep["ok"] = False
+        return rep
+    # The projected pages are inputs: written before Quarto is asked what the inputs are
+    pages = await project_pages(gx, website_root, profile, plan["pages"], drafts_dir=drafts_dir)
+    rep["pages"] = {k: v for k, v in pages.items() if k not in ("errors", "sources")}
+    rep["errors"] += pages["errors"]
+    if rep["errors"]:
+        rep["ok"] = False
+        return rep
     info = quarto_inspect(website_root, profile)
     rep["output_dir"] = info["output_dir"]
     aliases = check_source_aliases(website_root, info["inputs"], plan["pages"], drafts_dir)
@@ -287,6 +312,7 @@ async def site_build(
                                   "detail": rep["render"]["tail"]})
             rep["ok"] = False
             return rep
+    rep["errors"] += check_page_outputs(info["output_dir"], pages["sources"])
     red = write_redirects(info["output_dir"], plan["stubs"], page_outputs(website_root, info["inputs"]))
     rep["redirects"] = {"stubs": len(plan["stubs"]), "written": red["written"], "unchanged": red["unchanged"]}
     rep["errors"] += red["errors"]

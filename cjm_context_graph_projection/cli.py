@@ -831,14 +831,16 @@ async def _dispatch(args) -> int:
                 print(f"error: spec is not valid JSON: {e}", file=sys.stderr)
                 return 1
             res = await set_lens(gx, args.slug, spec, title=args.title,
-                                 description=args.description, actor=args.actor)
+                                 description=args.description, actor=args.actor, date=args.date)
             print(render("set-lens", res, args.format))
             # Lens vocabulary is journal-sourced like display-rule: the last
             # set-lens op per slug wins on replay (deterministic-id upsert).
             if args.journal_path and res.get("written"):
-                append_write(args.journal_path, "set-lens",
-                             {"slug": args.slug, "spec": spec, "title": args.title,
-                              "description": args.description, "actor": args.actor})
+                op = {"slug": args.slug, "spec": spec, "title": args.title,
+                      "description": args.description, "actor": args.actor}
+                if args.date is not None:   # only then, so every other op keeps its shape
+                    op["date"] = args.date
+                append_write(args.journal_path, "set-lens", op)
             return 1 if res.get("error") else 0
         elif args.command == "series":
             # A Series born on-graph (DEC 72d669c5 (2)): the op carries the page's WHOLE record,
@@ -1688,7 +1690,11 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
             description=str(overrides.get("description") or ""),
             information_policy=overrides.get("information_policy"),
             presentation_policy=overrides.get("presentation_policy"),
-            production_procedure=overrides.get("production_procedure"), actor=args.actor)
+            production_procedure=overrides.get("production_procedure"), actor=args.actor,
+            kind=overrides.get("kind") or args.kind, origin=overrides.get("origin") or args.origin)
+        if res.get("error"):
+            print(f"error: {res['error']}", file=sys.stderr)
+            return 1
         print(render("notes-type", res, args.format))
         if args.journal_path and res.get("written"):
             append_write(args.journal_path, "deliverable-type", res["args"])
@@ -2305,7 +2311,9 @@ def _add_notes_lane_parsers(sub) -> None:
     p.add_argument("key", help="The type slug (e.g. pure-notes)")
     p.add_argument("--title", default=None)
     p.add_argument("--policy-file", default=None,
-                   help="JSON with any of title / description / information_policy / presentation_policy / production_procedure")
+                   help="JSON with any of title / description / information_policy / presentation_policy / production_procedure / kind / origin")
+    p.add_argument("--kind", default=None, help="The navigation kind: tutorial | notes | log | work | site (design amendment c64e07e7)")
+    p.add_argument("--origin", default=None, help="archive (authored before the graph, public as authored) | born (public once published)")
     p.add_argument("--actor", default=_DEFAULT_ACTOR)
 
     p = sub.add_parser("notes-pack", help="Read one source UNIT from a sibling graph per the type's stratum "
@@ -2805,6 +2813,8 @@ def main() -> int:
     p_sle.add_argument("--spec-file", default=None, help="Read the spec JSON from a file")
     p_sle.add_argument("--title", default=None, help="Display title (presentation only)")
     p_sle.add_argument("--description", default=None, help="One orientation line for the shelf")
+    p_sle.add_argument("--date", default=None,
+                       help="The page's own date when the lens is a site page (verbatim; design e240183f)")
     p_sle.add_argument("--actor", default=_DEFAULT_ACTOR)
 
     p_ser = sub.add_parser("series",

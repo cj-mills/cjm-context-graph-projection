@@ -30,8 +30,11 @@ LENS_LABEL = "Lens"
 # reify innards only on evidence — feeds a85327b1).
 SELECTION_VERBS = ("list", "relevant", "grep", "readiness", "journal-window", "subgraph")
 PARAM_TYPES = ("string", "timestamp", "node-ref")
-VIEW_KEYS = ("layout", "hide_kinds", "group_by", "color_by")
+VIEW_KEYS = ("layout", "hide_kinds", "group_by", "color_by", "sort")
 EXPAND_KEYS = ("hops", "relations")
+# view.sort (design e240183f (2)): the listing order a page projected from the lens uses —
+# the lens's own data, never a template's — as Quarto's "<field> [asc|desc]" terms, in order.
+SORT_DIRECTIONS = ("asc", "desc")
 
 
 def lens_node_id(slug: str) -> str:
@@ -125,6 +128,12 @@ def validate_lens_spec(spec: Any) -> Tuple[Optional[Dict[str, Any]], Optional[st
         bad = set(view) - set(VIEW_KEYS)
         if bad:
             errors.append(f"view: unknown key(s) {sorted(bad)} (allowed v1: {VIEW_KEYS})")
+        if "sort" in view:
+            terms = view["sort"]
+            if not (isinstance(terms, list) and terms and all(isinstance(t, str) for t in terms)
+                    and all(len(t.split()) in (1, 2) and (len(t.split()) == 1 or t.split()[1] in SORT_DIRECTIONS)
+                            for t in terms)):
+                errors.append('view.sort must be a non-empty list of "<field> [asc|desc]" terms')
 
     if errors:
         return None, "; ".join(errors)
@@ -139,6 +148,7 @@ async def set_lens(
     title: Optional[str] = None,        # Display title (else the slug shows)
     description: Optional[str] = None,  # One orientation line for the shelf
     actor: str = "agent:session",       # Who authored the view
+    date: Optional[str] = None,         # The page's own date when the lens is a site page (verbatim; design e240183f (4))
 ) -> Dict[str, Any]:  # The write result (incl. error on a malformed spec)
     """Author/update a graph-carried Lens (journaled upsert-by-slug).
 
@@ -159,6 +169,8 @@ async def set_lens(
         props["title"] = title
     if description is not None:
         props["description"] = description
+    if date is not None:
+        props["date"] = date
 
     existing = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=node_id)
     if existing is not None:
