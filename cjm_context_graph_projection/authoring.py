@@ -53,6 +53,7 @@ from . import factlayer as F
 from .projection import ambiguity_error, resolve_node_ref
 from .runtime import GraphHandle
 from .seeds import conceptual_key, repo_dir_name
+from .sitelinks import resolve_after_write
 from .source_state import is_test_module_path, journaled_emit, symbol_identity_map
 
 
@@ -221,7 +222,8 @@ async def reharvest_note_relations(
     """Re-run the relationship harvest on an EDITED note and apply the edge DIFF (finding cbde404c).
 
     Ingest and birth harvest a note's relations ONCE — `[[wiki-links]]` and cross-post links
-    (REFERENCES), categories (TAGGED -> Topic), series links (IN_SERIES -> Series) — but the
+    (REFERENCES), categories (TAGGED -> Topic), series-page links (the Note's verbatim
+    `site_refs`, resolved by `sitelinks`, DEC 72d669c5) — but the
     edit verbs (`author` on a Section, `author_section`, `add_section`) only rewrote the slot,
     so a link added on-graph minted no edge until a rebuild re-ingested the file, and a removed
     link's edge lingered. This closes the gap AT the edit: harvest the note's relation edges
@@ -232,33 +234,37 @@ async def reharvest_note_relations(
     unreferenced. Diffing prior-vs-new (not graph-vs-new) means a DELIBERATE `link` the content
     never produced is never touched. The edges are DERIVED, never journaled: replay re-runs the
     edit verb and re-derives them, so a journal-only rebuild converges on the same edge set an
-    archive ingest of the emitted file produces (the round-trip standard)."""
-    relation_kinds = (DevRelations.REFERENCES, DevRelations.TAGGED, DevRelations.IN_SERIES)
-    facet_labels = (DevNodeKinds.TOPIC, DevNodeKinds.SERIES)
+    archive ingest of the emitted file produces (the round-trip standard).
+
+    A changed `site_refs` is written onto the Note and re-resolved for this note at once (the
+    live resolve hook; a replay defers it to its one closing pass) — the `site_link` edges
+    are the resolver's own, never part of this diff."""
+    relation_kinds = (DevRelations.REFERENCES, DevRelations.TAGGED)
+    facet_labels = (DevNodeKinds.TOPIC,)
     slug = str(F.prop(note_node, "slug") or "")
     path = str(F.prop(note_node, "path") or "")
     profile = F.prop(note_node, "profile") or None
 
     def _elements(text: str, aliases: Optional[Dict[str, str]],
-                  ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+                  ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]], List[str]]:
         note = note_from_text(path, text, corpus_root=str(Path(path).parent), profile=profile,
                               lossless=True, slug=slug)
         nodes, edges = corpus_graph_elements([note], aliases)
         rel = {e["id"]: e for e in edges
                if e["relation_type"] in relation_kinds and e["source_id"] == note.id}
         facets = {n["id"]: n for n in nodes if n["label"] in facet_labels}
-        return rel, facets
+        return rel, facets, list(note.site_refs)
 
     # Cheap path first: harvest WITHOUT the alias map (it only remaps targets, so equal raw
     # edge sets stay equal mapped) — every replayed `section` op passes through here, and
     # `note_alias_map` reads the whole assertion layer, so it is loaded only when links moved.
-    prior_rel, _prior_facets = _elements(prior_text, None)
-    new_rel, new_facets = _elements(new_text, None)
+    prior_rel, _prior_facets, _prior_refs = _elements(prior_text, None)
+    new_rel, new_facets, site_refs = _elements(new_text, None)
     if set(prior_rel) != set(new_rel):
         aliases = await F.note_alias_map(gx)
         if aliases:
-            prior_rel, _prior_facets = _elements(prior_text, aliases)
-            new_rel, new_facets = _elements(new_text, aliases)
+            prior_rel, _prior_facets, _prior_refs = _elements(prior_text, aliases)
+            new_rel, new_facets, site_refs = _elements(new_text, aliases)
     added = [e for eid, e in new_rel.items() if eid not in prior_rel]
     removed = [e for eid, e in prior_rel.items() if eid not in new_rel]
     facet_nodes = [new_facets[e["target_id"]] for e in added if e["target_id"] in new_facets]
@@ -267,6 +273,12 @@ async def reharvest_note_relations(
         "removed": [(e["relation_type"], e["target_id"]) for e in removed],
         "facets_added": [n["id"] for n in facet_nodes], "facets_removed": [],
     }
+    if write and site_refs != list(F.prop(note_node, "site_refs") or []):
+        note_id = str(F.nid(note_node))
+        await graph_task(gx.queue, gx.graph_id, "update_node", node_id=note_id,
+                         properties={"site_refs": site_refs})
+        res["site_refs"] = site_refs
+        res["site_links"] = await resolve_after_write(gx, [note_id])
     if not write or not (added or removed):
         return res
     if added:
@@ -274,12 +286,12 @@ async def reharvest_note_relations(
     if removed:
         await graph_task(gx.queue, gx.graph_id, "delete_edges",
                          edge_ids=[e["id"] for e in removed])
-        # A Topic / Series the retraction left with no edge at all would survive only until
-        # the next rebuild (ingest never mints an unreferenced facet) — drop it now so the
-        # live graph matches what a rebuild produces.
+        # A Topic the retraction left with no edge at all would survive only until the next
+        # rebuild (ingest never mints an unreferenced facet) — drop it now so the live graph
+        # matches what a rebuild produces.
         for e in removed:
             tid = e["target_id"]
-            if e["relation_type"] not in (DevRelations.TAGGED, DevRelations.IN_SERIES):
+            if e["relation_type"] != DevRelations.TAGGED:
                 continue
             q = EdgeQuery(target_ids=[tid], project=["id"], limit=1)
             r = await graph_task(gx.queue, gx.graph_id, "query_edges", query=q.to_dict())

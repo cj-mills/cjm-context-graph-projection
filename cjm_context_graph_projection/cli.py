@@ -20,6 +20,7 @@ from typing import Any, Dict, Optional
 
 from cjm_context_graph_layer.ops import extend_graph
 from cjm_context_graph_primitives.journal import append_write, read_journal
+from cjm_dev_graph_schema.predicates import SITE_PATH
 
 from .authoring import add_symbol, author, emit_artifact, emit_post, read_node, read_slot
 from .code_edges import orphaned_edges
@@ -57,7 +58,9 @@ from .render import render as _render_base
 from .review import review_frontier
 from .runtime import DEFAULT_MANIFESTS, open_graph
 from .seeds import repo_dir_name
+from .series import mint_series, place_in_series, series_order, set_series_members
 from .serve import serve_graphs
+from .sitelinks import DEFER_RESOLVE, resolve_site_links
 from .source_state import (absorb_authored_text, cutover_module, emit_source_artifact, flip_module,
                            graph_sourced_modules, source_check)
 from .structure import add_section, new_note
@@ -629,22 +632,40 @@ async def _dispatch(args) -> int:
                     return 2
                 specs.append((i, spec))
             landed = flagged = 0
-            for i, spec in specs:
-                res = await _assert_journaled(gx, args.journal_path, spec["subject"],
-                                              spec["predicate"], spec["value"],
-                                              actor=spec.get("actor", args.actor),
-                                              evidence=spec.get("evidence"),
-                                              supersede=spec.get("supersede"),
-                                              superseded_by=spec.get("superseded_by"))
-                if res.get("error"):
-                    print(f"line {i}: {res['error']}", file=sys.stderr)
-                    print(f"assert-batch: {landed} of {len(specs)} landed; stopped at line {i}")
-                    return 1
-                if res.get("conflict") or res.get("multi_active"):
-                    flagged += 1
-                    print(f"line {i}:")
-                    print(render("assert", res, args.format))
-                landed += 1
+            stopped = None
+            paths_moved = False
+            # The per-assert site-link hook stands down for the batch; ONE resolve pass runs
+            # after it when any site_path landed (DEC 72d669c5 (1)) — on a stop too, since the
+            # lines before the refused one stand.
+            deferred = DEFER_RESOLVE.set(True)
+            try:
+                for i, spec in specs:
+                    res = await _assert_journaled(gx, args.journal_path, spec["subject"],
+                                                  spec["predicate"], spec["value"],
+                                                  actor=spec.get("actor", args.actor),
+                                                  evidence=spec.get("evidence"),
+                                                  supersede=spec.get("supersede"),
+                                                  superseded_by=spec.get("superseded_by"))
+                    if res.get("error"):
+                        print(f"line {i}: {res['error']}", file=sys.stderr)
+                        stopped = i
+                        break
+                    if res.get("conflict") or res.get("multi_active"):
+                        flagged += 1
+                        print(f"line {i}:")
+                        print(render("assert", res, args.format))
+                    landed += 1
+                    paths_moved = paths_moved or spec["predicate"] == SITE_PATH
+            finally:
+                DEFER_RESOLVE.reset(deferred)
+            if paths_moved:
+                links = await resolve_site_links(gx)
+                print(f"site links: {links['resolved']} resolved (+{links['added']} "
+                      f"-{links['removed']}), {len(links['unresolved'])} unresolved, "
+                      f"{len(links['ambiguous'])} ambiguous")
+            if stopped is not None:
+                print(f"assert-batch: {landed} of {len(specs)} landed; stopped at line {stopped}")
+                return 1
             print(f"assert-batch: {landed} of {len(specs)} landed"
                   + (f" · {flagged} flagged (conflict / multi-active, shown above)" if flagged else ""))
             return 2 if flagged else 0
@@ -813,6 +834,50 @@ async def _dispatch(args) -> int:
                              {"slug": args.slug, "spec": spec, "title": args.title,
                               "description": args.description, "actor": args.actor})
             return 1 if res.get("error") else 0
+        elif args.command == "series":
+            # A Series born on-graph (DEC 72d669c5 (2)): the op carries the page's WHOLE record,
+            # so the last `series` op per key wins on replay (deterministic-id upsert).
+            op = {"key": args.key, "title": args.title or "", "description": args.description or "",
+                  "image": args.image or "", "date": args.date or "",
+                  "categories": list(args.category or []), "actor": args.actor}
+            res = await mint_series(gx, args.key, title=op["title"], description=op["description"],
+                                    image=op["image"], date=op["date"], categories=op["categories"],
+                                    actor=args.actor)
+            print(render("series", res, args.format))
+            if args.journal_path and res.get("written"):
+                append_write(args.journal_path, "series", op)
+            return 1 if res.get("error") else 0
+        elif args.command == "series-members":
+            # The whole ordered membership (DEC 72d669c5 (4)): each slug follows the one before.
+            slugs = list(args.slugs)
+            if args.from_file:
+                slugs += [s.strip() for s in Path(args.from_file).read_text().splitlines() if s.strip()]
+            res = await set_series_members(gx, args.key, slugs, actor=args.actor)
+            print(render("series-members", res, args.format))
+            if args.journal_path and res.get("written"):
+                append_write(args.journal_path, "series-members",
+                             {"key": args.key, "slugs": slugs, "actor": args.actor})
+            return 1 if res.get("error") else 0
+        elif args.command == "place-in-series":
+            # One member spliced: insert / move (--after SLUG | --first) or --remove.
+            res = await place_in_series(gx, args.key, args.slug, after=args.after, first=args.first,
+                                        remove=args.remove, actor=args.actor)
+            print(render("place-in-series", res, args.format))
+            if args.journal_path and res.get("written"):
+                append_write(args.journal_path, "place-in-series",
+                             {"key": args.key, "slug": args.slug, "after": args.after,
+                              "first": bool(args.first), "remove": bool(args.remove),
+                              "actor": args.actor})
+            return 1 if res.get("error") else 0
+        elif args.command == "series-order":
+            res = await series_order(gx, args.key)
+            print(render("series-order", res, args.format))
+            return 1 if res.get("error") else (2 if res.get("contradictions") else 0)
+        elif args.command == "site-links":
+            # REPORT only: the rebuild's closing pass and the live hooks own the write.
+            res = await resolve_site_links(gx, write=False)
+            print(render("site-links", res, args.format))
+            return 2 if (res["unresolved"] or res["ambiguous"] or res["added"] or res["removed"]) else 0
         elif args.command == "lens":
             params: Dict[str, str] = {}
             for kv in (args.param or []):
@@ -2698,6 +2763,46 @@ def main() -> int:
     p_sle.add_argument("--title", default=None, help="Display title (presentation only)")
     p_sle.add_argument("--description", default=None, help="One orientation line for the shelf")
     p_sle.add_argument("--actor", default=_DEFAULT_ACTOR)
+
+    p_ser = sub.add_parser("series",
+                           help="Mint/update a Series from its page's record (journaled upsert by key; "
+                                "the op is the WHOLE record — an omitted field clears; DEC 72d669c5)")
+    p_ser.add_argument("key", help="The series' durable key (the page's file stem)")
+    p_ser.add_argument("--title", default="")
+    p_ser.add_argument("--description", default="")
+    p_ser.add_argument("--image", default="", help="The page's preview image (verbatim)")
+    p_ser.add_argument("--date", default="", help="The page's own date (verbatim front matter)")
+    p_ser.add_argument("--category", action="append", default=None,
+                       help="One of the page's categories (repeatable) -> TAGGED edges")
+    p_ser.add_argument("--actor", default=_DEFAULT_ACTOR)
+
+    p_sem = sub.add_parser("series-members",
+                           help="Set a series' WHOLE ordered membership (journaled): each slug follows "
+                                "the one before it (the authored order, never dates)")
+    p_sem.add_argument("key", help="The Series key")
+    p_sem.add_argument("slugs", nargs="*", help="The member notes' slugs, in order")
+    p_sem.add_argument("--from-file", default=None, help="Read more slugs, one per line, after the positional ones")
+    p_sem.add_argument("--actor", default=_DEFAULT_ACTOR)
+
+    p_pis = sub.add_parser("place-in-series",
+                           help="Splice ONE member of a series (journaled): insert or move it "
+                                "(--after SLUG | --first), or --remove it")
+    p_pis.add_argument("key", help="The Series key")
+    p_pis.add_argument("slug", help="The member note's slug")
+    g_pis = p_pis.add_mutually_exclusive_group(required=True)
+    g_pis.add_argument("--after", default=None, help="Place it after this member's slug")
+    g_pis.add_argument("--first", action="store_true", help="Place it at the head")
+    g_pis.add_argument("--remove", action="store_true", help="Take it out of the series")
+    p_pis.add_argument("--actor", default=_DEFAULT_ACTOR)
+
+    p_sor = sub.add_parser("series-order",
+                           help="A series in its AUTHORED order, with any fork or unreached member "
+                                "(exit 2 when the chain is broken)")
+    p_sor.add_argument("key", help="The Series key")
+
+    sub.add_parser("site-links",
+                   help="Report how every in-body site link resolves through site_path facts: "
+                        "unresolved / ambiguous rows, and any edge drift (exit 2 when any)")
 
     p_ls = sub.add_parser("list",
                           help="Enumerate a class: nodes by --label / assertions by --predicate / edges by --relation")

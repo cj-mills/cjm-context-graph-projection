@@ -25,13 +25,15 @@ from cjm_context_graph_layer.identity import derive_node_id
 from cjm_context_graph_layer.ops import PROVENANCE_TS
 from cjm_context_graph_primitives.journal import append_write, journal_segments, read_journal
 from cjm_dev_graph_schema.identity import (code_module_node_id, note_node_id, section_node_id,
-                                           session_node_id)
+                                           series_node_id, session_node_id)
 from cjm_dev_graph_schema.nodes import DecisionNode
 from cjm_markdown_decompose_core.extract import note_from_file
 
 from .display import display_rule_node_id, set_display_rule
 from .lens import lens_node_id, set_lens
 from .runtime import GraphHandle
+from .series import mint_series, place_in_series, set_series_members
+from .sitelinks import DEFER_RESOLVE, resolve_site_links
 from .structure import add_section, reconstruct_note
 from .write import (add_check, alias, assert_value, author_section, decide, link, mint_procedure,
                     mint_proposal, register_session, retract_session, unlink)
@@ -70,12 +72,16 @@ M3_BASELINE_ACTOR = "import:m3-baseline"
 # carries the point AND its segment observations so replay never opens the sibling graph; a
 # retract is the compensating op; a render replays GRAPH-ONLY and re-derives the same Sections
 # from the same Points (the body is a function of the substance, never journaled as text).
+# `series` / `series-members` / `place-in-series` = Series born on-graph (DEC 72d669c5): the
+# page's whole record upserted by key (last op wins), the whole ordered membership, and a
+# one-member splice — replayed in append order, so the authored `after` chain converges.
 JOURNAL_VERBS = ("decide", "alias", "assert", "link", "unlink", "section", "new-note",
                  "add-section", "display-rule", "set-lens", "check", "session",
                  "retract-session", "pull-transcript", "mint-messages", "edit-message",
                  "derive-message", "procedure", "propose",
                  "deliverable-type", "accept-point", "retract-point", "edit-point", "render-notes",
-                 "render-work-page", "rehome-points", "place-point")
+                 "render-work-page", "rehome-points", "place-point",
+                 "series", "series-members", "place-in-series")
 
 
 def m3_baseline_import(
@@ -342,6 +348,23 @@ async def _apply_op(gx: GraphHandle, op: Dict[str, Any]) -> str:
         from .purenotes import render_work_page
         await render_work_page(gx, a["slug"], write_md=False, actor=a.get("actor", "agent:session"),
                                observed=dict(a.get("observed") or {}))
+    elif verb == "series":
+        # A Series born on-graph (DEC 72d669c5 (2)): the op is the page's WHOLE record, so
+        # replaying the append-ordered ops converges on the last one (upsert by key).
+        await mint_series(gx, a["key"], title=a.get("title", ""),
+                          description=a.get("description", ""), image=a.get("image", ""),
+                          date=a.get("date", ""), categories=a.get("categories") or [],
+                          actor=a.get("actor", "agent:session"))
+    elif verb == "series-members":
+        # The whole ordered membership (DEC 72d669c5 (4)); a refused op (a member retired later
+        # in the journal) writes nothing, exactly as it refused live.
+        await set_series_members(gx, a["key"], list(a.get("slugs") or []),
+                                 actor=a.get("actor", "agent:session"))
+    elif verb == "place-in-series":
+        # One member spliced (insert / move / remove) against the chain the earlier ops built.
+        await place_in_series(gx, a["key"], a["slug"], after=a.get("after"),
+                              first=bool(a.get("first")), remove=bool(a.get("remove")),
+                              actor=a.get("actor", "agent:session"))
     else:
         return ""
     return verb
@@ -371,7 +394,12 @@ async def replay_journal(
     ordering holds without hoisting, and append order is exactly what lets an add compose with the
     `section` STATE ops interleaved around it (boundary shift then final content, in causal order).
     Its own idempotency (anchor-exists no-op) covers a note not yet journal-sourced whose backup
-    `.md` an ingest still read."""
+    `.md` an ingest still read.
+
+    THE RESOLVE STAGE (DEC 72d669c5 (1)): in-body site links resolve through site_path facts,
+    which are journal content, so the per-write resolve hooks stand down for the whole replay
+    and ONE pass runs at its end — every rebuild path (in-place, swap delta, heal) ends here,
+    so each lands the same `site_link` edges. The counts carry the pass's tallies."""
     counts = {v: 0 for v in JOURNAL_VERBS}
     counts["skipped"] = 0
     # offset = the swap-rebuild delta lane: ops[:offset] are already in the target
@@ -380,20 +408,27 @@ async def replay_journal(
     ops = read_journal(path)[offset:]
     genesis = [op for op in ops if op.get("verb") == "new-note"]
     rest = [op for op in ops if op.get("verb") != "new-note"]
-    for op in genesis + rest:
-        # Replay provenance window (0d50b921): every node/edge this op mints is
-        # stamped with the op's JOURNALED ts, so a rebuild restores true creation
-        # times instead of clamping the whole graph to rebuild time. Ops without
-        # a ts (pre-ts journal era) fall back to capability now()-stamping.
-        token = PROVENANCE_TS.set(op.get("ts"))
-        try:
-            verb = await _apply_op(gx, op)
-        finally:
-            PROVENANCE_TS.reset(token)
-        if verb:
-            counts[verb] += 1
-        else:
-            counts["skipped"] += 1
+    deferred = DEFER_RESOLVE.set(True)
+    try:
+        for op in genesis + rest:
+            # Replay provenance window (0d50b921): every node/edge this op mints is
+            # stamped with the op's JOURNALED ts, so a rebuild restores true creation
+            # times instead of clamping the whole graph to rebuild time. Ops without
+            # a ts (pre-ts journal era) fall back to capability now()-stamping.
+            token = PROVENANCE_TS.set(op.get("ts"))
+            try:
+                verb = await _apply_op(gx, op)
+            finally:
+                PROVENANCE_TS.reset(token)
+            if verb:
+                counts[verb] += 1
+            else:
+                counts["skipped"] += 1
+    finally:
+        DEFER_RESOLVE.reset(deferred)
+    links = await resolve_site_links(gx)
+    counts["site_links_resolved"] = links["resolved"]
+    counts["site_links_unresolved"] = len(links["unresolved"]) + len(links["ambiguous"])
     return counts
 
 
@@ -488,6 +523,11 @@ def touched_node_ids(
     elif verb in ("render-notes", "render-work-page", "rehome-points", "place-point"):
         if a.get("slug"):
             out.append(note_node_id(a["slug"]))
+    elif verb in ("series", "series-members", "place-in-series"):
+        if a.get("key"):
+            out.append(series_node_id(a["key"]))
+        out.extend(note_node_id(s) for s in ([a["slug"]] if a.get("slug") else [])
+                   + list(a.get("slugs") or []))
     elif a.get("repo_key") and a.get("module_path"):
         out.append(code_module_node_id(a["repo_key"], a["module_path"]))
     return out

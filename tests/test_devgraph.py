@@ -3,7 +3,7 @@
 import json
 
 from cjm_dev_graph_schema.identity import (code_module_node_id, entity_node_id,
-                                           note_node_id, series_node_id, topic_node_id)
+                                           note_node_id, topic_node_id)
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 from cjm_context_graph_projection.devgraph import (_cjm_dep_keys, notebook_elements,
                                                    notes_corpus_elements, repo_map_elements)
@@ -51,12 +51,13 @@ def test_notes_corpus_elements_permalink_identity_and_facets(tmp_path):
     note_ids = {n["id"] for n in nodes if n["label"] == DevNodeKinds.NOTE}
     assert note_node_id("the-learning-game-book-notes") in note_ids
     assert note_node_id("dumbing-us-down-book-notes") in note_ids
-    # Shared facets deduped: 2 Topics + 1 Series across the two posts.
+    # Shared Topics deduped across the two posts; the series-page link mints no Series and
+    # no IN_SERIES (a Series is born by a journaled op, DEC 72d669c5) — it rides site_refs.
     assert labels.count(DevNodeKinds.TOPIC) == 2
-    assert labels.count(DevNodeKinds.SERIES) == 1
-    # Both converge on the education Topic + the series; cross-post REFERENCES present.
-    in_series = [e for e in edges if e["relation_type"] == DevRelations.IN_SERIES]
-    assert {e["target_id"] for e in in_series} == {series_node_id("education-notes")}
+    assert labels.count(DevNodeKinds.SERIES) == 0
+    assert not [e for e in edges if e["relation_type"] == DevRelations.IN_SERIES]
+    notes = [n for n in nodes if n["label"] == DevNodeKinds.NOTE]
+    assert all(n["properties"]["site_refs"] == ["/series/notes/education-notes.html"] for n in notes)
     assert any(e["relation_type"] == DevRelations.TAGGED
                and e["target_id"] == topic_node_id("education") for e in edges)
     assert any(e["relation_type"] == DevRelations.REFERENCES

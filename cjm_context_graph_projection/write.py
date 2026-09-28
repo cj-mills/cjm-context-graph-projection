@@ -31,6 +31,7 @@ from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 from . import factlayer as F
 from .projection import ambiguity_error, resolve_node_ref
 from .runtime import DEFAULT_MANIFESTS, GraphHandle, open_graph
+from .sitelinks import resolve_after_write
 
 # A subject shaped like a PARTIAL node id (hex+dashes, >=6 chars) but NOT a full
 # UUID. Gates the never-mint rule: an unresolved PREFIX is a typo'd reference (the
@@ -350,7 +351,7 @@ async def assert_value(
                          "actor": F.prop(a, "actor")}
                         for a in active_after if F.nid(a) != assertion.id]
 
-    return {
+    out = {
         "subject": subject, "subject_id": subject_id, "slot_id": slot.id,
         "subject_content_hash": assertion.subject_content_hash,
         "predicate": predicate, "value": value, "actor": actor,
@@ -359,6 +360,13 @@ async def assert_value(
         "superseded": superseded_ids, "born_superseded": born_superseded,
         "conflict": conflict, "soft_conflict": soft, "multi_active": multi_active,
     }
+    if predicate == P.SITE_PATH:
+        # A page's path changed, so every in-body link may now resolve differently: the live
+        # resolve hook (DEC 72d669c5 (1)); a replay or a batch defers it to one pass at its end.
+        links = await resolve_after_write(gx)
+        if links is not None:
+            out["site_links"] = {k: links[k] for k in ("resolved", "added", "removed")}
+    return out
 
 
 async def alias(

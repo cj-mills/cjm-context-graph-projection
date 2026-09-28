@@ -337,6 +337,35 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                 f"_{obj.get('text')}_\n"
                 f"`check {obj.get('check_id')}` (task_state=open; close with "
                 f"`assert {obj.get('check_id')} task_state done --evidence <proof>`)")
+    if kind == "series-order":
+        if obj.get("error"):
+            return f"⚠ {obj['error']}"
+        lines = [f"## {obj.get('title') or obj.get('key')}  _Series_ `{obj['series_id']}`", ""]
+        for n, m in enumerate(obj.get("members") or [], 1):
+            lines.append(f"{n}. **{m.get('title') or m.get('slug')}** `{str(m['id'])[:8]}` — {m.get('slug')}")
+        if not obj.get("members"):
+            lines.append("_(no members)_")
+        for c in obj.get("contradictions") or []:
+            if c.get("kind") == "fork":
+                lines.append(f"⚠ fork: {len(c['members'])} members follow "
+                             f"`{(c['after'] or 'the head')[:8]}` — "
+                             + ", ".join(f"`{x[:8]}`" for x in c["members"]))
+            else:
+                lines.append(f"⚠ unreached: `{c['member'][:8]}` follows "
+                             f"`{(c.get('after') or '?')[:8]}`, which no walk from the head reaches")
+        return "\n".join(lines)
+    if kind == "site-links":
+        lines = [f"## Site links — {obj.get('links', 0)} link(s) on {obj.get('notes', 0)} note(s): "
+                 f"{obj.get('resolved', 0)} resolved"]
+        if obj.get("added") or obj.get("removed"):
+            lines.append(f"⚠ edge drift: +{obj['added']} -{obj['removed']} "
+                         "(the next rebuild or a write that touches an input reconciles it)")
+        for r in obj.get("unresolved") or []:
+            lines.append(f"- unresolved: `{r.get('slug')}` -> {r.get('target')}")
+        for r in obj.get("ambiguous") or []:
+            lines.append(f"- ambiguous: `{r.get('slug')}` -> {r.get('target')} "
+                         f"(held by {', '.join(h[:8] for h in r.get('holders') or [])})")
+        return "\n".join(lines)
     if kind == "display-rule":
         if obj.get("error"):
             return f"⚠ {obj['error']}"

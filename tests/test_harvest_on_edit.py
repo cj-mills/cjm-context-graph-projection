@@ -1,7 +1,8 @@
 """Harvest-on-edit (finding cbde404c): relation edges follow an on-graph EDIT, not just birth.
 
 Ingest and `new_note` harvest a note's `[[wiki-links]]` / cross-post links (REFERENCES),
-categories (TAGGED) and series links (IN_SERIES) once; the edit verbs used to rewrite the
+categories (TAGGED) and series-page links (the Note's `site_refs`, resolved to `site_link`
+REFERENCES through site_path facts — DEC 72d669c5) once; the edit verbs used to rewrite the
 slot only, so a link added on-graph minted no edge until a rebuild and a removed link's edge
 lingered. `reharvest_note_relations` diffs the note's PRIOR text against its NEW text at every
 edit seam (`author` on a Section, `author_section`, `add_section`) and applies exactly that
@@ -21,14 +22,16 @@ from cjm_context_graph_layer.ops import extend_graph, graph_task
 from cjm_context_graph_primitives.journal import read_journal
 from cjm_context_graph_primitives.query import EdgeQuery
 from cjm_dev_graph_schema.identity import note_node_id, section_node_id, series_node_id
+from cjm_dev_graph_schema.predicates import SITE_PATH
 from cjm_markdown_decompose_core.extract import note_from_file
 from cjm_markdown_decompose_core.ingest import corpus_graph_elements
 
 from cjm_context_graph_projection import factlayer as F
 from cjm_context_graph_projection.authoring import author
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
+from cjm_context_graph_projection.series import mint_series
 from cjm_context_graph_projection.structure import add_section, new_note
-from cjm_context_graph_projection.write import author_section, link
+from cjm_context_graph_projection.write import assert_value, author_section, link
 
 # These drive the real graph-storage worker capability via open_graph().
 # Skip wherever its manifest isn't discoverable (e.g. CI).
@@ -111,30 +114,33 @@ def test_born_post_add_section_and_author_section_follow_series_and_cross_post_l
             assert (await new_note(gx, str(root / "other-post" / "index.md"), other,
                                    profile="quarto_post", corpus_root=str(root),
                                    slug="other-post")).get("written")
+            # The series page is a born Series holding its public path (DEC 72d669c5).
+            await mint_series(gx, "education-notes", title="Education")
+            await assert_value(gx, series, SITE_PATH, "/series/notes/education-notes.html")
             note = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=note_id)
             profile = F.prop(note, "profile")
             r1 = await add_section(gx, "born", f"## More\n\n{LINKS}\n")
             in_series = await _targets(gx, note_id, "IN_SERIES")
             refs = await _targets(gx, note_id, "REFERENCES")
-            series_node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=series)
             r2 = await author_section(gx, "born", "more", "## More\n\nNothing here.\n")
-            in_series_after = await _targets(gx, note_id, "IN_SERIES")
             refs_after = await _targets(gx, note_id, "REFERENCES")
             series_after = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=series)
             tagged = await _targets(gx, note_id, "TAGGED")
-            return (profile, r1, in_series, refs, series_node, r2, in_series_after,
-                    refs_after, series_after, tagged)
+            return profile, r1, in_series, refs, r2, refs_after, series_after, tagged
 
-    (profile, r1, in_series, refs, series_node, r2, in_series_after,
-     refs_after, series_after, tagged) = asyncio.run(go())
+    profile, r1, in_series, refs, r2, refs_after, series_after, tagged = asyncio.run(go())
     assert profile == "quarto_post"                 # the born profile is readable at edit time
-    assert set(r1["relations"]["added"]) == {("IN_SERIES", series), ("REFERENCES", other_intro)}
-    assert r1["relations"]["facets_added"] == [series]
-    assert in_series == {series} and refs == {other_intro} and series_node is not None
+    # The cross-post link is harvested; the series-page link is a verbatim site_ref the live
+    # hook resolves to a site_link REFERENCES onto the Series — never IN_SERIES membership.
+    assert set(r1["relations"]["added"]) == {("REFERENCES", other_intro)}
+    assert r1["relations"]["site_refs"] == ["/series/notes/education-notes.html"]
+    assert r1["relations"]["site_links"]["added"] == 1
+    assert in_series == set() and refs == {other_intro, series}
     assert Path(path).read_text().endswith(f"{LINKS}\n")
-    assert set(r2["relations"]["removed"]) == {("IN_SERIES", series), ("REFERENCES", other_intro)}
-    assert in_series_after == set() and refs_after == set()
-    assert series_after is None and r2["relations"]["facets_removed"] == [series]  # orphan facet dropped
+    assert set(r2["relations"]["removed"]) == {("REFERENCES", other_intro)}
+    assert r2["relations"]["site_links"]["removed"] == 1
+    assert refs_after == set()
+    assert series_after is not None                  # a born Series is not a facet to drop
     assert len(tagged) == 1                          # the birth category's TAGGED edge untouched
 
 
@@ -181,4 +187,8 @@ def test_journal_replay_after_an_edit_matches_archive_ingest_of_the_emitted_post
     assert r3.returncode == 0, r3.stderr or r3.stdout
     replayed, ingested = _content_ids(tmp_path / "replay.db"), _content_ids(tmp_path / "ingest.db")
     assert replayed == ingested
-    assert "IN_SERIES" in {rel for _, rel in replayed[1]}   # the edit's edge survived replay
+    assert "IN_SERIES" not in {rel for _, rel in replayed[1]}   # a link is never membership
+    # With no page holding that path, both projections report the link unresolved alike.
+    for db in ("replay.db", "ingest.db"):
+        r4 = _run("--graph-db-path", str(tmp_path / db), "site-links")
+        assert r4.returncode == 2 and "unresolved: `born-post` -> /series/notes/education-notes.html" in r4.stdout

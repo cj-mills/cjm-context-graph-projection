@@ -48,7 +48,9 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - **`cjm_context_graph_projection.runtime`** — Open a context graph for reading/writing (domain-neutral runtime wiring).
 - **`cjm_context_graph_projection.scratchpad_export`** — Scratchpad session .md exporter — the projection lens (increment iv of the
 - **`cjm_context_graph_projection.seeds`** — Hand-seeded load-bearing slots + the rename-stable repo-key machinery.
+- **`cjm_context_graph_projection.series`** — Series born on-graph: the node, its membership and its ORDER as journaled intent
 - **`cjm_context_graph_projection.serve`** — A served, read-only graph EXPLORER data API over the read verbs — the richer-viz INSTRUMENT.
+- **`cjm_context_graph_projection.sitelinks`** — In-body site links, RESOLVED after replay (DEC 72d669c5 (1)).
 - **`cjm_context_graph_projection.source_state`** — N+3 Phase 1 (SHADOW): capture a module's canonical source into a SOURCE journal and
 - **`cjm_context_graph_projection.structure`** — M2a GRADIENT — structural memory authoring: create a note / add a section, born on-graph.
 - **`cjm_context_graph_projection.viz`** — A minimal READ-ONLY visualization: the readiness frontier + its dependency DAG, as HTML.
@@ -108,7 +110,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `code_elements` _function_ — Decompose each repo's importable package into code nodes + edges.
 - `memory_elements` _function_ — Decompose every memory markdown file (except MEMORY.md) into graph elements.
 - `notebook_elements` _function_ — Decompose each repo's nbdev notebooks into code/cell nodes + edges.
-- `notes_corpus_elements` _function_ — Decompose an arbitrary `<dir>/index.md` markdown corpus into graph elements.
+- `notes_corpus_elements` _function_ — Decompose an arbitrary `<dir>/index.md` / `index.qmd` markdown corpus into graph elements.
 - `repo_map_elements` _function_ — One repo Entity per cjm-* repo (RENAME-STABLE keys) + DEPENDS_ON from pyproject.
 - `resolve_corpus_code_edges` _function_ — Resolve CALLS/IMPORTS edges ACROSS the whole code + notebook corpus.
 - `resolve_test_edges` _function_ — Resolve TESTS edges across the corpus (the code<->test link).
@@ -440,11 +442,26 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `seed_elements` _function_ — All hand-seeded elements (rename contradiction + stale version + class subjects).
 - `stale_version_seed_elements` _function_ — A `cjm-substrate` version slot seeded BEHIND the real version (oracle bumps it).
 
+### `cjm_context_graph_projection.series`
+
+- `mint_series` _function_ — Mint or update a Series from its page's record (journaled `series`; upsert by key).
+- `order_members` _function_ — Walk the `after` chain from the head; report forks and unreached members.
+- `place_in_series` _function_ — Splice ONE member (journaled `place-in-series`): insert, move, or remove.
+- `series_order` _function_ — The series in its AUTHORED order, with whatever breaks the chain (the read verb).
+- `set_series_members` _function_ — Set a series' WHOLE ordered membership (journaled `series-members`).
+
 ### `cjm_context_graph_projection.serve`
 
 - `build_app` _function_ — Build the read-only API app over already-open graph handles.
 - `graph_names` _function_ — Derive a stable short name per db (its file stem; collisions suffixed `-2`, `-3`, …).
 - `serve_graphs` _function_ — Open every graph once, hold the handles, and serve the API until interrupted.
+
+### `cjm_context_graph_projection.sitelinks`
+
+- `resolve_after_write` _function_ — The live hook: re-resolve after a write that changed an input, unless deferred.
+- `resolve_site_links` _function_ — Reconcile the `site_link` REFERENCES edges of the scoped notes against the facts.
+- `site_path_holders` _function_ — Every site_path value on the graph, keyed for resolution, plus each page's ACTIVE path.
+- `site_path_key` _function_ — The key two URLs of one page share under Quarto's URL rules (the facts stay verbatim).
 
 ### `cjm_context_graph_projection.source_state`
 
