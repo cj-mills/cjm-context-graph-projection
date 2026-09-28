@@ -2377,7 +2377,7 @@ def main() -> int:
                                 "second self-contained persistent graph, kept distinct "
                                 "from the private dev/planning graph (a public corpus).")
     p_inn.add_argument("--notes-corpus", default=None,
-                       help="Root dir of the markdown corpus (every <dir>/index.md becomes a Note). "
+                       help="Root dir of the markdown corpus (every <dir>/index.md or index.qmd becomes a Note). "
                             "Falls back to the `notes_corpus` key of the graph-sibling "
                             "graph.config.json (81a02642: the corpus root is DATA beside the notes db).")
     p_inn.add_argument("--profile", default=None,

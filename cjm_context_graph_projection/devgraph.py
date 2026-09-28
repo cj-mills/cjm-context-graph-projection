@@ -17,7 +17,7 @@ from cjm_context_graph_layer.grammar import make_edge
 from cjm_context_graph_primitives.provenance import SourceRef
 from cjm_dev_graph_schema.nodes import EntityNode
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
-from cjm_markdown_decompose_core.extract import note_from_file
+from cjm_markdown_decompose_core.extract import corpus_index_files, note_from_file
 from cjm_markdown_decompose_core.ingest import corpus_graph_elements
 from cjm_notebook_decompose_core.compose import (decompose_notebook, decompose_notebook_file,
                                                  module_path_for_notebook)
@@ -65,10 +65,10 @@ def notes_corpus_elements(
     profile: str = "quarto_post",      # Relationship-harvest profile (see the markdown core's PROFILES)
     note_aliases: Optional[Dict[str, str]] = None,  # Confirmed {drifted-slug: canonical-slug} link aliases
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:  # (nodes, edges)
-    """Decompose an arbitrary `<dir>/index.md` markdown corpus into graph elements.
+    """Decompose an arbitrary `<dir>/index.md` / `index.qmd` markdown corpus into graph elements.
 
     The corpus analogue of `memory_elements`, generalized off the hardcoded dev
-    memory dir: every `index.md` under the root (the SSG permalink convention —
+    memory dir: every `index.md` or `index.qmd` under the root (`corpus_index_files`; the SSG permalink convention —
     `posts/<slug>/index.md`, nested allowed) becomes a Note identified by its
     directory permalink, with the per-source-type relationship harvesters (the
     `profile`, default Quarto blog posts) lighting up Topic/Series/cross-post
@@ -83,7 +83,7 @@ def notes_corpus_elements(
     recoverable by traversal — the fidelity the memory corpus has had since M1, and
     the precondition for carrying the membrane to posts (733d3b94)."""
     root = Path(corpus_root)
-    files = sorted(root.rglob("index.md"))
+    files = corpus_index_files(corpus_root)   # index.md + index.qmd, one per post dir
     notes = [note_from_file(str(p), corpus_root=str(root), profile=profile, lossless=True)
              for p in files]
     nodes, edges = corpus_graph_elements(notes, note_aliases)

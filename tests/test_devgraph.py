@@ -73,6 +73,29 @@ def test_notes_corpus_elements_permalink_identity_and_facets(tmp_path):
                for n in nodes if n["label"] == DevNodeKinds.NOTE)
 
 
+def test_notes_corpus_elements_ingests_qmd_posts_losslessly(tmp_path):
+    # A Quarto `.qmd` post (the archive's carry Graphviz `{dot}` cells) is a Note like any
+    # `index.md` post: permalink identity and a byte-exact reconstruction (finding 87b88ea3).
+    posts = tmp_path / "posts"
+    posts.mkdir()
+    _post(posts, "md-post", "Body.")
+    _post(posts, "qmd-post", "```{dot}\ndigraph G { a -> b }\n```")
+    qmd_file = posts / "qmd-post" / "index.qmd"
+    (posts / "qmd-post" / "index.md").rename(qmd_file)
+
+    nodes, edges = notes_corpus_elements(str(posts))
+    by_id = {n["id"]: n for n in nodes}
+    qid = note_node_id("qmd-post")
+    assert {qid, note_node_id("md-post")} <= set(by_id)
+    assert by_id[qid]["properties"]["path"] == str(qmd_file)
+    secs = sorted((by_id[e["target_id"]] for e in edges
+                   if e["relation_type"] == DevRelations.HAS_SECTION and e["source_id"] == qid),
+                  key=lambda n: n["properties"]["order"])
+    rebuilt = by_id[qid]["properties"]["frontmatter_raw"] + "".join(
+        n["properties"]["raw"] for n in secs)
+    assert rebuilt == qmd_file.read_text()
+
+
 def test_cjm_dep_keys_strips_specifiers_and_filters(tmp_path):
     py = tmp_path / "pyproject.toml"
     py.write_text(PYPROJECT)
