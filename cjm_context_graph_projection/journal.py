@@ -78,13 +78,16 @@ M3_BASELINE_ACTOR = "import:m3-baseline"
 # `entity` = a typed vocabulary Entity (design 8cbdc883: the Tutorials matrix's tasks and
 # stages): the whole record upserted by (kind, key), last op wins. `verified-on` = one
 # VERIFIED_ON edge with its evidence (deliverable, device, os), or its retraction.
+# `supports` = one SUPPORTS edge (deliverable -> claim) with its kind (amendment 98e99fe5),
+# or its retraction.
 JOURNAL_VERBS = ("decide", "alias", "assert", "link", "unlink", "section", "new-note",
                  "add-section", "display-rule", "set-lens", "check", "session",
                  "retract-session", "pull-transcript", "mint-messages", "edit-message",
                  "derive-message", "procedure", "propose",
                  "deliverable-type", "accept-point", "retract-point", "edit-point", "render-notes",
                  "render-work-page", "rehome-points", "place-point",
-                 "series", "series-members", "place-in-series", "entity", "verified-on")
+                 "series", "series-members", "place-in-series", "entity", "verified-on",
+                 "supports")
 
 
 def m3_baseline_import(
@@ -394,6 +397,13 @@ async def _apply_op(
                                   date=a.get("date", ""), basis=a.get("basis", "stated"),
                                   versions=dict(a.get("versions") or {}), note=a.get("note", ""),
                                   retract=bool(a.get("retract")), actor=a.get("actor", "agent:session"))
+    elif verb == "supports":
+        # One support (amendment 98e99fe5 (2)): the op names the resolved deliverable id, so
+        # replay re-lands the same edge; a retraction replays as the compensating delete.
+        from .claims import record_support
+        await record_support(gx, a["deliverable"], a["claim"], kind=a.get("kind", ""),
+                             note=a.get("note", ""), retract=bool(a.get("retract")),
+                             actor=a.get("actor", "agent:session"))
     else:
         return ""
     return verb
@@ -567,6 +577,11 @@ def touched_node_ids(
             out.append(a["deliverable"])
         if a.get("hardware"):
             out.append(entity_node_id("hardware", a["hardware"]))
+    elif verb == "supports":
+        if a.get("deliverable"):
+            out.append(a["deliverable"])
+        if a.get("claim"):
+            out.append(entity_node_id("claim", a["claim"]))
     elif a.get("repo_key") and a.get("module_path"):
         out.append(code_module_node_id(a["repo_key"], a["module_path"]))
     return out

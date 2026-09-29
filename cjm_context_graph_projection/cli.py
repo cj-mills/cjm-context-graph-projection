@@ -866,6 +866,8 @@ async def _dispatch(args) -> int:
                 fields["position"] = args.position
             if args.device_class:
                 fields["device_class"] = args.device_class
+            if args.statement:
+                fields["statement"] = args.statement
             for flag in ("cross_task", "off_grid", "retired"):
                 if getattr(args, flag):
                     fields[flag] = True
@@ -910,6 +912,25 @@ async def _dispatch(args) -> int:
                     op["retract"] = True
                 append_write(args.journal_path, "verified-on", op)
             return 1 if res.get("error") else 0
+        elif args.command == "supports":
+            # One support of a claim with its kind (amendment 98e99fe5 (2)): the op carries the
+            # resolved deliverable id, so replay never depends on slug resolution; --retract compensates.
+            from .claims import record_support
+            res = await record_support(gx, args.deliverable, args.claim, kind=args.kind, note=args.note,
+                                       retract=args.retract, actor=args.actor)
+            print(render("supports", res, args.format))
+            if args.journal_path and res.get("written"):
+                op = {"deliverable": res["deliverable_id"], "claim": args.claim, "kind": args.kind,
+                      "note": args.note, "actor": args.actor}
+                if args.retract:
+                    op["retract"] = True
+                append_write(args.journal_path, "supports", op)
+            return 1 if res.get("error") else 0
+        elif args.command == "claims":
+            from .claims import claims_report
+            res = await claims_report(gx, public=args.public)
+            print(render("claims", res, args.format))
+            return 0 if res.get("ok") else 1
         elif args.command == "series-members":
             # The whole ordered membership (DEC 72d669c5 (4)): each slug follows the one before.
             slugs = list(args.slugs)
@@ -2885,16 +2906,18 @@ def main() -> int:
     p_ser.add_argument("--actor", default=_DEFAULT_ACTOR)
 
     p_ent = sub.add_parser("entity",
-                           help="Mint/update a typed vocabulary Entity (task | stage) from its WHOLE record "
+                           help="Mint/update a typed Entity (task | stage | hardware | claim) from its WHOLE record "
                                 "(journaled upsert by kind + key; a field or flag left off clears; "
                                 "design 8cbdc883)")
-    p_ent.add_argument("kind", help="The Entity sub-kind (task | stage)")
+    p_ent.add_argument("kind", help="The Entity sub-kind (task | stage | hardware | claim)")
     p_ent.add_argument("key", help="The durable key the teaches_* facts name (never renamed; --name is the display)")
     p_ent.add_argument("--name", required=True, help="The display name")
     p_ent.add_argument("--description", default="", help="One line on what the entry covers")
     p_ent.add_argument("--position", type=int, default=None, help="Its place on the axis (ascending)")
     p_ent.add_argument("--device-class", default="",
                        help="hardware: gpu | cpu | board | phone | sensor | cloud")
+    p_ent.add_argument("--statement", default="",
+                       help="claim: the short statement the site makes (public once the claim is offered)")
     p_ent.add_argument("--cross-task", action="store_true",
                        help="stage: the cross-task row covers it for every task; task: IS the cross-task row")
     p_ent.add_argument("--off-grid", action="store_true",
@@ -2926,6 +2949,21 @@ def main() -> int:
     p_vo.add_argument("--note", default="", help="What ran there (e.g. 'model compilation only')")
     p_vo.add_argument("--retract", action="store_true", help="Remove this (deliverable, device, os) verification")
     p_vo.add_argument("--actor", default=_DEFAULT_ACTOR)
+
+    p_sup = sub.add_parser("supports",
+                           help="Record (or --retract) that a deliverable backs a claim, with the support's "
+                                "kind (journaled; one edge per deliverable + claim; amendment 98e99fe5)")
+    p_sup.add_argument("deliverable", help="The deliverable Note's id, or a post slug")
+    p_sup.add_argument("claim", help="The claim Entity's key")
+    p_sup.add_argument("--kind", default="", help="outcome | method | capability | knowledge")
+    p_sup.add_argument("--note", default="", help="Why this deliverable backs the claim, in one line")
+    p_sup.add_argument("--retract", action="store_true", help="Remove this (deliverable, claim) support")
+    p_sup.add_argument("--actor", default=_DEFAULT_ACTOR)
+    p_clm = sub.add_parser("claims",
+                           help="Every claim with its state and its backing by kind, refusing a claim with no "
+                                "or two states and an offered claim below the backing floor (READ verb)")
+    p_clm.add_argument("--public", action="store_true",
+                       help="Show the public view: offered claims and public supports only")
 
     p_sem = sub.add_parser("series-members",
                            help="Set a series' WHOLE ordered membership (journaled): each slug follows "

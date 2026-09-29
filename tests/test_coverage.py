@@ -85,7 +85,7 @@ def test_the_ratified_cross_product_flaw_is_explicit():
 
 def test_entity_records_are_validated_per_declared_kind():
     assert validate_entity("stage", "train", "Training", {"position": 1}) is None
-    assert "not declared" in validate_entity("claim", "c", "C", {})
+    assert "not declared" in validate_entity("audience", "c", "C", {})
     assert "needs position" in validate_entity("task", "det", "Detection", {})
     assert "must be int" in validate_entity("stage", "s", "S", {"position": True})
     assert "no field" in validate_entity("stage", "s", "S", {"position": 1, "off_grid": True})

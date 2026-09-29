@@ -362,6 +362,15 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         return (f"**{'re-verified' if obj.get('replaced') else 'verified'}** `{str(obj['deliverable_id'])[:8]}` "
                 f"on `{obj.get('hardware')}` · os {obj.get('os') or 'unknown'} · {obj.get('date')} · "
                 f"basis {obj.get('basis')} `{obj['edge_id']}`")
+    if kind == "supports":
+        if obj.get("error"):
+            return f"⚠ {obj['error']}"
+        if obj.get("retracted"):
+            return f"**retracted** support `{obj['edge_id']}`"
+        return (f"**{'restated' if obj.get('replaced') else 'supports'}** `{str(obj['deliverable_id'])[:8]}` "
+                f"→ claim `{obj.get('claim')}` as _{obj.get('kind')}_ `{obj['edge_id']}`")
+    if kind == "claims":
+        return _render_claims(obj)
     if kind == "series-order":
         if obj.get("error"):
             return f"⚠ {obj['error']}"
@@ -1309,6 +1318,37 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             bits.append("frontmatter~")
         return f"**{status}** " + " · ".join(bits)
     return json.dumps(obj, indent=2, default=str)
+
+
+def _render_claims(obj: Dict[str, Any]) -> str:
+    """The claims (amendment 98e99fe5): each with its state and backing counted by kind, the
+    public supports apart; the refusals first so a failing floor is never scrolled past."""
+    claims = obj.get("public") if obj.get("public") is not None else obj.get("claims") or []
+    title = "Claims — the public view" if obj.get("public") is not None else "Claims"
+    lines = [f"## {title} — {len(claims)} claim(s)", ""]
+    for r in obj.get("refusals") or []:
+        lines.append(f"- ⚠ **{r['reason']}** `{r['claim']}` — {r['detail']}")
+    if obj.get("refusals"):
+        lines.append("")
+    for c in claims:
+        st = c.get("state") or ("CONFLICT " + "/".join(c["conflict"]) if c.get("conflict") else "no state")
+        counts = []
+        for k, rows in (c.get("supports") or {}).items():
+            if rows:
+                pub = sum(1 for r in rows if r.get("public"))
+                counts.append(f"{k} {len(rows)}" + (f" ({pub} public)" if pub != len(rows) else ""))
+        lines.append(f"### {c.get('position')}. {c.get('name')} `{c.get('key')}` · _{st}_"
+                     + (" · backed" if c.get("backed") else ""))
+        if c.get("statement"):
+            lines.append(f"> {c['statement']}")
+        lines.append(f"- {' · '.join(counts) if counts else 'no support'}")
+        for k, rows in (c.get("supports") or {}).items():
+            for r in rows if k != "knowledge" else []:
+                lines.append(f"  - _{k}_ **{_short(r.get('title') or r.get('slug'), 70)}** `{r['id'][:8]}`"
+                             + ("" if r.get("public") else " (not public)")
+                             + (f" — {r['note']}" if r.get("note") else ""))
+        lines.append("")
+    return "\n".join(lines).rstrip() if claims else "_(no claims — `entity claim <key> --name ... --statement ... --position N`)_"
 
 
 def _render_coverage(obj: Dict[str, Any]) -> str:

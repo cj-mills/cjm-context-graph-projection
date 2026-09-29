@@ -13,6 +13,9 @@ compute device, its `verification_standing` a fact with history, and a VERIFIED_
 The standing is the page's FILTER and the gate on claims, never a weight: `coverage` with a
 hardware filter narrows the cells to what was verified there, and refusals stay whole.
 
+The CLAIMS (amendment 98e99fe5) declare their Entity kind here too; their state, the SUPPORTS
+edges and the backing floor live in claims.py.
+
 `coverage_matrix` derives everything the page and the gap list read, and stores nothing: the
 rows (tasks by position, the off-grid ones listed apart), the columns (stages by position),
 each cell's tutorials, the cells a CROSS-TASK stage leaves covered by the cross-task row, the
@@ -39,9 +42,10 @@ ENTITY_FIELDS: Dict[str, Dict[str, type]] = {
                     "retired": bool},
     P.ENTITY_STAGE: {"description": str, "position": int, "cross_task": bool, "retired": bool},
     P.ENTITY_HARDWARE: {"description": str, "device_class": str},
+    P.ENTITY_CLAIM: {"statement": str, "position": int},   # amendment 98e99fe5 (1); see claims.py
 }
 _REQUIRED = {P.ENTITY_TASK: ("position",), P.ENTITY_STAGE: ("position",),
-             P.ENTITY_HARDWARE: ("device_class",)}
+             P.ENTITY_HARDWARE: ("device_class",), P.ENTITY_CLAIM: ("statement", "position")}
 _ALLOWED = {(P.ENTITY_HARDWARE, "device_class"): P.DEVICE_CLASSES}   # closed slates on a field
 TUTORIAL_KIND = "tutorial"   # the navigation kind (predicates.DELIVERABLE_KINDS) the matrix reads
 
@@ -117,13 +121,17 @@ async def check_coverage_value(
 ) -> Optional[str]:  # An error, or None (also None for a predicate outside the coverage model)
     """A coverage value must name a live vocabulary entry of the predicate's kind, so a
     typo'd or retired key never lands (the projection refuses one that goes stale later);
-    a verification standing belongs to a hardware Entity and comes from its closed slate."""
-    if predicate == P.VERIFICATION_STANDING:
-        if value not in P.VERIFICATION_STANDINGS:
-            return f"`{value}` is no verification standing ({', '.join(P.VERIFICATION_STANDINGS)})"
+    a verification standing belongs to a hardware Entity and a claim state to a claim Entity
+    (98e99fe5 (1)), each from its closed slate."""
+    owned = {P.VERIFICATION_STANDING: ("verification standing", P.VERIFICATION_STANDINGS, P.ENTITY_HARDWARE),
+             P.CLAIM_STATE: ("claim state", P.CLAIM_STATES, P.ENTITY_CLAIM)}
+    if predicate in owned:
+        what, slate, owner = owned[predicate]
+        if value not in slate:
+            return f"`{value}` is no {what} ({', '.join(slate)})"
         node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=subject_id)
-        if node is None or F.prop(node, "entity_kind") != P.ENTITY_HARDWARE:
-            return "a verification standing belongs to a hardware Entity (`entity hardware <key> ...`)"
+        if node is None or F.prop(node, "entity_kind") != owner:
+            return f"a {what} belongs to a {owner} Entity (`entity {owner} <key> ...`)"
         return None
     kind = P.COVERAGE_KINDS.get(predicate)
     if kind is None:
@@ -301,6 +309,19 @@ async def load_hardware(
     return devices
 
 
+async def resolve_deliverable(
+    gx: GraphHandle,
+    deliverable: str,  # A deliverable Note's node id, or its post slug
+) -> Optional[str]:  # The Note's id, or None
+    """Resolve a deliverable argument to its Note id (an id first, then a slug)."""
+    from cjm_dev_graph_schema.identity import note_node_id
+    for cand in (deliverable, note_node_id(deliverable)):
+        node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=cand)
+        if node is not None and (getattr(node, "label", None) or (node.get("label") if isinstance(node, dict) else None)) == DevNodeKinds.NOTE:
+            return cand
+    return None
+
+
 async def record_verification(
     gx: GraphHandle,
     deliverable: str,                          # The deliverable's node id, or a Note's slug
@@ -316,18 +337,12 @@ async def record_verification(
 ) -> Dict[str, Any]:  # {edge_id, deliverable_id, hardware_id, written} | {error, written: False}
     """Write one VERIFIED_ON edge with its evidence (journaled `verified-on`), or retract it.
     A re-verification under the same OS replaces the evidence (the journal keeps the history)."""
-    from cjm_dev_graph_schema.identity import note_node_id
     if basis not in P.VERIFICATION_BASES:
         return {"error": f"basis must be one of {', '.join(P.VERIFICATION_BASES)} (got {basis!r})",
                 "written": False}
     if not retract and not date:
         return {"error": "a verification needs its --date", "written": False}
-    did = None
-    for cand in (deliverable, note_node_id(deliverable)):
-        node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=cand)
-        if node is not None and (getattr(node, "label", None) or (node.get("label") if isinstance(node, dict) else None)) == DevNodeKinds.NOTE:
-            did = cand
-            break
+    did = await resolve_deliverable(gx, deliverable)
     if did is None:
         return {"error": f"no deliverable Note `{deliverable}` (a node id or a post slug)", "written": False}
     hid = entity_node_id(P.ENTITY_HARDWARE, hardware)

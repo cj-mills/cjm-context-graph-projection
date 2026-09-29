@@ -4286,6 +4286,20 @@ async def note_publish_states(
     return {k: sorted(set(v)) for k, v in out.items()}
 
 
+async def public_deliverables(
+    gx: GraphHandle,
+) -> set:  # The ids of the deliverable Notes the public profile shows
+    """The public rule the publish guard enforces, as a set: a Note is public when its active
+    publish_state is exactly `published`, or when it has no publish_state and its type's origin
+    is `archive` (design amendment c64e07e7: archive posts are public as authored)."""
+    states = await note_publish_states(gx)
+    out = {nid for nid, vals in states.items() if vals == [P.PUBLISH_PUBLISHED]}
+    for nid, t in (await note_types(gx)).items():
+        if nid not in states and t.get("origin") == P.ORIGIN_ARCHIVE:
+            out.add(nid)
+    return out
+
+
 async def work_of_note(
     gx: GraphHandle,
     note_id: str,  # The deliverable Note id
