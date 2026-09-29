@@ -855,6 +855,31 @@ async def _dispatch(args) -> int:
             if args.journal_path and res.get("written"):
                 append_write(args.journal_path, "series", op)
             return 1 if res.get("error") else 0
+        elif args.command == "entity":
+            # A typed vocabulary Entity (design 8cbdc883 (1)): the op is the WHOLE record, so
+            # the last `entity` op per (kind, key) wins on replay; a flag left off clears.
+            from .coverage import mint_entity
+            fields: Dict[str, Any] = {}
+            if args.description:
+                fields["description"] = args.description
+            if args.position is not None:
+                fields["position"] = args.position
+            for flag in ("cross_task", "off_grid", "retired"):
+                if getattr(args, flag):
+                    fields[flag] = True
+            res = await mint_entity(gx, args.kind, args.key, name=args.name, fields=fields,
+                                    actor=args.actor)
+            print(render("entity", res, args.format))
+            if args.journal_path and res.get("written"):
+                append_write(args.journal_path, "entity",
+                             {"kind": args.kind, "key": args.key, "name": args.name,
+                              "fields": fields, "actor": args.actor})
+            return 1 if res.get("error") else 0
+        elif args.command == "coverage":
+            from .coverage import coverage_matrix
+            res = await coverage_matrix(gx)
+            print(render("coverage", res, args.format))
+            return 0 if res.get("ok") else 1
         elif args.command == "series-members":
             # The whole ordered membership (DEC 72d669c5 (4)): each slug follows the one before.
             slugs = list(args.slugs)
@@ -2828,6 +2853,27 @@ def main() -> int:
     p_ser.add_argument("--category", action="append", default=None,
                        help="One of the page's categories (repeatable) -> TAGGED edges")
     p_ser.add_argument("--actor", default=_DEFAULT_ACTOR)
+
+    p_ent = sub.add_parser("entity",
+                           help="Mint/update a typed vocabulary Entity (task | stage) from its WHOLE record "
+                                "(journaled upsert by kind + key; a field or flag left off clears; "
+                                "design 8cbdc883)")
+    p_ent.add_argument("kind", help="The Entity sub-kind (task | stage)")
+    p_ent.add_argument("key", help="The durable key the teaches_* facts name (never renamed; --name is the display)")
+    p_ent.add_argument("--name", required=True, help="The display name")
+    p_ent.add_argument("--description", default="", help="One line on what the entry covers")
+    p_ent.add_argument("--position", type=int, default=None, help="Its place on the axis (ascending)")
+    p_ent.add_argument("--cross-task", action="store_true",
+                       help="stage: the cross-task row covers it for every task; task: IS the cross-task row")
+    p_ent.add_argument("--off-grid", action="store_true",
+                       help="task: listed below the grid, needs no stage (e.g. other)")
+    p_ent.add_argument("--retired", action="store_true",
+                       help="Retired: off both axes, and no new fact may name it")
+    p_ent.add_argument("--actor", default=_DEFAULT_ACTOR)
+
+    sub.add_parser("coverage",
+                   help="The Tutorials matrix (task x stage) derived from the teaches_* facts: cells, "
+                        "covered cells, gaps, the off-grid list, and the refused tutorials (READ verb)")
 
     p_sem = sub.add_parser("series-members",
                            help="Set a series' WHOLE ordered membership (journaled): each slug follows "

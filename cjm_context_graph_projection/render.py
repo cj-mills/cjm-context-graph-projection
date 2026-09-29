@@ -337,6 +337,14 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                 f"_{obj.get('text')}_\n"
                 f"`check {obj.get('check_id')}` (task_state=open; close with "
                 f"`assert {obj.get('check_id')} task_state done --evidence <proof>`)")
+    if kind == "entity":
+        if obj.get("error"):
+            return f"⚠ {obj['error']}"
+        extra = ", ".join(f"{k}={v}" for k, v in (obj.get("fields") or {}).items() if k != "description")
+        return (f"**{'updated' if obj.get('updated') else 'minted'}** {obj['kind']} `{obj['key']}` "
+                f"— {obj.get('name')}" + (f" ({extra})" if extra else "") + f" `{obj['entity_id']}`")
+    if kind == "coverage":
+        return _render_coverage(obj)
     if kind == "series-order":
         if obj.get("error"):
             return f"⚠ {obj['error']}"
@@ -1284,6 +1292,51 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             bits.append("frontmatter~")
         return f"**{status}** " + " · ".join(bits)
     return json.dumps(obj, indent=2, default=str)
+
+
+def _render_coverage(obj: Dict[str, Any]) -> str:
+    """The Tutorials matrix (design 8cbdc883): a count per cell, `~` where a cross-task stage
+    is covered by the cross-task row, `·` a gap; then the gaps, the off-grid list and the
+    refusals (each a tutorial the page would otherwise drop)."""
+    tasks, stages = obj.get("tasks") or [], obj.get("stages") or []
+    cells, tuts = obj.get("cells") or {}, obj.get("tutorials") or {}
+    covered = {(c["task"], c["stage"]) for c in obj.get("covered") or []}
+    n = sum(1 for _ in tuts)
+    lines = [f"## Tutorials matrix — {n} tutorial(s) · {len(tasks)} task(s) x {len(stages)} stage(s) · "
+             f"{len(obj.get('gaps') or [])} gap(s) · {len(obj.get('refusals') or [])} refused", ""]
+    if not tasks or not stages:
+        lines.append("_(no vocabulary — mint tasks and stages with `entity task|stage <key> --name ...`)_")
+    else:
+        lines.append("| task | " + " | ".join(s.get("name") or s["key"] for s in stages) + " |")
+        lines.append("|---|" + "---:|" * len(stages))
+        for t in tasks:
+            row = []
+            for s in stages:
+                ids = cells.get(f"{t['key']}|{s['key']}") or []
+                row.append(str(len(ids)) if ids else ("~" if (t["key"], s["key"]) in covered
+                                                      else ("" if t.get("cross_task") else "·")))
+            lines.append(f"| {t.get('name') or t['key']} | " + " | ".join(row) + " |")
+        lines.append("")
+        lines.append("_count = tutorials teaching the cell · `~` covered by the cross-task row · "
+                     "`·` gap_")
+    gaps = obj.get("gaps") or []
+    if gaps:
+        by: Dict[str, List[str]] = {}
+        for g in gaps:
+            by.setdefault(g["task"], []).append(g["stage"])
+        lines += ["", "**Gaps:**"] + [f"- {t}: {', '.join(ss)}" for t, ss in by.items()]
+    for t in obj.get("off_grid_tasks") or []:
+        ids = (obj.get("off_grid") or {}).get(t["key"]) or []
+        lines += ["", f"**{t.get('name') or t['key']}** (off the grid, {len(ids)}):"]
+        lines += [f"- {tuts.get(i, {}).get('title') or i} `{i[:8]}`" for i in ids]
+    ref = obj.get("refusals") or []
+    if ref:
+        lines += ["", f"⛔ **Refused ({len(ref)})** — surveyed facts missing or naming no live vocabulary entry:"]
+        lines += [f"- **{r['reason']}** · {tuts.get(r['id'], {}).get('slug') or r['id']} `{r['id'][:8]}` — "
+                  f"{r['detail']}" for r in ref[:40]]
+        if len(ref) > 40:
+            lines.append(f"- … {len(ref) - 40} more (`--format agent` lists all)")
+    return "\n".join(lines)
 
 
 def render(

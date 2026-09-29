@@ -188,6 +188,12 @@ async def assert_value(
     # writes (window unset) keep the verb-time now() default.
     if asserted_at is None:
         asserted_at = PROVENANCE_TS.get()
+    # A coverage value names a live vocabulary entry (design 8cbdc883): refused, never journaled.
+    from .coverage import check_vocab_value
+    vocab_err = await check_vocab_value(gx, predicate, value)
+    if vocab_err:
+        return {"error": vocab_err, "subject": subject, "predicate": predicate,
+                "value": value, "written": False}
     r = await resolve_subject(gx, subject)
     if r.get("error"):
         return {"error": r["error"], "subject": subject, "predicate": predicate,

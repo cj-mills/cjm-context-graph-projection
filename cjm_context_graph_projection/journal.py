@@ -24,8 +24,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from cjm_context_graph_layer.identity import derive_node_id
 from cjm_context_graph_layer.ops import PROVENANCE_TS
 from cjm_context_graph_primitives.journal import append_write, journal_segments, read_journal
-from cjm_dev_graph_schema.identity import (code_module_node_id, note_node_id, section_node_id,
-                                           series_node_id, session_node_id)
+from cjm_dev_graph_schema.identity import (code_module_node_id, entity_node_id, note_node_id,
+                                           section_node_id, series_node_id, session_node_id)
 from cjm_dev_graph_schema.nodes import DecisionNode
 from cjm_markdown_decompose_core.extract import note_from_file
 
@@ -75,13 +75,15 @@ M3_BASELINE_ACTOR = "import:m3-baseline"
 # `series` / `series-members` / `place-in-series` = Series born on-graph (DEC 72d669c5): the
 # page's whole record upserted by key (last op wins), the whole ordered membership, and a
 # one-member splice — replayed in append order, so the authored `after` chain converges.
+# `entity` = a typed vocabulary Entity (design 8cbdc883: the Tutorials matrix's tasks and
+# stages): the whole record upserted by (kind, key), last op wins.
 JOURNAL_VERBS = ("decide", "alias", "assert", "link", "unlink", "section", "new-note",
                  "add-section", "display-rule", "set-lens", "check", "session",
                  "retract-session", "pull-transcript", "mint-messages", "edit-message",
                  "derive-message", "procedure", "propose",
                  "deliverable-type", "accept-point", "retract-point", "edit-point", "render-notes",
                  "render-work-page", "rehome-points", "place-point",
-                 "series", "series-members", "place-in-series")
+                 "series", "series-members", "place-in-series", "entity")
 
 
 def m3_baseline_import(
@@ -377,6 +379,12 @@ async def _apply_op(
         await place_in_series(gx, a["key"], a["slug"], after=a.get("after"),
                               first=bool(a.get("first")), remove=bool(a.get("remove")),
                               actor=a.get("actor", "agent:session"))
+    elif verb == "entity":
+        # A typed vocabulary Entity (design 8cbdc883): the whole record, so the append-ordered
+        # ops converge on the last one per (kind, key).
+        from .coverage import mint_entity
+        await mint_entity(gx, a["kind"], a["key"], name=a.get("name", ""),
+                          fields=dict(a.get("fields") or {}), actor=a.get("actor", "agent:session"))
     else:
         return ""
     return verb
@@ -542,6 +550,9 @@ def touched_node_ids(
             out.append(series_node_id(a["key"]))
         out.extend(note_node_id(s) for s in ([a["slug"]] if a.get("slug") else [])
                    + list(a.get("slugs") or []))
+    elif verb == "entity":
+        if a.get("kind") and a.get("key"):
+            out.append(entity_node_id(a["kind"], a["key"]))
     elif a.get("repo_key") and a.get("module_path"):
         out.append(code_module_node_id(a["repo_key"], a["module_path"]))
     return out
