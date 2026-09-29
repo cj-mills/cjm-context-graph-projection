@@ -188,17 +188,18 @@ async def assert_value(
     # writes (window unset) keep the verb-time now() default.
     if asserted_at is None:
         asserted_at = PROVENANCE_TS.get()
-    # A coverage value names a live vocabulary entry (design 8cbdc883): refused, never journaled.
-    from .coverage import check_vocab_value
-    vocab_err = await check_vocab_value(gx, predicate, value)
-    if vocab_err:
-        return {"error": vocab_err, "subject": subject, "predicate": predicate,
-                "value": value, "written": False}
     r = await resolve_subject(gx, subject)
     if r.get("error"):
         return {"error": r["error"], "subject": subject, "predicate": predicate,
                 "value": value, "written": False}
     subject_id, subject_label, created = r["subject_id"], r["subject_label"], r["created_node"]
+    # The coverage model's values (design 8cbdc883): a teaches_* value names a live vocabulary
+    # entry, a verification standing sits on a hardware Entity -- refused, never journaled.
+    from .coverage import check_coverage_value
+    coverage_err = await check_coverage_value(gx, predicate, value, subject_id)
+    if coverage_err:
+        return {"error": coverage_err, "subject": subject, "predicate": predicate,
+                "value": value, "written": False}
 
     # Approval binds to content (design 40622922): a claim about a content-bearing subject
     # records the subject's LIVE content hash (replay passes the journaled one instead).

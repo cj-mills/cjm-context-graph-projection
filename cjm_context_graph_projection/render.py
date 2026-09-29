@@ -344,7 +344,24 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         return (f"**{'updated' if obj.get('updated') else 'minted'}** {obj['kind']} `{obj['key']}` "
                 f"— {obj.get('name')}" + (f" ({extra})" if extra else "") + f" `{obj['entity_id']}`")
     if kind == "coverage":
-        return _render_coverage(obj)
+        return f"⚠ {obj['error']}" if obj.get("error") else _render_coverage(obj)
+    if kind == "hardware":
+        devs = sorted((obj.get("devices") or {}).values(),
+                      key=lambda d: (str(d.get("standing") or "~"), str(d.get("key"))))
+        lines = [f"## Hardware — {len(devs)} device(s)", ""]
+        for d in devs:
+            st = d.get("standing") or ("CONFLICT " + "/".join(d["conflict"]) if d.get("conflict") else "no standing")
+            lines.append(f"- **{d.get('name')}** `{d.get('key')}` · {d.get('device_class') or '?'} · "
+                         f"_{st}_ · {d.get('verified', 0)} verification(s)")
+        return "\n".join(lines) if devs else "_(no hardware — `entity hardware <key> --name ... --device-class ...`)_"
+    if kind == "verified-on":
+        if obj.get("error"):
+            return f"⚠ {obj['error']}"
+        if obj.get("retracted"):
+            return f"**retracted** verification `{obj['edge_id']}`"
+        return (f"**{'re-verified' if obj.get('replaced') else 'verified'}** `{str(obj['deliverable_id'])[:8]}` "
+                f"on `{obj.get('hardware')}` · os {obj.get('os') or 'unknown'} · {obj.get('date')} · "
+                f"basis {obj.get('basis')} `{obj['edge_id']}`")
     if kind == "series-order":
         if obj.get("error"):
             return f"⚠ {obj['error']}"
@@ -1303,7 +1320,10 @@ def _render_coverage(obj: Dict[str, Any]) -> str:
     covered = {(c["task"], c["stage"]) for c in obj.get("covered") or []}
     n = sum(1 for _ in tuts)
     lines = [f"## Tutorials matrix — {n} tutorial(s) · {len(tasks)} task(s) x {len(stages)} stage(s) · "
-             f"{len(obj.get('gaps') or [])} gap(s) · {len(obj.get('refusals') or [])} refused", ""]
+             f"{len(obj.get('gaps') or [])} gap(s) · {len(obj.get('refusals') or [])} refused"]
+    if obj.get("filter"):
+        lines.append(f"_filtered to {obj.get('filtered', 0)} tutorial(s) verified on {obj['filter']}_")
+    lines.append("")
     if not tasks or not stages:
         lines.append("_(no vocabulary — mint tasks and stages with `entity task|stage <key> --name ...`)_")
     else:

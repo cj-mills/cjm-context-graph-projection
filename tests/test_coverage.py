@@ -18,7 +18,8 @@ from cjm_dev_graph_schema.identity import entity_node_id, note_node_id
 from cjm_markdown_decompose_core.extract import note_from_text
 from cjm_markdown_decompose_core.ingest import corpus_graph_elements
 
-from cjm_context_graph_projection.coverage import (coverage_matrix, mint_entity, project_matrix,
+from cjm_context_graph_projection.coverage import (coverage_matrix, load_hardware, load_verifications,
+                                                   mint_entity, project_matrix, record_verification,
                                                    validate_entity)
 from cjm_context_graph_projection.purenotes import mint_deliverable_type
 from cjm_context_graph_projection.render import render
@@ -84,12 +85,23 @@ def test_the_ratified_cross_product_flaw_is_explicit():
 
 def test_entity_records_are_validated_per_declared_kind():
     assert validate_entity("stage", "train", "Training", {"position": 1}) is None
-    assert "not declared" in validate_entity("hardware", "rtx", "RTX", {})
+    assert "not declared" in validate_entity("claim", "c", "C", {})
     assert "needs position" in validate_entity("task", "det", "Detection", {})
     assert "must be int" in validate_entity("stage", "s", "S", {"position": True})
     assert "no field" in validate_entity("stage", "s", "S", {"position": 1, "off_grid": True})
     assert "slug" in validate_entity("task", "a b", "A", {"position": 1})
     assert "name" in validate_entity("task", "a", "", {"position": 1})
+    assert validate_entity("hardware", "rtx-4090", "RTX 4090", {"device_class": "gpu"}) is None
+    assert "one of" in validate_entity("hardware", "x", "X", {"device_class": "laptop"})
+    assert "needs device_class" in validate_entity("hardware", "x", "X", {})
+
+
+def test_a_filter_narrows_cells_but_never_hides_a_refusal():
+    tuts = {i: {"slug": i} for i in ("a", "b", "none")}
+    m = project_matrix(_T, _S, tuts, {"a": _f(["det"], ["train"]), "b": _f(["seg"], ["deploy"])},
+                       include={"a"})
+    assert m["cells"] == {"det|train": ["a"]} and m["filtered"] == 1
+    assert [r["id"] for r in m["refusals"]] == ["none"]
 
 
 def _post(slug: str) -> str:
@@ -186,13 +198,20 @@ def test_a_rebuild_reproduces_the_vocabulary_and_the_matrix(tmp_path):
                 ["entity", "stage", "train", "--name", "Training", "--position", "1"],
                 ["entity", "stage", "deploy", "--name", "Deploy", "--position", "2"],
                 ["entity", "stage", "deploy", "--name", "Deployment", "--position", "2"],
-                ["assert-batch", str(batch)]):
+                ["assert-batch", str(batch)],
+                ["entity", "hardware", "rtx-4090", "--name", "NVIDIA GeForce RTX 4090", "--device-class", "gpu"],
+                ["assert", entity_node_id("hardware", "rtx-4090"), P.VERIFICATION_STANDING, "in-set"],
+                ["verified-on", "a", "rtx-4090", "--os", "Ubuntu", "--date", "2024-11-11", "--basis", "timeline",
+                 "--version", "cuda=12.4"],
+                ["verified-on", "a", "rtx-4090", "--os", "Windows 11", "--date", "2023-10-20"],
+                ["verified-on", "a", "rtx-4090", "--os", "Windows 11", "--retract"]):
         r = _run(*base, *cmd)
         assert r.returncode == 0, (cmd, r.stdout, r.stderr)
     refused = _run(*base, "entity", "stage", "x", "--name", "X")          # no position: refused
     assert refused.returncode == 1 and "needs position" in refused.stdout
     verbs = [json.loads(line)["verb"] for line in Path(journal).read_text().splitlines()]
-    assert verbs.count("entity") == 6 and verbs.count("assert") == 7      # the refusal journaled nothing
+    assert verbs.count("entity") == 7 and verbs.count("assert") == 8      # the refusal journaled nothing
+    assert verbs.count("verified-on") == 3
     matrix = _run("--graph-db-path", live, "coverage")
     assert matrix.returncode == 0, matrix.stdout + matrix.stderr
     assert "| Detection | ~ | 1 | 1 |" in matrix.stdout and "| Deployment |" in matrix.stdout
@@ -203,3 +222,66 @@ def test_a_rebuild_reproduces_the_vocabulary_and_the_matrix(tmp_path):
     assert _ids(fresh) == _ids(live)
     again = _run("--graph-db-path", fresh, "coverage")
     assert again.stdout == matrix.stdout
+    filtered = [_run("--graph-db-path", db, "coverage", "--in-set").stdout for db in (live, fresh)]
+    assert filtered[0] == filtered[1] and "filtered to 1 tutorial(s)" in filtered[0]
+    hw = [_run("--graph-db-path", db, "hardware").stdout for db in (live, fresh)]
+    assert hw[0] == hw[1] and "_in-set_ · 1 verification(s)" in hw[0]
+
+
+@pytestmark_graph
+def test_hardware_standing_and_verifications(tmp_path):
+    async def go():
+        async with open_graph(str(tmp_path / "g.db")) as gx:
+            notes = [note_from_text(f"/c/posts/{s}/index.md", _post(s), corpus_root="/c/posts", lossless=True)
+                     for s in ("a", "b")]
+            nodes, edges = corpus_graph_elements(notes)
+            await extend_graph(gx.queue, gx.graph_id, nodes, edges)
+            await mint_deliverable_type(gx, "archive-tutorial", title="T", kind="tutorial", origin="archive")
+            await mint_entity(gx, "task", "det", name="Detection", fields={"position": 1})
+            await mint_entity(gx, "stage", "train", name="Training", fields={"position": 1})
+            for s in ("a", "b"):
+                await assert_value(gx, note_node_id(s), "deliverable_type", "archive-tutorial")
+                await assert_value(gx, note_node_id(s), P.TEACHES_TASK, "det")
+                await assert_value(gx, note_node_id(s), P.TEACHES_STAGE, "train")
+            for key, cls in (("rtx-4090", "gpu"), ("titan-rtx", "gpu")):
+                await mint_entity(gx, "hardware", key, name=key, fields={"device_class": cls})
+            gpu = entity_node_id("hardware", "rtx-4090")
+            bad_value = await assert_value(gx, gpu, P.VERIFICATION_STANDING, "owned")
+            bad_subject = await assert_value(gx, note_node_id("a"), P.VERIFICATION_STANDING, "in-set")
+            await assert_value(gx, gpu, P.VERIFICATION_STANDING, "in-set")
+            await assert_value(gx, entity_node_id("hardware", "titan-rtx"), P.VERIFICATION_STANDING, "in-set")
+            # The Titan's exit from the set is a dated supersession, never an erasure
+            moved = await assert_value(gx, entity_node_id("hardware", "titan-rtx"), P.VERIFICATION_STANDING,
+                                       "retired", supersede=["in-set"])
+            linux = await record_verification(gx, "a", "rtx-4090", os="Ubuntu", date="2024-11-11",
+                                              basis="timeline", versions={"tensorrt": "10"})
+            win = await record_verification(gx, note_node_id("a"), "rtx-4090", os="Windows 11", date="2023-10-20")
+            again = await record_verification(gx, "a", "rtx-4090", os="Ubuntu", date="2025-01-02")
+            old = await record_verification(gx, "b", "titan-rtx", os="Windows 10", date="2022-07-17")
+            no_date = await record_verification(gx, "b", "rtx-4090")
+            no_basis = await record_verification(gx, "b", "rtx-4090", date="x", basis="guess")
+            no_device = await record_verification(gx, "b", "a770", date="x")
+            devices = await load_hardware(gx)
+            in_set = await coverage_matrix(gx, in_set=True)
+            titan = await coverage_matrix(gx, hardware=["titan-rtx"])
+            unknown = await coverage_matrix(gx, hardware=["nope"])
+            gone = await record_verification(gx, "a", "rtx-4090", os="Windows 11", retract=True)
+            edges = await load_verifications(gx)
+            return (bad_value, bad_subject, moved, linux, win, again, old, no_date, no_basis, no_device,
+                    devices, in_set, titan, unknown, gone, edges)
+    (bad_value, bad_subject, moved, linux, win, again, old, no_date, no_basis, no_device,
+     devices, in_set, titan, unknown, gone, edges) = asyncio.run(go())
+    assert "no verification standing" in bad_value["error"] and "hardware Entity" in bad_subject["error"]
+    assert not moved.get("conflict")
+    assert devices["rtx-4090"]["standing"] == "in-set" and devices["titan-rtx"]["standing"] == "retired"
+    assert devices["rtx-4090"]["verified"] == 2 and devices["titan-rtx"]["verified"] == 1
+    assert linux["edge_id"] != win["edge_id"] and again["edge_id"] == linux["edge_id"] and again["replaced"]
+    assert old["written"] and "--date" in no_date["error"] and "basis" in no_basis["error"]
+    assert "no hardware" in no_device["error"]
+    # The in-set filter keeps a (verified on the 4090) and drops b (only on the retired Titan)
+    assert in_set["cells"] == {"det|train": [note_node_id("a")]} and in_set["filtered"] == 1
+    assert titan["cells"] == {"det|train": [note_node_id("b")]}
+    assert "no hardware `nope`" in unknown["error"]
+    assert gone["retracted"] and len(edges) == 2
+    ub = next(e for e in edges if e["id"] == linux["edge_id"])
+    assert ub["properties"]["date"] == "2025-01-02" and ub["properties"]["versions"] == {}

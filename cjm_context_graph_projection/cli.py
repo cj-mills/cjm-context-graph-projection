@@ -864,6 +864,8 @@ async def _dispatch(args) -> int:
                 fields["description"] = args.description
             if args.position is not None:
                 fields["position"] = args.position
+            if args.device_class:
+                fields["device_class"] = args.device_class
             for flag in ("cross_task", "off_grid", "retired"):
                 if getattr(args, flag):
                     fields[flag] = True
@@ -877,9 +879,37 @@ async def _dispatch(args) -> int:
             return 1 if res.get("error") else 0
         elif args.command == "coverage":
             from .coverage import coverage_matrix
-            res = await coverage_matrix(gx)
+            res = await coverage_matrix(gx, hardware=args.hardware, in_set=args.in_set)
             print(render("coverage", res, args.format))
             return 0 if res.get("ok") else 1
+        elif args.command == "hardware":
+            from .coverage import load_hardware
+            res = {"devices": await load_hardware(gx)}
+            print(render("hardware", res, args.format))
+            return 0
+        elif args.command == "verified-on":
+            # One verification with its evidence (design 8cbdc883 (7)): the op carries the resolved
+            # deliverable id, so replay never depends on slug resolution; --retract compensates.
+            from .coverage import record_verification
+            versions: Dict[str, str] = {}
+            for kv in args.version or []:
+                k, sep, v = kv.partition("=")
+                if not sep or not k:
+                    print(f"error: --version expects NAME=VALUE (got {kv!r})", file=sys.stderr)
+                    return 1
+                versions[k] = v
+            res = await record_verification(gx, args.deliverable, args.hardware, os=args.os,
+                                            date=args.date, basis=args.basis, versions=versions,
+                                            note=args.note, retract=args.retract, actor=args.actor)
+            print(render("verified-on", res, args.format))
+            if args.journal_path and res.get("written"):
+                op = {"deliverable": res["deliverable_id"], "hardware": args.hardware, "os": args.os,
+                      "date": args.date, "basis": args.basis, "versions": versions, "note": args.note,
+                      "actor": args.actor}
+                if args.retract:
+                    op["retract"] = True
+                append_write(args.journal_path, "verified-on", op)
+            return 1 if res.get("error") else 0
         elif args.command == "series-members":
             # The whole ordered membership (DEC 72d669c5 (4)): each slug follows the one before.
             slugs = list(args.slugs)
@@ -2863,6 +2893,8 @@ def main() -> int:
     p_ent.add_argument("--name", required=True, help="The display name")
     p_ent.add_argument("--description", default="", help="One line on what the entry covers")
     p_ent.add_argument("--position", type=int, default=None, help="Its place on the axis (ascending)")
+    p_ent.add_argument("--device-class", default="",
+                       help="hardware: gpu | cpu | board | phone | sensor | cloud")
     p_ent.add_argument("--cross-task", action="store_true",
                        help="stage: the cross-task row covers it for every task; task: IS the cross-task row")
     p_ent.add_argument("--off-grid", action="store_true",
@@ -2871,9 +2903,29 @@ def main() -> int:
                        help="Retired: off both axes, and no new fact may name it")
     p_ent.add_argument("--actor", default=_DEFAULT_ACTOR)
 
-    sub.add_parser("coverage",
-                   help="The Tutorials matrix (task x stage) derived from the teaches_* facts: cells, "
-                        "covered cells, gaps, the off-grid list, and the refused tutorials (READ verb)")
+    p_cov = sub.add_parser("coverage",
+                           help="The Tutorials matrix (task x stage) derived from the teaches_* facts: cells, "
+                                "covered cells, gaps, the off-grid list, and the refused tutorials (READ verb)")
+    p_cov.add_argument("--hardware", action="append", default=None,
+                       help="Filter: only tutorials VERIFIED_ON this device key (repeatable)")
+    p_cov.add_argument("--in-set", action="store_true",
+                       help="Filter: only tutorials verified on a device whose standing is in-set")
+    sub.add_parser("hardware",
+                   help="Every hardware Entity with its active verification_standing and how many "
+                        "deliverables were verified on it (READ verb)")
+    p_vo = sub.add_parser("verified-on",
+                          help="Record (or --retract) that a deliverable ran on a hardware device, with "
+                               "its evidence (journaled; one edge per deliverable + device + os; design 8cbdc883)")
+    p_vo.add_argument("deliverable", help="The deliverable Note's id, or a post slug")
+    p_vo.add_argument("hardware", help="The hardware Entity's key")
+    p_vo.add_argument("--os", default="", help="The OS it ran under (verbatim; empty = unknown)")
+    p_vo.add_argument("--date", default="", help="When it was verified (verbatim)")
+    p_vo.add_argument("--basis", default="stated", help="stated (the post names it) | timeline (attributed)")
+    p_vo.add_argument("--version", action="append", default=None, metavar="NAME=VALUE",
+                      help="A driver / runtime / library version (repeatable)")
+    p_vo.add_argument("--note", default="", help="What ran there (e.g. 'model compilation only')")
+    p_vo.add_argument("--retract", action="store_true", help="Remove this (deliverable, device, os) verification")
+    p_vo.add_argument("--actor", default=_DEFAULT_ACTOR)
 
     p_sem = sub.add_parser("series-members",
                            help="Set a series' WHOLE ordered membership (journaled): each slug follows "
