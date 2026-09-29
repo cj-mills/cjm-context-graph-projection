@@ -668,7 +668,7 @@ async def _dispatch(args) -> int:
                 links = await resolve_site_links(gx)
                 print(f"site links: {links['resolved']} resolved (+{links['added']} "
                       f"-{links['removed']}), {len(links['unresolved'])} unresolved, "
-                      f"{len(links['ambiguous'])} ambiguous")
+                      f"{len(links['ambiguous'])} ambiguous, {len(links['anchors'])} anchor(s) naming no Section")
             if stopped is not None:
                 print(f"assert-batch: {landed} of {len(specs)} landed; stopped at line {stopped}")
                 return 1
@@ -961,7 +961,8 @@ async def _dispatch(args) -> int:
             # REPORT only: the rebuild's closing pass and the live hooks own the write.
             res = await resolve_site_links(gx, write=False)
             print(render("site-links", res, args.format))
-            return 2 if (res["unresolved"] or res["ambiguous"] or res["added"] or res["removed"]) else 0
+            return 2 if (res["unresolved"] or res["ambiguous"] or res["anchors"]
+                         or res["added"] or res["removed"]) else 0
         elif args.command == "lens":
             params: Dict[str, str] = {}
             for kv in (args.param or []):

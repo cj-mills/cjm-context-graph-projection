@@ -73,7 +73,7 @@ def _site(root: Path) -> None:
         (root / d).mkdir(parents=True)
     (root / "_quarto.yml").write_text(
         "project:\n  type: website\nprofile:\n  default: public\n  group:\n    - [public, staging]\n"
-        "website:\n  title: t\n")
+        "filters:\n  - _derived/derived-blocks.lua\nwebsite:\n  title: t\n")
     (root / "_quarto-public.yml").write_text(
         'project:\n  render:\n    - "**/*.qmd"\n    - "**/*.md"\n    - "!drafts/"\n')
     (root / "_quarto-staging.yml").write_text(

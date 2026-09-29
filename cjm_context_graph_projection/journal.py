@@ -469,6 +469,7 @@ async def replay_journal(
     links = await resolve_site_links(gx)
     counts["site_links_resolved"] = links["resolved"]
     counts["site_links_unresolved"] = len(links["unresolved"]) + len(links["ambiguous"])
+    counts["site_links_unresolved_anchors"] = len(links["anchors"])
     return counts
 
 

@@ -57,11 +57,14 @@ def test_notes_corpus_elements_permalink_identity_and_facets(tmp_path):
     assert labels.count(DevNodeKinds.SERIES) == 0
     assert not [e for e in edges if e["relation_type"] == DevRelations.IN_SERIES]
     notes = [n for n in nodes if n["label"] == DevNodeKinds.NOTE]
-    assert all(n["properties"]["site_refs"] == ["/series/notes/education-notes.html"] for n in notes)
+    # every in-body site link rides site_refs for the one post-replay resolver (ruling d31e9ba7):
+    # the post link is no ingest edge
+    refs = {n["properties"]["slug"]: n["properties"]["site_refs"] for n in notes}
+    assert refs["the-learning-game-book-notes"] == ["/series/notes/education-notes.html"]
+    assert "/posts/the-learning-game-book-notes/" in refs["dumbing-us-down-book-notes"]
     assert any(e["relation_type"] == DevRelations.TAGGED
                and e["target_id"] == topic_node_id("education") for e in edges)
-    assert any(e["relation_type"] == DevRelations.REFERENCES
-               and e["properties"].get("cross_post") for e in edges)
+    assert not any(e["relation_type"] == DevRelations.REFERENCES for e in edges)
     # The notes corpus decomposes bodies into Section nodes (opt-in, posts only).
     assert labels.count(DevNodeKinds.SECTION) >= 1
     assert any(e["relation_type"] == DevRelations.HAS_SECTION for e in edges)

@@ -403,6 +403,13 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                          f"({pg.get('written', 0)} written, {pg.get('unchanged', 0)} unchanged, "
                          f"{len(pg.get('removed') or [])} removed)"
                          + (f" · no site_path: {', '.join(pg['unpaged'])}" if pg.get("unpaged") else ""))
+        if obj.get("derived"):
+            dv = obj["derived"]
+            lines.append(f"- derived blocks out of the render (253ac996): {dv.get('series_callout', 0)} series callout(s), "
+                         f"{dv.get('hand_toc', 0)} hand TOC(s), {dv.get('series_nav_line', 0)} nav line(s) · "
+                         f"navigation on {dv.get('posts', 0)} post(s) ({dv.get('series_nav', 0)} in a series, "
+                         f"{dv.get('collections', 0)} in a collection)"
+                         + (f" · filter reported {dv['reported']}" if "reported" in dv else ""))
         if obj.get("staging_index"):
             si = obj["staging_index"]
             lines.append(f"- drafts listings: {si.get('written', 0)} file(s) · "
@@ -427,8 +434,12 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         if obj.get("added") or obj.get("removed"):
             lines.append(f"⚠ edge drift: +{obj['added']} -{obj['removed']} "
                          "(the next rebuild or a write that touches an input reconciles it)")
+        if obj.get("anchors"):
+            lines[0] += f" · {len(obj['anchors'])} anchor(s) naming no Section (edge kept on the page)"
         for r in obj.get("unresolved") or []:
             lines.append(f"- unresolved: `{r.get('slug')}` -> {r.get('target')}")
+        for r in obj.get("anchors") or []:
+            lines.append(f"- anchor names no Section: `{r.get('slug')}` -> {r.get('target')}")
         for r in obj.get("ambiguous") or []:
             lines.append(f"- ambiguous: `{r.get('slug')}` -> {r.get('target')} "
                          f"(held by {', '.join(h[:8] for h in r.get('holders') or [])})")

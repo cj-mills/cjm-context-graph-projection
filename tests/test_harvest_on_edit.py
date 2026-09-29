@@ -93,7 +93,7 @@ def test_author_on_section_mints_and_retracts_wiki_link_edges_but_keeps_delibera
     assert r3["unchanged"] and "relations" not in r3   # a no-op edit harvests nothing
 
 
-def test_born_post_add_section_and_author_section_follow_series_and_cross_post_links(tmp_path):
+def test_born_post_add_section_and_author_section_follow_series_and_post_links(tmp_path):
     root = tmp_path / "emit"
     (root / "born").mkdir(parents=True)
     path = str(root / "born" / "index.md")
@@ -110,10 +110,12 @@ def test_born_post_add_section_and_author_section_follow_series_and_cross_post_l
             born = await new_note(gx, path, POST, profile="quarto_post",
                                   corpus_root=str(root), slug="born")
             assert born.get("written"), born
-            # The cross-post TARGET exists (the store drops a dangling edge, at ingest too).
+            # The post TARGET exists and holds its public path: the one resolver maps a post
+            # link through site_path facts like any site link (ruling d31e9ba7).
             assert (await new_note(gx, str(root / "other-post" / "index.md"), other,
                                    profile="quarto_post", corpus_root=str(root),
                                    slug="other-post")).get("written")
+            await assert_value(gx, note_node_id("other-post"), SITE_PATH, "/posts/other-post/")
             # The series page is a born Series holding its public path (DEC 72d669c5).
             await mint_series(gx, "education-notes", title="Education")
             await assert_value(gx, series, SITE_PATH, "/series/notes/education-notes.html")
@@ -130,15 +132,16 @@ def test_born_post_add_section_and_author_section_follow_series_and_cross_post_l
 
     profile, r1, in_series, refs, r2, refs_after, series_after, tagged = asyncio.run(go())
     assert profile == "quarto_post"                 # the born profile is readable at edit time
-    # The cross-post link is harvested; the series-page link is a verbatim site_ref the live
-    # hook resolves to a site_link REFERENCES onto the Series — never IN_SERIES membership.
-    assert set(r1["relations"]["added"]) == {("REFERENCES", other_intro)}
-    assert r1["relations"]["site_refs"] == ["/series/notes/education-notes.html"]
-    assert r1["relations"]["site_links"]["added"] == 1
+    # Both links are verbatim site_refs the live hook resolves (ruling d31e9ba7): the series
+    # page onto the Series — never IN_SERIES membership — and the anchored post link onto the
+    # Section its anchor names; neither is an ingest edge any more.
+    assert set(r1["relations"]["added"]) == set()
+    assert r1["relations"]["site_refs"] == ["/series/notes/education-notes.html", "/posts/other-post/#intro"]
+    assert r1["relations"]["site_links"]["added"] == 2 and not r1["relations"]["site_links"]["anchors"]
     assert in_series == set() and refs == {other_intro, series}
     assert Path(path).read_text().endswith(f"{LINKS}\n")
-    assert set(r2["relations"]["removed"]) == {("REFERENCES", other_intro)}
-    assert r2["relations"]["site_links"]["removed"] == 1
+    assert set(r2["relations"]["removed"]) == set()
+    assert r2["relations"]["site_links"]["removed"] == 2
     assert refs_after == set()
     assert series_after is not None                  # a born Series is not a facet to drop
     assert len(tagged) == 1                          # the birth category's TAGGED edge untouched

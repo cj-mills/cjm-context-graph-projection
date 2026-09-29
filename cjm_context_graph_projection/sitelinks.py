@@ -1,7 +1,8 @@
 """In-body site links, RESOLVED after replay (DEC 72d669c5 (1)).
 
-A post's link to a site page (a series page today) names a PATH; what the page is — a
-Series, a topic listing — lives in `site_path` facts on the node that holds it, and those
+A post's link to a site page names a PATH (ONE resolver for every in-body site link, ruling
+d31e9ba7); what the page is — a post, a Series, a topic listing, a site page — lives in
+`site_path` facts on the node that holds it, and those
 facts are journal content that replays AFTER the ingest. So the harvest keeps each target
 VERBATIM on the Note (`site_refs`) and resolution is its own stage: once every fact is on
 the graph, each target maps under Quarto's URL equivalences (`site_path_key`) to the one
@@ -24,6 +25,7 @@ from urllib.parse import urljoin, urlsplit
 from cjm_context_graph_layer.ops import extend_graph, graph_task
 from cjm_context_graph_primitives.query import EdgeQuery, PropertyPredicate
 from cjm_dev_graph_schema import predicates as P
+from cjm_dev_graph_schema.identity import section_node_id
 from cjm_dev_graph_schema.nodes import site_link_edge
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 
@@ -113,7 +115,7 @@ async def resolve_site_links(
     note_ids: Optional[List[str]] = None,  # Scope to these notes (None = every Note on the graph)
     *,
     write: bool = True,                    # Apply the edge diff (False = report only)
-) -> Dict[str, Any]:  # {notes, links, resolved, added, removed, unresolved: [...], ambiguous: [...], written}
+) -> Dict[str, Any]:  # {notes, links, resolved, added, removed, unresolved: [...], ambiguous: [...], anchors: [...], written}
     """Reconcile the `site_link` REFERENCES edges of the scoped notes against the facts.
 
     Each note's verbatim `site_refs` target maps through `site_path_key` (a relative target
@@ -121,15 +123,23 @@ async def resolve_site_links(
     extends the edges that mapping justifies and deletes the scoped notes' `site_link` edges
     it no longer does. A target nothing holds is `unresolved`, one two nodes hold is
     `ambiguous`; both are reported, neither mints an edge. A link to the note's own page is
-    dropped (a self-reference is not a cross-reference)."""
+    dropped (a self-reference is not a cross-reference).
+
+    ONE resolver for every in-body site link (ruling d31e9ba7): an ANCHORED link lands on the
+    Section its anchor names on the page's Note — the id that heading mints, the anchor slug
+    being the heading slug — and when that Section does not exist it lands on the page with the
+    anchor kept on the edge and is reported in `anchors`: never a dangling edge, never a silent
+    drop. A standing edge whose anchor changed is re-minted. An edge's id is its (note, target,
+    relation) triple, so a note's several links landing on one node are ONE edge: the first in
+    document order gives its properties, and every anchor naming no Section is still reported."""
     if note_ids is None:
         notes = await F.load_label(gx, DevNodeKinds.NOTE)
     else:
         notes = list((await F.load_nodes(gx, list(note_ids))).values())
     holders, active = await site_path_holders(gx)
-    desired: Dict[str, Dict[str, Any]] = {}
     unresolved: List[Dict[str, Any]] = []
     ambiguous: List[Dict[str, Any]] = []
+    placed: List[Tuple[str, str, str, Dict[str, Any]]] = []   # (note, holder, anchor, row)
     links = 0
     for n in notes:
         nid = str(F.nid(n))
@@ -143,18 +153,34 @@ async def resolve_site_links(
             elif not held:
                 unresolved.append(row)
             elif held[0] != nid:
-                e = site_link_edge(nid, held[0])
-                desired[e["id"]] = e
+                placed.append((nid, held[0], urlsplit(str(target)).fragment, row))
+    # every Section an anchor names, in one read
+    named = sorted({section_node_id(h, a) for _, h, a, _ in placed if a})
+    present = set(await F.load_nodes(gx, named)) if named else set()
+    desired: Dict[str, Dict[str, Any]] = {}
+    anchors: List[Dict[str, Any]] = []
+    for nid, holder, anchor, row in placed:
+        target_id = holder
+        if anchor:
+            section = section_node_id(holder, anchor)
+            if section in present:
+                target_id = section
+            else:
+                anchors.append(dict(row, anchor=anchor))
+        e = site_link_edge(nid, target_id, anchor)
+        desired.setdefault(e["id"], e)
     standing = await _standing_site_links(gx, [str(F.nid(n)) for n in notes])
-    added = [e for eid, e in desired.items() if eid not in standing]
-    removed = [eid for eid in standing if eid not in desired]
+    changed = {eid for eid, e in desired.items()
+               if eid in standing and (standing[eid].get("properties") or {}) != e["properties"]}
+    added = [e for eid, e in desired.items() if eid not in standing or eid in changed]
+    removed = [eid for eid in standing if eid not in desired or eid in changed]
     if write and removed:
         await graph_task(gx.queue, gx.graph_id, "delete_edges", edge_ids=sorted(removed))
     if write and added:
         await extend_graph(gx.queue, gx.graph_id, [], added)
     return {"notes": len(notes), "links": links, "resolved": len(desired),
             "added": len(added), "removed": len(removed), "unresolved": unresolved,
-            "ambiguous": ambiguous, "written": bool(write and (added or removed))}
+            "ambiguous": ambiguous, "anchors": anchors, "written": bool(write and (added or removed))}
 
 
 async def resolve_after_write(

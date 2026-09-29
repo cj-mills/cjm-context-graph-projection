@@ -277,6 +277,7 @@ async def site_build(
     """Build the site under one profile: generated inputs, render, the redirect projection,
     and (public) the publish guard. `ok` is False on any error row — the output is then not
     fit to publish, and the report names why."""
+    from .derivedblocks import check_derived, derived_plan, write_derived
     from .sitepages import check_page_outputs, project_pages
     rep: Dict[str, Any] = {"profile": profile, "errors": []}
     plan = await redirect_plan(gx)
@@ -286,7 +287,7 @@ async def site_build(
         return rep
     # The projected pages are inputs: written before Quarto is asked what the inputs are
     pages = await project_pages(gx, website_root, profile, plan["pages"], drafts_dir=drafts_dir)
-    rep["pages"] = {k: v for k, v in pages.items() if k not in ("errors", "sources")}
+    rep["pages"] = {k: v for k, v in pages.items() if k not in ("errors", "sources", "plan")}
     rep["errors"] += pages["errors"]
     if rep["errors"]:
         rep["ok"] = False
@@ -299,6 +300,15 @@ async def site_build(
     if rep["errors"]:   # the facts and the source disagree: nothing is rendered or written
         rep["ok"] = False
         return rep
+    # The derived blocks leave the render and the post navigation replaces them (design
+    # 253ac996): the plan names each post's blocks and navigation for the one Lua filter
+    derived = await derived_plan(gx, website_root, pages["plan"], plan["pages"], info["inputs"])
+    rep["derived"] = derived["counts"]
+    rep["errors"] += derived["errors"]
+    if rep["errors"]:
+        rep["ok"] = False
+        return rep
+    write_derived(website_root, derived)
     if profile == "staging" and staging_index_fn is not None:
         si = await staging_index_fn()
         rep["staging_index"] = {"counts": si.get("counts"), "written": len(si.get("written") or [])}
@@ -313,6 +323,10 @@ async def site_build(
             rep["ok"] = False
             return rep
     rep["errors"] += check_page_outputs(info["output_dir"], pages["sources"])
+    if render:   # the filter reports only when it ran: a projection onto old output has nothing to check
+        chk = check_derived(website_root, derived)
+        rep["derived"]["reported"] = chk["reported"]
+        rep["errors"] += chk["errors"]
     red = write_redirects(info["output_dir"], plan["stubs"], page_outputs(website_root, info["inputs"]))
     rep["redirects"] = {"stubs": len(plan["stubs"]), "written": red["written"], "unchanged": red["unchanged"]}
     rep["errors"] += red["errors"]
