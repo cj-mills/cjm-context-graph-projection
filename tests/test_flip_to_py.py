@@ -161,17 +161,16 @@ def _notebook_graph():
     ])
 
 
-def _wire(fake, monkeypatch, link_calls=None, extended=None):
+def _wire(fake, monkeypatch, link_calls=None, stepped=None):
     monkeypatch.setattr(module_ops_mod, "graph_task", fake.task)
     monkeypatch.setattr(factlayer_mod, "graph_task", fake.task)
 
-    async def fake_extend(queue, graph_id, nodes, edges):
-        if extended is not None:
-            extended.append((nodes, edges))
-        for n in nodes:
-            fake.nodes[n["id"]] = n
-        fake.edges.extend(edges)
-        return SimpleNamespace(nodes_added=len(nodes), edges_added=len(edges))
+    async def fake_apply_live(gx, source_journal_path, repos_dir, appended):
+        # The code fold's step is proven against a real store in test_relive; here the
+        # flip must hand it exactly the records it appended.
+        if stepped is not None:
+            stepped.append(list(appended))
+        return {"records": len(appended)}
 
     async def fake_link(gx, source_id, target_id, relation, actor="agent:session"):
         if link_calls is not None:
@@ -180,7 +179,7 @@ def _wire(fake, monkeypatch, link_calls=None, extended=None):
         return {"source_id": source_id, "target_id": target_id, "relation": relation,
                 "written": True, "source_label": "S", "target_label": "T"}
 
-    monkeypatch.setattr(module_ops_mod, "extend_graph", fake_extend)
+    monkeypatch.setattr(module_ops_mod, "apply_live", fake_apply_live)
     monkeypatch.setattr(module_ops_mod, "link", fake_link)
 
 
@@ -192,8 +191,8 @@ def test_flip_to_py_end_to_end(tmp_path, monkeypatch):
     sj, repos, nb_file = _journal_a_notebook(tmp_path)
     wj = str(tmp_path / "writes.jsonl")
     fake = _notebook_graph()
-    extended = []
-    _wire(fake, monkeypatch, extended=extended)
+    stepped = []
+    _wire(fake, monkeypatch, stepped=stepped)
 
     res = _run(flip_notebook_to_py(GX, sj, wj, str(repos), "cjm-demo", "nbs/m.ipynb",
                                    docstring="The demo module."))
@@ -213,9 +212,12 @@ def test_flip_to_py_end_to_end(tmp_path, monkeypatch):
     assert [c["cell_key"] for c in res["markdown_cells_dropped"]] == ["c1"]
     assert [c["cell_key"] for c in res["nonexport_code_cells_dropped"]] == ["c4"]
     assert res["pruned_imports"] == ["pathlib.Path"]  # imported, referenced nowhere (module-qualified clause)
-    # graph swap: Cells out, plain regions in (same module id)
-    assert "cell-c3" in fake.deleted and MID in fake.deleted
-    assert extended and any(n["label"] == "CodeSymbol" for n in extended[0][0])
+    # the Cells leave; the module derives IN PLACE through the code fold's step (never
+    # deleted — its id and its symbols' ids survive), fed exactly the flip's records
+    assert "cell-c3" in fake.deleted and MID not in fake.deleted and SYM_F not in fake.deleted
+    assert len(stepped) == 1
+    assert [(r["verb"], r["args"]["module_path"]) for r in stepped[0]] == [
+        ("source", "cjm_demo/m.py"), ("cutover", "cjm_demo/m.py"), ("retire", "nbs/m.ipynb")]
     # the whole walk soaks clean, regen gate included
     chk = source_check(sj, str(repos))
     assert chk["clean"] and chk["regen_clean"] and chk["count"] == 1
@@ -294,11 +296,11 @@ def test_flip_retargets_a_link_onto_the_surviving_symbol(tmp_path, monkeypatch):
     assert ops[-1]["verb"] == "link" and ops[-1]["args"]["target_id"] == SYM_F
 
 
-def test_flip_replays_curation_links_severed_by_the_subtree_swap(tmp_path, monkeypatch):
+def test_flip_keeps_a_surviving_symbol_and_its_curation_edges_in_place(tmp_path, monkeypatch):
     sj, repos, _ = _journal_a_notebook(tmp_path)
     wj = str(tmp_path / "writes.jsonl")
-    # a note's REFERENCES onto the SYMBOL — the endpoint survives the swap under the
-    # same id, but the cascade delete severs the live edge; the flip must re-apply it
+    # a note's REFERENCES onto the SYMBOL — the endpoint survives under the same id, and
+    # the step updates it IN PLACE (no cascade delete), so nothing is re-linked or replayed
     Path(wj).write_text(json.dumps(
         {"verb": "link", "ts": 0,
          "args": {"source_id": "note-1", "target_id": SYM_F,
@@ -308,10 +310,8 @@ def test_flip_replays_curation_links_severed_by_the_subtree_swap(tmp_path, monke
     _wire(fake, monkeypatch, link_calls=link_calls)
     res = _run(flip_notebook_to_py(GX, sj, wj, str(repos), "cjm-demo", "nbs/m.ipynb"))
     assert not res.get("error"), res
-    assert res["graph"]["curation_links_replayed"] == 1
-    assert {"source_id": "note-1", "target_id": SYM_F,
-            "relation": "REFERENCES", "actor": "human"} in link_calls
-    assert len(read_journal(wj)) == 1  # replay is live-only; the op was already journaled
+    assert SYM_F not in fake.deleted and link_calls == []
+    assert len(read_journal(wj)) == 1
 
 
 def test_import_clauses_see_same_root_submodule_imports():

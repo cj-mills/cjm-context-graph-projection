@@ -173,6 +173,33 @@ def test_a_keep_identity_move_keeps_created_at_across_its_records(tmp_path):
     assert fm["created_at"] == 100.0 and fm["updated_at"] == 200.5
 
 
+def test_a_rename_module_keeps_its_symbols_in_the_resolution_indexes(tmp_path):
+    # The new key's record holds the kept-id symbols BEFORE the old key's retire drops them:
+    # a symbol held by two modules at once must stay indexed (a target, a source) through
+    # the retire — found by the live-vs-rebuild acceptance (build B2 of leg B).
+    u, t, c = "cjm_demo_lib/util.py", "cjm_demo_lib/tools.py", "cjm_demo_lib/core.py"
+    ren = {"op": "rename-module", "from": u, "to": t, "identity": "keep"}
+    _, nodes, edges = _fold(
+        tmp_path,
+        _src(100.0, u, "def helper(x):\n    return twice(x)\n\n\ndef twice(x):\n    return 2 * x\n"),
+        _src(101.0, c, "from cjm_demo_lib.util import helper\n\n\ndef alpha(x):\n"
+                       "    return helper(x)\n"),
+        _src(200.0, t, "def helper(x):\n    return twice(x)\n\n\ndef twice(x):\n    return 2 * x\n",
+             op=ren),
+        _src(200.0, c, "from cjm_demo_lib.tools import helper\n\n\ndef alpha(x):\n"
+                       "    return helper(x)\n", op=ren),
+        _retire(200.0, u))
+    helper, twice, alpha = _sym(nodes, "helper"), _sym(nodes, "twice"), _sym(nodes, "alpha")
+    assert helper["id"] == code_symbol_node_id(code_module_node_id(REPO, u), "helper")  # kept
+    assert helper["properties"]["module_id"] == code_module_node_id(REPO, t)
+    calls = _edges(edges, DevRelations.CALLS)
+    assert (alpha["id"], helper["id"]) in calls    # still a target
+    assert (helper["id"], twice["id"]) in calls    # still a source
+    assert calls[(helper["id"], twice["id"])]["created_at"] == 100.0  # held throughout
+    imports = _edges(edges, DevRelations.IMPORTS)
+    assert (code_module_node_id(REPO, c), code_module_node_id(REPO, t)) in imports
+
+
 def test_what_the_fold_cannot_project_is_reported(tmp_path):
     mp = "cjm_demo_lib/a.py"
     fold, nodes, _ = _fold(

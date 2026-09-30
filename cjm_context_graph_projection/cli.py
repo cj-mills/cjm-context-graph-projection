@@ -55,6 +55,7 @@ from .reconcile import reconcile_memory
 from .refactor import refactor_candidates
 from .refactor_ops import move
 from .registers import register_drift
+from .relive import apply_live
 from .rename_ops import rename_symbol, rename_symbols
 from .render import render as _render_base
 from .review import review_frontier
@@ -64,8 +65,8 @@ from .series import mint_series, place_in_series, series_order, set_series_membe
 from .serve import serve_graphs
 from .site import site_build
 from .sitelinks import DEFER_RESOLVE, resolve_site_links
-from .source_state import (absorb_authored_text, cutover_module, emit_source_artifact, flip_module,
-                           graph_sourced_modules, source_check)
+from .source_state import (absorb_authored_text, collect_appends, cutover_module,
+                           emit_source_artifact, flip_module, graph_sourced_modules, source_check)
 from .structure import add_section, new_note
 from .viz import project_viz
 from .workbench import anchor_lead_view, portfolio_view, session_feed
@@ -1441,32 +1442,37 @@ async def _dispatch(args) -> int:
             return 0 if res.get("ok") else 1
         elif args.command == "move":
             res = await move(gx, args.symbol_id, args.target_module_id, write=not args.no_write,
-                             source_journal_path=args.source_journal_path)
+                             source_journal_path=args.source_journal_path,
+                             repos_dir=args.repos_dir)
             print(render("move", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "new-module":
             res = await new_module(gx, args.repo_key, args.module_path,
                                    import_name=args.import_name, repo_root=args.repo_root,
                                    write=not args.no_write,
-                                   source_journal_path=args.source_journal_path)
+                                   source_journal_path=args.source_journal_path,
+                                   repos_dir=args.repos_dir)
             print(render("module", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "regroup":
             res = await regroup(gx, args.repo_key, args.target_module_path, args.symbol_ids,
                                 import_name=args.import_name, write=not args.no_write,
-                                source_journal_path=args.source_journal_path)
+                                source_journal_path=args.source_journal_path,
+                                repos_dir=args.repos_dir)
             print(render("move", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "rename-module":
             res = await rename_module(gx, args.module_id, args.new_module_path,
                                       new_import_name=args.import_name, write=not args.no_write,
-                                      source_journal_path=args.source_journal_path)
+                                      source_journal_path=args.source_journal_path,
+                                      repos_dir=args.repos_dir)
             print(render("module", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "delete-module":
             res = await delete_module(gx, args.module_id, force=args.force,
                                       write=not args.no_write,
-                                      source_journal_path=args.source_journal_path)
+                                      source_journal_path=args.source_journal_path,
+                                      repos_dir=args.repos_dir)
             print(render("module", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "rename-symbol":
@@ -1496,10 +1502,12 @@ async def _dispatch(args) -> int:
             if len(pairs) == 1:
                 res = await rename_symbol(gx, pairs[0][0], pairs[0][1],
                                           write=not args.no_write,
-                                          source_journal_path=args.source_journal_path)
+                                          source_journal_path=args.source_journal_path,
+                                          repos_dir=args.repos_dir)
             else:
                 res = await rename_symbols(gx, pairs, write=not args.no_write,
-                                           source_journal_path=args.source_journal_path)
+                                           source_journal_path=args.source_journal_path,
+                                           repos_dir=args.repos_dir)
             print(render("rename", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "flip-module":
@@ -1514,9 +1522,15 @@ async def _dispatch(args) -> int:
                     print(f"error: {merr}", file=sys.stderr)
                     return 1
                 repo_key, module_path = spec["repo_key"], spec["module_path"]
-            res = flip_module(args.source_journal_path, args.repos_dir, repo_key,
-                              module_path, import_name=args.import_name,
-                              write=not args.no_write)
+            with collect_appends() as appended:
+                res = flip_module(args.source_journal_path, args.repos_dir, repo_key,
+                                  module_path, import_name=args.import_name,
+                                  write=not args.no_write)
+            if appended:
+                # An absorb (or a first capture) is a source record like any other: the code
+                # fold's step derives it into the db now (2cc81d3b, B2).
+                res["live"] = await apply_live(gx, args.source_journal_path, args.repos_dir,
+                                               appended)
             print(render("flip", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "flip-to-py":
@@ -3353,15 +3367,19 @@ def main() -> int:
     p_mv.add_argument("symbol_id", help="The top-level CodeSymbol id to move")
     p_mv.add_argument("target_module_id", help="The CodeModule id to move it into (same repo)")
     p_mv.add_argument("--no-write", action="store_true", help="Dry run: report the plan, don't touch disk")
+    p_mv.add_argument("--repos-dir", default=DEFAULT_REPOS,
+                      help="Repos root — the live code fold step derives node paths under it (as ingest does)")
 
-    p_nm = sub.add_parser("new-module", help="Mint an empty CodeModule node (a regroup/move target)")
+    p_nm = sub.add_parser("new-module", help="Mint an EMPTY module, journaled + cut over at birth (graph-sourced; populate with add-text / add-symbol)")
     p_nm.add_argument("repo_key", help="The repo's durable conceptual slug")
     p_nm.add_argument("module_path", help="Repo-relative path of the new module (e.g. pkg/sub.py)")
     p_nm.add_argument("--import-name", help="Dotted import name (derived from module_path if omitted)")
     p_nm.add_argument("--repo-root", default=None,
                       help="Absolute repo root — anchors the FIRST module of a fresh repo "
                            "(otherwise derived from an existing sibling module)")
-    p_nm.add_argument("--no-write", action="store_true", help="Dry run: report the plan, don't add the node")
+    p_nm.add_argument("--no-write", action="store_true", help="Dry run: report the plan, journal and write nothing")
+    p_nm.add_argument("--repos-dir", default=DEFAULT_REPOS,
+                      help="Repos root — the live code fold step derives node paths under it (as ingest does)")
 
     p_rg = sub.add_parser("regroup",
                           help="Gather symbols into a module (create if absent) — the under/over-split executor")
@@ -3370,6 +3388,8 @@ def main() -> int:
     p_rg.add_argument("symbol_ids", nargs="+", help="The top-level CodeSymbol ids to relocate")
     p_rg.add_argument("--import-name", help="Target's dotted import name (derived if omitted)")
     p_rg.add_argument("--no-write", action="store_true", help="Dry run: report the plan, don't touch disk")
+    p_rg.add_argument("--repos-dir", default=DEFAULT_REPOS,
+                      help="Repos root — the live code fold step derives node paths under it (as ingest does)")
 
     p_rn = sub.add_parser("rename-module",
                           help="Rename a .py module (re-emit at the new path + rewrite importer imports)")
@@ -3377,11 +3397,15 @@ def main() -> int:
     p_rn.add_argument("new_module_path", help="Its new repo-relative path")
     p_rn.add_argument("--import-name", help="New dotted import name (derived if omitted)")
     p_rn.add_argument("--no-write", action="store_true", help="Dry run: report the plan, don't touch disk")
+    p_rn.add_argument("--repos-dir", default=DEFAULT_REPOS,
+                      help="Repos root — the live code fold step derives node paths under it (as ingest does)")
 
     p_dm = sub.add_parser("delete-module", help="Delete a module's file + its graph subtree (guarded)")
     p_dm.add_argument("module_id", help="The CodeModule id to delete")
     p_dm.add_argument("--force", action="store_true", help="Delete even if it still defines symbols (dead module)")
     p_dm.add_argument("--no-write", action="store_true", help="Dry run: report the plan, don't touch disk")
+    p_dm.add_argument("--repos-dir", default=DEFAULT_REPOS,
+                      help="Repos root — the live code fold step derives node paths under it (as ingest does)")
 
     p_rs = sub.add_parser("rename-symbol",
                           help="Rename a top-level function/class everywhere (def + refs + importer imports)")
@@ -3392,6 +3416,8 @@ def main() -> int:
                            "wire snapshot with one emit, so rename k cannot revert rename j "
                            "(sequential single renames on a module clobber; finding 889b3025)")
     p_rs.add_argument("--no-write", action="store_true", help="Dry run: report the plan, don't touch disk")
+    p_rs.add_argument("--repos-dir", default=DEFAULT_REPOS,
+                      help="Repos root — the live code fold step derives node paths under it (as ingest does)")
 
     p_fl = sub.add_parser("flip-module",
                           help="N+3 Phase 1 (SHADOW): capture a module's canonical source into the source journal")

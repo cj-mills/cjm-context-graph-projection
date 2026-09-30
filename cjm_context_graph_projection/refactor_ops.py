@@ -26,9 +26,9 @@ from cjm_python_decompose_core.emit import emit_module_from_nodes, synth_import
 
 from . import factlayer as F
 from .authoring import _module_node, _module_region_wires, _source_emission, _stale_wires_error
-from .relive import relive_modules
+from .relive import apply_live
 from .runtime import GraphHandle
-from .source_state import is_test_module_path, journaled_emit, latest_source_ops
+from .source_state import collect_appends, is_test_module_path, journaled_emit, latest_source_ops
 
 
 def rewrite_symbol_import(
@@ -100,6 +100,7 @@ async def _relocate(
     target_node: Any = None,  # Pre-fetched/synthesized target CodeModule node (regroup dry-run into a not-yet-persisted module)
     source_journal_path: Optional[str] = None,  # The source journal (events land BEFORE files)
     op_name: str = "move",   # The mutating verb name riding the events as op provenance
+    repos_dir: Optional[str] = None,  # The repos root (the live fold step derives node paths under it)
 ) -> Dict[str, Any]:  # The relocation result (symbols, caller rewrites, diagnostic, or error)
     """Relocate one OR MANY top-level symbols into a target module, graph-driven.
 
@@ -114,8 +115,9 @@ async def _relocate(
 
     IDENTITY IS KEPT (36f649d3): the op rides the journal with `identity: keep`, so the
     moved symbols keep the ids they were born with, and the graph is updated LIVE from the
-    new texts (`relive_modules`) — no rebuild stands between this move and the next author
-    edit, and every journaled edge onto a moved symbol survives."""
+    new texts through the code fold's step (`relive.apply_live`, 2cc81d3b) — no rebuild
+    stands between this move and the next author edit, every journaled edge onto a moved
+    symbol survives, and the derived edges (CALLS / USES / IMPORTS / TESTS) move with it."""
     B = target_node if target_node is not None else await _module_node(gx, target_module_id)
     if B is None:
         return {"error": f"no target module `{target_module_id}`", "written": False}
@@ -150,7 +152,6 @@ async def _relocate(
 
     files: List[Tuple[str, str]] = []
     emissions: List[Optional[Dict[str, Any]]] = []
-    live_items: List[Tuple[Any, str]] = []  # (module node, new text) — the live re-derivation set
     # Each affected SOURCE module, re-emitted without its moved symbols (imports re-derived).
     for src_module_id, items in by_src.items():
         A = await _module_node(gx, src_module_id)
@@ -168,7 +169,6 @@ async def _relocate(
                                         uses_derived=a_uses)
         files.append((F.prop(A, "path"), a_text))
         emissions.append(_emission_for(A, a_text))
-        live_items.append((A, a_text))
 
     # The TARGET module, re-emitted with every moved symbol appended in order.
     b_wires = await _module_region_wires(gx, target_module_id)
@@ -197,7 +197,6 @@ async def _relocate(
                         for e in emissions)):
             b_emission["cutover"] = True
     emissions.append(b_emission)
-    live_items.append((B, b_text))
 
     # Callers: modules importing a source; rewrite each `from a_import import S` to point at B.
     import_pairs = await F.load_edge_pairs(gx, DevRelations.IMPORTS)
@@ -224,7 +223,6 @@ async def _relocate(
                     return {"error": m_stale, "written": False}
                 files.append((F.prop(m, "path"), text))
                 emissions.append(_emission_for(m, text))
-                live_items.append((m, text))
                 caller_hits.append(F.prop(m, "import_name", mid))
 
     result = {
@@ -245,18 +243,18 @@ async def _relocate(
     # The seam (journal-first): events for every affected module land BEFORE any file
     # write; write=False is the uniform full preview. `identity: keep` names the choice
     # the identity map replays (36f649d3).
-    rec = journaled_emit(source_journal_path, emissions=emissions,
-                         op={"op": op_name, "symbols": result["symbols"],
-                             "to_module": b_import, "identity": "keep"}, write=write)
+    with collect_appends() as appended:
+        rec = journaled_emit(source_journal_path, emissions=emissions,
+                             op={"op": op_name, "symbols": result["symbols"],
+                                 "to_module": b_import, "identity": "keep"}, write=write)
     if rec.get("error"):
         return {**result, "error": rec["error"]}
     result["journal"] = rec
     result["written"] = bool(write)
     if write:
-        # Live: the graph reproduces the files now — the moved symbols keep their ids
-        # (the identity map just learned this op from the journal); no rebuild needed.
-        result["live"] = await relive_modules(gx, live_items,
-                                              source_journal_path=source_journal_path)
+        # Live: the code fold's step over this op's records — the moved symbols keep their
+        # ids (the identity walk reads the op from the journal); no rebuild needed.
+        result["live"] = await apply_live(gx, source_journal_path, repos_dir, appended)
     return result
 
 
@@ -267,6 +265,7 @@ async def move(
     *,
     write: bool = True,     # Write the affected files to disk (Fork-1(a)); False = dry run
     source_journal_path: Optional[str] = None,  # The source journal (events land BEFORE files)
+    repos_dir: Optional[str] = None,  # The repos root (the live fold step derives node paths under it)
 ) -> Dict[str, Any]:  # The move result (files, caller rewrites, diagnostic, or error)
     """Relocate a single top-level symbol from its module to another, graph-driven.
 
@@ -275,7 +274,8 @@ async def move(
     module's `from A import S` to point at B. The USES-derived synthetics make it
     zero-residual; the next `ingest` re-derives (S's new id under B, CALLS re-resolved)."""
     res = await _relocate(gx, [symbol_id], target_module_id, write=write,
-                          source_journal_path=source_journal_path, op_name="move")
+                          source_journal_path=source_journal_path, op_name="move",
+                          repos_dir=repos_dir)
     if res.get("error"):
         return res
     # Shape the single-symbol result keys (back-compat with the published move surface).

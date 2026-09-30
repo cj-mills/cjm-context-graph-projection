@@ -11,22 +11,19 @@ Persistence is Fork-1(a) (the file stays the source; `ingest` re-derives) — th
 (safe at the verbatim-body line): they never rewrite a body. Symbol `rename` — which would
 push scoped identifier substitution INTO bodies (Ext-B) — is its own deliberate increment.
 
-The graph-mutation posture, per op (mirrors `move`'s "drive files from graph knowledge,
-let `ingest` re-derive", deviating only where a footgun forces it):
-- `new_module` ADDS the node (so a same-session `regroup`/`move` can target it; additive,
-  no id cascade).
-- `delete_module` / `rename_module` DROP the old module's graph subtree (a CodeModule id
-  embeds `module_path`, so a rename changes the id of the module AND every symbol — the
-  heavy cascade `move` defers to re-ingest; but a stale node whose file is gone would let a
-  later `emit` resurrect the deleted file, so the old subtree is removed). The NEW module is
-  re-derived by the next `ingest` — `rename_module` reports that.
+The graph-mutation posture (design amendment 2cc81d3b, build B2 of leg B): every op lands
+its source-journal records, then the code fold's step (`relive.apply_live`) applies exactly
+those records to the db — a module exists on the graph because the journal holds it, so
+`new_module` journals an EMPTY module and cuts it over at birth (graph-sourced from its first
+record), `rename_module` re-keys the module while its symbols keep their ids, and
+`delete_module`'s retire takes the whole subtree with it.
 """
 
 import ast
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from cjm_context_graph_layer.ops import extend_graph, graph_task
+from cjm_context_graph_layer.ops import graph_task
 from cjm_context_graph_primitives.journal import append_write, read_journal
 from cjm_context_graph_primitives.provenance import SourceRef
 from cjm_context_graph_primitives.query import PropertyPredicate
@@ -34,18 +31,17 @@ from cjm_dev_graph_schema.identity import code_module_node_id
 from cjm_dev_graph_schema.nodes import CodeModuleNode
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 from cjm_python_decompose_core.emit import emit_module_from_nodes
-from cjm_python_decompose_core.extract import decompose_text
-from cjm_python_decompose_core.ingest import corpus_graph_elements
 
 from . import factlayer as F
 from .authoring import (_label_of, _module_node, _module_region_wires, _notebook_cell_wires,
                         _resolve_node)
 from .refactor_ops import _emission_for, _get, _relocate
-from .relive import relive_modules
+from .relive import apply_live
 from .runtime import GraphHandle
 from .seeds import repo_dir_name
-from .source_state import (canonical_emit, graph_sourced_modules, is_test_module_path,
-                           journaled_emit, latest_source_ops, notebook_to_py_source)
+from .source_state import (canonical_emit, collect_appends, graph_sourced_modules,
+                           is_test_module_path, journaled_emit, latest_source_ops,
+                           notebook_to_py_source)
 from .write import link
 
 
@@ -121,17 +117,20 @@ async def new_module(
     *,
     import_name: Optional[str] = None,  # Dotted import name (derived from module_path if omitted)
     repo_root: Optional[str] = None,    # Absolute repo root — anchors the FIRST module of a fresh repo (no sibling to derive from)
-    write: bool = True,       # Add the node to the graph (else dry run)
-    source_journal_path: Optional[str] = None,  # The source journal (the repo REGISTER event lands here)
+    write: bool = True,       # Journal + write + derive (else dry run)
+    source_journal_path: Optional[str] = None,  # The source journal (the module's first record + cutover, and the repo REGISTER, land here)
+    repos_dir: Optional[str] = None,  # The repos root (the live fold step derives node paths under it)
 ) -> Dict[str, Any]:  # The new-module result (or error)
-    """Mint an empty CodeModule node (the target a `regroup`/`move` populates).
+    """Mint an EMPTY module, graph-sourced from birth (the target add-text / add-symbol /
+    `regroup` / `move` populate).
 
-    Node-only: no `.py` is written until the first symbol lands (a module is EMITTED from
-    its regions, and an empty module has none). The node is added so a same-session
-    relocation can target it by id; the next `ingest` re-derives it from whatever file the
-    relocation writes (or drops it harmlessly if it stays empty). A repo with no modules
-    yet (born-on-graph greenfield) has no sibling to derive the on-disk root from — pass
-    `repo_root` explicitly there; an existing sibling-derived root always wins."""
+    Under the code fold (2cc81d3b) a module is on the graph because the journal holds it: the
+    verb journals the empty module's first `source` record + its `cutover` (and the repo's
+    REGISTER), writes the empty file, and the code fold's step derives the CodeModule node —
+    so no flip-module / cutover follows the birth, and the module survives every rebuild. A
+    repo with no modules yet (born-on-graph greenfield) has no sibling to derive the on-disk
+    root from — pass `repo_root` explicitly there; an existing sibling-derived root always
+    wins."""
     mid = code_module_node_id(repo_key, module_path)
     if await _get(gx, mid) is not None:
         return {"error": f"module `{module_path}` already exists in {repo_key}",
@@ -144,25 +143,29 @@ async def new_module(
                          "— pass --repo-root for a fresh repo's first module",
                 "written": False}
     imp = import_name or _derive_import_name(module_path)
-    node = CodeModuleNode(repo_key=repo_key, module_path=module_path, path=root + module_path,
-                          content_hash=SourceRef.compute_hash(b""), import_name=imp)
     result = {"module_id": mid, "repo_key": repo_key, "module_path": module_path,
               "import_name": imp, "path": root + module_path, "written": False,
-              "note": "node only — the .py file is emitted when the first symbol is moved in"}
-    # The repo REGISTER event (DEC c47912f6, forward-compat for 640bc713): the inventory
-    # fact exists in the journal from the repo's first on-graph write, so a rebuild can
-    # stop depending on the hardcoded DEFAULT_*_LIBS tuples (finding a7bc1424).
-    rec = journaled_emit(source_journal_path,
-                         registers=[{"repo_key": repo_dir_name(repo_key),
-                                     "repo_root": root.rstrip("/"),
-                                     "source_kind": "code"}],
-                         op={"op": "new-module", "module_path": module_path}, write=write)
+              "note": "born graph-sourced: the empty module is journaled and cut over — "
+                      "populate it with add-text / add-symbol (no flip-module / cutover)"}
+    if write and not source_journal_path:
+        return {**result, "error": "new-module needs the source journal — a module is on the "
+                                   "graph because the journal holds it (2cc81d3b)"}
+    # The module's first record + its cutover, and the repo REGISTER event (DEC c47912f6).
+    with collect_appends() as appended:
+        rec = journaled_emit(source_journal_path,
+                             emissions=[{"repo_key": repo_dir_name(repo_key),
+                                         "module_path": module_path, "import_name": imp,
+                                         "text": "", "path": root + module_path,
+                                         "cutover": True}],
+                             registers=[{"repo_key": repo_dir_name(repo_key),
+                                         "repo_root": root.rstrip("/"),
+                                         "source_kind": "code"}],
+                             op={"op": "new-module", "module_path": module_path}, write=write)
     if rec.get("error"):
         return {**result, "error": rec["error"]}
     result["journal"] = rec
     if write:
-        await graph_task(gx.queue, gx.graph_id, "add_nodes", nodes=[node.to_graph_node()])
-        await graph_task(gx.queue, gx.graph_id, "add_edges", edges=[node.about_edge()])
+        result["live"] = await apply_live(gx, source_journal_path, repos_dir, appended)
         result["written"] = True
     return result
 
@@ -176,14 +179,15 @@ async def regroup(
     import_name: Optional[str] = None,  # Target's dotted import name (derived if omitted)
     write: bool = True,             # Execute (else dry-run preview)
     source_journal_path: Optional[str] = None,  # The source journal (events land BEFORE files)
+    repos_dir: Optional[str] = None,  # The repos root (the live fold step derives node paths under it)
 ) -> Dict[str, Any]:  # The regroup result (created_target + the relocation outcome, or error)
     """Gather symbols into a module — the EXECUTE verb for an `under_split` (extract a
     grab-bag into a cohesive module) or `over_split` (consolidate a scattered helper)
     finding. Creates the target module if it doesn't exist, then batch-relocates every
     symbol in ONE emit pass via `_relocate` (re-emitting each affected source module + the
-    target + the importers, imports re-derived). On dry-run into a NOT-yet-existing target,
-    the target node is synthesized in-memory so the file preview is still computed without
-    mutating the graph."""
+    target + the importers, imports re-derived). A NOT-yet-existing target is synthesized
+    in memory and born by the relocation's own records (source + cutover), so the code
+    fold's step derives it with everything else."""
     target_id = code_module_node_id(repo_key, target_module_path)
     existing = await _get(gx, target_id)
     target_node: Any = existing
@@ -197,13 +201,11 @@ async def regroup(
         node = CodeModuleNode(repo_key=repo_key, module_path=target_module_path,
                               path=root + target_module_path,
                               content_hash=SourceRef.compute_hash(b""), import_name=imp)
-        target_node = node.to_graph_node()  # synthesized; used as B even on dry run
+        target_node = node.to_graph_node()  # synthesized; born by the relocation's records
         created = True
-        if write:
-            await graph_task(gx.queue, gx.graph_id, "add_nodes", nodes=[target_node])
-            await graph_task(gx.queue, gx.graph_id, "add_edges", edges=[node.about_edge()])
     res = await _relocate(gx, symbol_ids, target_id, write=write, target_node=target_node,
-                          source_journal_path=source_journal_path, op_name="regroup")
+                          source_journal_path=source_journal_path, op_name="regroup",
+                          repos_dir=repos_dir)
     res["created_target"] = created
     res["target_module"] = import_name or _derive_import_name(target_module_path)
     return res
@@ -217,14 +219,15 @@ async def rename_module(
     new_import_name: Optional[str] = None,  # New dotted import name (derived if omitted)
     write: bool = True,             # Execute (else dry-run preview)
     source_journal_path: Optional[str] = None,  # The source journal (events land BEFORE files)
+    repos_dir: Optional[str] = None,  # The repos root (the live fold step derives node paths under it)
 ) -> Dict[str, Any]:  # The rename result (importer rewrites, files, or error)
     """Rename a `.py` module — re-emit its content at the new path, drop the old file, and
     rewrite every importer's `from old import …` / `import old` to the new name. Purely
     import-level (no body touched). The MODULE re-keys (its id embeds the path — the
     federation anchor) but its SYMBOLS keep their ids (36f649d3: the op rides the journal
     with `identity: keep`, and the identity map re-registers every name from the retired
-    path): the new module node is minted live, the symbols are re-homed under it in place,
-    the old module node + its code-text regions are dropped — no rebuild needed."""
+    path): the code fold's step derives the new module, re-homes the symbols in place and
+    drops the old module node + its code-text regions — no rebuild needed."""
     M = await _module_node(gx, module_id)
     if M is None:
         return {"error": f"no module `{module_id}`", "written": False}
@@ -260,7 +263,6 @@ async def rename_module(
     import_pairs = await F.load_edge_pairs(gx, DevRelations.IMPORTS)
     importers = [s for s, t in import_pairs if t == module_id and s != module_id]
     caller_hits: List[str] = []
-    caller_items: List[Tuple[Any, str]] = []  # (importer node, new text) — re-derived live
     for mid in dict.fromkeys(importers):
         m = await _module_node(gx, mid)
         itext = emit_module_from_nodes(await _module_region_wires(gx, mid))
@@ -269,7 +271,6 @@ async def rename_module(
             files.append((F.prop(m, "path"), new_itext))
             emissions.append(_emission_for(m, new_itext))
             caller_hits.append(F.prop(m, "import_name", mid))
-            caller_items.append((m, new_itext))
 
     result = {"from_module": old_import, "to_module": new_import,
               "from_path": old_mp, "to_path": new_module_path,
@@ -280,30 +281,22 @@ async def rename_module(
     if any(e is None for e in emissions):
         return {**result, "error": "cannot derive a source-journal key for an affected "
                 "module (notebook-backed caller?) — refusing to write unjournaled"}
-    rec = journaled_emit(source_journal_path, emissions=emissions,
-                         retires=[{"repo_key": dir_key, "module_path": old_mp,
-                                   "superseded_by": new_module_path}],
-                         deletes=[old_path] if (old_path and Path(old_path) != Path(new_path))
-                                 else [],
-                         op={"op": "rename-module", "from": old_mp, "to": new_module_path,
-                             "identity": "keep"},
-                         write=write)
+    with collect_appends() as appended:
+        rec = journaled_emit(source_journal_path, emissions=emissions,
+                             retires=[{"repo_key": dir_key, "module_path": old_mp,
+                                       "superseded_by": new_module_path}],
+                             deletes=[old_path] if (old_path and Path(old_path) != Path(new_path))
+                                     else [],
+                             op={"op": "rename-module", "from": old_mp, "to": new_module_path,
+                                 "identity": "keep"},
+                             write=write)
     if rec.get("error"):
         return {**result, "error": rec["error"]}
     result["journal"] = rec
     if write:
-        new_node = CodeModuleNode(repo_key=repo_key, module_path=new_module_path, path=new_path,
-                                  content_hash=SourceRef.compute_hash(text.encode("utf-8")),
-                                  import_name=new_import)
-        new_wire = new_node.to_graph_node()
-        await graph_task(gx.queue, gx.graph_id, "add_nodes", nodes=[new_wire])
-        await graph_task(gx.queue, gx.graph_id, "add_edges", edges=[new_node.about_edge()])
-        # Re-home the regions under the new module (symbols keep their ids; the old
-        # module's code-text churns), then drop the old module node itself.
-        result["live"] = await relive_modules(gx, [(new_wire, text)] + caller_items,
-                                              source_journal_path=source_journal_path,
-                                              retired_module_ids=[module_id])
-        await graph_task(gx.queue, gx.graph_id, "delete_nodes", node_ids=[module_id], cascade=True)
+        # The code fold's step: the new key derives (symbols keep their ids, the code-text
+        # regions re-key), the retired key's module node + regions go.
+        result["live"] = await apply_live(gx, source_journal_path, repos_dir, appended)
         result["module_id"] = new_id
         result["written"] = True
     return result
@@ -316,11 +309,12 @@ async def delete_module(
     force: bool = False,   # Delete even if it still defines top-level symbols (a confirmed-dead module)
     write: bool = True,    # Execute (else dry-run preview)
     source_journal_path: Optional[str] = None,  # The source journal (the retire event leads)
+    repos_dir: Optional[str] = None,  # The repos root (the live fold step derives node paths under it)
 ) -> Dict[str, Any]:  # The delete result (or error/guard)
-    """Delete a module — drop its file and its whole graph subtree. Guarded: refuses while
-    it still DEFINES top-level symbols (move them out first), unless `force` (a confirmed-dead
-    module). Cleans the graph (vs. deferring to re-ingest) precisely so a later `emit` can't
-    resurrect the just-deleted file from a lingering node."""
+    """Delete a module — retire its journal key, drop its file, and let the code fold's step
+    take its whole subtree off the graph (and re-resolve every name it held). Guarded: refuses
+    while it still DEFINES top-level symbols (move them out first), unless `force` (a
+    confirmed-dead module)."""
     M, amb = await _resolve_node(gx, module_id)
     if amb:
         return {"error": amb, "written": False}
@@ -348,17 +342,19 @@ async def delete_module(
               "path": path, "node_count": len(ids), "forced": force, "written": False}
     # The retire event leads; the unlink follows (journal-first — a deleted file whose
     # key stayed live would hold source-check red forever, finding ff8522fa's cousin).
-    rec = journaled_emit(source_journal_path,
-                         retires=[{"repo_key": repo_dir_name(F.prop(M, "repo_key", "")),
-                                   "module_path": str(F.prop(M, "module_path") or "")}],
-                         deletes=[path] if path else [],
-                         op={"op": "delete-module", "import_name": F.prop(M, "import_name", "")},
-                         write=write)
+    with collect_appends() as appended:
+        rec = journaled_emit(source_journal_path,
+                             retires=[{"repo_key": repo_dir_name(F.prop(M, "repo_key", "")),
+                                       "module_path": str(F.prop(M, "module_path") or "")}],
+                             deletes=[path] if path else [],
+                             op={"op": "delete-module",
+                                 "import_name": F.prop(M, "import_name", "")},
+                             write=write)
     if rec.get("error"):
         return {**result, "error": rec["error"]}
     result["journal"] = rec
     if write:
-        await graph_task(gx.queue, gx.graph_id, "delete_nodes", node_ids=ids, cascade=True)
+        result["live"] = await apply_live(gx, source_journal_path, repos_dir, appended)
         result["written"] = True
     return result
 
@@ -536,64 +532,41 @@ async def flip_notebook_to_py(
     # and the notebook unlink — the partial-flip states the old inline sequence could
     # leave (journaled-but-not-retired, written-but-not-cut-over) are gone structurally.
     nb_existed = nb_file.exists()
-    rec = journaled_emit(source_journal_path,
-                         emissions=[{"repo_key": repo_key, "module_path": module_path,
-                                     "import_name": import_name, "text": canonical,
-                                     "path": file_path, "cutover": True}],
-                         retires=[{"repo_key": repo_key, "module_path": notebook_path,
-                                   "superseded_by": module_path}],
-                         deletes=[str(nb_file)],
-                         op={"op": "flip-to-py", "from": notebook_path, "to": module_path})
+    with collect_appends() as appended:
+        rec = journaled_emit(source_journal_path,
+                             emissions=[{"repo_key": repo_key, "module_path": module_path,
+                                         "import_name": import_name, "text": canonical,
+                                         "path": file_path, "cutover": True}],
+                             retires=[{"repo_key": repo_key, "module_path": notebook_path,
+                                       "superseded_by": module_path}],
+                             deletes=[str(nb_file)],
+                             op={"op": "flip-to-py", "from": notebook_path, "to": module_path})
     if rec.get("error"):
         return {"error": f"flip refused at the seam: {rec['error']}", **result}
     result["journal"] = rec
     notebook_deleted = nb_existed and not nb_file.exists()
 
-    # Subtree swap: Cells (and the notebook-shaped module node) out, plain decomposition in.
-    old_ids = await _module_subtree_ids(gx, module_id)
-    await graph_task(gx.queue, gx.graph_id, "delete_nodes", node_ids=old_ids, cascade=True)
-    dm = decompose_text(repo_key, module_path, file_path, canonical, import_name=import_name)
-    nodes, edges = corpus_graph_elements([dm])
-    res = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
-
-    # Re-link AFTER the swap — the cascade delete just severed every live edge on the
-    # module's nodes, including ones whose endpoints SURVIVE under identical ids (a
-    # note's REFERENCES onto a symbol). Rebuild replay would heal them, but the live
-    # graph must not silently lose curation edges between rebuilds.
-    seen_edges = set()
+    # The Cells leave (no lane projects notebooks); the plain module derives through the
+    # code fold's step, IN PLACE — ids that survive keep every edge.
+    if cell_ids:
+        await graph_task(gx.queue, gx.graph_id, "delete_nodes", node_ids=sorted(cell_ids),
+                         cascade=True)
+    live = await apply_live(gx, source_journal_path, repos_dir, appended)
     for rt in retargets:
         rres = await link(gx, rt["source_id"], rt["target_id"], rt["relation"],
                           actor=rt["actor"])
         if rres.get("error"):
             return {"error": f"re-target link failed ({rt['relation']} -> "
                              f"{rt['surviving_symbol']}): {rres['error']}", **result}
-        seen_edges.add((rres["source_id"], rt["relation"], rres["target_id"]))
         append_write(writes_journal_path, "link",
                      {"source_id": rres["source_id"], "target_id": rres["target_id"],
                       "relation": rt["relation"], "actor": rt["actor"],
                       "source_label": rres.get("source_label"),
                       "target_label": rres.get("target_label")})
-    new_ids = {n["id"] for n in nodes}
-    replayed = 0
-    for op in read_journal(writes_journal_path):
-        if op.get("verb") != "link":
-            continue
-        oa = op.get("args", {})
-        key = (oa.get("source_id"), oa.get("relation"), oa.get("target_id"))
-        if key in seen_edges or not (set(key[::2]) & new_ids):
-            continue
-        seen_edges.add(key)
-        rres = await link(gx, oa["source_id"], oa["target_id"], oa["relation"],
-                          actor=oa.get("actor", "agent:session"))
-        if not rres.get("error"):  # a dead endpoint (e.g. a dropped Cell) is already reported
-            replayed += 1
-
     result.update({"written": True, "cut_over": True, "retired": True,
                    "notebook_deleted": notebook_deleted,
-                   "graph": {"dropped_nodes": len(old_ids), "added_nodes": res.nodes_added,
-                             "added_edges": res.edges_added,
-                             "curation_links_replayed": replayed},
+                   "graph": {"dropped_cells": len(cell_ids), "live": live},
                    "note": "GRAPH-SOURCED as plain .py; the .ipynb key is retired and the "
-                           "notebook file deleted; cross-module CALLS/IMPORTS re-derive on "
-                           "the next rebuild"})
+                           "notebook file deleted; the module derived live, every derived "
+                           "edge included"})
     return result

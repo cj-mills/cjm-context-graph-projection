@@ -40,8 +40,10 @@ import ast
 import json
 import os
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from cjm_context_graph_primitives.journal import journal_segments, maybe_rotate, op_now
 from cjm_notebook_decompose_core.project import render_notebook
@@ -481,8 +483,8 @@ def flip_module(
     note = ("GRAPH-SOURCED: absorbed into the source journal (this module's source of truth); "
             "if the file was not already canonical, regenerate it via emit-artifact"
             if sourced else
-            "SHADOW: the file is still the ingest source; run source-check each session "
-            "to soak before the Phase 2 cutover")
+            "SHADOW: journaled and on the graph (the code fold projects every live key, "
+            "2cc81d3b); cut it over to make the journal its source of truth at the regen gate")
     if not write:
         note = "PREVIEW (--no-write): nothing journaled — a real flip would capture this state"
     return {"repo_key": repo_key, "module_path": module_path, "import_name": imp,
@@ -888,6 +890,30 @@ def _append_record(
     _stamp_session(record)
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(record, sort_keys=True)
     with p.open("a") as f:
-        f.write(json.dumps(record, sort_keys=True) + "\n")
+        f.write(line + "\n")
     maybe_rotate(path)
+    appended = _APPENDED.get()
+    if appended is not None:
+        appended.append(json.loads(line))
+
+
+# The records appended inside `collect_appends` (None outside one) — what a live code verb
+# hands the code fold's step (design amendment 2cc81d3b, build B2 of leg B).
+_APPENDED: ContextVar[Optional[List[Dict[str, Any]]]] = ContextVar("source_appended", default=None)
+
+
+@contextmanager
+def collect_appends() -> Iterator[List[Dict[str, Any]]]:  # The records appended inside the block, in order
+    """Collect every source-journal record appended inside the block, as it landed on disk.
+
+    Every append goes through `_append_record`, so whatever helper a verb uses (journaled_emit,
+    flip_module, cutover_module, append_retire) its records are collected here — the group
+    the live fold step (`relive.apply_live`) applies, exactly the records a rebuild will fold."""
+    records: List[Dict[str, Any]] = []
+    token = _APPENDED.set(records)
+    try:
+        yield records
+    finally:
+        _APPENDED.reset(token)

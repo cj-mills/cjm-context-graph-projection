@@ -16,7 +16,8 @@ from cjm_python_decompose_core.emit import emit_module_from_nodes
 
 
 class FakeGraph:
-    """In-memory graph-task stand-in (the ops the rename/authoring verbs use)."""
+    """In-memory graph-task stand-in (the ops the rename/authoring verbs and the code
+    fold's live step use)."""
 
     def __init__(self, nodes, edges=None):
         self.nodes = {n["id"]: n for n in nodes}
@@ -35,14 +36,34 @@ class FakeGraph:
             if q.get("label"):
                 rows = [n for n in rows if n["label"] == q["label"]]
             for p in q.get("where") or []:
-                rows = [n for n in rows
-                        if (n.get("properties") or {}).get(p["prop"]) == p["value"]]
+                if p["op"] == "in":
+                    rows = [n for n in rows
+                            if (n.get("properties") or {}).get(p["prop"]) in p["value"]]
+                else:
+                    rows = [n for n in rows
+                            if (n.get("properties") or {}).get(p["prop"]) == p["value"]]
+            if q.get("count"):
+                return {"count": len(rows)}
+            if q.get("project"):
+                return {"rows": [{"id": n["id"], **{k: (n.get("properties") or {}).get(k)
+                                                    for k in q["project"]}} for n in rows]}
             return {"nodes": rows}
         if op == "query_edges":
             q = kw["query"]
-            rows = [e for e in self.edges
-                    if e.get("relation_type") == q.get("relation_type")]
-            return SimpleNamespace(rows=rows)
+            rows = list(self.edges)
+            if q.get("relation_type"):
+                rows = [e for e in rows if e.get("relation_type") == q["relation_type"]]
+            if q.get("source_ids") is not None:
+                rows = [e for e in rows if e.get("source_id") in set(q["source_ids"])]
+            return SimpleNamespace(rows=rows, edges=rows)
+        if op == "import_graph":  # the step's in-place commit (merge_strategy overwrite)
+            gd = kw["graph_data"]
+            for n in gd["nodes"]:
+                self.nodes[n["id"]] = n
+            have = {e.get("id") for e in self.edges}
+            new = [e for e in gd["edges"] if e["id"] not in have]
+            self.edges.extend(new)
+            return {"nodes_created": len(gd["nodes"]), "edges_created": len(new)}
         if op == "update_node":
             self.nodes[kw["node_id"]]["properties"].update(kw["properties"])
             return True
@@ -146,7 +167,9 @@ def test_sequential_renames_land_without_a_rebuild(tmp_path, monkeypatch):
     from cjm_dev_graph_schema.identity import code_module_node_id, code_symbol_node_id
     from cjm_python_decompose_core.extract import decompose_text
     from cjm_context_graph_projection.source_state import append_source
-    m_path, u_path = tmp_path / "cjm_demo/m.py", tmp_path / "cjm_demo/uses.py"
+    repos = tmp_path / "repos"
+    m_path = repos / "cjm-demo" / "cjm_demo/m.py"
+    u_path = repos / "cjm-demo" / "cjm_demo/uses.py"
     m_path.parent.mkdir(parents=True, exist_ok=True)
     m_src = "def f():\n    return 1\n\n\ndef g():\n    return f() + 1\n"
     u_src = "from cjm_demo.m import f, g\n\n\ndef h():\n    return f() + g()\n"
@@ -166,9 +189,11 @@ def test_sequential_renames_land_without_a_rebuild(tmp_path, monkeypatch):
     append_source(jp, "cjm-demo", "cjm_demo/uses.py", "cjm_demo.uses", u_src)
     mid = code_module_node_id("cjm-demo", "cjm_demo/m.py")
     f_id, g_id = code_symbol_node_id(mid, "f"), code_symbol_node_id(mid, "g")
-    res1 = asyncio.run(rename_symbol(GX, f_id, "f2", write=True, source_journal_path=jp))
+    res1 = asyncio.run(rename_symbol(GX, f_id, "f2", write=True, source_journal_path=jp,
+                             repos_dir=str(repos)))
     assert not res1.get("error") and "def f2():" in m_path.read_text()
-    res2 = asyncio.run(rename_symbol(GX, g_id, "g2", write=True, source_journal_path=jp))
+    res2 = asyncio.run(rename_symbol(GX, g_id, "g2", write=True, source_journal_path=jp,
+                             repos_dir=str(repos)))
     assert not res2.get("error"), res2.get("error")
     m_out = m_path.read_text()
     assert "def f2():" in m_out and "def g2():" in m_out      # neither rename reverted
@@ -233,7 +258,9 @@ def test_rename_keeps_symbol_identity_and_relives_the_graph(tmp_path, monkeypatc
     the two rebuilds the 14cafef6 sitting paid for two renames are gone."""
     from cjm_dev_graph_schema.identity import code_module_node_id, code_symbol_node_id
     from cjm_python_decompose_core.extract import decompose_text
-    m_path, u_path = tmp_path / "cjm_demo/m.py", tmp_path / "cjm_demo/uses.py"
+    repos = tmp_path / "repos"
+    m_path = repos / "cjm-demo" / "cjm_demo/m.py"
+    u_path = repos / "cjm-demo" / "cjm_demo/uses.py"
     m_path.parent.mkdir(parents=True, exist_ok=True)
     m_src = "def f():\n    return 1\n\n\ndef g():\n    return f() + 1\n"
     u_src = "from cjm_demo.m import f, g\n\n\ndef h():\n    return f() + g()\n"
@@ -257,11 +284,13 @@ def test_rename_keeps_symbol_identity_and_relives_the_graph(tmp_path, monkeypatc
     mid = code_module_node_id("cjm-demo", "cjm_demo/m.py")
     f_id, g_id = code_symbol_node_id(mid, "f"), code_symbol_node_id(mid, "g")
 
-    res = asyncio.run(rename_symbol(GX, f_id, "f2", write=True, source_journal_path=jp))
+    res = asyncio.run(rename_symbol(GX, f_id, "f2", write=True, source_journal_path=jp,
+                             repos_dir=str(repos)))
     assert not res.get("error"), res.get("error")
     assert "def f2():" in m_path.read_text() and "import f2, g" in u_path.read_text()
     # The id is KEPT; the live node reads the new name + body; the birth is recorded.
-    assert f_id in fake.nodes and f_id in res["live"]["updated"]
+    assert f_id in fake.nodes and res["live"]["nodes_updated"] >= 1
+    assert res["live"]["nodes_removed"] == 1  # the importer's old import region (its lead line changed)
     fp = fake.nodes[f_id]["properties"]
     assert fp["qualname"] == "f2" and fp["name"] == "f2" and "def f2():" in fp["body"]
     assert fp["birth_qualname"] == "f" and fp["generation"] == 0
@@ -277,7 +306,8 @@ def test_rename_keeps_symbol_identity_and_relives_the_graph(tmp_path, monkeypatc
     # THE HEADLINE: the live projection reproduces the files, so the next author edit lands
     # with no rebuild in between (the 889b3025 guard is satisfied, not bypassed).
     res2 = asyncio.run(author(GX, g_id, edit=("return f2() + 1", "return f2() + 2"),
-                              write=True, source_journal_path=jp))
+                              write=True, source_journal_path=jp,
+                             repos_dir=str(repos)))
     assert not res2.get("error"), res2.get("error")
     assert "return f2() + 2" in m_path.read_text()
     # A newcomer named `f` is the next generation — never the renamed symbol's id.

@@ -51,10 +51,11 @@ from cjm_python_decompose_core.parse import parse_module
 
 from . import factlayer as F
 from .projection import ambiguity_error, resolve_node_ref
+from .relive import apply_live
 from .runtime import GraphHandle
 from .seeds import conceptual_key, repo_dir_name
 from .sitelinks import resolve_after_write
-from .source_state import is_test_module_path, journaled_emit, symbol_identity_map
+from .source_state import collect_appends, is_test_module_path, journaled_emit, symbol_identity_map
 
 
 async def _resolve_node(
@@ -500,12 +501,15 @@ async def emit_artifact(
             return {**res, "error": "cannot derive the source-journal key for "
                     f"{artifact_path!r} under repos_dir={repos_dir!r} — refusing to "
                     "write unjournaled"}
-        rec = journaled_emit(source_journal_path, emissions=[emission],
-                             op={"op": "emit", "module_id": module_id})
+        with collect_appends() as appended:
+            rec = journaled_emit(source_journal_path, emissions=[emission],
+                                 op={"op": "emit", "module_id": module_id})
         if rec.get("error"):
             return {**res, "error": rec["error"]}
         res["journal"] = rec
         res["written"] = True
+        if artifact == "module":
+            res["live"] = await apply_live(gx, source_journal_path, repos_dir, appended)
     elif write and artifact_path:
         # Notes ride the writes-journal domain; bare path is TRANSITIONAL (seam rollout).
         Path(artifact_path).write_text(text)
@@ -723,21 +727,28 @@ async def author(
             return {**result, "error": "cannot derive the source-journal key for "
                     f"{artifact_path!r} under repos_dir={repos_dir!r} — refusing to "
                     "write unjournaled"}
-        rec = journaled_emit(source_journal_path, emissions=[emission],
-                             op={"op": "author", "node_id": node_id, "slot": slot,
-                                 "actor": actor}, write=write)
+        with collect_appends() as appended:
+            rec = journaled_emit(source_journal_path, emissions=[emission],
+                                 op={"op": "author", "node_id": node_id, "slot": slot,
+                                     "actor": actor}, write=write)
         if rec.get("error"):
             return {**result, "error": rec["error"]}
         result["journal"] = rec
+        if write and artifact == "module":
+            # The code fold's step (2cc81d3b, B2): the module re-derives from its journaled
+            # text — every node, wire, edge and time as a rebuild derives them.
+            result["live"] = await apply_live(gx, source_journal_path, repos_dir, appended)
+            result["written"] = True
+            return result
     if write and artifact_path:
         if artifact == "note" or source_journal_path is None:
             # Notes ride the WRITES-journal domain (M2b section states at the CLI seam;
             # pillar-3 unification owns merging the domains). The bare-path branch is
             # TRANSITIONAL scaffolding until every caller threads the journal.
             Path(artifact_path).write_text(emitted)
-        # Persist the slot change INTO the graph node too, so the graph stays consistent
-        # with the file and sequential authors compose (emit reads the graph). The file is
-        # still the durable source under Fork-1(a); the next `ingest` re-derives either way.
+        # Persist the slot change INTO the graph node too (a note section, a cell, or the
+        # unjournaled bare path), so sequential authors compose (emit reads the graph); a
+        # journaled code slot re-derives through the code fold's step above instead.
         merge: Dict[str, Any] = {slot: new_text}
         merge.update(rebind)
         if label == DevNodeKinds.CODE_SYMBOL:
@@ -874,12 +885,19 @@ async def add_symbol(
             return {**result, "error": "cannot derive the source-journal key for "
                     f"{artifact_path!r} under repos_dir={repos_dir!r} — refusing to "
                     "write unjournaled"}
-        rec = journaled_emit(source_journal_path, emissions=[emission],
-                             op={"op": "add-symbol", "qualname": qualname,
-                                 "actor": actor}, write=write)
+        with collect_appends() as appended:
+            rec = journaled_emit(source_journal_path, emissions=[emission],
+                                 op={"op": "add-symbol", "qualname": qualname,
+                                     "actor": actor}, write=write)
         if rec.get("error"):
             return {**result, "error": rec["error"]}
         result["journal"] = rec
+        if write:
+            # The code fold's step (2cc81d3b, B2): the new symbol, its nested symbols and
+            # every derived edge (CALLS / USES / TESTS included) land as a rebuild derives them.
+            result["live"] = await apply_live(gx, source_journal_path, repos_dir, appended)
+            result["written"] = True
+            return result
     if write and artifact_path:
         if source_journal_path is None:
             Path(artifact_path).write_text(emitted)  # TRANSITIONAL bare path (seam rollout)
@@ -1021,12 +1039,18 @@ async def add_text(
             return {**result, "error": "cannot derive the source-journal key for "
                     f"{artifact_path!r} under repos_dir={repos_dir!r} — refusing to "
                     "write unjournaled"}
-        rec = journaled_emit(source_journal_path, emissions=[emission],
-                             op={"op": "add-text", "region_key": region.region_key,
-                                 "actor": actor}, write=write)
+        with collect_appends() as appended:
+            rec = journaled_emit(source_journal_path, emissions=[emission],
+                                 op={"op": "add-text", "region_key": region.region_key,
+                                     "actor": actor}, write=write)
         if rec.get("error"):
             return {**result, "error": rec["error"]}
         result["journal"] = rec
+        if write:
+            # The code fold's step (2cc81d3b, B2) — see add_symbol.
+            result["live"] = await apply_live(gx, source_journal_path, repos_dir, appended)
+            result["written"] = True
+            return result
     if write and artifact_path:
         if source_journal_path is None:
             # TRANSITIONAL bare path (seam rollout). A born-on-graph package's FIRST

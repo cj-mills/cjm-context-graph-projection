@@ -1447,7 +1447,31 @@ def render(
     if (isinstance(obj, dict) and isinstance(obj.get("journal"), dict)
             and "journal_first" in obj["journal"] and not obj.get("error")):
         out += "\n" + _journal_receipt_line(obj["journal"])
+    # The code fold's live step (2cc81d3b, B2) — the same one line for every code verb.
+    live = obj.get("live") if isinstance(obj, dict) else None
+    if isinstance(live, dict) and "records" in live and not obj.get("error"):
+        out += "\n" + _live_step_line(live)
     return out
+
+
+def _live_step_line(live: Dict[str, Any]) -> str:  # The live step's one-line receipt
+    """What the code fold's step did to the db: modules re-derived, nodes added / updated /
+    removed, edges added / removed — and, loudly, drift it healed, edges the store skipped
+    (an absent endpoint, as a rebuild skips it) and fresh ids the db already held."""
+    if not live.get("modules"):
+        return "🧬 live: no code module re-derived"
+    line = (f"🧬 live: {len(live['modules'])} module(s) re-derived — nodes +{live['nodes_added']}"
+            f" ~{live['nodes_updated']} −{live['nodes_removed']} · edges +{live['edges_added']}"
+            f" −{live['edges_removed']}")
+    if live.get("healed_edges"):
+        line += f" · ⚠ healed {live['healed_edges']} drifted edge(s)"
+    if live.get("edges_skipped"):
+        line += f" · {live['edges_skipped']} edge(s) skipped (absent endpoint)"
+    if live.get("collisions"):
+        line += f" · ⚠ {len(live['collisions'])} fresh id(s) already in the db (overwritten)"
+    for f in live.get("failures") or []:
+        line += f"\n⚠ live: {f['repo_key']}/{f['module_path']} did not decompose ({f['error']})"
+    return line
 
 
 def _fmt_ts(ts: Any) -> str:  # Local wall-clock string, or the raw value

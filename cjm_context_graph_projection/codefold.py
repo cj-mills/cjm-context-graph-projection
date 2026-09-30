@@ -32,9 +32,13 @@ latest-state ingest let the first or last duplicate win by scan order (no journa
 that order).
 
 The rebuild folds every record and commits `elements()`; the live verbs (build B2 of leg B
-0e3508fd) apply the same step over state read from the db.
+0e3508fd) apply the SAME step over state read from the db: `advance` walks the journal prefix
+(identity + inventory, no derivation), `seed_corpus` / `seed_module` load the resolution
+indexes and the touched modules as the db holds them, and `apply` runs over the records the
+verb appended (`relive.apply_live`).
 """
 
+import json
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
@@ -79,7 +83,9 @@ def _resolved_imports(
 class _Scope:
     """One resolution rule: each source's names resolve to the UNIQUE target keyed by that
     name within the scope (precision over recall — never mint a guessed edge). Sources and
-    targets belong to the scope by their module's test-ness."""
+    targets belong to the scope by their module's test-ness. The indexes hold each node's
+    EFFECTIVE wire — the fold's view across every module holding it (a keep-identity
+    rename-module holds a symbol in two modules until its retire settles)."""
 
     def __init__(
         self,
@@ -106,17 +112,15 @@ class _Scope:
 
     def change(
         self,
-        old: Dict[str, Dict[str, Any]],  # The module's previous wires of this scope's label
-        new: Dict[str, Dict[str, Any]],  # Its new wires
-        test: bool,                      # Whether the module is a test module
+        old: Dict[str, Tuple[Dict[str, Any], bool]],  # id -> (its effective wire BEFORE, its module's test-ness)
+        new: Dict[str, Tuple[Dict[str, Any], bool]],  # id -> (its effective wire AFTER, its module's test-ness)
     ) -> Set[str]:  # Source ids whose edges must be re-resolved
-        """Swap one module's wires in the indexes; the dirty sources are the module's own plus
-        every caller of a name whose resolution moved."""
+        """Swap nodes' effective wires in the indexes; the dirty sources are the changed nodes
+        themselves plus every caller of a name whose resolution moved."""
         dirty: Set[str] = set()
         touched: Dict[str, Optional[str]] = {}  # name -> resolution BEFORE the change
-        is_src, is_tgt = self.sources_in(test), self.targets_in(test)
-        for sid, w in old.items():
-            if is_tgt:
+        for sid, (w, test) in old.items():
+            if self.targets_in(test):
                 k = self.target_key(w)
                 if k:
                     touched.setdefault(k, self.resolve(k))
@@ -133,13 +137,13 @@ class _Scope:
                         if not c:
                             del self.callers[n]
                 dirty.add(sid)
-        for sid, w in new.items():
-            if is_tgt:
+        for sid, (w, test) in new.items():
+            if self.targets_in(test):
                 k = self.target_key(w)
                 if k:
                     touched.setdefault(k, self.resolve(k))
                     self.targets.setdefault(k, set()).add(sid)
-            if is_src:
+            if self.sources_in(test):
                 names = tuple(dict.fromkeys(n for n in self.source_names(w) if n))
                 self.sources[sid] = names
                 for n in names:
@@ -201,14 +205,17 @@ class CodeFold:
 
     def __init__(
         self,
-        repos_dir: str,  # The repos root (a node's provenance path = repos_dir/<current dir>/<module_path>)
+        repos_dir: str,          # The repos root (a node's provenance path = repos_dir/<current dir>/<module_path>)
+        normalize: bool = False,  # JSON-normalize derived wires (the live step compares them with wires read from the db)
     ):
         self.repos_dir = Path(repos_dir)
+        self.normalize = normalize
         self.walk = IdentityWalk(conceptual_key)
         self.scopes = _scopes()
         self.live: Dict[Tuple[str, str], Tuple[int, Dict[str, Any]]] = {}  # raw key -> (seq, args)
         self.modules: Dict[Tuple[str, str], Dict[str, Any]] = {}  # conceptual key -> its derivation
-        self.nodes: Dict[str, Dict[str, Any]] = {}   # id -> {wire, created_at, updated_at, holders}
+        self.nodes: Dict[str, Dict[str, Any]] = {}   # id -> {wire, created_at, updated_at, by: {holder module: its wire}}
+        self.module_test: Dict[str, bool] = {}        # CodeModule id -> whether it is a test module
         self.edges: Dict[str, Dict[str, Any]] = {}   # id -> {wire, created_at, updated_at, n}
         self._pending_nodes: Set[str] = set()
         self._pending_edges: Set[str] = set()
@@ -218,26 +225,48 @@ class CodeFold:
         self.records = 0
 
     # -- node / edge bookkeeping ------------------------------------------------------------
+    # A node is held per module (`by`): a keep-identity rename-module holds its symbols in the
+    # new module and the old one until the retire settles. The EFFECTIVE wire is the latest
+    # put among the holders; a change to it is an update (label / properties) or a locator
+    # refresh (sources), and the scopes index it.
     def _node_put(self, holder, wire, ts) -> None:
         rec = self.nodes.get(wire["id"])
         if rec is None:
             self.nodes[wire["id"]] = {"wire": wire, "created_at": ts, "updated_at": ts,
-                                      "holders": {holder}}
+                                      "by": {holder: wire}}
             return
-        rec["holders"].add(holder)
+        rec["by"].pop(holder, None)
+        rec["by"][holder] = wire  # the latest put is the effective wire
         self._pending_nodes.discard(wire["id"])
+        self._take(rec, wire, ts)
+
+    def _node_drop(self, holder, nid, ts) -> None:
+        rec = self.nodes.get(nid)
+        if rec is None or rec["by"].pop(holder, None) is None:
+            return
+        if rec["by"]:
+            self._take(rec, next(reversed(rec["by"].values())), ts)  # the latest remaining holder's
+        else:
+            self._pending_nodes.add(nid)
+
+    @staticmethod
+    def _take(rec, wire, ts) -> None:
+        """Make `wire` the node's effective wire; a content change stamps updated_at."""
         old = rec["wire"]
         if (old["label"], old.get("properties")) != (wire["label"], wire.get("properties")):
             rec["updated_at"] = ts
         rec["wire"] = wire  # the provenance locator always follows the latest file state
 
-    def _node_drop(self, holder, nid) -> None:
+    def _effective(self, nid) -> Optional[Dict[str, Any]]:  # The node's effective wire, or None when no module holds it
         rec = self.nodes.get(nid)
-        if rec is None:
-            return
-        rec["holders"].discard(holder)
-        if not rec["holders"]:
-            self._pending_nodes.add(nid)
+        return rec["wire"] if rec is not None and rec["by"] else None
+
+    def _is_test(self, wire) -> bool:
+        """A node's test-ness — its module's (what decides which scopes index it)."""
+        p = wire["properties"]
+        if wire["label"] == DevNodeKinds.CODE_MODULE:
+            return is_test_module_path(p.get("module_path") or "")
+        return self.module_test.get(p.get("module_id"), False)
 
     def _edge_hold(self, wire, ts) -> None:
         rec = self.edges.get(wire["id"])
@@ -257,11 +286,11 @@ class CodeFold:
         if rec["n"] <= 0:
             self._pending_edges.add(eid)
 
-    def _settle(self) -> None:
+    def settle(self) -> None:
         """End of a group: whatever lost its last holder inside it is gone."""
         for nid in self._pending_nodes:
             rec = self.nodes.get(nid)
-            if rec is not None and not rec["holders"]:
+            if rec is not None and not rec["by"]:
                 del self.nodes[nid]
         for eid in self._pending_edges:
             rec = self.edges.get(eid)
@@ -277,8 +306,18 @@ class CodeFold:
     ) -> None:
         """Advance the corpus past one record (the step the rebuild folds and live verbs share)."""
         if self._prev is not None and not _same_group(self._prev, rec):
-            self._settle()
+            self.settle()
         self._prev = rec
+        key = self.advance(rec)
+        if key is not None:
+            self._rederive(key, rec.get("ts"))
+
+    def advance(
+        self,
+        rec: Dict[str, Any],  # One source-journal record, in append order
+    ) -> Optional[Tuple[str, str]]:  # The conceptual module key the record re-derives, or None
+        """Advance the identity walk and the inventory past one record WITHOUT deriving — half of
+        `apply`, and alone the walk over a journal prefix a live step seeds from."""
         self.records += 1
         self.walk.apply(rec)
         verb, a = rec.get("verb"), rec.get("args", {})
@@ -289,10 +328,59 @@ class CodeFold:
         elif verb == "retire":
             self.live.pop(raw, None)
         else:
-            return  # cutover / register: phase and inventory events, no code state
+            return None  # cutover / register: phase and inventory events, no code state
         if not str(raw[1]).endswith(".py"):
-            return  # a notebook record: identity only (no notebook lane)
-        self._rederive((conceptual_key(raw[0]), raw[1]), rec.get("ts"))
+            return None  # a notebook record: identity only (no notebook lane)
+        return (conceptual_key(raw[0]), raw[1])
+
+    def seed_corpus(
+        self,
+        modules: Dict[Tuple[str, str], List[Dict[str, Any]]],  # conceptual key -> its CodeModule + CodeSymbol wires (at least the properties the scopes read)
+    ) -> None:
+        """Seed the resolution indexes from state held elsewhere (the live step reads the db):
+        every scope indexes every module, then every source's edges are resolved and held —
+        the index and edge state a fold of the same journal holds. Nodes are not seeded here;
+        `seed_module` seeds the modules a group will re-derive."""
+        for key, wires in modules.items():
+            for w in wires:
+                if w["label"] == DevNodeKinds.CODE_MODULE:
+                    self.module_test[w["id"]] = is_test_module_path(key[1])
+        for key, wires in modules.items():
+            test = is_test_module_path(key[1])
+            for scope in self.scopes:
+                n = {w["id"]: (w, test) for w in wires if w["label"] == scope.label}
+                if n:
+                    scope.change({}, n)
+        for scope in self.scopes:
+            for sid in scope.sources:
+                out = scope.edges_for(sid)
+                if out:
+                    scope.out[sid] = out
+                    for e in out.values():
+                        self._edge_hold(e, None)
+
+    def seed_module(
+        self,
+        key: Tuple[str, str],          # The module's conceptual key
+        nodes: List[Dict[str, Any]],   # Its node wires as held (module + symbols + texts), each carrying created_at / updated_at
+        local: List[Dict[str, Any]],   # Its local edges as held (ABOUT / DEFINES / CONTAINS)
+    ) -> None:
+        """Seed one module's derivation as held elsewhere (the db) — the `old` side its next
+        record is diffed against, with each node's times carried."""
+        wires = {w["id"]: {k: w.get(k) for k in ("id", "label", "properties", "sources")}
+                 for w in nodes}
+        edges = {e["id"]: {k: e.get(k) for k in ("id", "source_id", "target_id",
+                                                 "relation_type", "properties")}
+                 for e in local}
+        for w in nodes:
+            self.nodes[w["id"]] = {"wire": wires[w["id"]], "created_at": w.get("created_at"),
+                                   "updated_at": w.get("updated_at"), "by": {key: wires[w["id"]]}}
+            if w["label"] == DevNodeKinds.CODE_MODULE:
+                self.module_test[w["id"]] = is_test_module_path(key[1])
+        for e in edges.values():
+            self._edge_hold(e, None)
+        if wires:
+            self.modules[key] = {"nodes": wires, "local": edges}
 
     def _current_args(self, key) -> Optional[Dict[str, Any]]:
         """The latest live record for a conceptual key (a renamed repo's old and new dir-name
@@ -307,7 +395,6 @@ class CodeFold:
     def _rederive(self, key, ts) -> None:
         a = self._current_args(key)
         old = self.modules.get(key) or {"nodes": {}, "local": {}}
-        test = is_test_module_path(key[1])
         if a is None:
             new = {"nodes": {}, "local": {}}
         else:
@@ -322,22 +409,33 @@ class CodeFold:
                 return  # the previous derivation stands; reported
             wires = [dm.module.to_graph_node(), *(s.to_graph_node() for s in dm.symbols),
                      *(t.to_graph_node() for t in dm.texts)]
+            local = dm.local_edges
+            if self.normalize:
+                wires, local = json.loads(json.dumps(wires)), json.loads(json.dumps(local))
             new = {"nodes": {w["id"]: w for w in wires},
-                   "local": {e["id"]: e for e in dm.local_edges}}
+                   "local": {e["id"]: e for e in local}}
+            self.module_test[dm.module.id] = is_test_module_path(key[1])
+        ids = old["nodes"].keys() | new["nodes"].keys()
+        before = {i: self._effective(i) for i in ids}
         for w in new["nodes"].values():
             self._node_put(key, w, ts)
         for nid in old["nodes"].keys() - new["nodes"].keys():
-            self._node_drop(key, nid)
+            self._node_drop(key, nid, ts)
+        after = {i: self._effective(i) for i in ids}
+        content = lambda w: None if w is None else (w["label"], w.get("properties"))
+        changed = [i for i in ids if content(before[i]) != content(after[i])]
         for eid in new["local"].keys() - old["local"].keys():
             self._edge_hold(new["local"][eid], ts)
         for eid in old["local"].keys() - new["local"].keys():
             self._edge_release(eid)
         for scope in self.scopes:
-            o = {i: w for i, w in old["nodes"].items() if w["label"] == scope.label}
-            n = {i: w for i, w in new["nodes"].items() if w["label"] == scope.label}
+            o = {i: (before[i], self._is_test(before[i])) for i in changed
+                 if before[i] is not None and before[i]["label"] == scope.label}
+            n = {i: (after[i], self._is_test(after[i])) for i in changed
+                 if after[i] is not None and after[i]["label"] == scope.label}
             if not o and not n:
                 continue
-            for sid in scope.change(o, n, test):
+            for sid in scope.change(o, n):
                 was = scope.out.pop(sid, {})
                 now = scope.edges_for(sid)
                 if now:
@@ -354,7 +452,7 @@ class CodeFold:
     # -- results ----------------------------------------------------------------------------
     def elements(self) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:  # (nodes, edges), times carried
         """The corpus as `extend_graph` wires, each carrying its `created_at` / `updated_at`."""
-        self._settle()
+        self.settle()
         nodes = [{**r["wire"], "created_at": r["created_at"], "updated_at": r["updated_at"]}
                  for r in self.nodes.values()]
         edges = [{**r["wire"], "created_at": r["created_at"], "updated_at": r["updated_at"]}

@@ -28,9 +28,9 @@ from cjm_python_decompose_core.emit import emit_module_from_nodes
 from . import factlayer as F
 from .authoring import _module_node, _module_region_wires, _stale_wires_error
 from .refactor_ops import _emission_for, _get
-from .relive import relive_modules
+from .relive import apply_live
 from .runtime import GraphHandle
-from .source_state import journaled_emit
+from .source_state import collect_appends, journaled_emit
 
 _COMP = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
 
@@ -295,6 +295,7 @@ async def rename_symbol(
     *,
     write: bool = True,  # Write the affected files (Fork-1(a)); False = dry run
     source_journal_path: Optional[str] = None,  # The source journal (events land BEFORE files)
+    repos_dir: Optional[str] = None,  # The repos root (the live fold step derives node paths under it)
 ) -> Dict[str, Any]:  # The rename result (modules updated, diagnostics, or error)
     """Rename a top-level free function/class everywhere it is referenced, graph-driven.
 
@@ -304,7 +305,8 @@ async def rename_symbol(
     any write. The symbol KEEPS its id and the graph is updated live (36f649d3) — the
     renamed symbol resolves under the same id the moment the verb returns."""
     res = await rename_symbols(gx, [(symbol_id, new_name)],
-                               write=write, source_journal_path=source_journal_path)
+                               write=write, source_journal_path=source_journal_path,
+                               repos_dir=repos_dir)
     if res.get("error") or not res.get("renames"):
         return res
     one = res["renames"][0]
@@ -320,6 +322,7 @@ async def rename_symbols(
     *,
     write: bool = True,  # Write the affected files (Fork-1(a)); False = dry run
     source_journal_path: Optional[str] = None,  # The source journal (events land BEFORE files)
+    repos_dir: Optional[str] = None,  # The repos root (the live fold step derives node paths under it)
 ) -> Dict[str, Any]:  # The batch result (renames, modules updated, diagnostics, or error)
     """Batch top-level renames in ONE emit set (finding 889b3025).
 
@@ -333,8 +336,9 @@ async def rename_symbols(
 
     IDENTITY IS KEPT (36f649d3): the op rides the journal with `identity: keep`, so a
     renamed symbol keeps the id it was born with (`locate` still finds it, every journaled
-    edge survives), and the graph is updated LIVE from the new texts (`relive_modules`) —
-    no rebuild stands between this rename and the next author edit."""
+    edge survives), and the graph is updated LIVE through the code fold's step
+    (`relive.apply_live`, 2cc81d3b) — no rebuild stands between this rename and the next
+    author edit, and every derived edge re-resolves under the new name."""
     if not renames:
         return {"error": "no renames given", "written": False}
     plans: List[Dict[str, Any]] = []
@@ -436,14 +440,14 @@ async def rename_symbols(
                           "identity": "keep"}
     if len(plans) == 1:
         op["from"], op["to"] = plans[0]["old"], plans[0]["new"]
-    rec = journaled_emit(source_journal_path, emissions=emissions, op=op, write=write)
+    with collect_appends() as appended:
+        rec = journaled_emit(source_journal_path, emissions=emissions, op=op, write=write)
     if rec.get("error"):
         return {**result, "error": rec["error"]}
     result["journal"] = rec
     result["written"] = bool(write)
     if write:
-        # Live: the graph reproduces the files now — the renamed symbols keep their ids
-        # (the identity map just learned this op from the journal); no rebuild needed.
-        result["live"] = await relive_modules(gx, [(mnodes[mid], texts[mid]) for mid in changed],
-                                              source_journal_path=source_journal_path)
+        # Live: the code fold's step over this op's records — the renamed symbols keep
+        # their ids (the identity walk reads the op from the journal); no rebuild needed.
+        result["live"] = await apply_live(gx, source_journal_path, repos_dir, appended)
     return result
