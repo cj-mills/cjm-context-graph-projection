@@ -40,6 +40,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import yaml
 from cjm_context_graph_layer.ops import extend_graph, graph_task
+from cjm_context_graph_primitives.journal import op_now
 from cjm_context_graph_primitives.query import (EdgeQuery, NodeQuery, PropertyPredicate,
                                                 RelationPredicate)
 from cjm_dev_graph_schema import predicates as P
@@ -3035,7 +3036,7 @@ async def place_point(
     by_key = {str(p.get("key")): p for p in points}
     # `at` = when the human confirmed this placement: content of the event, and what keeps a re-placement
     # after an undo distinct from the first (the journal dedups an op identical in verb + args)
-    args = {"slug": slug, "key": key, "section_key": section_key, "actor": actor, "at": round(time.time(), 3),
+    args = {"slug": slug, "key": key, "section_key": section_key, "actor": actor, "at": round(op_now(), 3),
             **({"after": after} if after is not None else {}),
             **({"refs_shown": list(refs_shown)} if refs_shown is not None else {})}
     point = by_key.get(key)

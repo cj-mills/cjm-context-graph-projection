@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from cjm_context_graph_layer.ops import extend_graph
-from cjm_context_graph_primitives.journal import append_write, read_journal
+from cjm_context_graph_primitives.journal import append_write, op_clock, op_now, read_journal
 from cjm_dev_graph_schema.predicates import SITE_PATH
 
 from .authoring import add_symbol, author, emit_artifact, emit_post, read_node, read_slot
@@ -49,6 +49,7 @@ from .prose_refs import prose_refs
 from .readiness import readiness
 from .readme import project_readme
 from .reads import configure_reads, record_read
+from .rebuilddiff import parse_path_map, rebuild_diff, render_rebuild_diff
 from .reconcile import reconcile_memory
 from .refactor import refactor_candidates
 from .refactor_ops import move
@@ -370,6 +371,14 @@ async def _dispatch(args) -> int:
                            port=args.port, manifests_dir=args.manifests_dir,
                            index_html=EXPLORER_HTML, hybrid_html=HYBRID_HTML)
         return 0
+    if args.command == "rebuild-diff":
+        # The standing check (design 8f6f2343): opens BOTH graphs read-only itself, so it
+        # doesn't ride the single-graph context below. Exit 3 = differences found.
+        res = await rebuild_diff(args.graph_db_path, args.against,
+                                 path_map=parse_path_map(args.path_map),
+                                 manifests_dir=args.manifests_dir)
+        print(render_rebuild_diff(res, args.format))
+        return 0 if res["clean"] else 3
     async with open_graph(args.graph_db_path, args.manifests_dir) as gx:
         if args.command == "ingest":
             note_aliases = await note_alias_map(gx)  # confirmed link aliases heal drifted refs
@@ -1702,6 +1711,15 @@ async def _dispatch(args) -> int:
         return 0
 
 
+async def _dispatch_clocked(args) -> int:
+    """Run one CLI invocation inside ONE op clock window (design 8f6f2343, amendment
+    efd659a1): every op the invocation journals carries the time its db writes used, so the
+    live db equals its rebuild — for every verb, current and future, by construction.
+    Replay / ingest open their own per-op windows inside it (op_clock nests)."""
+    with op_clock():
+        return await _dispatch(args)
+
+
 def _apply_graph_config(args) -> None:
     """Overlay the graph-sibling config onto parsed args (config = DATA,
     a1d965b0): an EXPLICIT flag always wins; a value still at its baked
@@ -2380,12 +2398,11 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
             # A re-render is journaled unless it repeats the LAST render of this draft (a true no-op). The
             # journal dedups an op identical in verb + args over its WHOLE history (finding 4aa5d5b4), which
             # would drop a render whose state toggled back to an earlier one, so the op carries `at`.
-            import time as _time
             from cjm_context_graph_primitives.journal import read_journal as _read_journal
             prev = [o for o in _read_journal(args.journal_path)
                     if o.get("verb") == "render-notes" and (o.get("args") or {}).get("slug") == args.slug]
             if not prev or (prev[-1].get("args") or {}).get("substance") != res["args"].get("substance"):
-                append_write(args.journal_path, "render-notes", {**res["args"], "at": round(_time.time(), 3)})
+                append_write(args.journal_path, "render-notes", {**res["args"], "at": round(op_now(), 3)})
         return 0
     if cmd == "notes-promotion":
         res = await work_promotion_status(gx, siblings=siblings, graph_key=args.sibling,
@@ -2864,6 +2881,16 @@ def main() -> int:
                       help="Drop these op verbs (repeatable; e.g. unlink for a retraction sweep)")
     p_jw.add_argument("--label", action="append", default=None,
                       help="Keep only touched nodes of this label (repeatable)")
+
+    p_rd = sub.add_parser("rebuild-diff",
+                          help="The live-versus-rebuild standing check (design 8f6f2343): compare "
+                               "--graph-db-path (A, the live db) with --against (B, its rebuild) "
+                               "node by node and edge by edge on every property + both time "
+                               "columns, no exclusion list; exit 3 when they differ")
+    p_rd.add_argument("--against", required=True, help="Graph B's db path (opened read-only)")
+    p_rd.add_argument("--path-map", action="append", default=None,
+                      help="OLD=NEW path-prefix rewrite applied to every string on both sides "
+                           "before comparing (repeatable; a corpus moved on disk)")
 
     p_pf = sub.add_parser("portfolio",
                           help="Workbench front door: every role-asserted anchor + lock lead "
@@ -3500,7 +3527,7 @@ def main() -> int:
     args = ap.parse_args()
     _apply_graph_config(args)
     configure_reads(args.reads_path, request=_read_request(args))
-    return asyncio.run(_dispatch(args))
+    return asyncio.run(_dispatch_clocked(args))
 
 
 # The __main__ dispatch was demoted from here to a TAIL region (2026-08-13): under

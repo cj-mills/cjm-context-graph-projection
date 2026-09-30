@@ -14,12 +14,11 @@ contradiction) and an unchanged read is an idempotent no-op.
 
 import importlib.metadata
 import re
-import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from cjm_context_graph_layer.identity import derive_node_id
-from cjm_context_graph_primitives.journal import append_write
+from cjm_context_graph_primitives.journal import append_write, op_now
 from cjm_dev_graph_schema.vocab import DevNodeKinds
 
 from . import factlayer as F
@@ -96,7 +95,7 @@ async def run_version_oracle(
     only_l = {o.lower() for o in only} if only else None
 
     bumped, first_seen, unchanged, skipped = [], [], [], []
-    now = time.time()
+    now = op_now()
     for e in repos:
         key, name = F.prop(e, "key"), F.prop(e, "name")
         if only_l and key.lower() not in only_l and (name or "").lower() not in only_l:

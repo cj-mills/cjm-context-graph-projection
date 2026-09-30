@@ -9,9 +9,9 @@ journaled `assert` (point_role) and `place-point` ops the render reads live. Rol
 SHARED substance point (the classification is the point's); moves ride the deliverable's
 own edge (the placement is this page's)."""
 
-import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from cjm_context_graph_primitives.journal import op_now
 from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.identity import note_node_id
 
@@ -292,7 +292,7 @@ async def apply_placement_plan(
         # identical in verb + args over its whole history (replay stamps asserted_at from the envelope)
         ops.append(("assert", {"subject": r["id"] or r["key"], "predicate": P.POINT_ROLE, "value": r["new"], "actor": actor,
                                "evidence": None, "supersede": ([r["old"]] if r.get("old") else None),
-                               "subject_content_hash": st.get("subject_content_hash"), "at": round(time.time(), 3)}))
+                               "subject_content_hash": st.get("subject_content_hash"), "at": round(op_now(), 3)}))
         out["roles"].append({"point": r["point"], "key": r["key"], "old": r["old"], "new": r["new"], "why": r.get("why", "")})
     for m in plan.get("moves") or []:
         res = await place_point(gx, slug, m["key"], m["section"], after=m["after_key"], actor=actor)

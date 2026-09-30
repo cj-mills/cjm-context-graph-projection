@@ -40,11 +40,10 @@ import ast
 import json
 import os
 import re
-import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from cjm_context_graph_primitives.journal import journal_segments, maybe_rotate
+from cjm_context_graph_primitives.journal import journal_segments, maybe_rotate, op_now
 from cjm_notebook_decompose_core.project import render_notebook
 from cjm_notebook_decompose_core.read import parse_notebook
 from cjm_python_decompose_core.emit import emit_module_from_nodes
@@ -392,7 +391,7 @@ def append_retire(
     `generation`/`op` ride the record as replay-ignored envelope (see `append_source`)."""
     if (repo_key, module_path) not in latest_source_ops(path):
         return False
-    record: Dict[str, Any] = {"verb": "retire", "ts": time.time(), "generation": 1,
+    record: Dict[str, Any] = {"verb": "retire", "ts": op_now(), "generation": 1,
                               "args": {"repo_key": repo_key, "module_path": module_path,
                                        "superseded_by": superseded_by}}
     if op_meta:
@@ -419,7 +418,7 @@ def append_source(
     cur = latest_source_ops(path).get((repo_key, module_path))
     if cur is not None and cur.get("text") == text:
         return False
-    record: Dict[str, Any] = {"verb": "source", "ts": time.time(), "generation": 1,
+    record: Dict[str, Any] = {"verb": "source", "ts": op_now(), "generation": 1,
                               "args": {"repo_key": repo_key, "module_path": module_path,
                                        "import_name": import_name, "text": text}}
     if op_meta:
@@ -665,7 +664,7 @@ def _append_cutover(
     The GUARDED path is `cutover_module` (shadow-clean checks); this is the shared
     append it and `journaled_emit` route through when the caller has already validated
     (e.g. flip-to-py births a `.py` graph-sourced from a state it just canonicalized)."""
-    record: Dict[str, Any] = {"verb": "cutover", "ts": time.time(), "generation": 1,
+    record: Dict[str, Any] = {"verb": "cutover", "ts": op_now(), "generation": 1,
                               "args": {"repo_key": repo_key, "module_path": module_path}}
     if op_meta:
         record["op"] = op_meta
@@ -693,7 +692,7 @@ def append_register(
     args = {"repo_key": repo_key, "repo_root": repo_root, "source_kind": source_kind}
     if latest == args:
         return False
-    record: Dict[str, Any] = {"verb": "register", "ts": time.time(), "generation": 1,
+    record: Dict[str, Any] = {"verb": "register", "ts": op_now(), "generation": 1,
                               "args": args}
     _append_record(path, record)
     return True
