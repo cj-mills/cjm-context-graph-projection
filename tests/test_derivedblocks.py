@@ -12,7 +12,8 @@ from cjm_dev_graph_schema.identity import note_node_id, series_node_id, topic_no
 from cjm_markdown_decompose_core.extract import note_from_text
 from cjm_markdown_decompose_core.ingest import corpus_graph_elements
 
-from cjm_context_graph_projection.derivedblocks import DERIVED_DIR, REPORT_FILE, render_nav
+from cjm_context_graph_projection.derivedblocks import (DERIVED_DIR, REPORT_FILE, check_end_placement,
+                                                        render_nav)
 from cjm_context_graph_projection.lens import lens_node_id, set_lens
 from cjm_context_graph_projection.purenotes import mint_deliverable_type
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
@@ -38,9 +39,25 @@ def test_render_nav_shapes():
     assert render_nav(None, []) == ""
 
 
+def test_end_placement_fails_closed_outside_main(tmp_path):
+    for slug, html in (("in", '<main><p>Body.</p><div class="author-strip">A</div></main>'),
+                       ("out", '<main><p>Body.</p></main></div><div class="author-strip">A</div>')):
+        (tmp_path / "posts" / slug).mkdir(parents=True)
+        (tmp_path / "posts" / slug / "index.html").write_text(html)
+    plan = {"posts": {"posts/in/index.md": {"end": "x"}, "posts/out/index.md": {"end": "x"},
+                      "posts/none/index.md": {"end": ""}}}
+    res = check_end_placement(str(tmp_path), plan)
+    assert res["checked"] == 2
+    assert [(e["kind"], e["source"]) for e in res["errors"]] == [("derived-end-placement", "posts/out/index.md")]
+
+
 CALLOUT = ("::: {.callout-tip}\n## This post is part of the following series:\n"
            "* [**CV**](/series/tutorials/cv.html): The parts.\n:::\n\n")
 TOC = "* [Overview](#overview)\n* [Details](#details)\n\n-----\n\n"
+ABOUT = "\n{{< include /_about-author-cta.qmd >}}\n"
+QUESTIONS = "\n{{< include /_tutorial-cta.qmd >}}\n"
+STRIP = ('author-strip:\n  byline: "**The Author**, a byline."\n  links: "[About](/about.html)"\n'
+         '  pitch: "Hire me for {claims}: [how]({href})."\n  questions: "Ask in the comments."\n')
 
 
 def _post(title: str, day: str, body: str) -> str:
@@ -52,19 +69,26 @@ def _site(root: Path) -> None:
         (root / d).mkdir(parents=True)
     (root / "_quarto.yml").write_text(
         "project:\n  type: website\nprofile:\n  default: public\n  group:\n    - [public, staging]\n"
-        "filters:\n  - _derived/derived-blocks.lua\nwebsite:\n  title: t\n")
+        "filters:\n  - _derived/derived-blocks.lua\nwebsite:\n  title: t\n" + STRIP)
+    (root / "_about-author-cta.qmd").write_text(
+        '---\n\n::: {.callout-tip title="About Me:"}\nI\'m the author. [More](/about.html)\n:::\n')
+    (root / "_tutorial-cta.qmd").write_text('::: {.callout-tip title="Questions:"}\n- Ask below.\n:::\n')
     (root / "_quarto-public.yml").write_text('project:\n  render:\n    - "**/*.qmd"\n    - "**/*.md"\n')
     (root / "_quarto-staging.yml").write_text(
         'project:\n  output-dir: _site-staging\n  render:\n    - "**/*.qmd"\n    - "**/*.md"\n')
     (root / "index.md").write_text("---\ntitle: Home\n---\n\nHome.\n")
-    body_a = CALLOUT + TOC + "## Overview\n\nPart one.\n\n## Details\n\nMore.\n\n### Next: [Part B](../b/)\n\nThanks.\n"
-    body_b = CALLOUT + "## Overview\n\nPart two, and a [real link](/series/tutorials/cv.html).\n"
+    body_a = (CALLOUT + TOC + "## Overview\n\nPart one.\n\n## Details\n\nMore.\n\n### Next: [Part B](../b/)\n\n"
+              "Thanks.\n" + ABOUT)
+    body_b = CALLOUT + "## Overview\n\nPart two, and a [real link](/series/tutorials/cv.html).\n" + QUESTIONS + ABOUT
     (root / "posts" / "a" / "index.md").write_text(_post("Post A", "2020-01-01", body_a))
     (root / "posts" / "b" / "index.md").write_text(_post("Post B", "2021-01-01", body_b))
     # c: in no series, but the topic Lens lists it: a collections line only; the CRLF source
     # carries a hand TOC the classifier must still see
     (root / "posts" / "c" / "index.md").write_bytes(
-        _post("Post C", "2022-01-01", TOC + "## Overview\n\nThree.\n\n## Details\n\nFour.\n")
+        _post("Post C", "2022-01-01", TOC + "## Overview\n\nThree.\n\n## Details\n\nFour.\n"
+              # raw HTML left open (a cell output's, in the archive): Pandoc nests the rest of the
+              # body, the include's callout with it, inside a Div
+              + '\n<div class="output">\n\nInside.\n' + ABOUT)
         .replace("\n", "\r\n").encode())
 
 
@@ -75,8 +99,11 @@ async def _graph(gx, root: Path) -> None:
     nodes, edges = corpus_graph_elements(notes)
     await extend_graph(gx.queue, gx.graph_id, nodes, edges)
     assert (await mint_deliverable_type(gx, "archive-notes", kind="notes", origin="archive"))["written"]
-    for s in ("a", "b", "c"):
+    assert (await mint_deliverable_type(gx, "archive-tutorial", kind="tutorial", origin="archive"))["written"]
+    for s in ("a", "c"):
         await assert_value(gx, note_node_id(s), "deliverable_type", "archive-notes")
+    await assert_value(gx, note_node_id("b"), "deliverable_type", "archive-tutorial")
+    await assert_value(gx, note_node_id("b"), "revised", "a new section")   # the header's Updated (39c51c15 (2))
     await mint_series(gx, "cv", title="CV series")
     await set_series_members(gx, "cv", ["a", "b"])
     await assert_value(gx, series_node_id("cv"), "site_path", "/series/tutorials/cv.html")
@@ -107,8 +134,9 @@ def test_derived_blocks_leave_the_render_and_the_navigation_replaces_them(tmp_pa
 
     pub, html, report, drift = asyncio.run(go())
     assert pub["ok"], pub
-    assert pub["derived"] == {"posts": 3, "series_nav": 2, "collections": 3, "series_callout": 2,
-                              "hand_toc": 2, "series_nav_line": 1, "reported": 3}
+    assert pub["derived"] == {"posts": 3, "series_nav": 2, "collections": 3, "strips": 3, "pitch": 0, "headers": 3,
+                              "pitch_pending": 0, "questions": 1, "series_callout": 2, "hand_toc": 2,
+                              "series_nav_line": 1, "chrome_include": 4, "reported": 3, "end_placed": 3}
     # The sources never change: the blocks leave the render only
     assert all(sources[s] == (site / "posts" / s / "index.md").read_bytes() for s in ("b", "c"))
     a, b, c = html["a"], html["b"], html["c"]
@@ -119,6 +147,17 @@ def test_derived_blocks_leave_the_render_and_the_navigation_replaces_them(tmp_pa
     assert "Part 1 of 2" in a and "Part 2 of 2" in b and "Part " not in c
     assert "In the collection" in a and "In the collection" in c
     assert "real link" in b and "Thanks." in a                          # content stays
+    # The chrome includes left (the about-author partial's opening rule with them); the author
+    # strip closes every post, the questions line only the tutorial (39c51c15 (5))
+    assert "About Me" not in a + b + c and "Questions:" not in b and "Ask below" not in b
+    assert "Inside." in c and "derived-drop" not in a + b + c          # a nested include leaves too
+    assert all("author-strip" in h and "The Author" in h for h in (a, b, c))
+    tail = a[a.index("Thanks."):a.index("author-strip")]
+    assert "<hr" not in tail
+    assert "comments-invite" in b and "Ask in the comments." in b and "comments-invite" not in a + c
+    assert b.index("real link") < b.index("author-strip") < b.index("comments-invite")
+    # the revision dates b's Updated; a and c keep their sources' own (none)
+    assert '<p class="date-modified">' in b and '<p class="date-modified">' not in a + c
     rows = [json.loads(l) for l in report.splitlines()]
     assert {r["input"] for r in rows} == {"posts/a/index.md", "posts/b/index.md", "posts/c/index.md"}
     assert all(d["count"] == 1 for r in rows for d in r["dropped"])

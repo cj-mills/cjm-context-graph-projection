@@ -50,13 +50,19 @@ def test_the_body_grid_lists_and_profiles():
              "art": {"title": "Blender", "href": "../../posts/art/index.md", "date": "2021-01-01",
                      "description": "", "marks": []}}
     pub = render_body(m, items, "public")
-    # The grid: counts link their lists, the covered cell links the general row, empty cells blank
+    # The grid: counts link their lists, the covered cell is a quiet mark linking the general
+    # row (its cover named once, in the caption), empty cells blank (39c51c15 (8))
+    mark = ('[[↓]{aria-hidden="true"}[covered by General]{.visually-hidden}]'
+            "(#general-setup){.covered-mark}")
     assert "| Task | Setup | Training | Deployment |" in pub
-    assert ("| [Object detection](#object-detection) | [General](#general-setup) | "
+    assert ("| [Object detection](#object-detection) | " + mark + " | "
             "[1](#object-detection-training) |  |") in pub
     assert "| [General](#general) | [1](#general-setup) |  |  |" in pub
+    assert pub.count(": ↓ = covered by the General tutorials of that stage") == 1
+    assert "[General](#general-setup)" not in pub
+    assert ".tutorials-matrix .table a { word-break: normal; overflow-wrap: normal; }" in pub
     # An empty row names its task without a link: no section exists for it to land on
-    assert "| LLMs | [General](#general-setup) |  |  |" in pub and "(#llm)" not in pub
+    assert "| LLMs | " + mark + " |  |  |" in pub and "(#llm)" not in pub
     assert "#### Training {#object-detection-training}" in pub and "### General {#general}" in pub
     assert ("- [Train \\[YOLOX\\]](../../posts/yolo/index.md) · 2023-08-21 — A detector. "
             "_(Tested on RTX 4090, Ubuntu)_") in pub
@@ -144,7 +150,7 @@ def test_the_matrix_lens_projects_the_tutorials_page(tmp_path):
     assert "date-modified: '2024-01-01'" in text and "page-layout: full" in text
     assert "listing:\n  id: learning-paths\n" in text and "  contents:\n  - det.qmd\n" in text
     assert "  categories: false\n" in text   # no sidebar: it read as the grid's filter (15e7b315)
-    assert "[1](#object-detection-training)" in text and "[General](#general-setup)" in text
+    assert "[1](#object-detection-training)" in text and "(#general-setup){.covered-mark}" in text
     assert "_(Tested on RTX 4090, Ubuntu)_" in text and "[timeline]" not in text
     assert "About Train YOLOX." in text and "A Note" not in text
     staged = next(p for p in stg["pages"] if p["source"] == "series/tutorials/index.qmd")["text"]

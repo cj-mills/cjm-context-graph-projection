@@ -286,7 +286,7 @@ async def site_build(
     """Build the site under one profile: generated inputs, render, the redirect projection,
     and (public) the publish guard. `ok` is False on any error row — the output is then not
     fit to publish, and the report names why."""
-    from .derivedblocks import check_derived, derived_plan, write_derived
+    from .derivedblocks import check_derived, check_end_placement, derived_plan, write_derived
     from .sitepages import check_page_outputs, project_pages
     rep: Dict[str, Any] = {"profile": profile, "errors": []}
     plan = await redirect_plan(gx)
@@ -336,6 +336,9 @@ async def site_build(
         chk = check_derived(website_root, derived)
         rep["derived"]["reported"] = chk["reported"]
         rep["errors"] += chk["errors"]
+        placed = check_end_placement(info["output_dir"], derived)
+        rep["derived"]["end_placed"] = placed["checked"]
+        rep["errors"] += placed["errors"]
     red = write_redirects(info["output_dir"], plan["stubs"], page_outputs(website_root, info["inputs"]))
     rep["redirects"] = {"stubs": len(plan["stubs"]), "written": red["written"], "unchanged": red["unchanged"]}
     rep["errors"] += red["errors"]

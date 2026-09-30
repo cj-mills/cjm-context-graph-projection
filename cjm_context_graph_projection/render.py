@@ -421,6 +421,12 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                          f"navigation on {dv.get('posts', 0)} post(s) ({dv.get('series_nav', 0)} in a series, "
                          f"{dv.get('collections', 0)} in a collection)"
                          + (f" · filter reported {dv['reported']}" if "reported" in dv else ""))
+            if "strips" in dv:   # the end matter replacing the chrome includes (39c51c15 (5))
+                lines.append(f"- end matter: {dv.get('chrome_include', 0)} chrome include(s) out · author strip on "
+                             f"{dv['strips']} post(s) ({dv.get('pitch', 0)} pitching, {dv.get('pitch_pending', 0)} "
+                             f"awaiting the Work-with-me page) · questions line on {dv.get('questions', 0)} · "
+                             f"header metadata on {dv.get('headers', 0)}"
+                             + (f" · inside <main> on {dv['end_placed']}" if "end_placed" in dv else ""))
         if obj.get("staging_index"):
             si = obj["staging_index"]
             lines.append(f"- drafts listings: {si.get('written', 0)} file(s) · "

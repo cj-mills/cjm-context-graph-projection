@@ -73,7 +73,9 @@ def _site(root: Path) -> None:
         (root / d).mkdir(parents=True)
     (root / "_quarto.yml").write_text(
         "project:\n  type: website\nprofile:\n  default: public\n  group:\n    - [public, staging]\n"
-        "filters:\n  - _derived/derived-blocks.lua\nwebsite:\n  title: t\n")
+        "filters:\n  - _derived/derived-blocks.lua\nwebsite:\n  title: t\n"
+        # the author strip's copy (design 39c51c15 (5)): typed posts carry the strip
+        'author-strip:\n  byline: "B"\n  links: "L"\n  pitch: "P {claims} {href}"\n  questions: "Q"\n')
     (root / "_quarto-public.yml").write_text(
         'project:\n  render:\n    - "**/*.qmd"\n    - "**/*.md"\n    - "!drafts/"\n')
     (root / "_quarto-staging.yml").write_text(

@@ -30,11 +30,16 @@ TUTORIAL_KIND = "tutorial"
 PATHS_LISTING = {"id": "learning-paths", "sort": ["date-modified desc"], "type": "default",
                  "categories": False, "sort-ui": False, "filter-ui": False,
                  "fields": ["title", "date-modified", "categories", "description"]}
-# The grid collapses to the per-task lists on narrow screens (903bc108 (1))
+# The grid collapses to the per-task lists on narrow screens (903bc108 (1)). Quarto's bundle sets
+# `.table a { word-break: break-word }`, which with auto column widths broke the grid's links
+# mid-word (finding 15e7b315): the page class keeps link text whole and sizes the task column to
+# its names, ready to move into the design system's stylesheet (39c51c15 (8))
 STYLE = ("```{=html}\n<style>\n"
          ".tutorials-matrix table { font-size: 0.9rem; }\n"
+         ".tutorials-matrix .table a { word-break: normal; overflow-wrap: normal; }\n"
          ".tutorials-matrix th, .tutorials-matrix td { text-align: center; }\n"
-         ".tutorials-matrix th:first-child, .tutorials-matrix td:first-child { text-align: left; }\n"
+         ".tutorials-matrix th:first-child, .tutorials-matrix td:first-child { text-align: left; white-space: nowrap; }\n"
+         ".tutorials-matrix .covered-mark { color: var(--bs-secondary-color); text-decoration: none; }\n"
          "@media (max-width: 991.98px) { .tutorials-matrix { display: none; } }\n"
          "</style>\n```\n")
 
@@ -72,11 +77,16 @@ def render_body(
             if ids:
                 row.append(f"[{len(ids)}](#{anchor(t['key'], s['key'])})")
             elif (t["key"], s["key"]) in covered:
+                # A quiet mark in the cell; the cover is named once, under the grid (39c51c15 (8))
                 by = covered[(t["key"], s["key"])][0]
-                row.append(f"[{names[by]}](#{anchor(by, s['key'])})")
+                row.append(f"[[↓]{{aria-hidden=\"true\"}}[covered by {names[by]}]{{.visually-hidden}}]"
+                           f"(#{anchor(by, s['key'])}){{.covered-mark}}")
             else:
                 row.append("")
         out.append("| " + " | ".join(row) + " |")
+    covers = sorted({names[b[0]] for b in covered.values()})
+    if covers:
+        out += ["", ": ↓ = covered by the " + " / ".join(covers) + " tutorials of that stage"]
     out += [":::", "", "## Learning paths", "", "::: {#learning-paths}", ":::", "", "## By task", ""]
 
     def lines(ids: List[str]) -> List[str]:
