@@ -1,4 +1,4 @@
-"""In-body site links, RESOLVED after replay (DEC 72d669c5 (1)).
+"""In-body site links, RESOLVED through site_path facts (DEC 72d669c5 (1); the step, 9ee4e346).
 
 A post's link to a site page names a PATH (ONE resolver for every in-body site link, ruling
 d31e9ba7); what the page is — a post, a Series, a topic listing, a site page — lives in
@@ -12,17 +12,19 @@ lands as a `site_link` REFERENCES edge (a cross-reference, never membership; rul
 `site_link` edges they no longer do, so it is a pure function of source plus journal and a
 rebuild reproduces it exactly.
 
-Where it runs: once at the end of every replay (the rebuild stage), and live on each write
-that changes an input — a note's links (birth, harvest-on-edit) or a `site_path` fact —
-so the live graph never waits for a rebuild. `DEFER_RESOLVE` holds the live hooks off
-while a replay or a batch runs; the caller then runs one pass for the whole graph."""
+Where it runs (design amendment 9ee4e346): as a STEP, once at the close of every write
+window that changed one of its inputs, inside that window — a live CLI invocation, or a
+replay window (the consecutive ops sharing one journaled ts) — so each edge carries the
+time of the invocation that first made it hold, live and on rebuild alike. The window's
+writes come from the layer's observer (`observe_writes`); `touches_inputs` reads them. A
+whole-graph pass closes every replay as the CHECK: it should change nothing."""
 
 import posixpath
-from contextvars import ContextVar
-from typing import Any, Dict, List, Optional, Set, Tuple
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator, Callable, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import urljoin, urlsplit
 
-from cjm_context_graph_layer.ops import extend_graph, graph_task
+from cjm_context_graph_layer.ops import extend_graph, graph_task, observe_writes
 from cjm_context_graph_primitives.query import EdgeQuery, PropertyPredicate
 from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.identity import section_node_id
@@ -31,10 +33,6 @@ from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 
 from . import factlayer as F
 from .runtime import GraphHandle
-
-# True while a replay or a batch runs: the per-write hooks stand down and the caller runs
-# ONE pass at the end (a replay applies ~hundreds of ops; each hook is a whole-graph read).
-DEFER_RESOLVE: ContextVar[bool] = ContextVar("defer_site_link_resolve", default=False)
 
 
 def site_path_key(
@@ -118,6 +116,7 @@ async def resolve_site_links(
     note_ids: Optional[List[str]] = None,  # Scope to these notes (None = every Note on the graph)
     *,
     write: bool = True,                    # Apply the edge diff (False = report only)
+    exclude: Optional[Iterable[str]] = None,  # Notes left out as link SOURCES (a replay's not-yet-born notes)
 ) -> Dict[str, Any]:  # {notes, links, resolved, added, removed, unresolved: [...], ambiguous: [...], anchors: [...], written}
     """Reconcile the `site_link` REFERENCES edges of the scoped notes against the facts.
 
@@ -139,6 +138,11 @@ async def resolve_site_links(
         notes = await F.load_label(gx, DevNodeKinds.NOTE)
     else:
         notes = list((await F.load_nodes(gx, list(note_ids))).values())
+    if exclude:
+        # A replay hoists every genesis op; a note whose journal position the replay has not
+        # reached is not born yet, so its links wait for its own window (9ee4e346 (2)).
+        left_out = set(exclude)
+        notes = [n for n in notes if str(F.nid(n)) not in left_out]
     holders, active = await site_path_holders(gx)
     unresolved: List[Dict[str, Any]] = []
     ambiguous: List[Dict[str, Any]] = []
@@ -186,11 +190,59 @@ async def resolve_site_links(
             "ambiguous": ambiguous, "anchors": anchors, "written": bool(write and (added or removed))}
 
 
-async def resolve_after_write(
+def touches_inputs(
+    writes: List[Dict[str, Any]],  # One window's writes (the layer's `observe_writes` records)
+) -> bool:  # True when the window wrote something the resolve reads
+    """Whether a window moved an input of the resolve (design amendment 9ee4e346 (3)).
+
+    The inputs: a Note's `site_refs` (born, harvested, updated or deleted with it), a deleted
+    Note (the edges onto it go with it), a Section appearing or disappearing (an anchor's
+    target), a `site_path` Assertion, a SUPERSEDES edge (which page a superseded path names),
+    and a `site_link` edge written by anything but the step itself."""
+    for w in writes:
+        deleting = w["method"] == "delete_nodes"
+        for n in w["nodes"]:
+            props = n.get("properties") or {}
+            label = n.get("label")
+            if "site_refs" in props or label == DevNodeKinds.SECTION:
+                return True
+            if deleting and label == DevNodeKinds.NOTE:
+                return True
+            if label == DevNodeKinds.ASSERTION and props.get("predicate") == P.SITE_PATH:
+                return True
+        for e in w["edges"]:
+            if e.get("relation_type") == DevRelations.SUPERSEDES:
+                return True
+            if (e.get("properties") or {}).get("site_link"):
+                return True
+    return False
+
+
+async def step_site_links(
     gx: GraphHandle,
-    note_ids: Optional[List[str]] = None,  # The notes a write touched (None = the whole graph, e.g. a site_path fact changed)
-) -> Optional[Dict[str, Any]]:  # The pass result, or None while a replay / batch defers
-    """The live hook: re-resolve after a write that changed an input, unless deferred."""
-    if DEFER_RESOLVE.get():
+    writes: List[Dict[str, Any]],  # The window's writes
+    *,
+    exclude: Optional[Iterable[str]] = None,  # Notes not yet born (a replay's hoisted genesis)
+    force: bool = False,           # Run even when no write moved an input (a note born this window)
+) -> Optional[Dict[str, Any]]:  # The pass result, or None when the window moved no input
+    """THE STEP (design amendment 9ee4e346): one whole-graph resolve at a window's close, run
+    only when the window moved an input. Called inside the window, so every edge it adds
+    carries the window's ts — the time its justification first held."""
+    if not (force or touches_inputs(writes)):
         return None
-    return await resolve_site_links(gx, note_ids)
+    return await resolve_site_links(gx, exclude=exclude)
+
+
+@asynccontextmanager
+async def site_link_window(
+    gx: GraphHandle,
+    report: Optional[Callable[[Dict[str, Any]], None]] = None,  # Called with the step's result when it ran
+) -> AsyncIterator[List[Dict[str, Any]]]:  # The window's writes, as the observer records them
+    """Observe the block's writes, then run the step once at its close (a live write window —
+    the CLI wraps every invocation in one). An exception skips the step: a failed
+    invocation's partial writes are for the rebuild's check to report."""
+    with observe_writes() as writes:
+        yield writes
+    got = await step_site_links(gx, writes)
+    if got is not None and report is not None:
+        report(got)

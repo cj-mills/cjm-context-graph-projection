@@ -20,7 +20,6 @@ from typing import Any, Dict, Optional
 
 from cjm_context_graph_layer.ops import extend_graph
 from cjm_context_graph_primitives.journal import append_write, op_clock, op_now, read_journal
-from cjm_dev_graph_schema.predicates import SITE_PATH
 
 from .authoring import add_symbol, author, emit_artifact, emit_post, read_node, read_slot
 from .code_edges import orphaned_edges
@@ -64,7 +63,7 @@ from .seeds import repo_dir_name
 from .series import mint_series, place_in_series, series_order, set_series_members
 from .serve import serve_graphs
 from .site import site_build
-from .sitelinks import DEFER_RESOLVE, resolve_site_links
+from .sitelinks import resolve_site_links, site_link_window
 from .source_state import (absorb_authored_text, collect_appends, cutover_module,
                            emit_source_artifact, flip_module, graph_sourced_modules, source_check)
 from .structure import add_section, new_note
@@ -295,6 +294,15 @@ def _absorb_graph_sourced(res, args) -> int:  # 0 = ok (absorbed or not applicab
     return 0
 
 
+def _report_site_links(links: Dict[str, Any]) -> None:
+    """The live step's receipt (9ee4e346): one line when the invocation's close moved an edge."""
+    if links["added"] or links["removed"]:
+        print(f"🔗 site links: {links['resolved']} resolved (+{links['added']} "
+              f"-{links['removed']}), {len(links['unresolved'])} unresolved, "
+              f"{len(links['ambiguous'])} ambiguous, {len(links['anchors'])} anchor(s) naming "
+              "no Section", file=sys.stderr)
+
+
 async def _dispatch(args) -> int:
     # The pillar-1 seam gate (DEC 6ee4b4f2): a source-mutating invocation is refused
     # OUTRIGHT when its verb isn't routed through journaled_emit, or when no source
@@ -327,7 +335,10 @@ async def _dispatch(args) -> int:
                                  manifests_dir=args.manifests_dir)
         print(render_rebuild_diff(res, args.format))
         return 0 if res["clean"] else 3
-    async with open_graph(args.graph_db_path, args.manifests_dir) as gx:
+    # One live write window per invocation (design amendment 9ee4e346): the site-link step
+    # runs once at its close, inside the op clock, when the invocation moved an input.
+    async with open_graph(args.graph_db_path, args.manifests_dir) as gx, \
+            site_link_window(gx, report=_report_site_links):
         if args.command == "ingest":
             note_aliases = await note_alias_map(gx)  # confirmed link aliases heal drifted refs
             # The code lane is a FOLD over the source journal (2cc81d3b): its inventory is the
@@ -605,36 +616,24 @@ async def _dispatch(args) -> int:
                 specs.append((i, spec))
             landed = flagged = 0
             stopped = None
-            paths_moved = False
-            # The per-assert site-link hook stands down for the batch; ONE resolve pass runs
-            # after it when any site_path landed (DEC 72d669c5 (1)) — on a stop too, since the
-            # lines before the refused one stand.
-            deferred = DEFER_RESOLVE.set(True)
-            try:
-                for i, spec in specs:
-                    res = await _assert_journaled(gx, args.journal_path, spec["subject"],
-                                                  spec["predicate"], spec["value"],
-                                                  actor=spec.get("actor", args.actor),
-                                                  evidence=spec.get("evidence"),
-                                                  supersede=spec.get("supersede"),
-                                                  superseded_by=spec.get("superseded_by"))
-                    if res.get("error"):
-                        print(f"line {i}: {res['error']}", file=sys.stderr)
-                        stopped = i
-                        break
-                    if res.get("conflict") or res.get("multi_active"):
-                        flagged += 1
-                        print(f"line {i}:")
-                        print(render("assert", res, args.format))
-                    landed += 1
-                    paths_moved = paths_moved or spec["predicate"] == SITE_PATH
-            finally:
-                DEFER_RESOLVE.reset(deferred)
-            if paths_moved:
-                links = await resolve_site_links(gx)
-                print(f"site links: {links['resolved']} resolved (+{links['added']} "
-                      f"-{links['removed']}), {len(links['unresolved'])} unresolved, "
-                      f"{len(links['ambiguous'])} ambiguous, {len(links['anchors'])} anchor(s) naming no Section")
+            # The site-link step runs once at the invocation's close (9ee4e346) — on a stop too,
+            # since the lines before the refused one stand.
+            for i, spec in specs:
+                res = await _assert_journaled(gx, args.journal_path, spec["subject"],
+                                              spec["predicate"], spec["value"],
+                                              actor=spec.get("actor", args.actor),
+                                              evidence=spec.get("evidence"),
+                                              supersede=spec.get("supersede"),
+                                              superseded_by=spec.get("superseded_by"))
+                if res.get("error"):
+                    print(f"line {i}: {res['error']}", file=sys.stderr)
+                    stopped = i
+                    break
+                if res.get("conflict") or res.get("multi_active"):
+                    flagged += 1
+                    print(f"line {i}:")
+                    print(render("assert", res, args.format))
+                landed += 1
             if stopped is not None:
                 print(f"assert-batch: {landed} of {len(specs)} landed; stopped at line {stopped}")
                 return 1

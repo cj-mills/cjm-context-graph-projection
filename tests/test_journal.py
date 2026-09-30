@@ -285,8 +285,8 @@ def test_replay_offset_skips_applied_prefix(tmp_path, monkeypatch):
         applied.append(op["args"]["n"])
         return "link"
 
-    async def no_links(gx):  # no graph behind the fake: the closing resolve pass has nothing to read
-        return {"resolved": 0, "unresolved": [], "ambiguous": [], "anchors": []}
+    async def no_links(gx):  # no graph behind the fake: the closing check has nothing to read
+        return {"resolved": 0, "added": 0, "removed": 0, "unresolved": [], "ambiguous": [], "anchors": []}
 
     monkeypatch.setattr(journal_mod, "_apply_op", fake_apply)
     monkeypatch.setattr(journal_mod, "resolve_site_links", no_links)
@@ -348,8 +348,8 @@ def test_procedure_verb_is_journaled_and_replays_through_mint(tmp_path, monkeypa
         asserted.append((subject, predicate, value, kw.get("method")))
         return {}
 
-    async def no_links(gx):  # no graph behind the fake: the closing resolve pass has nothing to read
-        return {"resolved": 0, "unresolved": [], "ambiguous": [], "anchors": []}
+    async def no_links(gx):  # no graph behind the fake: the closing check has nothing to read
+        return {"resolved": 0, "added": 0, "removed": 0, "unresolved": [], "ambiguous": [], "anchors": []}
 
     monkeypatch.setattr(journal_mod, "mint_procedure", fake_mint)
     monkeypatch.setattr(journal_mod, "assert_value", fake_assert)

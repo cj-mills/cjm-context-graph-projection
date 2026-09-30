@@ -30,6 +30,7 @@ from cjm_context_graph_projection import factlayer as F
 from cjm_context_graph_projection.authoring import author
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
 from cjm_context_graph_projection.series import mint_series
+from cjm_context_graph_projection.sitelinks import site_link_window
 from cjm_context_graph_projection.structure import add_section, new_note
 from cjm_context_graph_projection.write import assert_value, author_section, link
 
@@ -121,27 +122,31 @@ def test_born_post_add_section_and_author_section_follow_series_and_post_links(t
             await assert_value(gx, series, SITE_PATH, "/series/notes/education-notes.html")
             note = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=note_id)
             profile = F.prop(note, "profile")
-            r1 = await add_section(gx, "born", f"## More\n\n{LINKS}\n")
+            links1, links2 = [], []
+            async with site_link_window(gx, report=links1.append):   # one live write window each
+                r1 = await add_section(gx, "born", f"## More\n\n{LINKS}\n")
             in_series = await _targets(gx, note_id, "IN_SERIES")
             refs = await _targets(gx, note_id, "REFERENCES")
-            r2 = await author_section(gx, "born", "more", "## More\n\nNothing here.\n")
+            async with site_link_window(gx, report=links2.append):
+                r2 = await author_section(gx, "born", "more", "## More\n\nNothing here.\n")
             refs_after = await _targets(gx, note_id, "REFERENCES")
             series_after = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=series)
             tagged = await _targets(gx, note_id, "TAGGED")
-            return profile, r1, in_series, refs, r2, refs_after, series_after, tagged
+            return profile, r1, in_series, refs, r2, refs_after, series_after, tagged, links1[0], links2[0]
 
-    profile, r1, in_series, refs, r2, refs_after, series_after, tagged = asyncio.run(go())
+    (profile, r1, in_series, refs, r2, refs_after, series_after, tagged,
+     links1, links2) = asyncio.run(go())
     assert profile == "quarto_post"                 # the born profile is readable at edit time
-    # Both links are verbatim site_refs the live hook resolves (ruling d31e9ba7): the series
+    # Both links are verbatim site_refs the window's step resolves (ruling d31e9ba7, 9ee4e346): the series
     # page onto the Series — never IN_SERIES membership — and the anchored post link onto the
     # Section its anchor names; neither is an ingest edge any more.
     assert set(r1["relations"]["added"]) == set()
     assert r1["relations"]["site_refs"] == ["/series/notes/education-notes.html", "/posts/other-post/#intro"]
-    assert r1["relations"]["site_links"]["added"] == 2 and not r1["relations"]["site_links"]["anchors"]
+    assert links1["added"] == 2 and not links1["anchors"]
     assert in_series == set() and refs == {other_intro, series}
     assert Path(path).read_text().endswith(f"{LINKS}\n")
     assert set(r2["relations"]["removed"]) == set()
-    assert r2["relations"]["site_links"]["removed"] == 2
+    assert links2["removed"] == 2
     assert refs_after == set()
     assert series_after is not None                  # a born Series is not a facet to drop
     assert len(tagged) == 1                          # the birth category's TAGGED edge untouched

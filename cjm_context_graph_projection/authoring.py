@@ -54,7 +54,6 @@ from .projection import ambiguity_error, resolve_node_ref
 from .relive import apply_live
 from .runtime import GraphHandle
 from .seeds import conceptual_key, repo_dir_name
-from .sitelinks import resolve_after_write
 from .source_state import collect_appends, is_test_module_path, journaled_emit, symbol_identity_map
 
 
@@ -237,9 +236,9 @@ async def reharvest_note_relations(
     edit verb and re-derives them, so a journal-only rebuild converges on the same edge set an
     archive ingest of the emitted file produces (the round-trip standard).
 
-    A changed `site_refs` is written onto the Note and re-resolved for this note at once (the
-    live resolve hook; a replay defers it to its one closing pass) — the `site_link` edges
-    are the resolver's own, never part of this diff."""
+    A changed `site_refs` is written onto the Note; the site-link step resolves it at the
+    write window's close (9ee4e346) — the `site_link` edges are the resolver's own, never
+    part of this diff."""
     relation_kinds = (DevRelations.REFERENCES, DevRelations.TAGGED)
     facet_labels = (DevNodeKinds.TOPIC,)
     slug = str(F.prop(note_node, "slug") or "")
@@ -279,7 +278,6 @@ async def reharvest_note_relations(
         await graph_task(gx.queue, gx.graph_id, "update_node", node_id=note_id,
                          properties={"site_refs": site_refs})
         res["site_refs"] = site_refs
-        res["site_links"] = await resolve_after_write(gx, [note_id])
     if not write or not (added or removed):
         return res
     if added:

@@ -225,7 +225,6 @@ async def transfer_site_path(
     holds no active path and its whole history reads as the target's (`path_owners`). The
     target must hold no active path of its own -- a page has exactly one."""
     from .projection import resolve_node_ref
-    from .sitelinks import DEFER_RESOLVE, resolve_after_write
     from .write import assert_value
     ids = []
     for ref in (source, target):
@@ -250,16 +249,11 @@ async def transfer_site_path(
                          "active path", "written": False}
     old = have[src][0]
     value = str(F.prop(old, "value"))
-    token = DEFER_RESOLVE.set(True)   # one resolve pass after the edge, never between
-    try:
-        res = await assert_value(gx, dst, P.SITE_PATH, value, actor=actor)
-        if res.get("error"):
-            return {"error": res["error"], "written": False}
-        await extend_graph(gx.queue, gx.graph_id, [],
-                           [make_edge(res["assertion_id"], str(F.nid(old)), DevRelations.SUPERSEDES)])
-    finally:
-        DEFER_RESOLVE.reset(token)
-    links = await resolve_after_write(gx)
+    # The site-link step resolves the moved path once, at the write window's close (9ee4e346).
+    res = await assert_value(gx, dst, P.SITE_PATH, value, actor=actor)
+    if res.get("error"):
+        return {"error": res["error"], "written": False}
+    await extend_graph(gx.queue, gx.graph_id, [],
+                       [make_edge(res["assertion_id"], str(F.nid(old)), DevRelations.SUPERSEDES)])
     return {"from_id": src, "to_id": dst, "value": value, "assertion_id": res["assertion_id"],
-            "superseded": str(F.nid(old)), "written": True,
-            **({"site_links": {k: links[k] for k in ("resolved", "added", "removed")}} if links else {})}
+            "superseded": str(F.nid(old)), "written": True}

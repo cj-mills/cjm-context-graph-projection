@@ -33,7 +33,6 @@ from . import factlayer as F
 from .authoring import _note_section_wires, reharvest_note_relations
 from .devgraph import stamp_note_profile
 from .runtime import GraphHandle
-from .sitelinks import resolve_after_write
 
 
 async def _apply_note_text(
@@ -212,8 +211,6 @@ async def new_note(
         stamp_note_profile(nodes, profile)   # readable at edit time (harvest-on-edit, cbde404c)
         r = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
         res.update(written=True, nodes_added=r.nodes_added, edges_added=r.edges_added)
-        if note.site_refs:  # its series-page links resolve now (DEC 72d669c5 (1))
-            res["site_links"] = await resolve_after_write(gx, [note.id])
     return res
 
 
@@ -240,8 +237,6 @@ async def reconstruct_note(
     nodes, edges = corpus_graph_elements([note])
     stamp_note_profile(nodes, profile)   # replay carries the born profile too (cbde404c)
     r = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
-    if note.site_refs:  # deferred under replay: its closing pass resolves every note at once
-        await resolve_after_write(gx, [note.id])
     return {"slug": note.slug, "path": path, "sections": len(note.sections),
             "nodes_added": r.nodes_added, "edges_added": r.edges_added}
 

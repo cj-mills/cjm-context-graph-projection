@@ -18,11 +18,12 @@ re-applying the log collides into verified no-ops.
 
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from cjm_context_graph_layer.identity import derive_node_id
-from cjm_context_graph_layer.ops import PROVENANCE_TS
+from cjm_context_graph_layer.ops import observe_writes, PROVENANCE_TS
 from cjm_context_graph_primitives.journal import append_write, journal_segments, read_journal
 from cjm_dev_graph_schema.identity import (code_module_node_id, entity_node_id, note_node_id,
                                            section_node_id, series_node_id, session_node_id)
@@ -33,7 +34,7 @@ from .display import display_rule_node_id, set_display_rule
 from .lens import lens_node_id, set_lens
 from .runtime import GraphHandle
 from .series import mint_series, place_in_series, set_series_members
-from .sitelinks import DEFER_RESOLVE, resolve_site_links
+from .sitelinks import resolve_site_links, step_site_links
 from .structure import add_section, born_post_path, reconstruct_note
 from .write import (add_check, alias, assert_value, author_section, decide, link, mint_procedure,
                     mint_proposal, register_session, retract_session, unlink)
@@ -452,10 +453,15 @@ async def replay_journal(
     Its own idempotency (anchor-exists no-op) covers a note not yet journal-sourced whose backup
     `.md` an ingest still read.
 
-    THE RESOLVE STAGE (DEC 72d669c5 (1)): in-body site links resolve through site_path facts,
-    which are journal content, so the per-write resolve hooks stand down for the whole replay
-    and ONE pass runs at its end — every rebuild path (in-place, swap delta, heal) ends here,
-    so each lands the same `site_link` edges. The counts carry the pass's tallies."""
+    THE SITE-LINK STEP (design amendment 9ee4e346): the resolve runs once at the close of every
+    WINDOW that moved one of its inputs — a window is a run of consecutive ops sharing one
+    journaled ts, the ops one live invocation wrote under its one clock read — inside that
+    window, exactly as the live CLI runs it at an invocation's close; so an edge carries the
+    ts of the window that first made it hold, on rebuild as live. A hoisted genesis note is
+    left out of the step's sources until pass 2 reaches its journal position (its window
+    steps then). A whole-graph pass closes the replay as the CHECK: every rebuild path
+    (in-place, swap delta, heal) ends here, and anything it adds or removes is drift no
+    window justified — counted and printed loud. The counts carry the pass's tallies."""
     counts = {v: 0 for v in JOURNAL_VERBS}
     counts["skipped"] = 0
     # offset = the swap-rebuild delta lane: ops[:offset] are already in the target
@@ -463,30 +469,72 @@ async def replay_journal(
     # safe, so callers may pass a PRE-build count and let the overlap verify-collide.
     ops = read_journal(path)[offset:]
     genesis = [op for op in ops if op.get("verb") == "new-note"]
-    rest = [op for op in ops if op.get("verb") != "new-note"]
-    deferred = DEFER_RESOLVE.set(True)
-    try:
-        for op in genesis + rest:
-            # Replay provenance window (0d50b921): every node/edge this op mints is
-            # stamped with the op's JOURNALED ts, so a rebuild restores true creation
-            # times instead of clamping the whole graph to rebuild time. Ops without
-            # a ts (pre-ts journal era) fall back to capability now()-stamping.
-            token = PROVENANCE_TS.set(op.get("ts"))
-            try:
-                verb = await _apply_op(gx, op, emit_root)
-            finally:
-                PROVENANCE_TS.reset(token)
-            if verb:
-                counts[verb] += 1
-            else:
-                counts["skipped"] += 1
-    finally:
-        DEFER_RESOLVE.reset(deferred)
+
+    async def apply(op):
+        verb = await _apply_op(gx, op, emit_root)
+        if verb:
+            counts[verb] += 1
+        else:
+            counts["skipped"] += 1
+
+    # Pass 1: the genesis ops, each at its own ts (replay provenance window, 0d50b921: what an
+    # op mints is stamped with its JOURNALED ts; a pre-ts op falls back to capability now()).
+    for op in genesis:
+        token = PROVENANCE_TS.set(op.get("ts"))
+        try:
+            await apply(op)
+        finally:
+            PROVENANCE_TS.reset(token)
+    unborn = {nid for nid in (_genesis_note_id(op) for op in genesis) if nid}
+    # Pass 2: every op in append order, window by window; a genesis op marks its note born.
+    steps = 0
+    for window in _op_windows(ops):
+        token = PROVENANCE_TS.set(window[0].get("ts"))
+        try:
+            born = False
+            with observe_writes() as writes:
+                for op in window:
+                    if op.get("verb") == "new-note":
+                        unborn.discard(_genesis_note_id(op))
+                        born = True
+                    else:
+                        await apply(op)
+            if await step_site_links(gx, writes, exclude=unborn, force=born) is not None:
+                steps += 1
+        finally:
+            PROVENANCE_TS.reset(token)
     links = await resolve_site_links(gx)
+    counts["site_link_steps"] = steps
     counts["site_links_resolved"] = links["resolved"]
     counts["site_links_unresolved"] = len(links["unresolved"]) + len(links["ambiguous"])
     counts["site_links_unresolved_anchors"] = len(links["anchors"])
+    counts["site_links_drift"] = links["added"] + links["removed"]
+    if counts["site_links_drift"]:
+        print(f"⚠ site links: the closing check changed {links['added']} added / "
+              f"{links['removed']} removed edge(s) no window justified — drift, stamped at "
+              "rebuild time (9ee4e346 (4))", file=sys.stderr)
     return counts
+
+
+def _op_windows(
+    ops: List[Dict[str, Any]],  # Journaled ops, in append order
+) -> List[List[Dict[str, Any]]]:  # The ops grouped into op-clock windows
+    """Consecutive ops sharing one journaled ts are one window — one live invocation's ops,
+    written under its one clock read (amendment efd659a1). A pre-ts op is a window alone."""
+    windows: List[List[Dict[str, Any]]] = []
+    for op in ops:
+        ts = op.get("ts")
+        if windows and ts is not None and windows[-1][-1].get("ts") == ts:
+            windows[-1].append(op)
+        else:
+            windows.append([op])
+    return windows
+
+
+def _genesis_note_id(op: Dict[str, Any]) -> Optional[str]:  # The Note a `new-note` op mints
+    a = op.get("args") or {}
+    slug = a.get("slug") or _note_slug(a.get("path"), a.get("content"))
+    return note_node_id(slug) if slug else None
 
 
 def _id_shaped(ref: str) -> bool:  # True if `ref` looks like a node id / unique id prefix

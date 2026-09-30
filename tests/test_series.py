@@ -25,8 +25,9 @@ from cjm_context_graph_projection.lens import lens_node_id, set_lens
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
 from cjm_context_graph_projection.series import (mint_series, order_members, place_in_series,
                                                  series_order, set_series_members)
-from cjm_context_graph_projection.sitelinks import (DEFER_RESOLVE, resolve_site_links,
-                                                    site_path_key)
+from cjm_context_graph_projection.journal import _op_windows
+from cjm_context_graph_projection.sitelinks import (resolve_site_links, site_link_window,
+                                                    site_path_key, touches_inputs)
 from cjm_context_graph_projection.write import assert_value
 
 
@@ -142,46 +143,65 @@ def test_site_links_resolve_through_site_path_facts_live_and_report_the_rest(tmp
             spec = {"selection": [{"verb": "subgraph", "args": {"refs": [topic_node_id("notes")]}}],
                     "expand": {"hops": 1, "relations": ["TAGGED"]}}
             assert (await set_lens(gx, "edu", spec, title="Education"))["written"]
-            # The live hook: each site_path assert re-resolves the links it now answers.
-            r1 = await assert_value(gx, series, SITE_PATH, "/series/tutorials/cv-series.html")
-            r2 = await assert_value(gx, series, SITE_PATH, "/series/tutorials/old-cv",
-                                    superseded_by=["/series/tutorials/cv-series.html"])
-            r3 = await assert_value(gx, lens, SITE_PATH, "/series/notes/edu.html")
+            # The live step (9ee4e346): each write window that moved a site_path re-resolves
+            # the links it now answers, at the window's close.
+            r1 = await _stepped(gx, assert_value(gx, series, SITE_PATH, "/series/tutorials/cv-series.html"))
+            r2 = await _stepped(gx, assert_value(gx, series, SITE_PATH, "/series/tutorials/old-cv",
+                                                 superseded_by=["/series/tutorials/cv-series.html"]))
+            r3 = await _stepped(gx, assert_value(gx, lens, SITE_PATH, "/series/notes/edu.html"))
             a_refs = await _targets(gx, note_node_id("a"), "REFERENCES")
             b_refs = await _targets(gx, note_node_id("b"), "REFERENCES")
             report = await resolve_site_links(gx, write=False)
             # Ambiguity: a second page claiming the same path never resolves either way.
             await mint_series(gx, "twin")
-            r4 = await assert_value(gx, series_node_id("twin"), SITE_PATH, "/series/tutorials/cv-series")
+            r4 = await _stepped(gx, assert_value(gx, series_node_id("twin"), SITE_PATH,
+                                                 "/series/tutorials/cv-series"))
             twin = await resolve_site_links(gx)
             a_after = await _targets(gx, note_node_id("a"), "REFERENCES")
             return before, r1, r2, r3, a_refs, b_refs, report, r4, twin, a_after
 
     before, r1, r2, r3, a_refs, b_refs, report, r4, twin, a_after = asyncio.run(go())
     assert before["links"] == 4 and before["resolved"] == 0 and len(before["unresolved"]) == 4
-    assert r1["site_links"]["added"] == 1 and r2["site_links"]["added"] == 1 and r3["site_links"]["added"] == 1
+    assert r1["added"] == 1 and r2["added"] == 1 and r3["added"] == 1
     assert a_refs == {series: {"site_link": True}}
     # The superseded path still names its page; the topic page resolves to its Lens.
     assert b_refs == {series: {"site_link": True}, lens: {"site_link": True}}
     assert report["resolved"] == 3 and report["added"] == report["removed"] == 0
     assert [(r["slug"], r["target"]) for r in report["unresolved"]] == [("c", "/series/notes/nowhere.html")]
-    # The twin claims only the CURRENT path: a's link turns ambiguous and its own assert hook
+    # The twin claims only the CURRENT path: a's link turns ambiguous and its window's step
     # retracts that edge; b's link names the old path, which the Series alone still holds.
-    assert r4["site_links"]["removed"] == 1 and twin["removed"] == 0
+    assert r4["removed"] == 1 and twin["removed"] == 0
     assert [r["slug"] for r in twin["ambiguous"]] == ["a"] and a_after == {}
 
 
-@pytestmark_graph
-def test_replay_defers_the_hooks_to_one_closing_pass():
-    async def go():
-        token = DEFER_RESOLVE.set(True)
-        try:
-            from cjm_context_graph_projection.sitelinks import resolve_after_write
-            return await resolve_after_write(None)
-        finally:
-            DEFER_RESOLVE.reset(token)
+def test_replay_windows_are_one_ts_and_the_step_reads_only_its_inputs():
+    # 9ee4e346 (2): consecutive ops sharing one journaled ts are one window (one invocation);
+    # a pre-ts op is a window alone
+    ops = [{"ts": "1", "n": 0}, {"ts": "1", "n": 1}, {"ts": "2", "n": 2},
+           {"n": 3}, {"n": 4}, {"ts": "1", "n": 5}]
+    assert [[o["n"] for o in w] for w in _op_windows(ops)] == [[0, 1], [2], [3], [4], [5]]
+    # (3): the step runs only when a window wrote one of its inputs
+    rec = lambda method, nodes=(), edges=(): {"method": method, "nodes": list(nodes), "edges": list(edges)}
+    assert not touches_inputs([rec("add_nodes", [{"id": "p", "label": "Point", "properties": {}}]),
+                               rec("update_node", [{"id": "n", "label": None, "properties": {"title": "x"}}]),
+                               rec("delete_edges", edges=[{"id": "e", "relation_type": "TAGGED", "properties": {}}]),
+                               rec("add_nodes", [{"id": "a", "label": "Assertion",
+                                                  "properties": {"predicate": "publish_state"}}])])
+    for moved in (rec("update_node", [{"id": "n", "label": None, "properties": {"site_refs": []}}]),
+                  rec("add_nodes", [{"id": "s", "label": "Section", "properties": {}}]),
+                  rec("delete_nodes", [{"id": "n", "label": "Note", "properties": {}}]),
+                  rec("add_nodes", [{"id": "a", "label": "Assertion", "properties": {"predicate": SITE_PATH}}]),
+                  rec("delete_edges", edges=[{"id": "e", "relation_type": "SUPERSEDES", "properties": {}}]),
+                  rec("delete_edges", edges=[{"id": "e", "relation_type": "REFERENCES",
+                                               "properties": {"site_link": True}}])):
+        assert touches_inputs([moved]), moved
 
-    assert asyncio.run(go()) is None
+
+async def _stepped(gx, write):  # One live write window: the write, then the step's result (None = no input moved)
+    got = []
+    async with site_link_window(gx, report=got.append):
+        await write
+    return got[0] if got else None
 
 
 def _run(*args):
@@ -229,7 +249,7 @@ def test_a_rebuild_reproduces_series_order_and_site_links_from_source_plus_journ
                 ["assert-batch", str(batch)]):
         r = _run(*base, *cmd)
         assert r.returncode == 0, (cmd, r.stdout, r.stderr)
-    assert "site links: 2 resolved" in r.stdout          # the batch's ONE closing pass
+    assert "site links: 2 resolved" in r.stderr          # the invocation's ONE step (9ee4e346)
     order = _run("--graph-db-path", live, "series-order", "s")
     assert order.returncode == 0 and order.stdout.index("p0") < order.stdout.index("p1") < order.stdout.index("p2")
     assert _run("--graph-db-path", live, "site-links").returncode == 0
