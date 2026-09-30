@@ -143,7 +143,7 @@ def test_the_matrix_lens_projects_the_tutorials_page(tmp_path):
     assert text.startswith(f"---\n{GENERATED}\ntitle: Tutorials\ndescription: By task and stage.\n")
     assert "date-modified: '2024-01-01'" in text and "page-layout: full" in text
     assert "listing:\n  id: learning-paths\n" in text and "  contents:\n  - det.qmd\n" in text
-    assert "  categories: numbered\n" in text   # the hand page's category sidebar, kept
+    assert "  categories: false\n" in text   # no sidebar: it read as the grid's filter (15e7b315)
     assert "[1](#object-detection-training)" in text and "[General](#general-setup)" in text
     assert "_(Tested on RTX 4090, Ubuntu)_" in text and "[timeline]" not in text
     assert "About Train YOLOX." in text and "A Note" not in text

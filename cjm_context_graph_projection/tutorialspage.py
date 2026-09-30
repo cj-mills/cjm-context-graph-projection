@@ -25,8 +25,10 @@ from .runtime import GraphHandle
 LAYOUT = "coverage-matrix"   # The Lens view layout this page projects
 TUTORIAL_KIND = "tutorial"
 # The learning-paths listing keeps the look of the hand page it replaces (series/tutorials/index.md)
+# but its categories sidebar: the sidebar sits in the page margin beside the GRID, where it reads
+# as the grid's filter though it filters only this listing (user, 2026-09-29; finding 15e7b315)
 PATHS_LISTING = {"id": "learning-paths", "sort": ["date-modified desc"], "type": "default",
-                 "categories": "numbered", "sort-ui": False, "filter-ui": False,
+                 "categories": False, "sort-ui": False, "filter-ui": False,
                  "fields": ["title", "date-modified", "categories", "description"]}
 # The grid collapses to the per-task lists on narrow screens (903bc108 (1))
 STYLE = ("```{=html}\n<style>\n"
