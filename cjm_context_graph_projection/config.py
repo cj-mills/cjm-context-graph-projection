@@ -4,16 +4,17 @@ never library code).
 
 The config file lives BESIDE the graph db (`<db dir>/graph.config.json`), so
 the explicit --graph-db-path doctrine also names the config: whichever graph
-you address, its own inventory answers. Keys (all optional): `code_libs`,
-`notebook_libs`, `memory_dir`, `repos_dir`, `manifests_dir`, and
-`sibling_graphs` ({key: db path} — the graphs a cross-graph reference may
-target, 0154f5e4: `link <src> REL <key>:<id>` observes the node in that db
-read-only and the review frontier re-opens it by the same key) — unknown keys
-are ignored (forward compat). An ABSENT file falls back to the in-code
-DEFAULT_* scaffolding (the 6dfe00e9 class — dev-machine defaults, not
-endpoints); a CORRUPT file refuses LOUDLY, because a typo'd inventory
-silently falling back would drop repos from ingest (the a7bc1424 class:
-rebuilds silently drop repos outside the inventory)."""
+you address, its own paths answer. Keys (all optional): `memory_dir`,
+`repos_dir`, `manifests_dir`, `code_exclude` (["<repo_key>/<path prefix>"] —
+what an on-graph repo carries OUTSIDE its library, stated as such; the code
+inventory itself is the source journal's, never a config list — 2cc81d3b,
+finding 7a2d54ae), and `sibling_graphs` ({key: db path} — the graphs a
+cross-graph reference may target, 0154f5e4: `link <src> REL <key>:<id>`
+observes the node in that db read-only and the review frontier re-opens it by
+the same key) — unknown keys are ignored (forward compat). An ABSENT file falls
+back to the in-code DEFAULT_* scaffolding (the 6dfe00e9 class — dev-machine
+defaults, not endpoints); a CORRUPT file refuses LOUDLY, because a typo'd
+config silently falling back would point ingest at the wrong sources."""
 
 import json
 from pathlib import Path

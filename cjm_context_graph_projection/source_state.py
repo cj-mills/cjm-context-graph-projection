@@ -339,23 +339,43 @@ def symbol_identity_map(
     without the marker replay exactly as before the scheme: a pre-scheme move re-keyed,
     and the edges journaled after it name the NEW id — retroactive identity would orphan
     those instead of healing anything, so the op names the choice (the 9170669e pattern)."""
-    ident = SymbolIdentity()
-    latest_text: Dict[Tuple[str, str], str] = {}
-    in_flight: Dict[str, Tuple[str, str, str, int]] = {}  # moved symbol -> its birth (source landed, target pending)
-    norm = normalize or (lambda k: k)
+    walk = IdentityWalk(normalize)
     for rec in read_source_journal(path):
+        walk.apply(rec)
+    return walk.ident
+
+
+class IdentityWalk:
+    """The identity map's walk ONE RECORD AT A TIME — the step `symbol_identity_map` folds
+    over the whole journal, shared with the code fold (design amendment 2cc81d3b), which
+    decomposes each record under the map AS OF that record: a symbol renamed or moved with
+    identity: keep lived at another address before the record that re-homed it, so the
+    final map would hand its earlier generations the wrong ids."""
+
+    def __init__(self, normalize: Any = None):
+        self.ident = SymbolIdentity()
+        self.latest_text: Dict[Tuple[str, str], str] = {}
+        self.in_flight: Dict[str, Tuple[str, str, str, int]] = {}  # moved symbol -> its birth (source landed, target pending)
+        self.norm = normalize or (lambda k: k)
+
+    def apply(
+        self,
+        rec: Dict[str, Any],  # One source-journal record
+    ) -> None:
+        """Advance the identity map past one record (see `symbol_identity_map` for the rules)."""
         a = rec.get("args", {})
-        key = (norm(a.get("repo_key")), a.get("module_path"))
+        key = (self.norm(a.get("repo_key")), a.get("module_path"))
         verb = rec.get("verb")
         if verb == "retire":
-            latest_text.pop(key, None)
-            continue
+            self.latest_text.pop(key, None)
+            return
         if verb != "source":
-            continue
+            return
         text = a.get("text", "")
         op = rec.get("op") or {}
+        ident, in_flight = self.ident, self.in_flight
         if op.get("identity") == "keep":
-            prev, new = _top_level_names(latest_text.get(key, "")), _top_level_names(text)
+            prev, new = _top_level_names(self.latest_text.get(key, "")), _top_level_names(text)
             kind = op.get("op")
             if kind == "rename-symbol":
                 renames = op.get("renames") or [{"from": op.get("from"), "to": op.get("to")}]
@@ -372,8 +392,7 @@ def symbol_identity_map(
             elif kind == "rename-module" and op.get("from") and key[1] == op.get("to"):
                 for s in sorted(new):
                     ident.register((key[0], op["from"], s), (key[0], key[1], s))
-        latest_text[key] = text
-    return ident
+        self.latest_text[key] = text
 
 
 def append_retire(
@@ -800,21 +819,33 @@ def journaled_emit(
     return receipt
 
 
+def journal_repos(
+    source_journal_path: str,  # The source journal (JSONL)
+) -> List[str]:  # Conceptual keys of every repo holding a live journal key, sorted
+    """The on-graph repos — DERIVED from the journal (finding 7a2d54ae): a repo is on-graph
+    because the journal holds its modules, never because a list names it."""
+    from .seeds import conceptual_key
+    return sorted({conceptual_key(rk) for rk, _ in latest_source_ops(source_journal_path)})
+
+
 def uncaptured_modules(
     source_journal_path: str,   # The source journal (JSONL)
-    code_libs,                  # Iterable of conceptual repo keys (the ingest inventory)
+    code_libs,                  # Iterable of conceptual repo keys to walk (on-graph repos: `journal_repos`)
     repos_dir: str,             # The repos root the journal keys resolve under
+    exclude: Optional[List[str]] = None,  # "<repo_key>/<path prefix>" entries stated as outside the library (config `code_exclude`)
 ) -> Dict[str, List[str]]:  # {repo_key: [module_path, ...]} — .py files with NO journal capture
     """The uncaptured-module audit (build a6453f70) — the ac3d52f4 recipe as a verb.
 
     In an on-graph library every .py the repo carries should be journal-captured
     (shadow or cut over): a file-sourced module's edits are unjournaled plain writes,
     invisible to journal-window and unrecoverable from the journals (the 2026-08-27
-    hand audit found 21 uncaptured test modules across 7 repos). This walks each
-    code_libs repo tree — tests/ INCLUDED, caches/runtime/hidden dirs skipped — and
-    diffs against the journal's captured keys. Rows are advisory: capture each with
-    flip-module + cutover (nbdev v3 repos keep config in pyproject.toml — a lone
-    settings.ini repo is unmigrated, see the nbdev-v3 note e73525de)."""
+    hand audit found 21 uncaptured test modules across 7 repos). Since the code fold
+    (2cc81d3b) an uncaptured file is also ABSENT from the graph — ingest reads no file —
+    so ingest reports this audit's rows. This walks each repo tree — tests/ INCLUDED,
+    caches/runtime/hidden dirs and the stated exclusions skipped — and diffs against
+    the journal's captured keys. Rows are advisory: capture each with flip-module +
+    cutover (nbdev v3 repos keep config in pyproject.toml — a lone settings.ini repo is
+    unmigrated, see the nbdev-v3 note e73525de)."""
     from .seeds import repo_dir_name
     captured = set(latest_source_ops(source_journal_path))
     skip = {"__pycache__", ".git", ".venv", "runtime", "build", "dist",
@@ -824,12 +855,16 @@ def uncaptured_modules(
         root = Path(repos_dir) / repo_dir_name(key)
         if not root.is_dir():
             continue
+        prefixes = tuple(e.split("/", 1)[1] for e in exclude or []
+                         if "/" in e and e.split("/", 1)[0] in (key, repo_dir_name(key)))
         missing = []
         for p in sorted(root.rglob("*.py")):
             rel = p.relative_to(root)
             if any(part in skip or part.startswith(".") for part in rel.parts[:-1]):
                 continue
-            if (key, rel.as_posix()) not in captured:
+            if prefixes and rel.as_posix().startswith(prefixes):
+                continue
+            if (repo_dir_name(key), rel.as_posix()) not in captured:
                 missing.append(rel.as_posix())
         if missing:
             out[key] = missing

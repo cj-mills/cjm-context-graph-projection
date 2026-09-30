@@ -1,13 +1,11 @@
-"""Repo-map extraction: pyproject dep parsing + Entity nodes / DEPENDS_ON edges."""
+"""The dev graph's file-read sources: the notes corpus, the repo map (pyproject deps ->
+Entity nodes / DEPENDS_ON edges) and the site pages. The code lane is the source journal's
+fold — tests/test_codefold.py."""
 
-import json
-
-from cjm_dev_graph_schema.identity import (code_module_node_id, entity_node_id,
-                                           note_node_id, topic_node_id)
+from cjm_dev_graph_schema.identity import entity_node_id, note_node_id, topic_node_id
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
-from cjm_context_graph_projection.devgraph import (_cjm_dep_keys, notebook_elements,
-                                                   notes_corpus_elements, repo_map_elements)
-from cjm_context_graph_projection.seeds import conceptual_key
+from cjm_context_graph_projection.devgraph import (_cjm_dep_keys, notes_corpus_elements,
+                                                   repo_map_elements)
 
 PYPROJECT = """\
 [project]
@@ -122,189 +120,6 @@ def test_repo_map_elements_entities_and_depends_on(tmp_path):
     assert entity_node_id("repo", "cjm-foo") in {e["target_id"] for e in dep_edges}
 
 
-def _make_nbdev_repo(root, name="cjm-foo"):
-    """A minimal nbdev-style repo: nbs/00_core.ipynb exporting to <pkg>/core.py."""
-    d = root / name
-    (d / "nbs").mkdir(parents=True)
-    cells = [
-        {"cell_type": "code", "id": "c0", "source": "#| default_exp core\n"},
-        {"cell_type": "markdown", "id": "c1", "source": "# Core\n\nThe `alpha` helper.\n"},
-        {"cell_type": "code", "id": "c2", "source": "#| export\ndef alpha(x):\n    return x + 1\n"},
-    ]
-    (d / "nbs" / "00_core.ipynb").write_text(
-        json.dumps({"cells": cells, "metadata": {}, "nbformat": 4, "nbformat_minor": 5}))
-    (d / "nbs" / ".ipynb_checkpoints").mkdir()
-    (d / "nbs" / ".ipynb_checkpoints" / "skip.ipynb").write_text("{ not json")  # must be skipped
-    return d
-
-
-def test_notebook_elements_decomposes_repo_notebooks(tmp_path):
-    d = _make_nbdev_repo(tmp_path, "cjm-foo")
-    nodes, edges = notebook_elements([str(d)])
-
-    labels = {n["label"] for n in nodes}
-    assert DevNodeKinds.CODE_MODULE in labels and DevNodeKinds.CELL in labels
-    # notebook 00_core.ipynb (default_exp core) -> module cjm_foo/core.py (the export target)
-    mod_id = code_module_node_id(conceptual_key("cjm-foo"), "cjm_foo/core.py")
-    assert any(n["id"] == mod_id for n in nodes)
-    # the export cell yields a CodeSymbol; the checkpoints notebook was skipped (no crash)
-    syms = [n for n in nodes if n["label"] == DevNodeKinds.CODE_SYMBOL]
-    assert any(n["properties"]["qualname"] == "alpha" for n in syms)
-    assert any(e["relation_type"] == DevRelations.CONTAINS for e in edges)
-
-
-def test_code_elements_ingests_graph_sourced_modules_from_the_journal(tmp_path):
-    """N+3 Phase 2: a cut-over module's text comes from the SOURCE journal, not the file
-    (the authority flip — the code analogue of skip_memory_paths); a missing artifact
-    file still ingests (the journal is sufficient)."""
-    from cjm_context_graph_projection.devgraph import code_elements
-    from cjm_context_graph_projection.source_state import cutover_module, flip_module
-
-    repo = tmp_path / "cjm-demo-lib"
-    pkg = repo / "cjm_demo_lib"
-    pkg.mkdir(parents=True)
-    (pkg / "a.py").write_text('"""A."""\n\n\ndef fa():\n    return 1\n')
-    (pkg / "b.py").write_text('"""B."""\n\n\ndef fb():\n    return 2\n')
-    j = str(tmp_path / "source.jsonl")
-    key = conceptual_key(repo.name)
-    flip_module(j, str(tmp_path), key, "cjm_demo_lib/a.py")
-    cutover_module(j, str(tmp_path), key, "cjm_demo_lib/a.py")
-
-    # Post-cutover, an out-of-band file edit must NOT reach the graph — journal wins.
-    (pkg / "a.py").write_text('"""A."""\n\n\ndef fa():\n    return 999  # stray\n')
-    nodes, _ = code_elements([str(repo)], source_journal_path=j)
-    fa = next(n for n in nodes if n["label"] == "CodeSymbol" and n["properties"]["name"] == "fa")
-    assert "999" not in fa["properties"]["body"]
-    fb = next(n for n in nodes if n["label"] == "CodeSymbol" and n["properties"]["name"] == "fb")
-    assert "return 2" in fb["properties"]["body"]  # un-flipped modules read from disk
-
-    # The artifact file deleted entirely: the module still ingests from the journal.
-    (pkg / "a.py").unlink()
-    nodes, _ = code_elements([str(repo)], source_journal_path=j)
-    assert any(n["label"] == "CodeSymbol" and n["properties"]["name"] == "fa" for n in nodes)
-
-
-def test_code_elements_keeps_symbol_identity_across_a_keep_identity_rename(tmp_path):
-    """36f649d3: a rebuild reproduces the id a renamed symbol was BORN with (the identity map
-    replays the journal's keep-identity op), and a newcomer at the vacated name is the next
-    generation; a pre-scheme record (no marker) re-keys exactly as before."""
-    from cjm_context_graph_projection.devgraph import code_elements
-    from cjm_context_graph_projection.source_state import (append_source, cutover_module,
-                                                          flip_module)
-    from cjm_dev_graph_schema.identity import code_symbol_node_id
-
-    repo = tmp_path / "cjm-demo-lib"
-    pkg = repo / "cjm_demo_lib"
-    pkg.mkdir(parents=True)
-    (pkg / "a.py").write_text('"""A."""\n\n\ndef fa():\n    return 1\n')
-    j = str(tmp_path / "source.jsonl")
-    key = conceptual_key(repo.name)
-    flip_module(j, str(tmp_path), key, "cjm_demo_lib/a.py")
-    cutover_module(j, str(tmp_path), key, "cjm_demo_lib/a.py")
-    mid = code_module_node_id(key, "cjm_demo_lib/a.py")
-    born_id = code_symbol_node_id(mid, "fa")
-    nodes, _ = code_elements([str(repo)], source_journal_path=j)
-    assert any(n["id"] == born_id for n in nodes)
-
-    # A keep-identity rename lands (fa -> fa2) plus a newcomer named fa.
-    append_source(j, key, "cjm_demo_lib/a.py", "cjm_demo_lib.a",
-                  '"""A."""\n\n\ndef fa2():\n    return 1\n',
-                  op_meta={"op": "rename-symbol", "from": "fa", "to": "fa2", "identity": "keep"})
-    append_source(j, key, "cjm_demo_lib/a.py", "cjm_demo_lib.a",
-                  '"""A."""\n\n\ndef fa2():\n    return 1\n\n\ndef fa():\n    return 7\n',
-                  op_meta={"op": "add-symbol", "qualname": "fa"})
-    nodes, edges = code_elements([str(repo)], source_journal_path=j)
-    fa2 = next(n for n in nodes if n["label"] == "CodeSymbol" and n["properties"]["name"] == "fa2")
-    assert fa2["id"] == born_id                                     # the id survived the rename
-    assert fa2["properties"]["birth_qualname"] == "fa"
-    newcomer = next(n for n in nodes if n["label"] == "CodeSymbol" and n["properties"]["name"] == "fa")
-    assert newcomer["id"] == code_symbol_node_id(mid, "fa", 1)      # generation 1, never born_id
-    assert newcomer["id"] != born_id
-    # The structural edges name the kept id.
-    assert any(e["source_id"] == mid and e["target_id"] == born_id
-               and e["relation_type"] == DevRelations.DEFINES for e in edges)
-
-    # A pre-scheme rename (no marker) re-keys, as every rename before the scheme did.
-    append_source(j, key, "cjm_demo_lib/a.py", "cjm_demo_lib.a",
-                  '"""A."""\n\n\ndef fa3():\n    return 1\n\n\ndef fa():\n    return 7\n',
-                  op_meta={"op": "rename-symbol", "from": "fa2", "to": "fa3"})
-    nodes, _ = code_elements([str(repo)], source_journal_path=j)
-    fa3 = next(n for n in nodes if n["label"] == "CodeSymbol" and n["properties"]["name"] == "fa3")
-    assert fa3["id"] == code_symbol_node_id(mid, "fa3") and fa3["id"] != born_id
-
-
-def test_notebook_elements_scans_only_nbs_when_present(tmp_path):
-    """quarto's `_proc` copies (and `dist/` etc.) share export targets with the real
-    notebooks — scanning them ingests duplicate module identities. `nbs/` is the source."""
-    d = _make_nbdev_repo(tmp_path, "cjm-foo")
-    (d / "_proc").mkdir()
-    (d / "_proc" / "00_core.ipynb").write_text((d / "nbs" / "00_core.ipynb").read_text())
-    nodes, _ = notebook_elements([str(d)])
-    mods = [n for n in nodes if n["label"] == DevNodeKinds.CODE_MODULE]
-    assert len(mods) == 1  # the _proc duplicate was not scanned
-    assert mods[0]["properties"]["path"].endswith("nbs/00_core.ipynb")
-
-
-def test_notebook_elements_ingests_graph_sourced_notebooks_from_the_journal(tmp_path):
-    """The notebook authority flip: a cut-over notebook's cells come from the SOURCE
-    journal, not the file; a missing artifact file still ingests."""
-    from cjm_context_graph_projection.source_state import (cutover_module,
-                                                           emit_source_artifact, flip_module)
-
-    d = _make_nbdev_repo(tmp_path, "cjm-foo")
-    j = str(tmp_path / "source.jsonl")
-    key = conceptual_key("cjm-foo")
-    flip_module(j, str(tmp_path), key, "nbs/00_core.ipynb")
-    emit_source_artifact(j, str(tmp_path), key, "nbs/00_core.ipynb")  # canonicalize the file
-    assert cutover_module(j, str(tmp_path), key, "nbs/00_core.ipynb")["cut_over"]
-
-    # Post-cutover, an out-of-band file edit must NOT reach the graph — journal wins.
-    nb_file = d / "nbs" / "00_core.ipynb"
-    nb_file.write_text(nb_file.read_text().replace("x + 1", "x + 999"))
-    nodes, _ = notebook_elements([str(d)], source_journal_path=j)
-    cells = [n for n in nodes if n["label"] == DevNodeKinds.CELL]
-    assert cells and not any("999" in n["properties"]["source"] for n in cells)
-
-    # The artifact file deleted entirely: the notebook still ingests from the journal.
-    nb_file.unlink()
-    nodes, _ = notebook_elements([str(d)], source_journal_path=j)
-    assert any(n["label"] == DevNodeKinds.CELL for n in nodes)
-    mod_id = code_module_node_id(key, "cjm_foo/core.py")
-    assert any(n["id"] == mod_id for n in nodes)
-
-
-def test_test_elements_and_tests_edges(tmp_path):
-    """Stage 1 of tests-on-graph: tests/ decomposes with repo-relative module identity,
-    and the corpus TESTS pass links BOTH pytest symbols and notebook test cells to the
-    package symbols they exercise."""
-    from cjm_context_graph_projection.devgraph import resolve_test_edges, test_elements
-
-    d = _make_nbdev_repo(tmp_path, "cjm-foo")
-    # a notebook TEST cell (non-export code cell) calling the exported symbol
-    nb = json.loads((d / "nbs" / "00_core.ipynb").read_text())
-    nb["cells"].append({"cell_type": "code", "id": "t0", "source": "assert alpha(1) == 2\n"})
-    (d / "nbs" / "00_core.ipynb").write_text(json.dumps(nb))
-    # a pytest file outside any package
-    (d / "tests").mkdir()
-    (d / "tests" / "test_core.py").write_text(
-        "from cjm_foo.core import alpha\n\n\ndef test_alpha():\n    assert alpha(1) == 2\n")
-
-    tn, _ = test_elements([str(d)])
-    tmod = next(n for n in tn if n["label"] == DevNodeKinds.CODE_MODULE)
-    assert tmod["properties"]["module_path"] == "tests/test_core.py"
-
-    nn, _ = notebook_elements([str(d)])
-    tests_edges = [e for e in resolve_test_edges(nn + tn) if e["relation_type"] == "TESTS"]
-    alpha_id = next(n["id"] for n in nn if n["label"] == DevNodeKinds.CODE_SYMBOL
-                    and n["properties"]["qualname"] == "alpha")
-    sources = {e["source_id"] for e in tests_edges if e["target_id"] == alpha_id}
-    test_fn_id = next(n["id"] for n in tn if n["label"] == DevNodeKinds.CODE_SYMBOL
-                      and n["properties"]["qualname"] == "test_alpha")
-    cell_id = next(n["id"] for n in nn if n["label"] == DevNodeKinds.CELL
-                   and n["properties"].get("cell_key") == "t0")
-    assert test_fn_id in sources and cell_id in sources
-
-
 def test_compute_untested_flags_unlinked_public_symbols():
     """The untested audit: public package symbols without an incoming TESTS edge are
     flagged; private symbols and test-module symbols are not audited."""
@@ -318,40 +133,6 @@ def test_compute_untested_flags_unlinked_public_symbols():
             {"id": "st", "properties": {"qualname": "test_fa", "module_id": "mt"}}]
     out = compute_untested(syms, mods, {"s1"})
     assert [u["qualname"] for u in out] == ["fb"]
-
-
-def test_test_elements_ingests_graph_sourced_test_module_from_journal(tmp_path):
-    """Stage 2 of tests-on-graph: a cut-over test module ingests from the SOURCE journal
-    (verbatim imports), survives artifact deletion, and does NOT leak into
-    `code_elements`' journal-only leg as a package module."""
-    from cjm_context_graph_projection.devgraph import code_elements, test_elements
-    from cjm_context_graph_projection.source_state import cutover_module, flip_module
-
-    d = tmp_path / "cjm-bar"
-    (d / "cjm_bar").mkdir(parents=True)
-    (d / "cjm_bar" / "core.py").write_text("def beta(x):\n    return x\n")
-    (d / "tests").mkdir()
-    test_text = ("from conftest import my_fixture\n\n\n"
-                 "def test_beta(my_fixture):\n    assert my_fixture\n")
-    (d / "tests" / "test_core.py").write_text(test_text)
-    j = str(tmp_path / "source.jsonl")
-
-    assert flip_module(j, str(tmp_path), "cjm-bar", "tests/test_core.py")["file_already_canonical"]
-    assert cutover_module(j, str(tmp_path), "cjm-bar", "tests/test_core.py")["cut_over"]
-
-    # The artifact deleted: the test module still ingests, text from the journal,
-    # fixture import intact.
-    (d / "tests" / "test_core.py").unlink()
-    tn, _ = test_elements([str(d)], source_journal_path=j)
-    tmod = next(n for n in tn if n["label"] == DevNodeKinds.CODE_MODULE)
-    assert tmod["properties"]["module_path"] == "tests/test_core.py"
-    assert any(n["properties"].get("qualname") == "test_beta" for n in tn
-               if n["label"] == DevNodeKinds.CODE_SYMBOL)
-
-    # code_elements must not pick the journaled TEST key up as a package module.
-    cn, _ = code_elements([str(d)], source_journal_path=j)
-    paths = {n["properties"]["module_path"] for n in cn if n["label"] == DevNodeKinds.CODE_MODULE}
-    assert paths == {"cjm_bar/core.py"}
 
 
 def test_notes_corpus_elements_ingests_site_pages_by_their_path(tmp_path):

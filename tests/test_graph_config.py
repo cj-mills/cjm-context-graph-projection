@@ -1,7 +1,8 @@
 """Graph-sibling config discovery + arg overlay (a1d965b0): the DEFAULT_*
-hardcodes are fallback only — the config beside the addressed graph db is the
-inventory of record, explicit flags always win, and a corrupt config refuses
-loudly instead of silently dropping repos from ingest (the a7bc1424 class)."""
+hardcodes are fallback only — the config beside the addressed graph db names its
+paths, explicit flags always win, and a corrupt config refuses loudly instead of
+silently falling back. No key names a code inventory: that is the source journal's
+(2cc81d3b, finding 7a2d54ae)."""
 import argparse
 import json
 
@@ -40,21 +41,20 @@ def test_overlay_replaces_baked_defaults_only(tmp_path):
     # Values still at their baked defaults are replaced by the config
     a = _args(db, code_lib=None, memory_dir=DEFAULT_MEMORY, repos_dir=DEFAULT_REPOS)
     _apply_graph_config(a)
-    assert a.code_lib == ["repo-a", "repo-b"]
     assert a.memory_dir == "/cfg/memory" and a.repos_dir == "/cfg/repos"
+    assert a.code_lib is None  # a stale code_libs key overlays nothing: the journal is the inventory
     # Explicit flags win over the config
-    b = _args(db, code_lib=["mine"], memory_dir="/explicit", repos_dir=DEFAULT_REPOS)
+    b = _args(db, memory_dir="/explicit", repos_dir=DEFAULT_REPOS)
     _apply_graph_config(b)
-    assert b.code_lib == ["mine"] and b.memory_dir == "/explicit"
-    assert b.repos_dir == "/cfg/repos"
+    assert b.memory_dir == "/explicit" and b.repos_dir == "/cfg/repos"
     # Verbs without the attribute are untouched (no spurious attrs minted)
     c = _args(db)
     _apply_graph_config(c)
-    assert not hasattr(c, "code_lib") and not hasattr(c, "memory_dir")
+    assert not hasattr(c, "memory_dir")
 
 
 def test_config_keys_absent_leave_args_alone(tmp_path):
-    (tmp_path / "graph.config.json").write_text(json.dumps({"code_libs": ["x"]}))
+    (tmp_path / "graph.config.json").write_text(json.dumps({"repos_dir": "/x"}))
     a = _args(tmp_path / "g.db", memory_dir=DEFAULT_MEMORY)
     _apply_graph_config(a)
     assert a.memory_dir == DEFAULT_MEMORY
@@ -74,7 +74,7 @@ def test_notes_corpus_and_profile_overlay(tmp_path):
     _apply_graph_config(b)
     assert b.notes_corpus == "/explicit" and b.profile == "mine"
     # The dev graph's config (no notes keys) leaves the attrs alone
-    (tmp_path / "graph.config.json").write_text(json.dumps({"code_libs": ["x"]}))
+    (tmp_path / "graph.config.json").write_text(json.dumps({"repos_dir": "/x"}))
     c = _args(tmp_path / "g.db", notes_corpus=None, profile="quarto_post")
     _apply_graph_config(c)
     assert c.notes_corpus is None and c.profile == "quarto_post"

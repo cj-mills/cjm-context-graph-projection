@@ -1,47 +1,46 @@
 """Cross-corpus CALLS/IMPORTS resolution + the structural convention audit (pure cores)."""
 
-from cjm_dev_graph_schema.nodes import CodeModuleNode, CodeSymbolNode
+from cjm_dev_graph_schema.nodes import CodeSymbolNode
 from cjm_dev_graph_schema.vocab import DevRelations
 
 from cjm_context_graph_projection.conventions import compute_conventions
-from cjm_context_graph_projection.devgraph import resolve_corpus_code_edges
+from cjm_context_graph_projection.codefold import CodeFold
 
 
-# --- cross-corpus resolution ---
+# --- cross-corpus resolution (the code fold's scopes, 2cc81d3b) ---
 
-def _mod(repo, path, import_name, imports=None):
-    return CodeModuleNode(repo_key=repo, module_path=path, path="/" + path, content_hash="h",
-                          import_name=import_name, imports=imports or []).to_graph_node()
-
-
-def _sym(module_id, qual, calls=None):
-    return CodeSymbolNode(module_id=module_id, qualname=qual, symbol_kind="function",
-                          path="/x", calls=calls or []).to_graph_node()
-
-
-def test_resolve_cross_module_calls_and_imports():
-    a = _mod("r", "pkg/a.py", "pkg.a")
-    b = _mod("r", "pkg/b.py", "pkg.b", imports=["pkg.a", "os"])  # imports a (intra) + os (external)
-    foo = _sym(a["id"], "foo")
-    bar = _sym(b["id"], "bar", calls=["foo", "open"])            # calls foo (cross-module) + open (builtin)
-    edges = resolve_corpus_code_edges([a, b, foo, bar])
-
-    imports = [(e["source_id"], e["target_id"]) for e in edges if e["relation_type"] == DevRelations.IMPORTS]
-    calls = [(e["source_id"], e["target_id"]) for e in edges if e["relation_type"] == DevRelations.CALLS]
-    assert (b["id"], a["id"]) in imports          # pkg.b imports pkg.a (cross-module)
-    assert all(t != "os" for _s, t in imports)    # external import not minted
-    assert (bar["id"], foo["id"]) in calls        # bar calls foo across modules
-    assert all(s != t for s, t in calls)          # no self-loops
+def _resolve(tmp_path, modules):
+    """Fold one source record per module and return the CALLS / IMPORTS edge pairs by name."""
+    fold = CodeFold(str(tmp_path))
+    for i, (mp, text) in enumerate(modules):
+        fold.apply({"verb": "source", "ts": 100.0 + i,
+                    "args": {"repo_key": "r", "module_path": mp, "text": text,
+                             "import_name": mp[:-3].replace("/", ".")}})
+    nodes, edges = fold.elements()
+    name = {n["id"]: n["properties"].get("qualname") or n["properties"].get("import_name")
+            for n in nodes}
+    return {rel: {(name[e["source_id"]], name[e["target_id"]]) for e in edges
+                  if e["relation_type"] == rel}
+            for rel in (DevRelations.CALLS, DevRelations.IMPORTS)}
 
 
-def test_ambiguous_call_name_is_not_resolved():
-    a = _mod("r", "pkg/a.py", "pkg.a")
-    b = _mod("r", "pkg/b.py", "pkg.b")
+def test_resolve_cross_module_calls_and_imports(tmp_path):
+    got = _resolve(tmp_path, [
+        ("pkg/a.py", "def foo():\n    return 1\n"),
+        # imports a (intra) + os (external); calls foo (cross-module) + open (builtin)
+        ("pkg/b.py", "import os\n\nimport pkg.a\n\n\ndef bar():\n    return foo(), open, os\n")])
+    assert ("pkg.b", "pkg.a") in got[DevRelations.IMPORTS]
+    assert all(t != "os" for _s, t in got[DevRelations.IMPORTS])      # external import not minted
+    assert ("bar", "foo") in got[DevRelations.CALLS]
+    assert all(s != t for s, t in got[DevRelations.CALLS])
+
+
+def test_ambiguous_call_name_is_not_resolved(tmp_path):
     # `helper` is defined in BOTH modules -> ambiguous -> a caller's `helper` call is skipped.
-    h1, h2 = _sym(a["id"], "helper"), _sym(b["id"], "helper")
-    caller = _sym(a["id"], "use", calls=["helper"])
-    edges = resolve_corpus_code_edges([a, b, h1, h2, caller])
-    assert [e for e in edges if e["relation_type"] == DevRelations.CALLS] == []
+    got = _resolve(tmp_path, [
+        ("pkg/a.py", "def helper():\n    return 1\n\n\ndef use():\n    return helper()\n"),
+        ("pkg/b.py", "def helper():\n    return 2\n")])
+    assert got[DevRelations.CALLS] == set()
 
 
 # --- convention audit (pure) ---

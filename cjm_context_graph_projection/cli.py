@@ -24,6 +24,7 @@ from cjm_dev_graph_schema.predicates import SITE_PATH
 
 from .authoring import add_symbol, author, emit_artifact, emit_post, read_node, read_slot
 from .code_edges import orphaned_edges
+from .codefold import fold_source_journal
 from .cohesion import cohesion
 from .config import load_graph_config, sibling_graphs
 from .contradictions import contradictions
@@ -83,64 +84,10 @@ DEFAULT_REPOS = "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills"
 # per-verb flags; an explicit --actor always wins over the env.
 _DEFAULT_ACTOR = os.environ.get("CJM_ACTOR") or "agent:session"
 
-DEFAULT_CODE_LIBS = ("cjm-dev-graph-schema", "cjm-markdown-decompose-core",
-                     "cjm-notebook-decompose-core",
-                     "cjm-context-graph-projection", "cjm-python-decompose-core",
-                     "cjm-substrate-tui-kit",
-                     "cjm-transcript-correction-tui", "cjm-transcription-tui",
-                     "cjm-transcript-decomp-tui", "cjm-workflow-hub-tui",
-                     # Session B.5 born-on-graph additions (user rule: NEW libs
-                     # are born-on-graph; off-graph interface libs are a legacy
-                     # unlikely-to-edit exception, not a pattern).
-                     "cjm-sentence-segmentation-adapter-interface",
-                     "cjm-capability-pysbd",
-                     # Session D born-on-graph additions (the diarization pair,
-                     # DEC 18d7de80): interface + capability, both editable
-                     # until their publish slots in the window after 07-28.
-                     "cjm-speaker-diarization-adapter-interface",
-                     "cjm-capability-pyannote",
-                     # Workbench round (833d27e4): the graph-workbench TUI,
-                     # born-on-graph 2026-08-11.
-                     "cjm-graph-workbench-tui",
-                     # Qt pilot (d2a6d8e1, DEC 1e5b9a76): the PySide6 lane's
-                     # slab-1 spike, born-on-graph 2026-08-13.
-                     "cjm-graph-workbench-qt",
-                     # Transcription migration (DEC dcf8a712): the first workflow
-                     # TUI on the Qt lane, born-on-graph 2026-08-14.
-                     "cjm-transcription-qt",
-                     # The shared Qt foundation lib (DEC c4b0d6e5: minted at the
-                     # first real duplication), born-on-graph 2026-08-14.
-                     "cjm-substrate-qt-kit",
-                     # Decomp migration (DEC 6c574c89): the second workflow
-                     # TUI on the Qt lane, born-on-graph 2026-08-15.
-                     "cjm-transcript-decomp-qt",
-                     # Correction migration (DEC 0f11683d): the third workflow
-                     # TUI on the Qt lane — the direct port, born-on-graph
-                     # 2026-08-15.
-                     "cjm-transcript-correction-qt",
-                     # Hub migration (DEC 61b46ae8): the Qt front door — the
-                     # last migration repo, spawn-not-suspend, born-on-graph
-                     # 2026-08-15.
-                     "cjm-workflow-hub-qt",
-                     # Composition seat v0 (DECs 2a062aff + ea85eab7): the
-                     # session scratchpad, born-on-graph 2026-08-19.
-                     "cjm-session-scratchpad-qt",
-                     # Spine absorption (DEC 12f342f1, 2026-08-19): the workflow
-                     # cores absorbed the shells' toolkit-neutral domain modules
-                     # (spine/state/runs/segments/candidates/launch…), so the
-                     # cores join the ingest list — the moved code keeps its
-                     # graph visibility (locate/grep) across the re-homing.
-                     "cjm-transcription-core",
-                     "cjm-transcript-decomp-core",
-                     "cjm-transcript-correction-core")
-# Repos whose NOTEBOOKS are the ingest source (cross-cell @patch/incremental methods
-# re-attributed to their true classes by the compositor). EMPTY since the 2026-08-13
-# audit: every lib the c25780e8/5a7c2af7-era list carried is now graph-sourced .py
-# (0 notebooks repo-wide, cjm-substrate included). The five still-notebook adapter
-# interfaces (forced-alignment / graph-storage / media-processing / source-separation
-# / vad) were never listed and stay out of ingest scope until their on-graph
-# transition. The whole DEFAULT_* block migrates to config under a1d965b0.
-DEFAULT_NOTEBOOK_LIBS = ()
+# No code inventory lives here: the code lane is a FOLD over the source journal (design
+# amendment 2cc81d3b), so the repos on the graph are the journal's live keys — the
+# DEFAULT_CODE_LIBS / DEFAULT_NOTEBOOK_LIBS tuples and the config's code_libs /
+# notebook_libs retired with finding 7a2d54ae (a hand-kept list the graph can derive).
 
 # Pillar-1 seam registry (DEC 6ee4b4f2): every CLI verb that can MUTATE source files on
 # disk, mapped to whether its implementation routes through `journaled_emit` (events
@@ -382,25 +329,28 @@ async def _dispatch(args) -> int:
     async with open_graph(args.graph_db_path, args.manifests_dir) as gx:
         if args.command == "ingest":
             note_aliases = await note_alias_map(gx)  # confirmed link aliases heal drifted refs
-            code_repos = None
+            # The code lane is a FOLD over the source journal (2cc81d3b): its inventory is the
+            # journal's live keys and every code time is the time of the record behind it.
+            code_fold = None
             if not args.no_code:
-                libs = args.code_lib or list(DEFAULT_CODE_LIBS)
-                code_repos = [str(Path(args.repos_dir) / name) for name in libs]
-            notebook_repos = None
-            if not args.no_notebooks:
-                nb_libs = args.notebook_lib or list(DEFAULT_NOTEBOOK_LIBS)
-                notebook_repos = [str(Path(args.repos_dir) / n) for n in nb_libs]
+                if not args.source_journal_path:
+                    print("error: ingest projects code from the SOURCE journal — pass "
+                          "--source-journal-path (cg-rebuild bakes it), or --no-code",
+                          file=sys.stderr)
+                    return 1
+                code_fold = fold_source_journal(args.source_journal_path, args.repos_dir)
             # Authority flip: notes with a genesis `new-note` op (migrated OR born on-graph)
             # are reconstructed from the journal during replay, so don't read their `.md` here.
             skip_memory_paths = journal_sourced_note_paths(args.journal_path) if args.journal_path else None
             nodes, edges = build_dev_graph_elements(
                 args.memory_dir, None if args.no_repo_map else args.repos_dir,
-                seed=not args.no_seed, note_aliases=note_aliases, code_repos=code_repos,
-                notebook_repos=notebook_repos, skip_memory_paths=skip_memory_paths,
-                source_journal_path=args.source_journal_path)
+                seed=not args.no_seed, note_aliases=note_aliases, code_fold=code_fold,
+                skip_memory_paths=skip_memory_paths)
             res = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
             print(f"ingested: {res.nodes_added} nodes added / {res.nodes_verified} verified, "
                   f"{res.edges_added} edges added / {res.edges_existing} existing")
+            if code_fold is not None:
+                _report_code_fold(code_fold, args)
             if args.journal_path:
                 # Replay born-on-graph writes on top of the fresh projection so
                 # `rm db && ingest` fully reconstructs the graph (the migration story).
@@ -800,17 +750,18 @@ async def _dispatch(args) -> int:
                                       "source_label": lk.get("source_label"),
                                       "target_label": lk.get("target_label")})
         elif args.command == "uncaptured":
-            from .source_state import uncaptured_modules
+            from .source_state import journal_repos, uncaptured_modules
             cfg = load_graph_config(args.graph_db_path)
-            libs = args.repo or cfg.get("code_libs") or list(DEFAULT_CODE_LIBS)
             if not args.source_journal_path:
                 print("error: uncaptured needs --source-journal-path (cg-write bakes it)",
                       file=sys.stderr)
                 return 1
+            libs = args.repo or journal_repos(args.source_journal_path)
             repos_dir = cfg.get("repos_dir") or args.repos_dir
-            rows = uncaptured_modules(args.source_journal_path, libs, repos_dir)
+            rows = uncaptured_modules(args.source_journal_path, libs, repos_dir,
+                                      exclude=cfg.get("code_exclude"))
             if not rows:
-                print(f"every .py in {len(libs)} code_libs repo(s) is journal-captured ✓")
+                print(f"every .py in {len(libs)} on-graph repo(s) is journal-captured ✓")
                 return 0
             total = sum(len(v) for v in rows.values())
             print(f"## Uncaptured modules ({total} file(s) across {len(rows)} repo(s))")
@@ -1720,12 +1671,36 @@ async def _dispatch_clocked(args) -> int:
         return await _dispatch(args)
 
 
+def _report_code_fold(fold, args) -> None:
+    """Report what the code fold could not project (2cc81d3b): a record whose text did not
+    decompose, a notebook key still live, and every on-graph .py file with no journal state
+    — absent from the graph because ingest reads no file (never stamped, never guessed)."""
+    from .source_state import journal_repos, uncaptured_modules
+    print(f"code fold: {fold.records} source-journal record(s) -> {len(fold.nodes)} code "
+          f"node(s) across {len(fold.modules)} module(s)")
+    for f in fold.failures:
+        print(f"⚠ code fold: {f['repo_key']}/{f['module_path']} @ {f['ts']} did not decompose "
+              f"({f['error']}) — its previous state stands", file=sys.stderr)
+    for rk, mp in fold.live_notebooks():
+        print(f"⚠ code fold: notebook key {rk}/{mp} is live — no lane projects notebooks",
+              file=sys.stderr)
+    cfg = load_graph_config(args.graph_db_path) or {}
+    rows = uncaptured_modules(args.source_journal_path,
+                              journal_repos(args.source_journal_path), args.repos_dir,
+                              exclude=cfg.get("code_exclude"))
+    total = sum(len(v) for v in rows.values())
+    if total:
+        print(f"⚠ code fold: {total} uncaptured .py file(s) in on-graph repos are NOT on the "
+              f"graph (capture: flip-module + cutover; list: `uncaptured`)", file=sys.stderr)
+
+
 def _apply_graph_config(args) -> None:
     """Overlay the graph-sibling config onto parsed args (config = DATA,
     a1d965b0): an EXPLICIT flag always wins; a value still at its baked
-    scaffolding default is replaced by the config's answer. code_libs /
-    notebook_libs feed ingest's repo inventory; the DEFAULT_* constants
-    remain only the absent-config fallback."""
+    scaffolding default is replaced by the config's answer. No key names a code
+    inventory: the repos on the graph are the source journal's (2cc81d3b); the
+    config keeps paths, and `code_exclude` states what an on-graph repo carries
+    outside its library (read where it is used)."""
     if not getattr(args, "graph_db_path", None):
         return
     cfg = load_graph_config(args.graph_db_path)
@@ -1734,9 +1709,7 @@ def _apply_graph_config(args) -> None:
     # notes_corpus / notes_profile (81a02642): the notes graph's corpus root + harvest
     # profile are DATA in ITS sibling config, so `ingest-notes` needs no repeated
     # --notes-corpus on every rebuild (the wrapper stays a thin lane).
-    for key, attr, baked in (("code_libs", "code_lib", None),
-                             ("notebook_libs", "notebook_lib", None),
-                             ("memory_dir", "memory_dir", DEFAULT_MEMORY),
+    for key, attr, baked in (("memory_dir", "memory_dir", DEFAULT_MEMORY),
                              ("repos_dir", "repos_dir", DEFAULT_REPOS),
                              ("manifests_dir", "manifests_dir", DEFAULT_MANIFESTS),
                              ("notes_corpus", "notes_corpus", None),
@@ -2654,15 +2627,9 @@ def main() -> int:
     p_ing.add_argument("--repos-dir", default=DEFAULT_REPOS)
     p_ing.add_argument("--no-repo-map", action="store_true", help="Skip the repo map")
     p_ing.add_argument("--no-seed", action="store_true", help="Skip the hand-seeded slots")
-    p_ing.add_argument("--code-lib", action="append", default=None,
-                       help="Repo dir name (under --repos-dir) to decompose as code; repeatable. "
-                            "Omit for the arc libs; --no-code to skip code entirely.")
-    p_ing.add_argument("--no-code", action="store_true", help="Skip code decomposition")
-    p_ing.add_argument("--notebook-lib", action="append", default=None,
-                       help="Repo dir name (under --repos-dir) whose nbdev NOTEBOOKS to decompose "
-                            "(the source for nbdev libs); repeatable. Omit for the default nbdev libs; "
-                            "use this, not --code-lib, for nbdev libs (the notebook source, not the .py).")
-    p_ing.add_argument("--no-notebooks", action="store_true", help="Skip notebook decomposition")
+    p_ing.add_argument("--no-code", action="store_true",
+                       help="Skip the code lane (the fold over --source-journal-path: every live "
+                            "journaled module, whatever repo it lives in — 2cc81d3b)")
 
     p_inn = sub.add_parser("ingest-notes",
                            help="Ingest an arbitrary markdown notes corpus into the "
@@ -3160,11 +3127,12 @@ def main() -> int:
     p_ck.add_argument("--actor", default=_DEFAULT_ACTOR)
 
     p_un = sub.add_parser("uncaptured",
-                          help="Audit: .py files in code_libs repos with NO source-journal "
-                               "capture (file-sourced — their edits are unjournaled plain "
-                               "writes); capture each with flip-module + cutover (a6453f70)")
+                          help="Audit: .py files in on-graph repos with NO source-journal "
+                               "capture (absent from the graph; their edits are unjournaled "
+                               "plain writes); capture each with flip-module + cutover (a6453f70)")
     p_un.add_argument("--repo", action="append", default=None,
-                      help="Limit to this repo key (repeatable; default: every code_libs repo)")
+                      help="Limit to this repo key (repeatable; default: every repo the "
+                           "source journal holds, less the config's code_exclude)")
     p_un.add_argument("--repos-dir", default=DEFAULT_REPOS)
 
     p_dr = sub.add_parser("display-rule",
