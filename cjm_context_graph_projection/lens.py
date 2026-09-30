@@ -275,9 +275,13 @@ async def _clause_refs(
         res = await list_graph(gx, label=args.get("label"), predicate=args.get("predicate"),
                                relation=args.get("relation"), limit=args.get("limit", 500),
                                contains=args.get("contains"), where=args.get("where"),
-                               value=args.get("value"))
+                               value=args.get("value"), deliverable_kind=args.get("deliverable_kind"))
         if res.get("error"):
             return [], res["error"]
+        if res.get("truncated"):
+            # A selection that stops at its window would silently drop members (6752db0a (9))
+            return [], (f"list clause selected {res.get('count')} of {res.get('total')} — raise its "
+                        "`limit`; a truncated selection never lands")
         refs: List[str] = []
         for row in res.get("rows", []):
             for key in ("id", "subject_id", "source_id", "target_id"):

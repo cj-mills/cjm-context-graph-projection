@@ -33,6 +33,7 @@ from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.vocab import DevNodeKinds
 
 from . import factlayer as F
+from .archive import path_owners
 from .runtime import GraphHandle
 from .sitelinks import site_path_key
 
@@ -89,25 +90,33 @@ async def redirect_plan(
     gx: GraphHandle,
 ) -> Dict[str, Any]:  # {stubs: [{stub, target, alias, subject}], pages, errors}
     """The redirect projection from the `site_path` facts: one stub per superseded path, to
-    its page's ACTIVE path. A page with no single active path, or two superseded paths landing
-    on one stub, is an error row — the build refuses, never guesses."""
+    its page's ACTIVE path. A value belongs to the page its supersession chain ends at
+    (`archive.path_owners`): the page's own prior paths, and every path TRANSFERRED to it
+    from another holder (design amendment e916a4b9 (4)). A page with no single active path, a
+    value reaching two pages, or two superseded paths landing on one stub, is an error row —
+    the build refuses, never guesses."""
     assertions = await F.load_label_where(
         gx, DevNodeKinds.ASSERTION, [PropertyPredicate("predicate", "eq", P.SITE_PATH)])
     supers = await F.load_supersedes(gx) if assertions else []
     stubs: List[Dict[str, Any]] = []
-    errors: List[Dict[str, Any]] = []
+    owners, errors = path_owners(assertions, supers)
     pages: Dict[str, Dict[str, Any]] = {}
-    for group in F.group_by_slot(assertions).values():
-        subject = str(F.prop(group[0], "subject_id") or "")
-        standing = F.active_assertions(group, supers)
+    standing_ids = {F.nid(a) for a in F.active_assertions(assertions, supers)}
+    owned: Dict[str, List[Any]] = {}
+    for a in assertions:
+        owner = owners.get(str(F.nid(a)))
+        if owner:
+            owned.setdefault(owner, []).append(a)
+    for subject, group in sorted(owned.items()):
+        standing = [a for a in group if F.nid(a) in standing_ids]
         values = [str(F.prop(a, "value") or "") for a in standing]
         if len(standing) != 1:
             errors.append({"kind": "active", "subject": subject, "active": sorted(values),
                            "why": "a page's site_path needs exactly one active value"})
             continue
         active = values[0]
-        standing_ids = {F.nid(a) for a in standing}
-        prior = sorted(str(F.prop(a, "value") or "") for a in group if F.nid(a) not in standing_ids)
+        prior = sorted({str(F.prop(a, "value") or "") for a in group
+                        if F.nid(a) not in standing_ids} - {active})
         pages[subject] = {"active": active, "superseded": prior}
         target = output_href(active)
         for alias in prior:

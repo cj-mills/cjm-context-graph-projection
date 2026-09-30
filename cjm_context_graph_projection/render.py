@@ -362,6 +362,17 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         return (f"**{'re-verified' if obj.get('replaced') else 'verified'}** `{str(obj['deliverable_id'])[:8]}` "
                 f"on `{obj.get('hardware')}` · os {obj.get('os') or 'unknown'} · {obj.get('date')} · "
                 f"basis {obj.get('basis')} `{obj['edge_id']}`")
+    if kind == "retire-source":
+        if obj.get("error"):
+            return f"⚠ {obj['error']}"
+        return (f"**retired** `{obj['slug']}` `{str(obj['note_id'])[:8]}` · source {obj.get('path')} @ "
+                f"{str(obj.get('commit') or '')[:12]} · {obj.get('reason')}"
+                + (f" · successor `{str(obj['successor_id'])[:8]}`" if obj.get("successor_id") else ""))
+    if kind == "transfer-path":
+        if obj.get("error"):
+            return f"⚠ {obj['error']}"
+        return (f"**transferred** {obj['value']} from `{str(obj['from_id'])[:8]}` to `{str(obj['to_id'])[:8]}` "
+                f"(assertion `{str(obj['assertion_id'])[:8]}` supersedes `{str(obj['superseded'])[:8]}`)")
     if kind == "supports":
         if obj.get("error"):
             return f"⚠ {obj['error']}"

@@ -79,7 +79,11 @@ M3_BASELINE_ACTOR = "import:m3-baseline"
 # stages): the whole record upserted by (kind, key), last op wins. `verified-on` = one
 # VERIFIED_ON edge with its evidence (deliverable, device, os), or its retraction.
 # `supports` = one SUPPORTS edge (deliverable -> claim) with its kind (amendment 98e99fe5),
-# or its retraction.
+# or its retraction. `retire-source` = an archive source retired as a fact (design amendment
+# e916a4b9): publish_state retired, the successor's SUPERSEDES edge, and where the source
+# lived (path + commit) -- the ingest reads these ops BEFORE replay and restores each retired
+# node from git. `transfer-path` = a page's active site_path moved to another holder (the
+# target's assertion supersedes the source's across slots).
 JOURNAL_VERBS = ("decide", "alias", "assert", "link", "unlink", "section", "new-note",
                  "add-section", "display-rule", "set-lens", "check", "session",
                  "retract-session", "pull-transcript", "mint-messages", "edit-message",
@@ -87,7 +91,7 @@ JOURNAL_VERBS = ("decide", "alias", "assert", "link", "unlink", "section", "new-
                  "deliverable-type", "accept-point", "retract-point", "edit-point", "render-notes",
                  "render-work-page", "rehome-points", "place-point",
                  "series", "series-members", "place-in-series", "entity", "verified-on",
-                 "supports")
+                 "supports", "retire-source", "transfer-path")
 
 
 def m3_baseline_import(
@@ -404,6 +408,18 @@ async def _apply_op(
         await record_support(gx, a["deliverable"], a["claim"], kind=a.get("kind", ""),
                              note=a.get("note", ""), retract=bool(a.get("retract")),
                              actor=a.get("actor", "agent:session"))
+    elif verb == "retire-source":
+        # An archive source retired (design amendment e916a4b9 (1)): the ingest already restored
+        # the node from the journaled commit, so replay re-lands the fact and the successor edge
+        # without reading git again.
+        from .archive import retire_source
+        await retire_source(gx, a["note"], reason=a.get("reason", ""), successor=a.get("successor"),
+                            commit=a["commit"], rel_path=a["path"], actor=a.get("actor", "agent:session"))
+    elif verb == "transfer-path":
+        # A page's active path moved to another holder (e916a4b9 (4)): the same cross-slot
+        # supersession, re-landed in append order.
+        from .archive import transfer_site_path
+        await transfer_site_path(gx, a["from"], a["to"], actor=a.get("actor", "agent:session"))
     else:
         return ""
     return verb
@@ -583,6 +599,10 @@ def touched_node_ids(
             out.append(a["deliverable"])
         if a.get("claim"):
             out.append(entity_node_id("claim", a["claim"]))
+    elif verb == "retire-source":
+        out.extend(r for r in (a.get("note"), a.get("successor")) if r)
+    elif verb == "transfer-path":
+        out.extend(r for r in (a.get("from"), a.get("to")) if r)
     elif a.get("repo_key") and a.get("module_path"):
         out.append(code_module_node_id(a["repo_key"], a["module_path"]))
     return out

@@ -406,8 +406,13 @@ async def _dispatch(args) -> int:
             # The site's own pages ride the same ingest (config DATA `site_pages`, relative to
             # the site root) so every public page is a node its site_path fact can hold
             site_pages = (load_graph_config(args.graph_db_path) or {}).get("site_pages") or None
+            # Retired archive sources come back from git BEFORE replay, so every op naming one
+            # resolves (design amendment e916a4b9 (2))
+            from .archive import retired_sources
+            retired = retired_sources(args.journal_path) if args.journal_path else None
             nodes, edges = notes_corpus_elements(args.notes_corpus, args.profile or "quarto_post",
-                                                 site_root=args.website_root, site_pages=site_pages)
+                                                 site_root=args.website_root, site_pages=site_pages,
+                                                 retired=retired)
             res = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
             print(f"ingested notes: {res.nodes_added} nodes added / {res.nodes_verified} verified, "
                   f"{res.edges_added} edges added / {res.edges_existing} existing")
@@ -598,7 +603,8 @@ async def _dispatch(args) -> int:
             res = await list_graph(gx, label=args.label, predicate=args.predicate,
                                    relation=args.relation, limit=args.limit,
                                    offset=args.offset, contains=args.contains,
-                                   where=args.where, value=args.value, full=args.full)
+                                   where=args.where, value=args.value, full=args.full,
+                                   deliverable_kind=args.deliverable_kind)
             print(render("list", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "conventions":
@@ -925,6 +931,30 @@ async def _dispatch(args) -> int:
                 if args.retract:
                     op["retract"] = True
                 append_write(args.journal_path, "supports", op)
+            return 1 if res.get("error") else 0
+        elif args.command == "retire-source":
+            # An archive source retires as a FACT (design amendment e916a4b9 (1)): the op records
+            # where its source lived (the website clone's path + commit), so the ingest can restore
+            # the node from git before replay once the file leaves the tree.
+            from .archive import retire_source
+            res = await retire_source(gx, args.note, reason=args.reason, successor=args.successor,
+                                      website_root=args.website_root, actor=args.actor)
+            print(render("retire-source", res, args.format))
+            if args.journal_path and res.get("written"):
+                append_write(args.journal_path, "retire-source",
+                             {"note": res["note_id"], "slug": res["slug"], "path": res["path"],
+                              "commit": res["commit"], "reason": args.reason,
+                              "successor": res["successor_id"], "actor": args.actor})
+            return 1 if res.get("error") else 0
+        elif args.command == "transfer-path":
+            # A page's active path moves to another holder (e916a4b9 (4)): the op carries the
+            # resolved ids, so replay never depends on prefix resolution.
+            from .archive import transfer_site_path
+            res = await transfer_site_path(gx, args.source, args.target, actor=args.actor)
+            print(render("transfer-path", res, args.format))
+            if args.journal_path and res.get("written"):
+                append_write(args.journal_path, "transfer-path",
+                             {"from": res["from_id"], "to": res["to_id"], "actor": args.actor})
             return 1 if res.get("error") else 0
         elif args.command == "claims":
             from .claims import claims_report
@@ -2960,6 +2990,23 @@ def main() -> int:
     p_sup.add_argument("--note", default="", help="Why this deliverable backs the claim, in one line")
     p_sup.add_argument("--retract", action="store_true", help="Remove this (deliverable, claim) support")
     p_sup.add_argument("--actor", default=_DEFAULT_ACTOR)
+    p_rs = sub.add_parser("retire-source",
+                          help="Retire an ARCHIVE source as a fact (journaled; design amendment e916a4b9): "
+                               "publish_state retired + where its source lived, so a rebuild restores it "
+                               "from git once its file leaves the tree")
+    p_rs.add_argument("note", help="The archive Note's id (or a unique prefix)")
+    p_rs.add_argument("--reason", required=True, help="Why it retires, in one line")
+    p_rs.add_argument("--successor", default=None, help="The node that takes its place (id or prefix)")
+    p_rs.add_argument("--website-root", default=None,
+                      help="The website clone root (default: the sibling config's website_root); the "
+                           "source is read from its HEAD")
+    p_rs.add_argument("--actor", default=_DEFAULT_ACTOR)
+    p_tp = sub.add_parser("transfer-path",
+                          help="Move a page's ACTIVE site_path to another node (journaled; e916a4b9): the "
+                               "target asserts it and supersedes the source's across slots")
+    p_tp.add_argument("source", help="The node losing the path (id or prefix)")
+    p_tp.add_argument("target", help="The node taking it (id or prefix)")
+    p_tp.add_argument("--actor", default=_DEFAULT_ACTOR)
     p_clm = sub.add_parser("claims",
                            help="Every claim with its state and its backing by kind, refusing a claim with no "
                                 "or two states and an offered claim below the backing floor (READ verb)")
@@ -3015,6 +3062,9 @@ def main() -> int:
     p_ls.add_argument("--full", action="store_true",
                       help="Label mode: untruncated title/gloss + each node's body text "
                            "(statement/description) — the batch body read (1d8d4486)")
+    p_ls.add_argument("--deliverable-kind", default=None,
+                      help="Label mode, --label Note: only deliverables whose type's kind is this "
+                           "(tutorial, notes, ...; design 7f200ecb)")
 
     p_wl = sub.add_parser("worklist", help="Propose/confirm queue (dangling refs, soft conflicts)")
     p_wl.add_argument("--memory-dir", default=DEFAULT_MEMORY,

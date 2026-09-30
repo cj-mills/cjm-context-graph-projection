@@ -67,6 +67,7 @@ def notes_corpus_elements(
     *,
     site_root: Optional[str] = None,          # The site project root the pages live under
     site_pages: Optional[List[str]] = None,   # The site's own pages, relative to site_root (config DATA)
+    retired: Optional[List[Dict[str, Any]]] = None,  # The journal's retire records (archive.retired_sources): restored from git, never read from the tree
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:  # (nodes, edges)
     """Decompose an arbitrary `<dir>/index.md` / `index.qmd` markdown corpus into graph elements.
 
@@ -86,7 +87,14 @@ def notes_corpus_elements(
     recoverable by traversal — the fidelity the memory corpus has had since M1, and
     the precondition for carrying the membrane to posts (733d3b94)."""
     root = Path(corpus_root)
-    files = corpus_index_files(corpus_root)   # index.md + index.qmd, one per post dir
+    # A RETIRED archive source (design amendment e916a4b9 (2)) is restored from the commit its
+    # retire op recorded, never read from the tree: its file may be gone, and a copy still in
+    # the tree must not claim the same identity twice
+    retired = list(retired or [])
+    if retired and not site_root:
+        raise ValueError("retired sources need the site root they are restored from (`website_root`)")
+    gone = {str((Path(site_root) / r["path"]).resolve()) for r in retired}
+    files = [p for p in corpus_index_files(corpus_root) if str(p.resolve()) not in gone]
     notes = [note_from_file(str(p), corpus_root=str(root), profile=profile, lossless=True)
              for p in files]
     # The site's own pages (about, the front page, the listing hubs …) ride the same ingest as
@@ -97,11 +105,20 @@ def notes_corpus_elements(
             raise ValueError("site_pages need the site root they live under (`website_root`)")
         posts = {n.slug for n in notes}
         pages = [note_from_file(str(Path(site_root) / rel), corpus_root=str(site_root), profile=profile,
-                                lossless=True, slug=site_page_slug(rel)) for rel in site_pages]
+                                lossless=True, slug=site_page_slug(rel)) for rel in site_pages
+                 if str((Path(site_root) / rel).resolve()) not in gone]
         clash = sorted(p.slug for p in pages if p.slug in posts)
         if clash:
             raise ValueError(f"site page identities collide with posts: {', '.join(clash)}")
         notes += pages
+    if retired:
+        from .archive import restore_retired
+        back = restore_retired(site_root, retired, profile)
+        live = {n.id for n in notes}
+        dup = sorted(n.slug for n in back if n.id in live)
+        if dup:
+            raise ValueError(f"retired sources still ingested from the tree: {', '.join(dup)}")
+        notes += back
     nodes, edges = corpus_graph_elements(notes, note_aliases)
     return stamp_note_profile(nodes, profile), edges   # the profile is READABLE at edit time (cbde404c)
 

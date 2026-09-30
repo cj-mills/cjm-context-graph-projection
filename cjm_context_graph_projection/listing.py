@@ -48,7 +48,8 @@ async def _labels_for(
 async def _list_label(gx: GraphHandle, label: str, limit: int, offset: int = 0,
                       contains: Optional[str] = None,
                       where: Optional[List[PropertyPredicate]] = None,
-                      full: bool = False) -> Dict[str, Any]:
+                      full: bool = False,
+                      only: Optional[Set[str]] = None) -> Dict[str, Any]:
     """Nodes carrying `label`, windowed by `offset`+`limit`, filtered by property
     predicates (`where`, server-side) and/or title substring (`contains`, client-side).
 
@@ -58,15 +59,18 @@ async def _list_label(gx: GraphHandle, label: str, limit: int, offset: int = 0,
     that filter scans the whole label, so the window is over the MATCHES). `total` is
     the TRUE class/match size, never the page size. `full` (finding 1d8d4486) adds each
     node's body `text` (statement / description / text / body / raw — first present) so
-    one page delivers N bodies instead of N `read` subprocesses."""
+    one page delivers N bodies instead of N `read` subprocesses. `only` keeps the nodes whose
+    ids it holds (the deliverable-kind filter, design 7f200ecb), over the whole label."""
     preds = list(where or [])
-    if contains:
-        # Title filtering needs display annotation, so load all matches client-side;
+    if contains or only is not None:
+        # Title and id-set filtering run client-side over every match, so load them all;
         # the true total is the match count.
         nodes = (await F.load_label_where(gx, label, preds, limit=1_000_000) if preds
                  else await F.load_label(gx, label, limit=1_000_000))
+        if only is not None:
+            nodes = [n for n in nodes if F.nid(n) in only]
         await annotate_display(gx, nodes)
-        c = contains.lower()
+        c = (contains or "").lower()
         nodes = [n for n in nodes if c in node_title(n).lower()]
         total = len(nodes)
         window = nodes[offset:offset + limit]
@@ -170,6 +174,7 @@ async def list_graph(
     where: Optional[List[str]] = None,  # Label mode: `PROP=VALUE` property filters (repeatable, ANDed, server-side)
     value: Optional[str] = None,      # Predicate mode: keep only assertions with this value (the register read)
     full: bool = False,               # Label mode: carry each node's body text (the batch body read, 1d8d4486)
+    deliverable_kind: Optional[str] = None,  # Label mode (Note): only deliverables whose type's kind is this (design 7f200ecb)
 ) -> Dict[str, Any]:  # {mode, key, rows, count, total, truncated} or {error}
     """Enumerate one CLASS of the graph: nodes by label / assertions by predicate / edges
     by relation. Exactly one of `label`/`predicate`/`relation` selects the mode; `total`
@@ -187,9 +192,16 @@ async def list_graph(
         return {"error": "--where filters node properties — label mode only"}
     if value is not None and mode != "predicate":
         return {"error": "--value filters assertion values — predicate mode only"}
+    only = None
+    if deliverable_kind is not None:
+        from cjm_dev_graph_schema.vocab import DevNodeKinds
+        if mode != "label" or key != DevNodeKinds.NOTE:
+            return {"error": "--deliverable-kind filters Notes — label mode with --label Note only"}
+        from .purenotes import note_types
+        only = {nid for nid, t in (await note_types(gx)).items() if t.get("kind") == deliverable_kind}
     if mode == "label":
         return await _list_label(gx, key, limit, offset=offset, contains=contains,
-                                 where=preds, full=full)
+                                 where=preds, full=full, only=only)
     if mode == "predicate":
         return await _list_predicate(gx, key, limit, offset=offset, value=value,
                                      contains=contains)

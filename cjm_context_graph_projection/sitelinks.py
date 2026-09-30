@@ -74,17 +74,20 @@ async def site_path_holders(
     """Every site_path value on the graph, keyed for resolution, plus each page's ACTIVE path.
 
     Superseded values count as holders too — an old URL still names its page (that is what
-    the redirect projection serves). A key two different nodes hold is ambiguous and never
+    the redirect projection serves): the page its supersession chain ends at, so a path
+    TRANSFERRED to another holder names the new one (design amendment e916a4b9 (4)). A key two different nodes hold is ambiguous and never
     resolves (the caller reports it)."""
     assertions = await F.load_label_where(
         gx, DevNodeKinds.ASSERTION, [PropertyPredicate("predicate", "eq", P.SITE_PATH)])
+    from .archive import path_owners   # function-local: archive reaches this module at call time
+    supers = await F.load_supersedes(gx) if assertions else []
+    owners, _ = path_owners(assertions, supers)   # an ambiguous value holds nothing; the build reports it
     holders: Dict[str, Set[str]] = {}
     for a in assertions:
         key = site_path_key(str(F.prop(a, "value") or ""))
-        subject = F.prop(a, "subject_id")
+        subject = owners.get(str(F.nid(a)))
         if key and subject:
-            holders.setdefault(key, set()).add(str(subject))
-    supers = await F.load_supersedes(gx) if assertions else []
+            holders.setdefault(key, set()).add(subject)
     active: Dict[str, str] = {}
     for group in F.group_by_slot(assertions).values():
         standing = F.active_assertions(group, supers)

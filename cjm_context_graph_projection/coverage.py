@@ -245,11 +245,14 @@ async def coverage_matrix(
     in_set: bool = False,                  # Filter: tutorials verified on any in-set device
 ) -> Dict[str, Any]:  # project_matrix's result over the live graph (+ the filter it applied)
     """The Tutorials matrix over the graph: every deliverable whose type's kind is
-    `tutorial`, against the live vocabulary, optionally narrowed by the hardware filter."""
-    from .purenotes import note_types
+    `tutorial` and that is not retired (design amendment e916a4b9 (3)), against the live
+    vocabulary, optionally narrowed by the hardware filter."""
+    from .archive import is_retired
+    from .purenotes import note_publish_states, note_types
     vocab = await load_vocab(gx)
     typed = await note_types(gx)
-    ids = [nid for nid, t in typed.items() if t.get("kind") == TUTORIAL_KIND]
+    states = await note_publish_states(gx)
+    ids = [nid for nid, t in typed.items() if t.get("kind") == TUTORIAL_KIND and not is_retired(nid, states)]
     tutorials: Dict[str, Dict[str, Any]] = {}
     for nid in ids:
         node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=nid)
