@@ -30,6 +30,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import yaml
 from cjm_context_graph_primitives.query import PropertyPredicate
 from cjm_dev_graph_schema.vocab import DevNodeKinds
 from cjm_markdown_decompose_core.blocks import (block_link_targets, CHROME_INCLUDE, HAND_TOC,
@@ -340,16 +341,33 @@ async def derived_plan(
         posts.setdefault(src_of[nid], {"drop": [], "nav": "", "end": ""})["nav"] = nav
     # The end matter: the author strip replacing the chrome includes (design 39c51c15 (5))
     # — its copy is required only when a rendered post carries one
-    from .postpage import POST_KINDS, end_plan, load_strip_copy, offered_backing, pitch_target
+    from .postpage import (POST_KINDS, end_plan, license_facts, load_strip_copy, offered_backing,
+                           pitch_target, post_licenses, related_context, related_posts)
     from .purenotes import note_types
     types = await note_types(gx)
     ends: Dict[str, Any] = {"ends": {}, "counts": {}}
+    post_lic: Dict[str, Dict[str, Any]] = {}
     if any((types.get(n) or {}).get("kind") in POST_KINDS for n in src_of):
         strip = load_strip_copy(website_root)
         errors += strip["errors"]
         if not strip["errors"]:
+            # Related posts, among the posts this profile renders (39c51c15 (4))
+            ctx = await related_context(gx)
+            cands = {n: {"title": str(F.prop(notes[n], "title") or ""), "href": _post_href(n, s, pages),
+                         "kind": (types.get(n) or {}).get("kind"),
+                         "date": (F.prop(notes[n], "metadata") or {}).get("date")}
+                     for n, s in src_of.items() if (types.get(n) or {}).get("kind") in POST_KINDS}
+            related = {n: related_posts(n, cands, ctx) for n in cands}
+            # Every post states its licenses: its own override, else its class's (39c51c15 (6))
+            lic = await license_facts(gx)
+            for n in cands:
+                r = post_licenses(n, (types.get(n) or {}).get("type") or "", lic)
+                if "error" in r:
+                    errors.append({"kind": "post-license", "source": src_of[n], "why": r["error"]})
+                else:
+                    post_lic[n] = r
             ends = end_plan(strip["copy"], src_of, types, await offered_backing(gx),
-                            pitch_target(planned_pages))
+                            pitch_target(planned_pages), related, post_lic)
     for nid, md in ends["ends"].items():
         posts.setdefault(src_of[nid], {"drop": [], "nav": "", "end": ""})["end"] = md
     # The header (39c51c15 (2)): the kind label and the dated facts, as metadata the filter sets
@@ -366,11 +384,33 @@ async def derived_plan(
             posts.setdefault(src, {"drop": [], "nav": "", "end": ""})["meta"] = meta
             heads += 1
     ends["counts"]["headers"] = heads
+    # The footer, derived from the PUBLIC posts this profile renders (39c51c15 (6)): an archive
+    # post's own dates, a born post's publication, every revision
+    footer: Optional[Dict[str, Any]] = None
+    if post_lic:
+        from .postpage import load_holder, site_footer
+        from .sitepages import parse_date
+        dated, public_lic = [], []
+        for n in post_lic:
+            t, md, f = types.get(n) or {}, F.prop(notes[n], "metadata") or {}, facts.get(n, {})
+            own = parse_date(md.get("date")) if t.get("origin") != "born" else None
+            published = f.get("published") or (own.isoformat() if own else "")
+            if not published:
+                continue   # a draft: not public
+            mod = parse_date(md.get("date-modified")) if t.get("origin") != "born" else None
+            dated.append({"published": published,
+                          "updated": max(v for v in (f.get("revised") or "", mod.isoformat() if mod else "", published) if v)})
+            public_lic.append(post_lic[n])
+        holder = load_holder(website_root)
+        errors += holder["errors"]
+        if not holder["errors"] and dated:
+            footer = site_footer(holder["holder"], dated, public_lic)
+            ends["counts"]["footer_years"] = footer["website"]["page-footer"]["center"][0]["text"]
     counts = {"posts": len(posts), "series_nav": len(series_nav), "collections": len(collections),
               **ends["counts"]}
     for role in ROLES:
         counts[role] = sum(1 for p in posts.values() for d in p["drop"] if d["role"] == role)
-    return {"posts": dict(sorted(posts.items())), "counts": counts, "errors": errors}
+    return {"posts": dict(sorted(posts.items())), "counts": counts, "errors": errors, "footer": footer}
 
 
 def write_derived(
@@ -387,6 +427,17 @@ def write_derived(
         if not p.exists() or p.read_text(encoding="utf-8") != text:
             p.write_text(text, encoding="utf-8")
             written.append(name)
+    # The generated footer (39c51c15 (6)), a metadata-files entry of the site config; none, none written
+    from .postpage import FOOTER_FILE
+    foot = d / FOOTER_FILE
+    if plan.get("footer"):
+        text = "# GENERATED by site-build from the notes graph (design 39c51c15 (6)): do not edit.\n" + \
+            yaml.safe_dump(plan["footer"], sort_keys=False, allow_unicode=True, width=10_000)
+        if not foot.exists() or foot.read_text(encoding="utf-8") != text:
+            foot.write_text(text, encoding="utf-8")
+            written.append(FOOTER_FILE)
+    elif foot.exists():
+        foot.unlink()
     report = d / REPORT_FILE
     cleared = report.exists()
     report.unlink(missing_ok=True)

@@ -3,12 +3,16 @@
 import asyncio
 import json
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
+
+import yaml
 
 import pytest
 
 from cjm_context_graph_layer.ops import extend_graph
-from cjm_dev_graph_schema.identity import note_node_id, series_node_id, topic_node_id
+from cjm_dev_graph_schema.identity import (deliverable_type_node_id, note_node_id, series_node_id,
+                                          topic_node_id)
 from cjm_markdown_decompose_core.extract import note_from_text
 from cjm_markdown_decompose_core.ingest import corpus_graph_elements
 
@@ -57,7 +61,8 @@ TOC = "* [Overview](#overview)\n* [Details](#details)\n\n-----\n\n"
 ABOUT = "\n{{< include /_about-author-cta.qmd >}}\n"
 QUESTIONS = "\n{{< include /_tutorial-cta.qmd >}}\n"
 STRIP = ('author-strip:\n  byline: "**The Author**, a byline."\n  links: "[About](/about.html)"\n'
-         '  pitch: "Hire me for {claims}: [how]({href})."\n  questions: "Ask in the comments."\n')
+         '  pitch: "Hire me for {claims}: [how]({href})."\n  questions: "Ask in the comments."\n'
+         'copyright-holder: "The Author"\n')
 
 
 def _post(title: str, day: str, body: str) -> str:
@@ -103,6 +108,10 @@ async def _graph(gx, root: Path) -> None:
     for s in ("a", "c"):
         await assert_value(gx, note_node_id(s), "deliverable_type", "archive-notes")
     await assert_value(gx, note_node_id("b"), "deliverable_type", "archive-tutorial")
+    for t in ("archive-notes", "archive-tutorial"):   # the class licenses (39c51c15 (6))
+        await assert_value(gx, deliverable_type_node_id(t), "content_license", "cc-by-nc-sa-4.0")
+        await assert_value(gx, deliverable_type_node_id(t), "code_license", "mit")
+    await assert_value(gx, note_node_id("c"), "content_license", "cc-by-4.0")   # one post's override
     await assert_value(gx, note_node_id("b"), "revised", "a new section")   # the header's Updated (39c51c15 (2))
     await mint_series(gx, "cv", title="CV series")
     await set_series_members(gx, "cv", ["a", "b"])
@@ -134,12 +143,21 @@ def test_derived_blocks_leave_the_render_and_the_navigation_replaces_them(tmp_pa
 
     pub, html, report, drift = asyncio.run(go())
     assert pub["ok"], pub
-    assert pub["derived"] == {"posts": 3, "series_nav": 2, "collections": 3, "strips": 3, "pitch": 0, "headers": 3,
-                              "pitch_pending": 0, "questions": 1, "series_callout": 2, "hand_toc": 2,
+    # The footer's years run from the first publication to the latest revision (b's, asserted today)
+    this_year = datetime.now(timezone.utc).year
+    derived = dict(pub["derived"])
+    assert derived.pop("footer_years") == f"© 2020–{this_year} The Author"
+    foot = yaml.safe_load((site / DERIVED_DIR / "site-footer.yml").read_text())["website"]["page-footer"]
+    assert foot["right"][0]["text"] == "Code samples licensed under the MIT License"
+    assert "licenses vary" in foot["left"][0]["text"]            # c's override differs from the class
+    assert derived == {"posts": 3, "series_nav": 2, "collections": 3, "strips": 3, "pitch": 0, "headers": 3,
+                              "pitch_pending": 0, "questions": 1, "related": 0, "series_callout": 2, "hand_toc": 2,
                               "series_nav_line": 1, "chrome_include": 4, "reported": 3, "end_placed": 3}
     # The sources never change: the blocks leave the render only
     assert all(sources[s] == (site / "posts" / s / "index.md").read_bytes() for s in ("b", "c"))
     a, b, c = html["a"], html["b"], html["c"]
+    # every post states its licenses in Quarto's Reuse appendix: the class's, or its own override
+    assert "Reuse" in a and "CC BY-NC-SA 4.0</a>" in a and "CC BY 4.0</a>" in c and "MIT License</a>" in c
     assert "This post is part of the following series" not in a + b
     assert 'href="#overview"' not in a and 'href="#overview"' not in c   # the hand TOCs left
     assert "Next:</a>" not in a and "Part B</a>" not in a.split("Part 1 of 2")[0]

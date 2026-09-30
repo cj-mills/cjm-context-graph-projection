@@ -11,7 +11,8 @@ from pathlib import Path
 import pytest
 
 from cjm_context_graph_layer.ops import extend_graph
-from cjm_dev_graph_schema.identity import note_node_id, series_node_id, topic_node_id
+from cjm_dev_graph_schema.identity import (deliverable_type_node_id, note_node_id, series_node_id,
+                                          topic_node_id)
 from cjm_dev_graph_schema.nodes import series_member_edge
 from cjm_markdown_decompose_core.extract import note_from_text
 from cjm_markdown_decompose_core.ingest import corpus_graph_elements
@@ -75,7 +76,8 @@ def _site(root: Path) -> None:
         "project:\n  type: website\nprofile:\n  default: public\n  group:\n    - [public, staging]\n"
         "filters:\n  - _derived/derived-blocks.lua\nwebsite:\n  title: t\n"
         # the author strip's copy (design 39c51c15 (5)): typed posts carry the strip
-        'author-strip:\n  byline: "B"\n  links: "L"\n  pitch: "P {claims} {href}"\n  questions: "Q"\n')
+        'author-strip:\n  byline: "B"\n  links: "L"\n  pitch: "P {claims} {href}"\n  questions: "Q"\n'
+        'copyright-holder: "The Holder"\n')
     (root / "_quarto-public.yml").write_text(
         'project:\n  render:\n    - "**/*.qmd"\n    - "**/*.md"\n    - "!drafts/"\n')
     (root / "_quarto-staging.yml").write_text(
@@ -105,6 +107,8 @@ async def _graph(gx, root: Path) -> None:
     # The archive posts' standing is their ARCHIVE type (design amendment c64e07e7)
     assert (await mint_deliverable_type(gx, "archive-notes", title="Archive notes",
                                         kind="notes", origin="archive"))["written"]
+    for pred, spdx in (("content_license", "cc-by-4.0"), ("code_license", "mit")):   # 39c51c15 (6)
+        await assert_value(gx, deliverable_type_node_id("archive-notes"), pred, spdx)
     for s in ("a", "b", "c"):
         await assert_value(gx, note_node_id(s), "deliverable_type", "archive-notes")
     # The series' AUTHORED order is b, a, c: neither date order nor its reverse

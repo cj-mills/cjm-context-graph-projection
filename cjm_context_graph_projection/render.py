@@ -425,7 +425,8 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                 lines.append(f"- end matter: {dv.get('chrome_include', 0)} chrome include(s) out · author strip on "
                              f"{dv['strips']} post(s) ({dv.get('pitch', 0)} pitching, {dv.get('pitch_pending', 0)} "
                              f"awaiting the Work-with-me page) · questions line on {dv.get('questions', 0)} · "
-                             f"header metadata on {dv.get('headers', 0)}"
+                             f"header metadata on {dv.get('headers', 0)} · related posts on {dv.get('related', 0)}"
+                             + (f" · footer: {dv['footer_years']}" if dv.get("footer_years") else "")
                              + (f" · inside <main> on {dv['end_placed']}" if "end_placed" in dv else ""))
         if obj.get("staging_index"):
             si = obj["staging_index"]
