@@ -36,6 +36,14 @@ RENAME_ALIASES: Dict[str, Dict[str, Any]] = {
     "torch-utils": {"current": "cjm-substrate-torch-utils", "aliases": ["cjm-torch-plugin-utils"]},
     "hf-utils": {"current": "cjm-substrate-hf-utils", "aliases": ["cjm-hf-plugin-utils"]},
 }
+# When each seed group was authored (design amendment 19edbe97 (5)): the seeds' elements take
+# these times, never the ingest's clock. Read from this file's history: all four groups landed in
+# 9bd5a57 (2026-06-22 17:33:16 -0700, committer time) and none has changed since.
+RENAME_ALIASES_AUTHORED = 1782174796.0          # RENAME_ALIASES (a renamed repo Entity's aliases)
+RENAME_CONTRADICTION_AUTHORED = 1782174796.0    # rename_contradiction_elements
+STALE_VERSION_AUTHORED = 1782174796.0           # stale_version_seed_elements
+CLASS_SUBJECTS_AUTHORED = 1782174796.0          # class_subject_elements
+
 # Reverse index: any name (current or prior) -> its conceptual key.
 _NAME_TO_KEY: Dict[str, str] = {}
 for _k, _v in RENAME_ALIASES.items():
@@ -85,14 +93,16 @@ def rename_contradiction_elements() -> Tuple[List[Dict[str, Any]], List[Dict[str
         slot = FactSlotNode(subject_id=subject_id, predicate="rename-disposition",
                             subject_label=new_name)
         keep = AssertionNode(slot_id=slot.id, value="keep", actor="human",
-                             predicate="rename-disposition", subject_id=subject_id)
+                             predicate="rename-disposition", subject_id=subject_id,
+                             asserted_at=RENAME_CONTRADICTION_AUTHORED)
         rename = AssertionNode(slot_id=slot.id, value=f"rename:{new_name}", actor="human",
-                               predicate="rename-disposition", subject_id=subject_id)
+                               predicate="rename-disposition", subject_id=subject_id,
+                               asserted_at=RENAME_CONTRADICTION_AUTHORED)
         nodes += [slot.to_graph_node(), keep.to_graph_node(), rename.to_graph_node()]
         edges += [slot.about_edge(), keep.on_slot_edge(), rename.on_slot_edge()]
         edges += keep.evidenced_by_edges([note_node_id(s) for s in _KEEP_SOURCES])
         edges += rename.evidenced_by_edges([note_node_id(_RENAME_SOURCE)])
-    return nodes, edges
+    return _authored((nodes, edges), RENAME_CONTRADICTION_AUTHORED)
 
 
 def stale_version_seed_elements() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -100,9 +110,9 @@ def stale_version_seed_elements() -> Tuple[List[Dict[str, Any]], List[Dict[str, 
     subject_id = EntityNode(kind="repo", key="cjm-substrate", name="cjm-substrate").id
     slot = FactSlotNode(subject_id=subject_id, predicate="version", subject_label="cjm-substrate")
     stale = AssertionNode(slot_id=slot.id, value="0.0.1", actor="manual-seed",
-                          predicate="version", subject_id=subject_id)
-    return ([slot.to_graph_node(), stale.to_graph_node()],
-            [slot.about_edge(), stale.on_slot_edge()])
+                          predicate="version", subject_id=subject_id, asserted_at=STALE_VERSION_AUTHORED)
+    return _authored(([slot.to_graph_node(), stale.to_graph_node()],
+                      [slot.about_edge(), stale.on_slot_edge()]), STALE_VERSION_AUTHORED)
 
 
 # A small class-subject seed (membership distributed at query time). Conceptual
@@ -126,7 +136,18 @@ def class_subject_elements() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]
         for member_key in spec["members"]:
             member_id = EntityNode(kind="repo", key=member_key, name=member_key).id
             edges.append(make_edge(member_id, cls.id, DevRelations.ABOUT))
-    return nodes, edges
+    return _authored((nodes, edges), CLASS_SUBJECTS_AUTHORED)
+
+
+def _authored(
+    elements: Tuple[List[Dict[str, Any]], List[Dict[str, Any]]],  # (nodes, edges) of one seed group
+    ts: float,                                                     # The group's authored time
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:  # The same lists, every wire carrying the time
+    """Stamp a seed group's authored time on each of its elements (design amendment 19edbe97 (5)):
+    a seed is authored data, so its time is written here, never read from the ingest's clock."""
+    for w in elements[0] + elements[1]:
+        w["created_at"] = w["updated_at"] = ts
+    return elements
 
 
 def seed_elements() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:

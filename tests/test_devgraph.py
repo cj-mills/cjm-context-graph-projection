@@ -1,11 +1,14 @@
-"""The dev graph's file-read sources: the notes corpus, the repo map (pyproject deps ->
-Entity nodes / DEPENDS_ON edges) and the site pages. The code lane is the source journal's
-fold — tests/test_codefold.py."""
+"""The dev graph's git-read sources: the notes corpus, the repo map (pyproject deps ->
+Entity nodes / DEPENDS_ON edges) and the site pages, each read from HEAD (19edbe97; their
+times: tests/test_gitfold.py). The code lane is the source journal's fold —
+tests/test_codefold.py."""
 
 from cjm_dev_graph_schema.identity import entity_node_id, note_node_id, topic_node_id
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
-from cjm_context_graph_projection.devgraph import (_cjm_dep_keys, notes_corpus_elements,
-                                                   repo_map_elements)
+from cjm_context_graph_projection.devgraph import notes_corpus_elements, repo_map_elements
+from cjm_context_graph_projection.gitfold import cjm_dep_names
+
+from conftest import commit_all
 
 PYPROJECT = """\
 [project]
@@ -18,6 +21,7 @@ def _make_repo(root, name, deps_toml):
     d = root / name
     d.mkdir()
     (d / "pyproject.toml").write_text(deps_toml)
+    commit_all(d)
     return d
 
 
@@ -42,6 +46,7 @@ def test_notes_corpus_elements_permalink_identity_and_facets(tmp_path):
     _post(posts, "dumbing-us-down-book-notes",
           "See [other](/posts/the-learning-game-book-notes/).",
           categories=["education", "history"], series_link="/series/notes/education-notes.html")
+    commit_all(posts)
 
     nodes, edges = notes_corpus_elements(str(posts))
     labels = [n["label"] for n in nodes]
@@ -84,6 +89,7 @@ def test_notes_corpus_elements_ingests_qmd_posts_losslessly(tmp_path):
     _post(posts, "qmd-post", "```{dot}\ndigraph G { a -> b }\n```")
     qmd_file = posts / "qmd-post" / "index.qmd"
     (posts / "qmd-post" / "index.md").rename(qmd_file)
+    commit_all(posts)
 
     nodes, edges = notes_corpus_elements(str(posts))
     by_id = {n["id"]: n for n in nodes}
@@ -98,10 +104,9 @@ def test_notes_corpus_elements_ingests_qmd_posts_losslessly(tmp_path):
     assert rebuilt == qmd_file.read_text()
 
 
-def test_cjm_dep_keys_strips_specifiers_and_filters(tmp_path):
-    py = tmp_path / "pyproject.toml"
-    py.write_text(PYPROJECT)
-    keys = _cjm_dep_keys(py)
+def test_cjm_dep_names_strips_specifiers_and_filters():
+    keys = cjm_dep_names(PYPROJECT)
+    assert cjm_dep_names("not [toml") == []
     assert keys == ["cjm-foo", "cjm-context-graph-layer", "cjm-baz"]  # numpy filtered out
 
 
@@ -151,6 +156,7 @@ def test_notes_corpus_elements_ingests_site_pages_by_their_path(tmp_path):
     (site / "about.qmd").write_text("---\ntitle: About\naliases:\n- /services\n---\n\nHello.\n")
     (site / "series" / "notes").mkdir(parents=True)
     (site / "series" / "notes" / "index.md").write_text("---\ntitle: Notes\n---\n")
+    commit_all(site)
     nodes, edges = notes_corpus_elements(str(posts), site_root=str(site),
                                          site_pages=["about.qmd", "series/notes/index.md"])
     by_id = {n["id"]: n for n in nodes}
@@ -162,5 +168,6 @@ def test_notes_corpus_elements_ingests_site_pages_by_their_path(tmp_path):
     assert (by_id[about]["properties"]["frontmatter_raw"] + "".join(n["properties"]["raw"] for n in secs)
             == (site / "about.qmd").read_text())
     (site / "a-post.qmd").write_text("---\ntitle: Clash\n---\n")
+    commit_all(site)
     with pytest.raises(ValueError, match="collide with posts: a-post"):
         notes_corpus_elements(str(posts), site_root=str(site), site_pages=["a-post.qmd"])

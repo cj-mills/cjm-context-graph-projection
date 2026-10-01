@@ -3,24 +3,24 @@
 Dev-domain-specific (this is where the general projection lib adopts the dev
 schema): assemble the memory corpus (markdown -> Note nodes via the markdown
 decomposer), a repo map (one Entity per cjm-* repo + DEPENDS_ON edges read
-from each pyproject) and the code corpus the source journal folds into
+from each pyproject at HEAD, timed from git history — `gitfold`) and the code corpus the source journal folds into
 (`codefold`) into the `(nodes, edges)` lists that extend_graph commits.
 
 Kept separate from `projection`/`runtime` (which stay domain-neutral) so the pure
 core remains extractable.
 """
 
-import tomllib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, Tuple
 
 from cjm_dev_graph_schema.nodes import EntityNode
 from cjm_dev_graph_schema.vocab import DevNodeKinds
-from cjm_markdown_decompose_core.extract import corpus_index_files, note_from_file
+from cjm_markdown_decompose_core.extract import INDEX_FILENAMES, note_from_file, note_from_text
 from cjm_markdown_decompose_core.ingest import corpus_graph_elements
 
 from .codefold import CodeFold
-from .seeds import aliases_for, conceptual_key, seed_elements
+from .gitfold import cjm_dep_names, fold_history, git_toplevel, head_tree, root_commit_time
+from .seeds import aliases_for, conceptual_key, RENAME_ALIASES_AUTHORED, seed_elements
 
 
 def memory_elements(
@@ -59,8 +59,9 @@ def notes_corpus_elements(
     site_root: Optional[str] = None,          # The site project root the pages live under
     site_pages: Optional[List[str]] = None,   # The site's own pages, relative to site_root (config DATA)
     retired: Optional[List[Dict[str, Any]]] = None,  # The journal's retire records (archive.retired_sources): restored from git, never read from the tree
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:  # (nodes, edges)
-    """Decompose an arbitrary `<dir>/index.md` / `index.qmd` markdown corpus into graph elements.
+    report: Optional[Dict[str, Any]] = None,  # Filled with what was read: {root, head, commits, versions, uncommitted, untracked}
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:  # (nodes, edges), each carrying its created_at / updated_at
+    """Decompose a git-held `<dir>/index.md` / `index.qmd` markdown corpus into graph elements.
 
     The corpus analogue of `memory_elements`, generalized off the hardcoded dev
     memory dir: every `index.md` or `index.qmd` under the root (`corpus_index_files`; the SSG permalink convention —
@@ -76,42 +77,110 @@ def notes_corpus_elements(
     lede is a level-0 `_preamble` Section and the Note carries `frontmatter_raw`, so
     `read <note>` reconstructs the post byte-for-byte and the within-note sequence is
     recoverable by traversal — the fidelity the memory corpus has had since M1, and
-    the precondition for carrying the membrane to posts (733d3b94)."""
+    the precondition for carrying the membrane to posts (733d3b94).
+
+    THE ARCHIVE IS HEAD (design amendment 19edbe97): the corpus is read from the commit its
+    work tree's HEAD names, never from the tree, and every element's times come from git
+    history at the element grain (`gitfold`): created_at = the commit that began its current
+    continuous run, updated_at = the commit that last changed it. A file with uncommitted
+    changes is reported and ingested at HEAD; an untracked one is reported and absent until
+    committed. A corpus under no git history has no durable time and is refused."""
     root = Path(corpus_root)
-    # A RETIRED archive source (design amendment e916a4b9 (2)) is restored from the commit its
-    # retire op recorded, never read from the tree: its file may be gone, and a copy still in
-    # the tree must not claim the same identity twice
+    top = git_toplevel(str(root))
+    if top is None:
+        raise ValueError(f"the archive {corpus_root} is under no git history — its times come from "
+                         "git (design amendment 19edbe97): commit it first")
     retired = list(retired or [])
     if retired and not site_root:
         raise ValueError("retired sources need the site root they are restored from (`website_root`)")
-    gone = {str((Path(site_root) / r["path"]).resolve()) for r in retired}
-    files = [p for p in corpus_index_files(corpus_root) if str(p.resolve()) not in gone]
-    notes = [note_from_file(str(p), corpus_root=str(root), profile=profile, lossless=True)
-             for p in files]
+    if site_pages and not site_root:
+        raise ValueError("site_pages need the site root they live under (`website_root`)")
+    if site_root and str(Path(site_root).resolve()) != top:
+        raise ValueError(f"the site root {site_root} is not the archive's work tree {top}")
+    rel = root.resolve().relative_to(top).as_posix()
+    prefix = "" if rel == "." else rel + "/"
+    # A RETIRED archive source (design amendment e916a4b9 (2)) is restored from the commit its
+    # retire op recorded, never read from HEAD: its file may be gone, and a copy still at HEAD
+    # must not claim the same identity twice. Its times stop at that commit (19edbe97 (7)).
+    by_retired = {r["path"]: r for r in retired}
     # The site's own pages (about, the front page, the listing hubs …) ride the same ingest as
     # archive Sources, so every public page is a node its site_path fact can hold (ruling
     # 96aff70e; user, 2026-09-28). Identity = the page's path under the site root.
-    if site_pages:
-        if not site_root:
-            raise ValueError("site_pages need the site root they live under (`website_root`)")
-        posts = {n.slug for n in notes}
-        pages = [note_from_file(str(Path(site_root) / rel), corpus_root=str(site_root), profile=profile,
-                                lossless=True, slug=site_page_slug(rel)) for rel in site_pages
-                 if str((Path(site_root) / rel).resolve()) not in gone]
-        clash = sorted(p.slug for p in pages if p.slug in posts)
-        if clash:
-            raise ValueError(f"site page identities collide with posts: {', '.join(clash)}")
-        notes += pages
-    if retired:
-        from .archive import restore_retired
-        back = restore_retired(site_root, retired, profile)
-        live = {n.id for n in notes}
-        dup = sorted(n.slug for n in back if n.id in live)
-        if dup:
-            raise ValueError(f"retired sources still ingested from the tree: {', '.join(dup)}")
-        notes += back
+    pages = {p: site_page_slug(p) for p in (site_pages or []) if p not in by_retired}
+
+    def is_post(path: str) -> bool:
+        return path.startswith(prefix) and PurePosixPath(path).name in INDEX_FILENAMES
+
+    def keep(path: str) -> bool:
+        return (is_post(path) or path in pages) and path not in by_retired
+
+    def decompose(path: str, data: bytes) -> Tuple[Any, List[Dict[str, Any]]]:
+        text = data.decode("utf-8")
+        if path in by_retired or path in pages:
+            slug = by_retired[path]["slug"] if path in by_retired else pages[path]
+            note = note_from_text(str(Path(site_root) / path), text, corpus_root=str(site_root),
+                                  profile=profile, lossless=True, slug=slug)
+        else:
+            note = note_from_text(str(root / path[len(prefix):]), text, corpus_root=str(root),
+                                  profile=profile, lossless=True)
+        n, e = corpus_graph_elements([note], note_aliases)
+        return note, n + e
+
+    hist = fold_history(top, keep, decompose, freeze={p: r["commit"] for p, r in by_retired.items()})
+    tree = head_tree(top)
+    post_paths = sorted((p for p in tree if is_post(p) and p not in by_retired),
+                        key=lambda p: PurePosixPath(p).parts)
+    by_dir: Dict[str, List[str]] = {}
+    for p in post_paths:
+        by_dir.setdefault(str(PurePosixPath(p).parent), []).append(p)
+    both = sorted(d for d, fs in by_dir.items() if len(fs) > 1)
+    if both:
+        raise ValueError("post directories holding more than one index file "
+                         f"({', '.join(INDEX_FILENAMES)}): " + ", ".join(both))
+    notes = [hist.payloads[p] for p in post_paths]
+    posts = {n.slug for n in notes}
+    missing = sorted(p for p in pages if p not in tree and p not in hist.untracked)
+    if missing:
+        raise ValueError(f"site pages HEAD does not hold: {', '.join(missing)}")
+    page_notes = [hist.payloads[p] for p in pages if p in tree]
+    clash = sorted(p.slug for p in page_notes if p.slug in posts)
+    if clash:
+        raise ValueError(f"site page identities collide with posts: {', '.join(clash)}")
+    notes += page_notes
+    back = []
+    for p, r in by_retired.items():
+        note = hist.payloads.get(p)
+        if note is None:
+            raise ValueError(f"retired source {p} is not at commit {r['commit'][:12]} in {site_root} "
+                             "(a shallow clone or rewritten history?) — the rebuild cannot restore it")
+        if note.id != r["note"]:
+            raise ValueError(f"retired source {p} restores as {note.id}, not the retired node {r['note']}")
+        back.append(note)
+    live = {n.id for n in notes}
+    dup = sorted(n.slug for n in back if n.id in live)
+    if dup:
+        raise ValueError(f"retired sources still ingested from HEAD: {', '.join(dup)}")
+    notes += back
     nodes, edges = corpus_graph_elements(notes, note_aliases)
+    timeless = hist.fold.stamp(nodes, edges)
+    if timeless:
+        raise ValueError(f"{len(timeless)} archive element(s) the history fold holds no time for "
+                         f"(first: {timeless[0]}) — the fold and the ingest decompose differently")
+    if report is not None:
+        report.update({"root": top, "head": hist.head, "commits": hist.commits, "versions": hist.versions,
+                       "uncommitted": hist.uncommitted, "untracked": hist.untracked})
     return stamp_note_profile(nodes, profile), edges   # the profile is READABLE at edit time (cbde404c)
+
+
+def _pyproject_decomposer(
+    ent: EntityNode,  # The repo Entity whose pyproject versions are folded
+    name: str,        # Its current dir name (a self-dependency is dropped)
+):  # (path, bytes) -> (dep keys, DEPENDS_ON wires): one pyproject version's dependency edges
+    """The repo map's per-version decomposition for `fold_history` (19edbe97 (4))."""
+    def decompose(path: str, data: bytes) -> Tuple[Any, List[Dict[str, Any]]]:
+        keys = [conceptual_key(k) for k in cjm_dep_names(data.decode("utf-8")) if k != name]
+        return keys, ent.depends_on_edges(keys)
+    return decompose
 
 
 def stamp_note_profile(
@@ -132,25 +201,10 @@ def stamp_note_profile(
     return nodes
 
 
-def _cjm_dep_keys(pyproject: Path) -> List[str]:
-    """The cjm-* dependency names from a pyproject (version specifiers stripped)."""
-    try:
-        data = tomllib.loads(pyproject.read_text())
-    except (OSError, tomllib.TOMLDecodeError):
-        return []
-    deps = (data.get("project") or {}).get("dependencies") or []
-    keys = []
-    for d in deps:
-        name = d.replace("'", "").replace('"', "").strip()
-        name = name.split(">=")[0].split("==")[0].split("<")[0].split("~=")[0].split("[")[0].strip()
-        if name.startswith("cjm-"):
-            keys.append(name)
-    return keys
-
-
 def repo_map_elements(
     repos_dir: str,  # Dir holding the cjm-* repos (the active tree)
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:  # (Entity nodes, DEPENDS_ON edges)
+    report: Optional[Dict[str, Any]] = None,  # Filled with {repos, no_history, uncommitted}
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:  # (Entity nodes, DEPENDS_ON edges), each carrying its times
     """One repo Entity per cjm-* repo (RENAME-STABLE keys) + DEPENDS_ON from pyproject.
 
     Each entity is keyed by its durable conceptual slug (name-independent), carries
@@ -158,21 +212,43 @@ def repo_map_elements(
     keeps one home and old names still resolve. DEPENDS_ON targets resolve the
     pyproject dep name through the same conceptual-key map; an edge to a repo
     outside this tree still resolves to a stable id (the store drops it until that
-    entity exists — same dangling semantics as note references)."""
+    entity exists — same dangling semantics as note references).
+
+    TIMES FROM GIT (design amendment 19edbe97 (4)): a repo Entity's created_at =
+    updated_at = its root commit — nothing a commit changes is on it (its aliases are seed
+    data, so a renamed repo's updated_at is the aliases' authored time); DEPENDS_ON is read
+    from pyproject.toml at HEAD and timed from the start of that dependency's current
+    continuous run across the pyproject versions. A cjm-* dir with no git history of its
+    own has no durable time: it is reported and left out of the map."""
     root = Path(repos_dir)
     nodes: List[Dict[str, Any]] = []
     edges: List[Dict[str, Any]] = []
+    no_history: List[str] = []
+    uncommitted: List[str] = []
     for d in sorted(root.iterdir()):
         if not d.is_dir() or not d.name.startswith("cjm-"):
             continue
+        born = root_commit_time(str(d)) if git_toplevel(str(d)) == str(d.resolve()) else None
+        if born is None:
+            no_history.append(d.name)
+            continue
         key = conceptual_key(d.name)
-        ent = EntityNode(kind="repo", key=key, name=d.name, aliases=aliases_for(d.name),
+        aliases = aliases_for(d.name)
+        ent = EntityNode(kind="repo", key=key, name=d.name, aliases=aliases,
                          properties={"path": str(d), "tier": "active"})
-        nodes.append(ent.to_graph_node())
-        pyproject = d / "pyproject.toml"
-        if pyproject.exists():
-            dep_keys = [conceptual_key(k) for k in _cjm_dep_keys(pyproject) if k != d.name]
-            edges.extend(ent.depends_on_edges(dep_keys))
+        wire = ent.to_graph_node()
+        wire["created_at"] = born
+        wire["updated_at"] = max(born, RENAME_ALIASES_AUTHORED) if aliases else born
+        nodes.append(wire)
+        hist = fold_history(str(d), lambda p: p == "pyproject.toml", _pyproject_decomposer(ent, d.name))
+        deps = ent.depends_on_edges(hist.payloads.get("pyproject.toml") or [])
+        timeless = hist.fold.stamp([], deps)
+        if timeless:
+            raise ValueError(f"{d.name}: {len(timeless)} DEPENDS_ON edge(s) with no time in its history")
+        edges.extend(deps)
+        uncommitted += [f"{d.name}/{p}" for p in hist.uncommitted]
+    if report is not None:
+        report.update({"repos": len(nodes), "no_history": no_history, "uncommitted": uncommitted})
     return nodes, edges
 
 
@@ -183,6 +259,7 @@ def build_dev_graph_elements(
     note_aliases: Optional[Dict[str, str]] = None,  # Confirmed link aliases (drifted -> canonical)
     code_fold: Optional[CodeFold] = None,  # The code lane folded over the source journal (None = skip code)
     skip_memory_paths: Optional[List[str]] = None,  # Memory `.md` paths NOT to read (journal-sourced under M3)
+    report: Optional[Dict[str, Any]] = None,  # Filled with {"repo_map": repo_map_elements' report}
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:  # (all nodes, all edges)
     """Assemble the full dev graph: memory notes (+ refs), the repo map (+ deps),
     the hand-seeded fine-tier slots (the torch/hf contradiction, the stale version
@@ -195,7 +272,10 @@ def build_dev_graph_elements(
     reconstruct rather than read from disk — the authority flip, scoped per note."""
     nodes, edges = memory_elements(memory_dir, note_aliases, skip_paths=skip_memory_paths)
     if repos_dir:
-        rn, re = repo_map_elements(repos_dir)
+        repo_report: Dict[str, Any] = {}
+        rn, re = repo_map_elements(repos_dir, report=repo_report)
+        if report is not None:
+            report["repo_map"] = repo_report
         nodes += rn
         edges += re
     if seed:

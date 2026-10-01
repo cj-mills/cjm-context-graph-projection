@@ -33,6 +33,7 @@ from cjm_context_graph_projection.series import mint_series
 from cjm_context_graph_projection.sitelinks import site_link_window
 from cjm_context_graph_projection.structure import add_section, new_note
 from cjm_context_graph_projection.write import assert_value, author_section, link
+from conftest import commit_all
 
 # These drive the real graph-storage worker capability via open_graph().
 # Skip wherever its manifest isn't discoverable (e.g. CI).
@@ -191,6 +192,7 @@ def test_journal_replay_after_an_edit_matches_archive_ingest_of_the_emitted_post
 
     r2 = _run("--graph-db-path", str(tmp_path / "replay.db"), "--journal-path", journal, "replay")
     assert r2.returncode == 0, r2.stderr or r2.stdout
+    commit_all(emit)   # the archive is HEAD (19edbe97)
     r3 = _run("--graph-db-path", str(tmp_path / "ingest.db"), "ingest-notes")
     assert r3.returncode == 0, r3.stderr or r3.stdout
     replayed, ingested = _content_ids(tmp_path / "replay.db"), _content_ids(tmp_path / "ingest.db")

@@ -19,6 +19,7 @@ from cjm_markdown_decompose_core.ingest import corpus_graph_elements
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
 from cjm_context_graph_projection.sitelinks import resolve_site_links
 from cjm_context_graph_projection.write import assert_value
+from conftest import commit_all
 
 _HAVE_GRAPH = (Path(DEFAULT_MANIFESTS) / f"{DEFAULT_GRAPH_ID}.json").exists()
 
@@ -101,9 +102,13 @@ def _post(title, body):
 def test_live_site_links_equal_their_rebuild_after_every_window(tmp_path):
     """Design amendment 9ee4e346: the resolve is a step at the op-clock window grain, so a
     site_link edge carries the time of the invocation that first made it hold — live and on
-    rebuild alike. Born posts only: an archive node's time is leg C's (7ddcea72)."""
+    rebuild alike. An archive post rides along: its elements take their times from the
+    clone's git history (design amendment 19edbe97), so they match on every rebuild too — and
+    its Topic, shared with the born posts, keeps the archive's time."""
     corpus, emit = tmp_path / "archive", tmp_path / "drafts"
-    corpus.mkdir()
+    (corpus / "old").mkdir(parents=True)
+    (corpus / "old" / "index.md").write_text(_post("Old", "## Notes\n\nArchive body."))
+    commit_all(corpus)
     emit.mkdir()
     journal = str(tmp_path / "writes.jsonl")
     live = str(tmp_path / "live.db")

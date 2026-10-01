@@ -354,13 +354,16 @@ async def _dispatch(args) -> int:
             # Authority flip: notes with a genesis `new-note` op (migrated OR born on-graph)
             # are reconstructed from the journal during replay, so don't read their `.md` here.
             skip_memory_paths = journal_sourced_note_paths(args.journal_path) if args.journal_path else None
+            dev_report: Dict[str, Any] = {}
             nodes, edges = build_dev_graph_elements(
                 args.memory_dir, None if args.no_repo_map else args.repos_dir,
                 seed=not args.no_seed, note_aliases=note_aliases, code_fold=code_fold,
-                skip_memory_paths=skip_memory_paths)
+                skip_memory_paths=skip_memory_paths, report=dev_report)
             res = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
             print(f"ingested: {res.nodes_added} nodes added / {res.nodes_verified} verified, "
                   f"{res.edges_added} edges added / {res.edges_existing} existing")
+            if "repo_map" in dev_report:
+                _report_git_sources(dev_report["repo_map"], "repo map")
             if code_fold is not None:
                 _report_code_fold(code_fold, args)
             if args.journal_path:
@@ -381,12 +384,15 @@ async def _dispatch(args) -> int:
             # resolves (design amendment e916a4b9 (2))
             from .archive import retired_sources
             retired = retired_sources(args.journal_path) if args.journal_path else None
+            # The archive is HEAD, timed from git history at the element grain (19edbe97)
+            archive_report: Dict[str, Any] = {}
             nodes, edges = notes_corpus_elements(args.notes_corpus, args.profile or "quarto_post",
                                                  site_root=args.website_root, site_pages=site_pages,
-                                                 retired=retired)
+                                                 retired=retired, report=archive_report)
             res = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
             print(f"ingested notes: {res.nodes_added} nodes added / {res.nodes_verified} verified, "
                   f"{res.edges_added} edges added / {res.edges_existing} existing")
+            _report_git_sources(archive_report, "archive")
             if args.journal_path:
                 rc = await replay_journal(gx, args.journal_path, emit_root=args.emit_root)
                 print(f"replayed journal: {rc}")
@@ -1705,6 +1711,21 @@ def _report_code_fold(fold, args) -> None:
     if total:
         print(f"⚠ code fold: {total} uncaptured .py file(s) in on-graph repos are NOT on the "
               f"graph (capture: flip-module + cutover; list: `uncaptured`)", file=sys.stderr)
+
+
+def _report_git_sources(report: Dict[str, Any], lane: str) -> None:
+    """Report what an ingest read from git (design amendment 19edbe97): the HEAD it ingested,
+    and every file HEAD does not carry — an uncommitted one was ingested at HEAD, an untracked
+    one is absent until committed, a dir with no history is left out (never stamped now())."""
+    if report.get("head"):
+        print(f"{lane}: HEAD {report['head'][:12]} · {report['commits']} commit(s) walked · "
+              f"{report['versions']} version(s) folded")
+    for p in report.get("uncommitted") or []:
+        print(f"⚠ {lane}: {p} has uncommitted changes — ingested at HEAD", file=sys.stderr)
+    for p in report.get("untracked") or []:
+        print(f"⚠ {lane}: {p} is untracked — absent until committed", file=sys.stderr)
+    for d in report.get("no_history") or []:
+        print(f"⚠ {lane}: {d} has no git history — left out", file=sys.stderr)
 
 
 def _apply_graph_config(args) -> None:

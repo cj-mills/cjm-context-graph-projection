@@ -29,6 +29,7 @@ from cjm_context_graph_projection.journal import _op_windows
 from cjm_context_graph_projection.sitelinks import (resolve_site_links, site_link_window,
                                                     site_path_key, touches_inputs)
 from cjm_context_graph_projection.write import assert_value
+from conftest import commit_all
 
 
 def test_site_path_key_follows_quartos_url_equivalences():
@@ -225,6 +226,7 @@ def test_a_rebuild_reproduces_series_order_and_site_links_from_source_plus_journ
                        "p0": "See [topic](/series/notes/t.html)."}.items():
         (corpus / slug).mkdir(parents=True)
         (corpus / slug / "index.md").write_text(_post(slug, body))
+    commit_all(corpus)
     journal = str(tmp_path / "writes.jsonl")
     for sub in ("live", "fresh"):
         (tmp_path / sub).mkdir()

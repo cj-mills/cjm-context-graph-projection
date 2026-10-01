@@ -26,6 +26,7 @@ from cjm_context_graph_projection.purenotes import mint_deliverable_type, public
 from cjm_context_graph_projection.render import render
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
 from cjm_context_graph_projection.write import assert_value
+from conftest import commit_all
 
 _HAVE_GRAPH = (Path(DEFAULT_MANIFESTS) / f"{DEFAULT_GRAPH_ID}.json").exists()
 pytestmark_graph = pytest.mark.skipif(not _HAVE_GRAPH, reason="needs the graph capability")
@@ -157,6 +158,7 @@ def test_a_rebuild_reproduces_the_claims(tmp_path):
     for s in ("a", "b"):
         (corpus / s).mkdir(parents=True)
         (corpus / s / "index.md").write_text(_post(s))
+    commit_all(corpus)
     journal = str(tmp_path / "writes.jsonl")
     for sub in ("live", "fresh"):
         (tmp_path / sub).mkdir()

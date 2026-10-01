@@ -15,6 +15,7 @@ import pytest
 
 from cjm_context_graph_primitives.journal import read_journal
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS
+from conftest import commit_all
 
 # Integration smoke: drives the real CLI, which needs the graph-storage worker
 # capability installed. Skip wherever its manifest isn't discoverable (e.g. CI).
@@ -170,6 +171,7 @@ def test_new_note_born_post_round_trips_with_ingest_notes(tmp_path):
     # Journal-only projection (what a rebuild replays) vs. archive ingest of the emitted tree
     r2 = _run("--graph-db-path", str(tmp_path / "replay.db"), "--journal-path", journal, "replay")
     assert r2.returncode == 0, r2.stderr or r2.stdout
+    commit_all(emit)   # the archive is HEAD (19edbe97)
     r3 = _run("--graph-db-path", str(tmp_path / "ingest.db"), "ingest-notes")   # corpus from config
     assert r3.returncode == 0, r3.stderr or r3.stdout
     replayed, ingested = ids(tmp_path / "replay.db"), ids(tmp_path / "ingest.db")
