@@ -23,20 +23,31 @@ def test_render_end_variants():
     plain = render_end(COPY)
     assert plain.startswith("::: {.author-strip}\n")
     assert "**A** — a byline.  \n[About](/about.html)" in plain and "Hire" not in plain and "Ask" not in plain
-    pitched = render_end(COPY, pitch={"claims": "CV, Data", "href": "/work/"}, questions=True)
+    pitched = render_end(COPY, pitch={"claims": "CV, Data", "href": "/work/"},
+                         comments="::: {.post-comments}\nAsk below.\n:::\n")
     assert "Hire me for CV, Data: [how](/work/)." in pitched
-    assert pitched.index("Hire") < pitched.index("[About]") < pitched.index("::: {.comments-invite}")
+    assert pitched.index("Hire") < pitched.index("[About]") < pitched.index("::: {.post-comments}")
 
 
 def test_end_plan_pitches_only_with_a_published_target():
     backing = {"t": ["CV"], "n": []}
     pending = end_plan(COPY, ["t", "n", "p", "w", "x"], TYPES, backing, None)
     assert sorted(pending["ends"]) == ["n", "t", "w"]            # site pages and untyped Notes carry none
-    assert pending["counts"] == {"strips": 3, "pitch": 0, "pitch_pending": 1, "questions": 1, "related": 0}
+    assert pending["counts"] == {"strips": 3, "pitch": 0, "pitch_pending": 1, "questions": 1, "related": 0,
+                                 "comments_thread": 0, "comments_term": 0, "comments_earlier": 0}
     assert "Hire" not in "".join(pending["ends"].values())       # no target page: no pitch anywhere
     live = end_plan(COPY, ["t", "n"], TYPES, backing, {"title": "Work with me", "href": "/work/"})
     assert "Hire me for CV: [how](/work/)." in live["ends"]["t"] and "Hire" not in live["ends"]["n"]
     assert live["counts"]["pitch"] == 1 and live["counts"]["pitch_pending"] == 0
+    # The comments block closes every post; the questions line opens a tutorial's (39c51c15 (1))
+    cfg = {"repo": "o/r", "repo-id": "R", "category": "C", "category-id": "CI", "theme": {"light": "l", "dark": "d"}}
+    threads = {"t": {"number": 4, "term": "/t/", "earlier": [2]}, "n": {"number": None, "term": "/n/", "earlier": []}}
+    com = end_plan(COPY, ["t", "n"], TYPES, {}, None, comments_config=cfg, page_threads=threads)
+    t, n = com["ends"]["t"], com["ends"]["n"]
+    assert t.index("[About]") < t.index("::: {.post-comments}\nAsk below.") and "Ask below." not in n
+    assert '"term": "4"' in t and "Earlier comments: [#2]" in t and '"term": "/n/", "strict": "1"' in n
+    assert {k: com["counts"][k] for k in ("comments_thread", "comments_term", "comments_earlier")} == \
+        {"comments_thread": 1, "comments_term": 1, "comments_earlier": 1}
 
 
 def test_header_meta_kind_dates_and_drafts():

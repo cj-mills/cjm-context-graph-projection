@@ -9,8 +9,9 @@ graph decides the variant -- the pitch only on a post that backs an OFFERED clai
 backing kind (outcome / method / capability; knowledge never carries an offer, 98e99fe5), and
 only once the page it points at is published. Until the Work-with-me page (903bc108 (5)) is
 on-graph every post takes the no-pitch variant and the plan counts the posts that would pitch.
-A tutorial's end matter invites questions into the comments (the questions callout 32 posts
-included, now a line derived from the kind)."""
+Every post closes on its COMMENTS block (`comments`, 39c51c15 (1)): the thread its discussion
+fact names, else its canonical path; a tutorial's questions line opens it (the questions
+callout 32 posts included, now a line derived from the kind)."""
 
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -79,12 +80,11 @@ def render_end(
     copy: Dict[str, str],                   # load_strip_copy's copy
     *,
     pitch: Optional[Dict[str, str]] = None,  # {claims, href}: the pitch's claim names and its target page
-    questions: bool = False,                # A tutorial: the questions line closes the page
+    comments: str = "",                     # The post's comments block (comments.render_comments)
     related: Optional[List[Dict[str, str]]] = None,  # related_posts' result
     reuse: str = "",                        # render_reuse's appendix
-) -> str:  # The post's end matter (markdown): related posts, the author strip, the questions line, Reuse
-    """Related posts, the author strip (with the pitch line when given) and a tutorial's
-    questions line."""
+) -> str:  # The post's end matter (markdown): related posts, the author strip, the comments, Reuse
+    """Related posts, the author strip (with the pitch line when given) and the comments block."""
     lines = [copy["byline"]]
     if pitch:
         lines.append(copy["pitch"].format(claims=pitch["claims"], href=pitch["href"]))
@@ -92,8 +92,8 @@ def render_end(
     # Plain classed divs: a callout a user filter inserts is never converted by Quarto, so its
     # look is the site stylesheet's (.author-strip / .comments-invite)
     out = ([render_related(related)] if related else []) + ["::: {.author-strip}\n" + "  \n".join(lines) + "\n:::\n"]
-    if questions:
-        out.append("::: {.comments-invite}\n" + copy["questions"] + "\n:::\n")
+    if comments:
+        out.append(comments)
     if reuse:
         out.append(reuse)
     return "\n".join(out)
@@ -132,10 +132,14 @@ def end_plan(
     target: Optional[Dict[str, str]],       # pitch_target's page
     related: Optional[Dict[str, List[Dict[str, str]]]] = None,  # {note id: related_posts' result}
     licenses: Optional[Dict[str, Dict[str, Any]]] = None,       # {note id: post_licenses' result}
+    comments_config: Optional[Dict[str, Any]] = None,           # comments.load_comments_config's config
+    page_threads: Optional[Dict[str, Dict[str, Any]]] = None,   # {note id: comments.page_comments' result}
 ) -> Dict[str, Any]:  # {ends: {note id: markdown}, counts}
     """Every post's end matter. A Note of no post kind (a site page, an untyped Note) has none."""
+    from .comments import render_comments
     ends: Dict[str, str] = {}
-    counts = {"strips": 0, "pitch": 0, "pitch_pending": 0, "questions": 0, "related": 0}
+    counts = {"strips": 0, "pitch": 0, "pitch_pending": 0, "questions": 0, "related": 0,
+              "comments_thread": 0, "comments_term": 0, "comments_earlier": 0}
     for nid in sorted(notes):
         kind = (types.get(nid) or {}).get("kind")
         if kind not in POST_KINDS:
@@ -144,8 +148,14 @@ def end_plan(
         pitch = {"claims": ", ".join(claims), "href": target["href"]} if claims and target else None
         rel = (related or {}).get(nid) or []
         lic = (licenses or {}).get(nid)
-        ends[nid] = render_end(copy, pitch=pitch, questions=kind == TUTORIAL_KIND, related=rel,
+        pc = (page_threads or {}).get(nid)
+        block = (render_comments(comments_config, **pc, questions=copy["questions"] if kind == TUTORIAL_KIND else "")
+                 if comments_config and pc else "")
+        ends[nid] = render_end(copy, pitch=pitch, comments=block, related=rel,
                                reuse=render_reuse(lic) if lic else "")
+        if block:
+            counts["comments_thread" if pc["number"] is not None else "comments_term"] += 1
+            counts["comments_earlier"] += bool(pc["earlier"])
         counts["related"] += bool(rel)
         counts["strips"] += 1
         counts["pitch"] += bool(pitch)

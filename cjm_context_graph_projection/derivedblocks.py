@@ -22,7 +22,9 @@ what Quarto renders instead, and projects what they restated from the graph:
 
 The site-chrome includes (the about-author and questions callouts) are derived blocks too
 (design 39c51c15 (5)): an entry names the partial, the filter parses it and drops the blocks it
-expanded to, and the post's END MATTER — the author strip of `postpage` — closes the page."""
+expanded to, and the post's END MATTER — the author strip of `postpage` — closes the page.
+The utterances widget the posts carried leaves too: every post's end matter ends on its
+comments block (`comments`, design 39c51c15 (1)), the thread its discussion fact names."""
 
 import json
 import posixpath
@@ -348,6 +350,7 @@ async def derived_plan(
     ends: Dict[str, Any] = {"ends": {}, "counts": {}}
     post_lic: Dict[str, Dict[str, Any]] = {}
     ends_stale: List[Dict[str, str]] = []
+    comments_unrendered: List[Dict[str, Any]] = []
     if any((types.get(n) or {}).get("kind") in POST_KINDS for n in src_of):
         strip = load_strip_copy(website_root)
         errors += strip["errors"]
@@ -372,8 +375,26 @@ async def derived_plan(
                     errors.append({"kind": "post-license", "source": src_of[n], "why": r["error"]})
                 else:
                     post_lic[n] = r
+            # The comment threads (39c51c15 (1)): the thread its discussion fact names, else the
+            # page's canonical path as the widget's term; a thread on a Note this profile does
+            # not render is reported (its comments have no page here)
+            from .comments import load_comments_config, load_threads, page_comments
+            ccfg = load_comments_config(website_root)
+            errors += ccfg["errors"]
+            threads = await load_threads(gx)
+            page_threads: Dict[str, Dict[str, Any]] = {}
+            for n in cands:
+                pc = page_comments(threads.get(n, {}), cands[n]["href"])
+                if "error" in pc:
+                    errors.append({"kind": "post-comments", "source": src_of[n], "why": pc["error"]})
+                else:
+                    page_threads[n] = pc
+            comments_unrendered = [{"id": n, "title": str(F.prop(notes[n], "title") or "") if n in notes else "",
+                                    "threads": threads[n]["active"] + threads[n]["earlier"]}
+                                   for n in sorted(threads) if n not in cands]
             ends = end_plan(strip["copy"], src_of, types, await offered_backing(gx),
-                            pitch_target(planned_pages), related, post_lic)
+                            pitch_target(planned_pages), related, post_lic,
+                            comments_config=ccfg["config"] or None, page_threads=page_threads)
     for nid, md in ends["ends"].items():
         posts.setdefault(src_of[nid], {"drop": [], "nav": "", "end": ""})["end"] = md
     # The header (39c51c15 (2)): the kind label and the dated facts, as metadata the filter sets
@@ -413,11 +434,12 @@ async def derived_plan(
             footer = site_footer(holder["holder"], dated, public_lic)
             ends["counts"]["footer_years"] = footer["website"]["page-footer"]["center"][0]["text"]
     counts = {"posts": len(posts), "series_nav": len(series_nav), "collections": len(collections),
-              "related_stale": len(ends_stale), **ends["counts"]}
+              "related_stale": len(ends_stale), "comments_unrendered": len(comments_unrendered),
+              **ends["counts"]}
     for role in ROLES:
         counts[role] = sum(1 for p in posts.values() for d in p["drop"] if d["role"] == role)
     return {"posts": dict(sorted(posts.items())), "counts": counts, "errors": errors, "footer": footer,
-            "related_stale": ends_stale}
+            "related_stale": ends_stale, "comments_unrendered": comments_unrendered}
 
 
 def write_derived(
@@ -490,9 +512,10 @@ def check_end_placement(
     output_dir: str,       # The profile's output dir
     plan: Dict[str, Any],  # derived_plan's report
 ) -> Dict[str, Any]:  # {checked, errors}
-    """After the render: every post's end matter sits inside the page's <main>. A source that
-    leaves an element open can push the blocks after it out of the content (ruling ea676ba0:
-    such a defect is fixed at the source), so the build names the post instead of shipping it."""
+    """After the render: every post's end matter -- the author strip, and the comments block
+    when it carries one -- sits inside the page's <main>. A source that leaves an element open
+    can push the blocks after it out of the content (ruling ea676ba0: such a defect is fixed at
+    the source), so the build names the post instead of shipping it."""
     out = Path(output_dir)
     checked = 0
     errors: List[Dict[str, Any]] = []
@@ -506,4 +529,15 @@ def check_end_placement(
         if at < 0 or main_end < 0 or at > main_end:
             errors.append({"kind": "derived-end-placement", "source": src,
                            "why": "the post's end matter renders outside <main> (an element its source leaves open?)"})
+        com = html.find("post-comments")
+        if "post-comments" in entry["end"] and (com < 0 or main_end < 0 or com > main_end):
+            errors.append({"kind": "derived-comments-placement", "source": src,
+                           "why": "the post's comments block is missing or renders outside <main>"})
+        # One thread per page: a widget Quarto adds from the post's own `comments` metadata
+        # (added before any filter runs, so the render cannot drop it) would load a second one
+        if "post-comments" in entry["end"] and ("utteranc.es/client.js" in html
+                                                or html.count('id="giscus-base-theme"') > 1):
+            errors.append({"kind": "comments-second-widget", "source": src,
+                           "why": "the page loads a second comments widget: its source's front matter "
+                                  "configures `comments`, which Quarto renders before any filter"})
     return {"checked": checked, "errors": errors}

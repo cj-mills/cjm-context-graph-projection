@@ -911,6 +911,28 @@ async def _dispatch(args) -> int:
             if args.journal_path and res.get("written"):
                 append_write(args.journal_path, "judge-related", {"run": res["run"], "actor": args.actor})
             return 1 if res.get("error") else 0
+        elif args.command == "harvest-discussions":
+            # The comment threads as facts (design 39c51c15 (1)): GitHub is asked here and only
+            # here; the op carries the run, so replay re-lands it without asking.
+            from .comments import harvest_discussions
+            if not args.website_root:
+                print("error: harvest-discussions needs --website-root (or `website_root` in the "
+                      "graph-sibling graph.config.json)", file=sys.stderr)
+                return 1
+            maps: Dict[int, str] = {}
+            for m in args.map:
+                num, _, ref = m.partition("=")
+                num = num.strip().lstrip("#")
+                if not num.isdigit() or not ref.strip():
+                    print(f"error: --map takes N=<note id>, got {m!r}", file=sys.stderr)
+                    return 1
+                maps[int(num)] = ref.strip()
+            res = await harvest_discussions(gx, args.website_root, maps=maps, dry_run=args.dry_run,
+                                            actor=args.actor)
+            print(render("harvest-discussions", res, args.format))
+            if args.journal_path and res.get("written"):
+                append_write(args.journal_path, "harvest-discussions", {"run": res["run"], "actor": args.actor})
+            return 1 if res.get("error") else 0
         elif args.command == "retire-source":
             # An archive source retires as a FACT (design amendment e916a4b9 (1)): the op records
             # where its source lived (the website clone's path + commit), so the ingest can restore
@@ -3041,6 +3063,18 @@ def main() -> int:
     p_jr.add_argument("--url", default=None, help="The judge endpoint (default TypeSafe's System One API)")
     p_jr.add_argument("--workers", type=int, default=None, help="Concurrent requests (default 16)")
     p_jr.add_argument("--actor", default=_DEFAULT_ACTOR)
+    p_hd = sub.add_parser("harvest-discussions",
+                          help="Harvest the posts' comment threads as discussion facts (journaled; design "
+                               "39c51c15 (1)): every utterances issue and comments-category discussion is "
+                               "mapped to its Note by site_path history, by title, or an authored map; the "
+                               "thread with the most comments stands, the others are earlier threads")
+    p_hd.add_argument("--map", action="append", default=[], metavar="N=NOTE",
+                      help="Map thread N to a Note (id or unique prefix) where its title reaches none (repeatable)")
+    p_hd.add_argument("--dry-run", action="store_true", help="Report the mapping and the changes; write nothing")
+    p_hd.add_argument("--website-root", default=None,
+                      help="The site project root: the widget's settings and the site title (default: the "
+                           "sibling config's website_root)")
+    p_hd.add_argument("--actor", default=_DEFAULT_ACTOR)
     p_rs = sub.add_parser("retire-source",
                           help="Retire an ARCHIVE source as a fact (journaled; design amendment e916a4b9): "
                                "publish_state retired + where its source lived, so a rebuild restores it "

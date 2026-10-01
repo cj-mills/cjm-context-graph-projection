@@ -54,6 +54,16 @@ def test_end_placement_fails_closed_outside_main(tmp_path):
     res = check_end_placement(str(tmp_path), plan)
     assert res["checked"] == 2
     assert [(e["kind"], e["source"]) for e in res["errors"]] == [("derived-end-placement", "posts/out/index.md")]
+    # The comments block sits inside <main> and is the page's only widget (39c51c15 (1))
+    block = '<div class="post-comments">C</div>'
+    for slug, html in (("one", f'<main><div class="author-strip">A</div>{block}</main>'),
+                       ("two", f'<main><div class="author-strip">A</div>{block}</main><script src="https://utteranc.es/client.js"></script>'),
+                       ("gone", '<main><div class="author-strip">A</div></main>')):
+        (tmp_path / "posts" / slug).mkdir(parents=True)
+        (tmp_path / "posts" / slug / "index.html").write_text(html)
+    plan = {"posts": {f"posts/{s}/index.md": {"end": "::: {.post-comments}\n:::"} for s in ("one", "two", "gone")}}
+    assert sorted((e["kind"], e["source"]) for e in check_end_placement(str(tmp_path), plan)["errors"]) == [
+        ("comments-second-widget", "posts/two/index.md"), ("derived-comments-placement", "posts/gone/index.md")]
 
 
 CALLOUT = ("::: {.callout-tip}\n## This post is part of the following series:\n"
@@ -63,7 +73,8 @@ ABOUT = "\n{{< include /_about-author-cta.qmd >}}\n"
 QUESTIONS = "\n{{< include /_tutorial-cta.qmd >}}\n"
 STRIP = ('author-strip:\n  byline: "**The Author**, a byline."\n  links: "[About](/about.html)"\n'
          '  pitch: "Hire me for {claims}: [how]({href})."\n  questions: "Ask in the comments."\n'
-         'copyright-holder: "The Author"\n')
+         'copyright-holder: "The Author"\n'
+         'post-comments:\n  repo: o/r\n  repo-id: R_1\n  category: Comments\n  category-id: C_1\n')
 
 
 def _post(title: str, day: str, body: str) -> str:
@@ -114,6 +125,9 @@ async def _graph(gx, root: Path) -> None:
         await assert_value(gx, deliverable_type_node_id(t), "code_license", "mit")
     await assert_value(gx, note_node_id("c"), "content_license", "cc-by-4.0")   # one post's override
     await assert_value(gx, note_node_id("b"), "revised", "a new section")   # the header's Updated (39c51c15 (2))
+    # b's comment thread, and an earlier one that stands superseded (39c51c15 (1), 86f4a34d)
+    await assert_value(gx, note_node_id("b"), "discussion", "7")
+    await assert_value(gx, note_node_id("b"), "discussion", "3", superseded_by=["7"])
     await mint_series(gx, "cv", title="CV series")
     await set_series_members(gx, "cv", ["a", "b"])
     await assert_value(gx, series_node_id("cv"), "site_path", "/series/tutorials/cv.html")
@@ -163,7 +177,8 @@ def test_derived_blocks_leave_the_render_and_the_navigation_replaces_them(tmp_pa
     assert foot["right"][0]["text"] == "Code samples licensed under the MIT License"
     assert "licenses vary" in foot["left"][0]["text"]            # c's override differs from the class
     assert derived == {"posts": 3, "series_nav": 2, "collections": 3, "related_stale": 0, "strips": 3,
-                       "pitch": 0, "headers": 3,
+                       "pitch": 0, "headers": 3, "comments_unrendered": 0, "comments_thread": 1,
+                       "comments_term": 2, "comments_earlier": 1,
                               "pitch_pending": 0, "questions": 1, "related": 0, "series_callout": 2, "hand_toc": 2,
                               "series_nav_line": 1, "chrome_include": 4, "reported": 3, "end_placed": 3}
     # The sources never change: the blocks leave the render only
@@ -185,8 +200,13 @@ def test_derived_blocks_leave_the_render_and_the_navigation_replaces_them(tmp_pa
     assert all("author-strip" in h and "The Author" in h for h in (a, b, c))
     tail = a[a.index("Thanks."):a.index("author-strip")]
     assert "<hr" not in tail
-    assert "comments-invite" in b and "Ask in the comments." in b and "comments-invite" not in a + c
-    assert b.index("real link") < b.index("author-strip") < b.index("comments-invite")
+    # Every post closes on its comments block: b's thread by number with its earlier one linked,
+    # a and c by their canonical paths as strict terms; the questions line opens the tutorial's
+    assert all("post-comments" in h for h in (a, b, c)) and "utterances" not in a + b + c
+    assert "Ask in the comments." in b and "Ask in the comments." not in a + c
+    assert b.index("real link") < b.index("author-strip") < b.index("post-comments") < b.index("Ask in the comments.")
+    assert '"mapping": "number", "term": "7"' in b and "o/r/discussions/3" in b
+    assert '"mapping": "specific", "term": "/posts/a/", "strict": "1"' in a
     # the revision dates b's Updated; a and c keep their sources' own (none)
     assert '<p class="date-modified">' in b and '<p class="date-modified">' not in a + c
     rows = [json.loads(l) for l in report.splitlines()]

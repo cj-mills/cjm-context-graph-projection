@@ -78,7 +78,8 @@ def _site(root: Path) -> None:
         "filters:\n  - _derived/derived-blocks.lua\nwebsite:\n  title: t\n"
         # the author strip's copy (design 39c51c15 (5)): typed posts carry the strip
         'author-strip:\n  byline: "B"\n  links: "L"\n  pitch: "P {claims} {href}"\n  questions: "Q"\n'
-        'copyright-holder: "The Holder"\n')
+        'copyright-holder: "The Holder"\n'
+        'post-comments:\n  repo: o/r\n  repo-id: R_1\n  category: Comments\n  category-id: C_1\n')
     (root / "_quarto-public.yml").write_text(
         'project:\n  render:\n    - "**/*.qmd"\n    - "**/*.md"\n    - "!drafts/"\n')
     (root / "_quarto-staging.yml").write_text(

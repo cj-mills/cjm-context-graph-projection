@@ -87,7 +87,10 @@ M3_BASELINE_ACTOR = "import:m3-baseline"
 # target's assertion supersedes the source's across slots). `judge-related` = one judge run
 # (design e09e262b): the judged posts with the states they were judged against, every stored
 # judgment (JUDGED_RELATED, at or above the floor) and the records' content hashes -- replay
-# re-lands the run without asking the judge.
+# re-lands the run without asking the judge. `harvest-discussions` = one comment-thread harvest
+# (design 39c51c15 (1)): the observed threads, the authored maps and the plan (each Note's
+# standing thread and its earlier ones) -- replay re-lands the discussion facts without asking
+# GitHub.
 JOURNAL_VERBS = ("decide", "alias", "assert", "link", "unlink", "section", "new-note",
                  "add-section", "display-rule", "set-lens", "check", "session",
                  "retract-session", "pull-transcript", "mint-messages", "edit-message",
@@ -95,7 +98,7 @@ JOURNAL_VERBS = ("decide", "alias", "assert", "link", "unlink", "section", "new-
                  "deliverable-type", "accept-point", "retract-point", "edit-point", "render-notes",
                  "render-work-page", "rehome-points", "place-point",
                  "series", "series-members", "place-in-series", "entity", "verified-on",
-                 "supports", "retire-source", "transfer-path", "judge-related")
+                 "supports", "retire-source", "transfer-path", "judge-related", "harvest-discussions")
 
 
 def m3_baseline_import(
@@ -417,6 +420,11 @@ async def _apply_op(
         # so replay never calls the judge; the journaled content hashes bind the records the same.
         from .judging import apply_judgments
         await apply_judgments(gx, a["run"], actor=a.get("actor", "agent:session"))
+    elif verb == "harvest-discussions":
+        # One comment-thread harvest (design 39c51c15 (1)): the threads are observations the op
+        # carries whole, so replay never asks GitHub; the journaled content hashes bind the facts.
+        from .comments import apply_harvest
+        await apply_harvest(gx, a["run"], actor=a.get("actor", "agent:session"))
     elif verb == "retire-source":
         # An archive source retired (design amendment e916a4b9 (1)): the ingest already restored
         # the node from the journaled commit, so replay re-lands the fact and the successor edge
@@ -657,6 +665,8 @@ def touched_node_ids(
             out.append(entity_node_id("claim", a["claim"]))
     elif verb == "judge-related":
         out.extend(sorted((a.get("run") or {}).get("posts") or {}))
+    elif verb == "harvest-discussions":
+        out.extend(sorted((a.get("run") or {}).get("plan") or {}))
     elif verb == "retire-source":
         out.extend(r for r in (a.get("note"), a.get("successor")) if r)
     elif verb == "transfer-path":

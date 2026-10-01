@@ -398,6 +398,8 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         if len(stale) > 20:
             lines.append(f"  - … {len(stale) - 20} more")
         return "\n".join(lines)
+    if kind == "harvest-discussions":
+        return _render_harvest(obj)
     if kind == "claims":
         return _render_claims(obj)
     if kind == "series-order":
@@ -448,6 +450,12 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                                 if dv.get('related_stale') else "")
                              + (f" · footer: {dv['footer_years']}" if dv.get("footer_years") else "")
                              + (f" · inside <main> on {dv['end_placed']}" if "end_placed" in dv else ""))
+            if "comments_thread" in dv:   # the comments block (39c51c15 (1))
+                lines.append(f"- comments: the thread by its fact on {dv['comments_thread']} post(s) · the canonical "
+                             f"path as the term on {dv.get('comments_term', 0)} · earlier threads linked on "
+                             f"{dv.get('comments_earlier', 0)}"
+                             + (f" (⚠ {dv['comments_unrendered']} Note(s) hold a thread this profile does not render)"
+                                if dv.get("comments_unrendered") else ""))
         if obj.get("staging_index"):
             si = obj["staging_index"]
             lines.append(f"- drafts listings: {si.get('written', 0)} file(s) · "
@@ -1398,6 +1406,47 @@ def _render_claims(obj: Dict[str, Any]) -> str:
                              + (f" — {r['note']}" if r.get("note") else ""))
         lines.append("")
     return "\n".join(lines).rstrip() if claims else "_(no claims — `entity claim <key> --name ... --statement ... --position N`)_"
+
+
+def _render_harvest(obj: Dict[str, Any]) -> str:
+    """The harvest's receipt (design 39c51c15 (1)): the mapping, every page with several threads
+    (the standing one by most comments, each with its creation and last-comment dates beside the
+    count, 86f4a34d), the ties and ambiguous matches to settle, and the unmapped threads."""
+    lines = []
+    if obj.get("error"):
+        lines.append(f"⚠ {obj['error']}")
+    threads = obj.get("threads") or []
+    if not threads:
+        return "\n".join(lines) or "**threads** none"
+    by_num = {t["number"]: t for t in threads}
+    plan = obj.get("plan") or {}
+    mapped = sum(1 for t in threads if t.get("note"))
+    lines.append(f"**{'harvested' if obj.get('written') else 'threads'}** {len(threads)} on {obj.get('repo')} · "
+                 f"{mapped} mapped to {len(plan)} page(s) · {len(obj.get('unmapped') or [])} unmapped")
+    if obj.get("written"):
+        ap = obj.get("applied") or {}
+        lines.append(f"  landed {ap.get('asserted', 0)} standing thread fact(s) · {ap.get('backfilled', 0)} "
+                     "earlier thread(s) back-filled")
+    else:
+        lines.append(f"  {len(obj.get('changes') or [])} page(s) would change")
+
+    def row(n):
+        t = by_num.get(n) or {}
+        return (f"#{n} ({t.get('comments', 0)} comment(s), opened {str(t.get('created', ''))[:10]}, "
+                f"last {str(t.get('last_comment', ''))[:10] or '-'}, by {t.get('via') or '?'})")
+    for note, p in sorted(plan.items(), key=lambda kv: kv[1]["winner"]):
+        if p["earlier"]:
+            title = (by_num.get(p["winner"]) or {}).get("note_title", "")
+            lines.append(f"  - {title} `{note[:8]}`: {row(p['winner'])} stands over "
+                         + ", ".join(row(n) for n in p["earlier"]))
+    for t in obj.get("ties") or []:
+        lines.append(f"  ⚠ tie on `{t['note'][:8]}`: " + ", ".join(row(n) for n in t["numbers"]))
+    for a in obj.get("ambiguous") or []:
+        lines.append(f"  ⚠ ambiguous {row(a['number'])} {by_num.get(a['number'], {}).get('title', '')!r} -> "
+                     + ", ".join(f"`{n[:8]}`" for n in a["notes"]))
+    for n in obj.get("unmapped") or []:
+        lines.append(f"  · unmapped {row(n)} {by_num.get(n, {}).get('title', '')!r}")
+    return "\n".join(lines)
 
 
 def _render_coverage(obj: Dict[str, Any]) -> str:
