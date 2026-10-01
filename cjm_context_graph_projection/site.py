@@ -59,10 +59,10 @@ _REDIRECT_PAGE = """<html xmlns="http://www.w3.org/1999/xhtml">
 </html>
 """
 
-# A link INTO the drafts tree from a public page (href/src attributes, listing and search
-# JSON, the sitemap): the guard's text scan
-_DRAFTS_REF = re.compile(r"""(?:href|src)=["'][^"']*\bdrafts/|["'/]drafts/posts/""")
-_TEXT_OUTPUTS = (".html", ".json", ".xml")
+# A link INTO the drafts tree from a public page (href/src attributes, markdown link targets in
+# the .llms.md copies, listing and search JSON, the sitemap, llms.txt): the guard's text scan
+_DRAFTS_REF = re.compile(r"""(?:href|src)=["'][^"']*\bdrafts/|\]\([^)\s]*\bdrafts/|["'/]drafts/posts/""")
+_TEXT_OUTPUTS = (".html", ".json", ".xml", ".md", ".txt")
 
 
 def output_href(
@@ -256,14 +256,15 @@ async def publish_guard(
 def quarto_inspect(
     website_root: str,  # The site project root
     profile: str,       # The Quarto profile
-) -> Dict[str, Any]:  # {output_dir, inputs} — the profile's own config, never re-typed here
+) -> Dict[str, Any]:  # {output_dir, inputs, website} — the profile's own config, never re-typed here
     """The profile's output dir and input documents, read from Quarto itself."""
     r = subprocess.run(["quarto", "inspect", "--profile", profile], cwd=website_root,
                        capture_output=True, text=True, check=True)
     info = json.loads(r.stdout)
     root = Path(info.get("dir") or website_root)
     out = info["config"]["project"].get("output-dir") or "_site"
-    return {"output_dir": str(root / out), "inputs": list(info["files"]["input"])}
+    return {"output_dir": str(root / out), "inputs": list(info["files"]["input"]),
+            "website": info["config"].get("website") or {}}
 
 
 def page_outputs(
@@ -286,6 +287,7 @@ async def site_build(
     """Build the site under one profile: generated inputs, render, the redirect projection,
     and (public) the publish guard. `ok` is False on any error row — the output is then not
     fit to publish, and the report names why."""
+    from .agentlayer import check_jsonld, rewrite_llms_links, write_llms_txt
     from .derivedblocks import check_derived, check_end_placement, derived_plan, write_derived
     from .sitepages import check_page_outputs, project_pages
     rep: Dict[str, Any] = {"profile": profile, "errors": []}
@@ -311,7 +313,8 @@ async def site_build(
         return rep
     # The derived blocks leave the render and the post navigation replaces them (design
     # 253ac996): the plan names each post's blocks and navigation for the one Lua filter
-    derived = await derived_plan(gx, website_root, pages["plan"], plan["pages"], info["inputs"])
+    derived = await derived_plan(gx, website_root, pages["plan"], plan["pages"], info["inputs"],
+                                 site=info["website"])
     rep["derived"] = derived["counts"]
     rep["errors"] += derived["errors"]
     # Related posts rank by stored judgments (amendment e09e262b): a public build with a stale
@@ -351,6 +354,17 @@ async def site_build(
         placed = check_end_placement(info["output_dir"], derived)
         rep["derived"]["end_placed"] = placed["checked"]
         rep["errors"] += placed["errors"]
+        jl = check_jsonld(info["output_dir"], derived)
+        rep["derived"]["jsonld_checked"] = jl["checked"]
+        rep["errors"] += jl["errors"]
+    # The agent layer (amendment 23a49667 (2), (3)): links kept in the markdown layer, then the
+    # projected llms.txt over Quarto's flat list
+    if derived.get("llms"):
+        rew = rewrite_llms_links(info["output_dir"])
+        wr = write_llms_txt(info["output_dir"], derived["llms"])
+        rep["agent"] = {"llms_md": rew["files"], "links_rewritten": rew["rewritten"],
+                        "llms_txt_written": wr["written"], **derived["llms"]["counts"]}
+        rep["errors"] += wr["errors"]
     red = write_redirects(info["output_dir"], plan["stubs"], page_outputs(website_root, info["inputs"]))
     rep["redirects"] = {"stubs": len(plan["stubs"]), "written": red["written"], "unchanged": red["unchanged"]}
     rep["errors"] += red["errors"]

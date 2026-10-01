@@ -474,6 +474,14 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                              + (f" · ⚠ {dv['sources_missing']} born post(s) derive from a source they do not name: "
                                 + ", ".join(m["title"] for m in sr.get("missing") or [])
                                 if dv.get("sources_missing") else ""))
+        if obj.get("agent"):   # the agent layer (39c51c15 (7), amendment 23a49667)
+            ag, dv = obj["agent"], obj.get("derived") or {}
+            lines.append(f"- agent layer: JSON-LD on {dv.get('jsonld', 0)} post(s)"
+                         + (f" (read back on {dv['jsonld_checked']})" if "jsonld_checked" in dv else "")
+                         + f" · {ag.get('llms_md', 0)} .llms.md page(s), {ag.get('links_rewritten', 0)} link(s) "
+                         f"kept in the markdown layer · llms.txt: {ag.get('llms_links', 0)} link(s) in "
+                         f"{ag.get('llms_sections', 0)} section(s)"
+                         + ("" if ag.get("llms_txt_written") else " (unchanged)"))
         if obj.get("staging_index"):
             si = obj["staging_index"]
             lines.append(f"- drafts listings: {si.get('written', 0)} file(s) · "

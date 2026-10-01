@@ -16,6 +16,7 @@ from cjm_dev_graph_schema.identity import (deliverable_type_node_id, note_node_i
 from cjm_markdown_decompose_core.extract import note_from_text
 from cjm_markdown_decompose_core.ingest import corpus_graph_elements
 
+from cjm_context_graph_projection.agentlayer import read_jsonld
 from cjm_context_graph_projection.derivedblocks import (DERIVED_DIR, REPORT_FILE, check_end_placement,
                                                         render_nav)
 from cjm_context_graph_projection.lens import lens_node_id, set_lens
@@ -86,7 +87,10 @@ def _site(root: Path) -> None:
         (root / d).mkdir(parents=True)
     (root / "_quarto.yml").write_text(
         "project:\n  type: website\nprofile:\n  default: public\n  group:\n    - [public, staging]\n"
-        "filters:\n  - _derived/derived-blocks.lua\nwebsite:\n  title: t\n" + STRIP)
+        "filters:\n  - _derived/derived-blocks.lua\nwebsite:\n  title: t\n  site-url: https://example.org\n"
+        "  llms-txt: true\nllms-index:\n  summary: The test site.\n" + STRIP)
+    # The posts' author, as Quarto merges it from the directory (the JSON-LD's, 23a49667 (4))
+    (root / "posts" / "_metadata.yml").write_text("author: The Author\n")
     (root / "_about-author-cta.qmd").write_text(
         '---\n\n::: {.callout-tip title="About Me:"}\nI\'m the author. [More](/about.html)\n:::\n')
     (root / "_tutorial-cta.qmd").write_text('::: {.callout-tip title="Questions:"}\n- Ask below.\n:::\n')
@@ -160,14 +164,16 @@ def test_derived_blocks_leave_the_render_and_the_navigation_replaces_them(tmp_pa
             pub = await site_build(gx, str(site), "public")
             html = {s: (site / "_site" / "posts" / s / "index.html").read_text() for s in ("a", "b", "c")}
             report = (site / DERIVED_DIR / REPORT_FILE).read_text()
+            agent = {"txt": (site / "_site" / "llms.txt").read_text(),
+                     "a_md": (site / "_site" / "posts" / "a" / "index.llms.md").read_text()}
             # The source drifts from the graph (a TOC item added, no re-ingest): the fingerprint
             # no longer names the block, and the build fails closed, naming the post
             p = site / "posts" / "a" / "index.md"
             p.write_text(p.read_text().replace("* [Details](#details)", "* [Details](#details)\n* [Extra](#extra)"))
             drift = await site_build(gx, str(site), "public")
-            return pub, html, report, drift
+            return pub, html, report, drift, agent
 
-    pub, html, report, drift = asyncio.run(go())
+    pub, html, report, drift, agent = asyncio.run(go())
     assert pub["ok"], pub
     # The footer's years run from the first publication to the latest revision (b's, asserted today)
     this_year = datetime.now(timezone.utc).year
@@ -182,7 +188,23 @@ def test_derived_blocks_leave_the_render_and_the_navigation_replaces_them(tmp_pa
                        "sources": 0, "sources_linked": 0, "sources_cited": 0, "sources_unrendered": 0,
                        "sources_missing": 0,
                               "pitch_pending": 0, "questions": 1, "related": 0, "series_callout": 2, "hand_toc": 2,
-                              "series_nav_line": 1, "chrome_include": 4, "reported": 3, "end_placed": 3}
+                              "series_nav_line": 1, "chrome_include": 4, "reported": 3, "end_placed": 3,
+                       "jsonld": 3, "jsonld_checked": 3}
+    # The agent layer (39c51c15 (7), amendment 23a49667): one JSON-LD object per post, as planned
+    ld = {s: read_jsonld(h) for s, h in html.items()}
+    assert all(len(v) == 1 for v in ld.values())
+    (la,), (lb,), (lc,) = ld["a"], ld["b"], ld["c"]
+    assert lb["@type"] == "TechArticle" and la["@type"] == lc["@type"] == "BlogPosting"
+    assert la["url"] == "https://example.org/posts/a/" and la["author"]["name"] == "The Author"
+    assert la["datePublished"] == "2020-01-01" and lb["dateModified"] == datetime.now(timezone.utc).date().isoformat()
+    assert [s["@type"] for s in la["isPartOf"]] == ["CreativeWorkSeries"] and "isPartOf" not in lc
+    assert lc["license"] == "https://creativecommons.org/licenses/by/4.0/"
+    # Links stay in the markdown layer; llms.txt is the build's, from the graph's structure
+    assert pub["agent"]["links_rewritten"] > 0 and "](../b/index.llms.md)" in agent["a_md"]
+    txt = agent["txt"]
+    assert txt.startswith("# t\n\n> The test site.\n\n")
+    assert all(txt.count(f"https://example.org/posts/{s}/index.llms.md") == 1 for s in ("a", "b", "c"))
+    assert "## Notes" in txt and "## Optional" not in txt
     # The sources never change: the blocks leave the render only
     assert all(sources[s] == (site / "posts" / s / "index.md").read_bytes() for s in ("b", "c"))
     a, b, c = html["a"], html["b"], html["c"]

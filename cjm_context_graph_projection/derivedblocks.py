@@ -174,6 +174,8 @@ end
 local function apply(doc)
   local key, entry = doc_entry()
   if entry == nil then return nil end
+  -- The post's JSON-LD (design 39c51c15 (7)): planned by the build, placed in the page head
+  if entry.head and entry.head ~= "" then quarto.doc.include_text("in-header", entry.head) end
   -- The header's projected metadata: the kind label, the dated facts (design 39c51c15 (2))
   if entry.meta then
     for k, v in pairs(entry.meta.set or {}) do doc.meta[k] = pandoc.MetaString(v) end
@@ -283,7 +285,8 @@ async def derived_plan(
     planned_pages: List[Dict[str, Any]],  # page_plan's pages (each with `listed`: the note ids it lists, in order; `href`; `title`)
     pages: Dict[str, Dict[str, Any]],   # redirect_plan's {subject: {active, superseded}}
     inputs: List[str],                  # The profile's input documents (absolute, from `quarto inspect`)
-) -> Dict[str, Any]:  # {posts: {source: {drop, nav}}, counts, errors}
+    site: Optional[Dict[str, Any]] = None,  # The profile's `website` config (site-url, title)
+) -> Dict[str, Any]:  # {posts: {source: {drop, nav, end, meta, head}}, counts, errors, footer, llms, ...}
     """Plan every rendered post's drops and navigation. A derived block with no link target
     cannot be named to the filter, so it refuses rather than stays silently."""
     root = Path(website_root).resolve()
@@ -425,24 +428,32 @@ async def derived_plan(
     # post's own dates, a born post's publication, every revision
     footer: Optional[Dict[str, Any]] = None
     if post_lic:
-        from .postpage import load_holder, site_footer
-        from .sitepages import parse_date
+        from .postpage import load_holder, post_dates, site_footer
         dated, public_lic = [], []
         for n in post_lic:
-            t, md, f = types.get(n) or {}, F.prop(notes[n], "metadata") or {}, facts.get(n, {})
-            own = parse_date(md.get("date")) if t.get("origin") != "born" else None
-            published = f.get("published") or (own.isoformat() if own else "")
-            if not published:
+            t = types.get(n) or {}
+            d = post_dates(t.get("origin", ""), F.prop(notes[n], "metadata") or {}, facts.get(n, {}))
+            if not d["published"]:
                 continue   # a draft: not public
-            mod = parse_date(md.get("date-modified")) if t.get("origin") != "born" else None
-            dated.append({"published": published,
-                          "updated": max(v for v in (f.get("revised") or "", mod.isoformat() if mod else "", published) if v)})
+            dated.append(d)
             public_lic.append(post_lic[n])
         holder = load_holder(website_root)
         errors += holder["errors"]
         if not holder["errors"] and dated:
             footer = site_footer(holder["holder"], dated, public_lic)
             ends["counts"]["footer_years"] = footer["website"]["page-footer"]["center"][0]["text"]
+    # The agent layer (39c51c15 (7), amendment 23a49667): each post's JSON-LD for the page head, and
+    # llms.txt's plan from the graph's structure; both need the site URL once a post renders
+    llms: Optional[Dict[str, Any]] = None
+    if post_lic:
+        from .agentlayer import agent_plan
+        agent = await agent_plan(gx, website_root, site or {}, src_of, notes, types, cands, post_lic,
+                                 facts, planned_pages)
+        errors += agent["errors"]
+        for nid, head in agent["heads"].items():
+            posts.setdefault(src_of[nid], {"drop": [], "nav": "", "end": ""})["head"] = head
+        llms = agent["llms"]
+        ends["counts"]["jsonld"] = len(agent["heads"])
     counts = {"posts": len(posts), "series_nav": len(series_nav), "collections": len(collections),
               "related_stale": len(ends_stale), "comments_unrendered": len(comments_unrendered),
               **ends["counts"]}
@@ -450,7 +461,7 @@ async def derived_plan(
         counts[role] = sum(1 for p in posts.values() for d in p["drop"] if d["role"] == role)
     return {"posts": dict(sorted(posts.items())), "counts": counts, "errors": errors, "footer": footer,
             "related_stale": ends_stale, "comments_unrendered": comments_unrendered,
-            "sources_unrendered": srcs["unrendered"], "sources_missing": srcs["missing"]}
+            "sources_unrendered": srcs["unrendered"], "sources_missing": srcs["missing"], "llms": llms}
 
 
 def write_derived(

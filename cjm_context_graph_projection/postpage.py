@@ -227,6 +227,24 @@ def header_meta(
     return out
 
 
+def post_dates(
+    origin: str,                    # The type's origin (archive | born)
+    metadata: Dict[str, Any],       # The source's front matter (the Note's metadata)
+    facts: Dict[str, str],          # header_facts' entry for this Note
+) -> Dict[str, str]:  # {published, updated} ISO days ("" both = a draft: not public)
+    """A post's public dates (39c51c15 (2)): an archive post's own date, a born post's publication;
+    updated = the latest of its revisions, an archive post's date-modified and its publication. The
+    footer's years and the JSON-LD dates (amendment 23a49667 (4)) both read them."""
+    from .sitepages import parse_date
+    own = parse_date(metadata.get("date")) if origin != "born" else None
+    published = facts.get("published") or (own.isoformat() if own else "")
+    if not published:
+        return {"published": "", "updated": ""}
+    mod = parse_date(metadata.get("date-modified")) if origin != "born" else None
+    return {"published": published,
+            "updated": max(v for v in (facts.get("revised") or "", mod.isoformat() if mod else "", published) if v)}
+
+
 def _day(
     value: Any,  # A date string or None
 ) -> int:  # The day's ordinal (0 = none): newer posts rank first within a tie
