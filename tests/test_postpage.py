@@ -10,13 +10,24 @@ TYPES = {"t": {"kind": "tutorial"}, "n": {"kind": "notes"}, "p": {"kind": "site"
 
 
 def test_the_copy_comes_from_the_site_config_and_refuses_when_missing(tmp_path):
+    who = 'site-author:\n  name: "N"\n  role: "R"\n'
     (tmp_path / "_quarto.yml").write_text(
-        'author-strip:\n  byline: "B"\n  links: "L"\n  pitch: "P {claims} {href}"\n  questions: "Q"\n')
-    assert load_strip_copy(str(tmp_path)) == {"copy": {"byline": "B", "links": "L", "pitch": "P {claims} {href}",
+        'author-strip:\n  byline: "**{name}** — {role}."\n  links: "L"\n  pitch: "P {claims} {href}"\n  questions: "Q"\n'
+        + who)
+    # The byline names the author through the site's one statement of them (amendment fe6f0fb7);
+    # the pitch keeps its own placeholders for the render
+    assert load_strip_copy(str(tmp_path)) == {"copy": {"byline": "**N** — R.", "links": "L", "pitch": "P {claims} {href}",
                                                        "questions": "Q"}, "errors": []}
-    (tmp_path / "_quarto.yml").write_text('author-strip:\n  byline: "B"\n  links: ""\n')
+    (tmp_path / "_quarto.yml").write_text('author-strip:\n  byline: "B"\n  links: ""\n' + who)
     err = load_strip_copy(str(tmp_path))["errors"]
     assert err and err[0]["missing"] == ["links", "pitch", "questions"]   # never a fallback text
+    # No site author, or a placeholder it does not name, refuses
+    (tmp_path / "_quarto.yml").write_text('author-strip:\n  byline: "B"\n  links: "L"\n  pitch: "P"\n  questions: "Q"\n'
+                                          'site-author:\n  name: "N"\n')
+    assert load_strip_copy(str(tmp_path))["errors"][0] == {**load_strip_copy(str(tmp_path))["errors"][0],
+                                                           "kind": "site-author", "missing": ["role"]}
+    (tmp_path / "_quarto.yml").write_text('author-strip:\n  byline: "{who}"\n  links: "L"\n  pitch: "P"\n  questions: "Q"\n' + who)
+    assert load_strip_copy(str(tmp_path))["errors"][0]["field"] == "byline"
 
 
 def test_render_end_variants():

@@ -19,6 +19,10 @@ def test_post_jsonld_by_kind_and_draft():
     assert list(t) == [k for k in JSONLD_KEYS if k in t]          # the fixed key order
     assert t["@type"] == "TechArticle" and t["description"] == "Two lines"
     assert t["author"] == {"@type": "Person", "name": "A", "url": "https://x.org/"}
+    # the site author's role rides their Person (amendment fe6f0fb7); another author's never does
+    two = post_jsonld("notes", "T", "", "u", DATES, ["A", "B"], "", [], "https://x.org", {"A": "Role"})
+    assert two["author"][0] == {"@type": "Person", "name": "A", "jobTitle": "Role", "url": "https://x.org/"}
+    assert "jobTitle" not in two["author"][1]
     assert t["isPartOf"] == [{"@type": "CreativeWorkSeries", "name": "S", "url": "https://x.org/series/s.html"}]
     assert (t["datePublished"], t["dateModified"], t["license"]) == ("2024-05-01", "2024-06-02", lic)
     # Notes are BlogPostings; a draft carries no dates; empty fields are dropped; two authors list
@@ -77,10 +81,15 @@ def test_descriptions_are_plain_text():
 
 
 def test_index_copy_refuses_without_a_summary(tmp_path):
-    (tmp_path / "_quarto.yml").write_text("llms-index:\n  details: d\n")
+    who = 'site-author:\n  name: "N"\n  role: "R"\n'
+    (tmp_path / "_quarto.yml").write_text("llms-index:\n  details: d\n" + who)
     assert load_index_copy(str(tmp_path))["errors"][0]["missing"] == ["summary"]
-    (tmp_path / "_quarto.yml").write_text("llms-index:\n  summary: |\n    The   site.\n")
-    assert load_index_copy(str(tmp_path)) == {"copy": {"summary": "The site.", "details": ""}, "errors": []}
+    (tmp_path / "_quarto.yml").write_text("llms-index:\n  summary: |\n    {name},   {role}: the site.\n" + who)
+    assert load_index_copy(str(tmp_path)) == {"copy": {"summary": "N, R: the site.", "details": ""}, "errors": []}
+    (tmp_path / "_quarto.yml").write_text("llms-index:\n  summary: S\n  details: '{nope}'\n" + who)
+    assert load_index_copy(str(tmp_path))["errors"][0]["field"] == "details"   # an unknown placeholder refuses
+    (tmp_path / "_quarto.yml").write_text("llms-index:\n  summary: S\n")
+    assert load_index_copy(str(tmp_path))["errors"][0]["kind"] == "site-author"
 
 
 def _p(title, kind, date, src=None):

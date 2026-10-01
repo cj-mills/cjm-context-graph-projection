@@ -72,7 +72,8 @@ CALLOUT = ("::: {.callout-tip}\n## This post is part of the following series:\n"
 TOC = "* [Overview](#overview)\n* [Details](#details)\n\n-----\n\n"
 ABOUT = "\n{{< include /_about-author-cta.qmd >}}\n"
 QUESTIONS = "\n{{< include /_tutorial-cta.qmd >}}\n"
-STRIP = ('author-strip:\n  byline: "**The Author**, a byline."\n  links: "[About](/about.html)"\n'
+STRIP = ('site-author:\n  name: "The Author"\n  role: "a byline"\n'
+         'author-strip:\n  byline: "**{name}**, {role}."\n  links: "[About](/about.html)"\n'
          '  pitch: "Hire me for {claims}: [how]({href})."\n  questions: "Ask in the comments."\n'
          'copyright-holder: "The Author"\n'
          'post-comments:\n  repo: o/r\n  repo-id: R_1\n  category: Comments\n  category-id: C_1\n')
@@ -196,6 +197,7 @@ def test_derived_blocks_leave_the_render_and_the_navigation_replaces_them(tmp_pa
     (la,), (lb,), (lc,) = ld["a"], ld["b"], ld["c"]
     assert lb["@type"] == "TechArticle" and la["@type"] == lc["@type"] == "BlogPosting"
     assert la["url"] == "https://example.org/posts/a/" and la["author"]["name"] == "The Author"
+    assert la["author"]["jobTitle"] == "a byline"   # the site author's role (amendment fe6f0fb7)
     assert la["datePublished"] == "2020-01-01" and lb["dateModified"] == datetime.now(timezone.utc).date().isoformat()
     assert [s["@type"] for s in la["isPartOf"]] == ["CreativeWorkSeries"] and "isPartOf" not in lc
     assert lc["license"] == "https://creativecommons.org/licenses/by/4.0/"

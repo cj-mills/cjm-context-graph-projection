@@ -23,6 +23,8 @@ from .runtime import GraphHandle
 
 STRIP_KEY = "author-strip"                               # The site-config key holding the strip's copy
 STRIP_FIELDS = ("byline", "links", "pitch", "questions")  # Every field the copy must carry
+SITE_AUTHOR_KEY = "site-author"            # The site config's one statement of the author (amendment fe6f0fb7)
+SITE_AUTHOR_FIELDS = ("name", "role")
 POST_KINDS = ("tutorial", "notes", "log", "work")        # Deliverable kinds a post page carries (not site pages)
 TUTORIAL_KIND = "tutorial"
 # The header's kind label (39c51c15 (2)): the navigation kind, as a reader reads it; the site's
@@ -58,7 +60,46 @@ def load_strip_copy(
     if missing:
         return {"copy": {}, "errors": [{"kind": "strip-copy", "path": str(path), "missing": missing,
                                         "why": f"the site config's `{STRIP_KEY}` lacks copy the strip renders"}]}
-    return {"copy": {f: str(copy[f]).strip() for f in STRIP_FIELDS}, "errors": []}
+    out = {f: str(copy[f]).strip() for f in STRIP_FIELDS}
+    # The byline names the author through the site's one statement of them (amendment fe6f0fb7)
+    author = load_site_author(website_root)
+    if author["errors"]:
+        return {"copy": {}, "errors": author["errors"]}
+    filled = fill_copy(out["byline"], author["author"])
+    if "error" in filled:
+        return {"copy": {}, "errors": [{"kind": "strip-copy", "path": str(path), "field": "byline",
+                                        "why": f"the byline carries {filled['error']}"}]}
+    out["byline"] = filled["text"]
+    return {"copy": out, "errors": []}
+
+
+def load_site_author(
+    website_root: str,  # The site project root
+) -> Dict[str, Any]:  # {author: {name, role}, errors}
+    """The site's one statement of its author (`site-author` in the site config, amendment
+    fe6f0fb7): the byline, llms.txt's intro and the JSON-LD jobTitle all render it. A missing name
+    or role refuses, never a default."""
+    path = Path(website_root) / "_quarto.yml"
+    try:
+        got = (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get(SITE_AUTHOR_KEY) or {}
+    except (OSError, yaml.YAMLError) as e:
+        return {"author": {}, "errors": [{"kind": "site-author", "path": str(path), "why": f"unreadable: {e}"}]}
+    missing = [f for f in SITE_AUTHOR_FIELDS if not str(got.get(f) or "").strip()]
+    if missing:
+        return {"author": {}, "errors": [{"kind": "site-author", "path": str(path), "missing": missing,
+                                          "why": f"the site config's `{SITE_AUTHOR_KEY}` lacks the author's {', '.join(missing)}"}]}
+    return {"author": {f: " ".join(str(got[f]).split()) for f in SITE_AUTHOR_FIELDS}, "errors": []}
+
+
+def fill_copy(
+    text: str,                # Copy from the site config
+    author: Dict[str, str],   # load_site_author's author
+) -> Dict[str, Any]:  # {text} | {error}
+    """Copy names the site author through {name} / {role}; any other placeholder refuses."""
+    try:
+        return {"text": text.format_map(author)}
+    except (KeyError, ValueError, IndexError) as e:
+        return {"error": f"a placeholder other than {{name}} / {{role}} ({e})"}
 
 
 def load_holder(

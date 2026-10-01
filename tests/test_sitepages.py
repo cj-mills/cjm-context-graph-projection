@@ -80,6 +80,7 @@ def _site(root: Path) -> None:
         "  llms-txt: true\nllms-index:\n  summary: S.\n"
         # the author strip's copy (design 39c51c15 (5)): typed posts carry the strip
         'author-strip:\n  byline: "B"\n  links: "L"\n  pitch: "P {claims} {href}"\n  questions: "Q"\n'
+        'site-author:\n  name: "N"\n  role: "R"\n'
         'copyright-holder: "The Holder"\n'
         'post-comments:\n  repo: o/r\n  repo-id: R_1\n  category: Comments\n  category-id: C_1\n')
     (root / "_quarto-public.yml").write_text(

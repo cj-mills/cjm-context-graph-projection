@@ -72,8 +72,19 @@ def load_index_copy(
     if missing:
         return {"copy": {}, "errors": [{"kind": "llms-index-copy", "path": str(path), "missing": missing,
                                         "why": f"the site config's `{INDEX_KEY}` lacks copy llms.txt renders"}]}
-    return {"copy": {f: " ".join(str(copy.get(f) or "").split()) for f in INDEX_REQUIRED + INDEX_OPTIONAL},
-            "errors": []}
+    # The copy names the author through the site's one statement of them (amendment fe6f0fb7)
+    from .postpage import fill_copy, load_site_author
+    author = load_site_author(website_root)
+    if author["errors"]:
+        return {"copy": {}, "errors": author["errors"]}
+    out: Dict[str, str] = {}
+    for f in INDEX_REQUIRED + INDEX_OPTIONAL:
+        filled = fill_copy(" ".join(str(copy.get(f) or "").split()), author["author"])
+        if "error" in filled:
+            return {"copy": {}, "errors": [{"kind": "llms-index-copy", "path": str(path), "field": f,
+                                            "why": f"`{INDEX_KEY}.{f}` carries {filled['error']}"}]}
+        out[f] = filled["text"]
+    return {"copy": out, "errors": []}
 
 
 def llms_path(
@@ -127,6 +138,7 @@ def post_jsonld(
     license_url: str,                   # The content license's URL ("" = none)
     series: List[Dict[str, str]],       # [{title, url}] -- every series the post belongs to
     site_url: str,                      # The site URL (an author's url)
+    job_titles: Optional[Dict[str, str]] = None,  # {author name: role} -- the site author's (amendment fe6f0fb7)
 ) -> Dict[str, Any]:  # The post's JSON-LD object (keys in JSONLD_KEYS order, empties dropped)
     """A post's structured data (39c51c15 (7), amendment 23a49667 (4)): a draft has no
     datePublished, and dateModified shows only beside a publication."""
@@ -136,7 +148,9 @@ def post_jsonld(
         "headline": plain(title),
         "description": plain(description),
         "url": url,
-        "author": [{"@type": "Person", "name": n, "url": site_url.rstrip("/") + "/"} for n in authors],
+        "author": [{"@type": "Person", "name": n,
+                    **({"jobTitle": (job_titles or {})[n]} if (job_titles or {}).get(n) else {}),
+                    "url": site_url.rstrip("/") + "/"} for n in authors],
         "datePublished": dates.get("published") or "",
         "dateModified": (dates.get("updated") or "") if dates.get("published") else "",
         "license": license_url,
@@ -341,6 +355,11 @@ async def agent_plan(
                 in_series.setdefault(m, []).append({"title": page["title"], "url": site_url + page["href"]})
     heads: Dict[str, str] = {}
     dates: Dict[str, Dict[str, str]] = {}
+    # The site author's role rides their Person as jobTitle (amendment fe6f0fb7); a missing
+    # site-author already refused the strip, so here it only omits the role
+    from .postpage import load_site_author
+    me = load_site_author(website_root)["author"]
+    job_titles = {me["name"]: me["role"]} if me else {}
     for nid in sorted(licenses):
         t = types.get(nid) or {}
         md = F.prop(notes[nid], "metadata") or {}
@@ -348,7 +367,7 @@ async def agent_plan(
         obj = post_jsonld(t.get("kind", ""), stated(nid, "title"), stated(nid, "description"),
                           site_url + posts[nid]["href"], dates[nid],
                           directory_author(website_root, src_of[nid], md),
-                          licenses[nid]["content"][1], in_series.get(nid, []), site_url)
+                          licenses[nid]["content"][1], in_series.get(nid, []), site_url, job_titles)
         heads[nid] = jsonld_script(obj)
     copy = load_index_copy(website_root)
     errors += copy["errors"]
