@@ -22,6 +22,7 @@ from cjm_context_graph_projection.lens import lens_node_id, set_lens
 from cjm_context_graph_projection.purenotes import mint_deliverable_type
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
 from cjm_context_graph_projection.series import mint_series, set_series_members
+from cjm_context_graph_projection.judging import judge_related
 from cjm_context_graph_projection.site import site_build
 from cjm_context_graph_projection.write import assert_value
 
@@ -122,6 +123,13 @@ async def _graph(gx, root: Path) -> None:
     await assert_value(gx, lens_node_id("topic"), "site_path", "/series/notes/topic.html")
 
 
+def _unrelated(body):
+    """A judge that relates nothing (design e09e262b's verb, without the service)."""
+    return {"model": "test", "answers": {
+        "relatedness": {"score": 0.1, "confidence": 0.9, "probabilities": {"0": 0.9, "1": 0.1}},
+        "relation": {"choice": "unrelated", "confidence": 0.9, "probabilities": {"unrelated": 1.0}}}}
+
+
 @pytest.mark.skipif(not (_HAVE_GRAPH and _HAVE_QUARTO), reason="needs the graph capability and quarto")
 def test_derived_blocks_leave_the_render_and_the_navigation_replaces_them(tmp_path):
     site = tmp_path / "site"
@@ -131,6 +139,10 @@ def test_derived_blocks_leave_the_render_and_the_navigation_replaces_them(tmp_pa
     async def go():
         async with open_graph(str(tmp_path / "g.db")) as gx:
             await _graph(gx, site)
+            # A public build needs every public post judged (amendment e09e262b): a judge that
+            # relates nothing, so the posts under test are unchanged
+            judged = await judge_related(gx, ask=_unrelated)
+            assert judged["written"], judged
             pub = await site_build(gx, str(site), "public")
             html = {s: (site / "_site" / "posts" / s / "index.html").read_text() for s in ("a", "b", "c")}
             report = (site / DERIVED_DIR / REPORT_FILE).read_text()
@@ -150,7 +162,8 @@ def test_derived_blocks_leave_the_render_and_the_navigation_replaces_them(tmp_pa
     foot = yaml.safe_load((site / DERIVED_DIR / "site-footer.yml").read_text())["website"]["page-footer"]
     assert foot["right"][0]["text"] == "Code samples licensed under the MIT License"
     assert "licenses vary" in foot["left"][0]["text"]            # c's override differs from the class
-    assert derived == {"posts": 3, "series_nav": 2, "collections": 3, "strips": 3, "pitch": 0, "headers": 3,
+    assert derived == {"posts": 3, "series_nav": 2, "collections": 3, "related_stale": 0, "strips": 3,
+                       "pitch": 0, "headers": 3,
                               "pitch_pending": 0, "questions": 1, "related": 0, "series_callout": 2, "hand_toc": 2,
                               "series_nav_line": 1, "chrome_include": 4, "reported": 3, "end_placed": 3}
     # The sources never change: the blocks leave the render only

@@ -347,6 +347,7 @@ async def derived_plan(
     types = await note_types(gx)
     ends: Dict[str, Any] = {"ends": {}, "counts": {}}
     post_lic: Dict[str, Dict[str, Any]] = {}
+    ends_stale: List[Dict[str, str]] = []
     if any((types.get(n) or {}).get("kind") in POST_KINDS for n in src_of):
         strip = load_strip_copy(website_root)
         errors += strip["errors"]
@@ -358,6 +359,11 @@ async def derived_plan(
                          "date": (F.prop(notes[n], "metadata") or {}).get("date")}
                      for n, s in src_of.items() if (types.get(n) or {}).get("kind") in POST_KINDS}
             related = {n: related_posts(n, cands, ctx) for n in cands}
+            # A public post whose judgments are missing or stale is REPORTED, never ranked around
+            # (amendment e09e262b (2)): the public build refuses it, staging counts it
+            from .judging import related_stale
+            stale = await related_stale(gx)
+            ends_stale = [s for s in stale if s["id"] in cands]
             # Every post states its licenses: its own override, else its class's (39c51c15 (6))
             lic = await license_facts(gx)
             for n in cands:
@@ -407,10 +413,11 @@ async def derived_plan(
             footer = site_footer(holder["holder"], dated, public_lic)
             ends["counts"]["footer_years"] = footer["website"]["page-footer"]["center"][0]["text"]
     counts = {"posts": len(posts), "series_nav": len(series_nav), "collections": len(collections),
-              **ends["counts"]}
+              "related_stale": len(ends_stale), **ends["counts"]}
     for role in ROLES:
         counts[role] = sum(1 for p in posts.values() for d in p["drop"] if d["role"] == role)
-    return {"posts": dict(sorted(posts.items())), "counts": counts, "errors": errors, "footer": footer}
+    return {"posts": dict(sorted(posts.items())), "counts": counts, "errors": errors, "footer": footer,
+            "related_stale": ends_stale}
 
 
 def write_derived(

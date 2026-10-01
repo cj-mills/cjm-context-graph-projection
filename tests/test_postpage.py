@@ -58,11 +58,15 @@ def test_related_posts_tiers_reasons_and_exclusions():
              for k, kind, day in (("me", "tutorial", "2024-01-01"), ("out", "notes", "2020-01-01"),
                                   ("in", "notes", "2021-01-01"), ("mate", "tutorial", "2022-01-01"),
                                   ("next", "tutorial", "2023-01-01"), ("far", "tutorial", "2023-01-01"),
-                                  ("topical", "notes", "2022-06-01"), ("thin", "notes", "2022-06-01"))}
+                                  ("topical", "notes", "2022-06-01"), ("thin", "notes", "2022-06-01"),
+                                  ("odd", "notes", "2022-06-01"), ("unjudged", "notes", "2022-06-01"))}
+    j = lambda score, rel: {"score": score, "relation": rel}
     ctx = {"links": {("me", "out"), ("in", "me"), ("me", "mate")},
-           "topics": {"me": {"t1", "t2", "kind"}, "topical": {"t1", "t2"}, "thin": {"t1", "kind"},
-                      "far": {"t1", "t2"}},
-           "topic_names": {"t1": "pytorch", "t2": "onnx", "kind": "tutorial"},
+           "judged": {("me", "out"): j(1.2, "unrelated"), ("me", "in"): j(2.5, "prerequisite"),
+                      ("me", "next"): j(2.8, "follow_up"), ("me", "far"): j(1.9, "same_technique"),
+                      ("me", "topical"): j(1.8, "same_subject"), ("me", "thin"): j(1.4, "same_tool"),
+                      ("me", "odd"): j(2.0, "unrelated"), ("me", "mate"): j(3.0, "follow_up"),
+                      ("far", "me"): j(3.0, "same_technique")},
            "series": {"me": {"s"}, "mate": {"s"}},
            "coverage": {"me": {"teaches_task": ["det"], "teaches_stage": ["training"]},
                         "next": {"teaches_task": ["det"], "teaches_stage": ["export"]},
@@ -70,11 +74,16 @@ def test_related_posts_tiers_reasons_and_exclusions():
            "stages": ["training", "export", "deployment"],
            "stage_names": {"export": "Export"}}
     got = related_posts("me", cands, ctx)
+    # links first whatever the judge says, ordered by the judged score; then judged pairs by score,
+    # an adjacent-stage tutorial keeping its stage reason; the cap (4) drops TOPICAL
     assert [(g["title"], g["reason"]) for g in got] == [
-        ("OUT", "Linked from this post"), ("IN", "Links here"), ("NEXT", "Next step: Export"),
-        ("FAR", "Shared topics: onnx, pytorch")]    # the cap (4) drops TOPICAL, older than FAR
+        ("IN", "Links here"), ("OUT", "Linked from this post"), ("NEXT", "Next step: Export"),
+        ("FAR", "Same technique")]
     assert all(g["title"] != "MATE" for g in got)    # a series-mate is the navigation's
-    assert "THIN" not in {g["title"] for g in related_posts("me", cands, ctx, limit=10)}  # a kind topic is no relation
+    every = {g["title"]: g["reason"] for g in related_posts("me", cands, ctx, limit=10)}
+    assert every["TOPICAL"] == "Same subject"
+    # below the floor, judged unrelated, or never judged: no relation
+    assert not {"THIN", "ODD", "UNJUDGED"} & set(every)
     block = render_related(got)
     assert block.startswith("::: {.related-posts}\n**Related**") and "- [OUT](/posts/out/) — Linked from this post" in block
     assert render_related([]) == ""

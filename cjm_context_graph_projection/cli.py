@@ -900,6 +900,17 @@ async def _dispatch(args) -> int:
                     op["retract"] = True
                 append_write(args.journal_path, "supports", op)
             return 1 if res.get("error") else 0
+        elif args.command == "judge-related":
+            # Judged related posts (design e09e262b): the judge is asked here and only here; the op
+            # carries the whole run, so replay re-lands it without calling the service.
+            from .judging import JUDGE_MODEL, JUDGE_URL, JUDGE_WORKERS, judge_related
+            res = await judge_related(gx, all_posts=args.all, dry_run=args.dry_run,
+                                      model=args.model or JUDGE_MODEL, url=args.url or JUDGE_URL,
+                                      workers=args.workers or JUDGE_WORKERS, actor=args.actor)
+            print(render("judge-related", res, args.format))
+            if args.journal_path and res.get("written"):
+                append_write(args.journal_path, "judge-related", {"run": res["run"], "actor": args.actor})
+            return 1 if res.get("error") else 0
         elif args.command == "retire-source":
             # An archive source retires as a FACT (design amendment e916a4b9 (1)): the op records
             # where its source lived (the website clone's path + commit), so the ingest can restore
@@ -3020,6 +3031,16 @@ def main() -> int:
     p_sup.add_argument("--note", default="", help="Why this deliverable backs the claim, in one line")
     p_sup.add_argument("--retract", action="store_true", help="Remove this (deliverable, claim) support")
     p_sup.add_argument("--actor", default=_DEFAULT_ACTOR)
+    p_jr = sub.add_parser("judge-related",
+                          help="Judge related posts (journaled; design e09e262b): every pair touching a stale "
+                               "public post is asked of the judge; the judgments at or above the store floor "
+                               "land as JUDGED_RELATED edges and each post records what it was judged against")
+    p_jr.add_argument("--all", action="store_true", help="Re-judge every public post, not only the stale ones")
+    p_jr.add_argument("--dry-run", action="store_true", help="List the stale posts and the pair count; ask nothing")
+    p_jr.add_argument("--model", default=None, help="The judge model (default jev-latest)")
+    p_jr.add_argument("--url", default=None, help="The judge endpoint (default TypeSafe's System One API)")
+    p_jr.add_argument("--workers", type=int, default=None, help="Concurrent requests (default 16)")
+    p_jr.add_argument("--actor", default=_DEFAULT_ACTOR)
     p_rs = sub.add_parser("retire-source",
                           help="Retire an ARCHIVE source as a fact (journaled; design amendment e916a4b9): "
                                "publish_state retired + where its source lived, so a rebuild restores it "

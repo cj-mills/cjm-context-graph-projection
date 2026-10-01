@@ -20,6 +20,7 @@ from cjm_markdown_decompose_core.ingest import corpus_graph_elements
 from cjm_context_graph_projection.lens import lens_node_id, set_lens, validate_lens_spec
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
 from cjm_context_graph_projection.series import mint_series, set_series_members
+from cjm_context_graph_projection.judging import judge_related
 from cjm_context_graph_projection.site import publish_guard, redirect_plan, site_build
 from cjm_context_graph_projection.sitepages import (GENERATED, is_generated, is_public, member_updated,
                                                     page_plan, page_source, parse_date, project_pages,
@@ -123,6 +124,13 @@ async def _graph(gx, root: Path) -> None:
     await assert_value(gx, lens_node_id("topic"), "site_path", "/series/notes/topic.html")
 
 
+def _unrelated(body):
+    """A judge that relates nothing (design e09e262b's verb, without the service)."""
+    return {"model": "test", "answers": {
+        "relatedness": {"score": 0.1, "confidence": 0.9, "probabilities": {"0": 0.9, "1": 0.1}},
+        "relation": {"choice": "unrelated", "confidence": 0.9, "probabilities": {"unrelated": 1.0}}}}
+
+
 @pytest.mark.skipif(not (_HAVE_GRAPH and _HAVE_QUARTO), reason="needs the graph capability and quarto")
 def test_series_and_topic_pages_are_projected_and_rendered(tmp_path):
     site = tmp_path / "site"
@@ -131,6 +139,9 @@ def test_series_and_topic_pages_are_projected_and_rendered(tmp_path):
     async def go():
         async with open_graph(str(tmp_path / "g.db")) as gx:
             await _graph(gx, site)
+            # A public build needs every public post judged (amendment e09e262b): a judge that
+            # relates nothing, so the pages under test are unchanged
+            await judge_related(gx, ask=_unrelated)
             # A hand file where a projected page lands refuses the build before anything renders
             (site / "series" / "notes" / "topic.qmd").write_text("---\ntitle: hand\n---\n")
             refused = await site_build(gx, str(site), "public")

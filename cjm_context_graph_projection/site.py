@@ -314,6 +314,14 @@ async def site_build(
     derived = await derived_plan(gx, website_root, pages["plan"], plan["pages"], info["inputs"])
     rep["derived"] = derived["counts"]
     rep["errors"] += derived["errors"]
+    # Related posts rank by stored judgments (amendment e09e262b): a public build with a stale
+    # post is not fit to publish -- the publish step runs `judge-related` first
+    stale = derived.get("related_stale") or []
+    if profile == "public" and stale:
+        rep["errors"].append({"kind": "related-stale",
+                              "why": f"{len(stale)} public post(s) have missing or stale related judgments "
+                                     "-- run judge-related",
+                              "detail": [s["title"] for s in stale[:10]]})
     if rep["errors"]:
         rep["ok"] = False
         return rep

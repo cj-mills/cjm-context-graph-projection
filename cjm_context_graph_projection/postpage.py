@@ -28,6 +28,7 @@ TUTORIAL_KIND = "tutorial"
 KIND_LABELS = {"tutorial": "Tutorial", "notes": "Notes", "log": "Log", "work": "Work"}
 KIND_META = "post-kind"
 RELATED_MAX = 4   # Related posts shown at most (39c51c15 (4))
+RELATED_FLOOR = 1.5   # The judged score a related post needs (amendment e09e262b; tuned on the review)
 # The license vocabulary a page renders (SPDX ids, case-folded as the facts store them)
 LICENSES = {
     "cc-by-4.0": ("CC BY 4.0", "https://creativecommons.org/licenses/by/4.0/"),
@@ -222,27 +223,24 @@ def _day(
 
 async def related_context(
     gx: GraphHandle,
-) -> Dict[str, Any]:  # {links, topics, topic_names, series, coverage, stages, stage_names}
-    """The relations related posts rank by (39c51c15 (4)): post-to-post links (REFERENCES between
-    Notes), topics (TAGGED), series membership (IN_SERIES), and the tutorials' task + stage facts
-    with the stage order."""
+) -> Dict[str, Any]:  # {links, judged, series, coverage, stages, stage_names}
+    """The relations related posts rank by (39c51c15 (4), amendment e09e262b): post-to-post links
+    (REFERENCES between Notes), the stored judgments (JUDGED_RELATED), series membership
+    (IN_SERIES), and the tutorials' task + stage facts with the stage order (the adjacent-stage
+    reason)."""
     from cjm_dev_graph_schema import predicates as P
     from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
     from . import factlayer as F
     from .coverage import load_coverage_facts, load_vocab
+    from .judging import load_judged
     notes = {str(F.nid(n)) for n in await F.load_label(gx, DevNodeKinds.NOTE)}
-    names = {str(F.nid(n)): str(F.prop(n, "name") or "") for n in await F.load_label(gx, DevNodeKinds.TOPIC)}
     links = {(str(s), str(t)) for s, t in await F.load_edge_pairs(gx, DevRelations.REFERENCES)
              if str(s) in notes and str(t) in notes and s != t}
-    topics: Dict[str, set] = {}
-    for s, t in await F.load_edge_pairs(gx, DevRelations.TAGGED):
-        if str(s) in notes and str(t) in names:
-            topics.setdefault(str(s), set()).add(str(t))
     series: Dict[str, set] = {}
     for s, t in await F.load_edge_pairs(gx, DevRelations.IN_SERIES):
         series.setdefault(str(s), set()).add(str(t))
     stages = (await load_vocab(gx))[P.ENTITY_STAGE]
-    return {"links": links, "topics": topics, "topic_names": names, "series": series,
+    return {"links": links, "judged": await load_judged(gx), "series": series,
             "coverage": await load_coverage_facts(gx), "stages": [s["key"] for s in stages],
             "stage_names": {s["key"]: s.get("name", s["key"]) for s in stages}}
 
@@ -253,50 +251,47 @@ def related_posts(
     ctx: Dict[str, Any],                    # related_context's relations
     limit: int = RELATED_MAX,
 ) -> List[Dict[str, str]]:  # [{title, href, reason}] in rank order
-    """Related posts by relation, each with its reason (39c51c15 (4)): explicit links in either
-    direction first; then, for a tutorial, a tutorial of the same task at the adjacent stage; then
-    the most shared topics (at least two, rarer topics weigh more, and a topic that only restates
-    a kind -- `notes`, `tutorial` -- is no relation). Series-mates are excluded: the navigation
-    holds them. A shared claim is no signal (one claim is backed by 30 posts)."""
+    """Related posts by relation, each with its reason (39c51c15 (4), amendment e09e262b):
+    explicit links in either direction first -- authored intent, kept whatever the judge says,
+    ordered by the judged score; then the posts the judge rated at or above RELATED_FLOOR with a
+    relation other than `unrelated`, by score, the reason the relation's (a tutorial of the same
+    task at the adjacent stage keeps its stage reason). Series-mates are excluded: the navigation
+    holds them. Only stored judgments rank -- a post never judged has its links alone, and the
+    build reports it stale."""
     from cjm_dev_graph_schema import predicates as P
+    from .judging import RELATION_REASONS
     mine_series = ctx["series"].get(nid, set())
     pool = {c: v for c, v in candidates.items()
             if c != nid and not (mine_series & ctx["series"].get(c, set()))}
+    judged = ctx.get("judged") or {}
+
+    def score(c):
+        return float((judged.get((nid, c)) or {}).get("score") or 0.0)
     ranked: List[tuple] = []   # (tier, sort key, id, reason)
     for c in pool:
         if (nid, c) in ctx["links"]:
-            ranked.append((0, 0, c, "Linked from this post"))
+            ranked.append((0, -score(c), c, "Linked from this post"))
         elif (c, nid) in ctx["links"]:
-            ranked.append((0, 1, c, "Links here"))
+            ranked.append((0, -score(c), c, "Links here"))
     seen = {r[2] for r in ranked}
     order = {k: i for i, k in enumerate(ctx["stages"])}
     mine = ctx["coverage"].get(nid, {})
-    if candidates.get(nid, {}).get("kind") == TUTORIAL_KIND and mine:
-        tasks, stages = set(mine.get(P.TEACHES_TASK, [])), [s for s in mine.get(P.TEACHES_STAGE, []) if s in order]
-        for c in pool:
-            theirs = ctx["coverage"].get(c, {})
-            if c in seen or pool[c].get("kind") != TUTORIAL_KIND or not tasks & set(theirs.get(P.TEACHES_TASK, [])):
-                continue
+    tasks = set(mine.get(P.TEACHES_TASK, []))
+    stages = [s for s in mine.get(P.TEACHES_STAGE, []) if s in order]
+    tutorial = candidates.get(nid, {}).get("kind") == TUTORIAL_KIND
+    for c in pool:
+        j = judged.get((nid, c))
+        if c in seen or not j or score(c) < RELATED_FLOOR or j.get("relation") not in RELATION_REASONS:
+            continue
+        reason = RELATION_REASONS[j["relation"]]
+        theirs = ctx["coverage"].get(c, {})
+        if tutorial and pool[c].get("kind") == TUTORIAL_KIND and tasks & set(theirs.get(P.TEACHES_TASK, [])):
             steps = [(order[t] - order[s], t) for s in stages for t in theirs.get(P.TEACHES_STAGE, [])
                      if t in order and abs(order[t] - order[s]) == 1]
             if steps:
                 d, stage = max(steps)   # a next step outranks a previous one
-                label = "Next step" if d > 0 else "Previous step"
-                ranked.append((1, 0 if d > 0 else 1, c, f"{label}: {ctx['stage_names'].get(stage, stage)}"))
-                seen.add(c)
-    kinds = set(KIND_LABELS) | {"tutorials"}
-    names = ctx["topic_names"]
-    df: Dict[str, int] = {}
-    for c in candidates:
-        for t in ctx["topics"].get(c, set()):
-            df[t] = df.get(t, 0) + 1
-    own = {t for t in ctx["topics"].get(nid, set()) if names.get(t, "").lower() not in kinds}
-    for c in pool:
-        shared = own & ctx["topics"].get(c, set())
-        if c in seen or len(shared) < 2:
-            continue
-        weight = sum(1.0 / df.get(t, 1) for t in shared)
-        ranked.append((2, -weight, c, "Shared topics: " + ", ".join(sorted(names[t] for t in shared))))
+                reason = f"{'Next step' if d > 0 else 'Previous step'}: {ctx['stage_names'].get(stage, stage)}"
+        ranked.append((1, -score(c), c, reason))
     ranked.sort(key=lambda r: (r[0], r[1], -_day(pool[r[2]].get("date")), pool[r[2]].get("title", "")))
     return [{"title": pool[c]["title"], "href": pool[c]["href"], "reason": why} for _, _, c, why in ranked[:limit]]
 

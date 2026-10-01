@@ -84,7 +84,10 @@ M3_BASELINE_ACTOR = "import:m3-baseline"
 # e916a4b9): publish_state retired, the successor's SUPERSEDES edge, and where the source
 # lived (path + commit) -- the ingest reads these ops BEFORE replay and restores each retired
 # node from git. `transfer-path` = a page's active site_path moved to another holder (the
-# target's assertion supersedes the source's across slots).
+# target's assertion supersedes the source's across slots). `judge-related` = one judge run
+# (design e09e262b): the judged posts with the states they were judged against, every stored
+# judgment (JUDGED_RELATED, at or above the floor) and the records' content hashes -- replay
+# re-lands the run without asking the judge.
 JOURNAL_VERBS = ("decide", "alias", "assert", "link", "unlink", "section", "new-note",
                  "add-section", "display-rule", "set-lens", "check", "session",
                  "retract-session", "pull-transcript", "mint-messages", "edit-message",
@@ -92,7 +95,7 @@ JOURNAL_VERBS = ("decide", "alias", "assert", "link", "unlink", "section", "new-
                  "deliverable-type", "accept-point", "retract-point", "edit-point", "render-notes",
                  "render-work-page", "rehome-points", "place-point",
                  "series", "series-members", "place-in-series", "entity", "verified-on",
-                 "supports", "retire-source", "transfer-path")
+                 "supports", "retire-source", "transfer-path", "judge-related")
 
 
 def m3_baseline_import(
@@ -409,6 +412,11 @@ async def _apply_op(
         await record_support(gx, a["deliverable"], a["claim"], kind=a.get("kind", ""),
                              note=a.get("note", ""), retract=bool(a.get("retract")),
                              actor=a.get("actor", "agent:session"))
+    elif verb == "judge-related":
+        # One judge run (design e09e262b): the judgments are observations the op carries whole,
+        # so replay never calls the judge; the journaled content hashes bind the records the same.
+        from .judging import apply_judgments
+        await apply_judgments(gx, a["run"], actor=a.get("actor", "agent:session"))
     elif verb == "retire-source":
         # An archive source retired (design amendment e916a4b9 (1)): the ingest already restored
         # the node from the journaled commit, so replay re-lands the fact and the successor edge
@@ -647,6 +655,8 @@ def touched_node_ids(
             out.append(a["deliverable"])
         if a.get("claim"):
             out.append(entity_node_id("claim", a["claim"]))
+    elif verb == "judge-related":
+        out.extend(sorted((a.get("run") or {}).get("posts") or {}))
     elif verb == "retire-source":
         out.extend(r for r in (a.get("note"), a.get("successor")) if r)
     elif verb == "transfer-path":

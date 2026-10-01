@@ -380,6 +380,24 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             return f"**retracted** support `{obj['edge_id']}`"
         return (f"**{'restated' if obj.get('replaced') else 'supports'}** `{str(obj['deliverable_id'])[:8]}` "
                 f"→ claim `{obj.get('claim')}` as _{obj.get('kind')}_ `{obj['edge_id']}`")
+    if kind == "judge-related":
+        lines = []
+        if obj.get("error"):
+            lines.append(f"⚠ {obj['error']}")
+            lines += [f"  - `{str(f['a'])[:8]}` → `{str(f['b'])[:8]}`: {f['error']}" for f in obj.get("failures") or []]
+        stale = obj.get("stale") or []
+        head = (f"**judged** {obj['pairs']} pair(s) touching {len(stale)} post(s)" if obj.get("written") else
+                f"**stale** {len(stale)} post(s) · {obj.get('pairs', 0)} pair(s) to judge")
+        lines.append(head + f" · question `{obj.get('question')}`")
+        if obj.get("written"):
+            run, ap = obj["run"], obj.get("applied") or {}
+            lines.append(f"  stored {ap.get('landed', 0)} judgment(s) at or above the floor · replaced "
+                         f"{ap.get('deleted', 0)} · records {ap.get('recorded', 0)} · models {', '.join(run.get('models') or [])}"
+                         f" · input tokens {obj.get('input_tokens', 0)}")
+        lines += [f"  - {s['title']} `{str(s['id'])[:8]}`" for s in stale[:20]]
+        if len(stale) > 20:
+            lines.append(f"  - … {len(stale) - 20} more")
+        return "\n".join(lines)
     if kind == "claims":
         return _render_claims(obj)
     if kind == "series-order":
@@ -426,6 +444,8 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                              f"{dv['strips']} post(s) ({dv.get('pitch', 0)} pitching, {dv.get('pitch_pending', 0)} "
                              f"awaiting the Work-with-me page) · questions line on {dv.get('questions', 0)} · "
                              f"header metadata on {dv.get('headers', 0)} · related posts on {dv.get('related', 0)}"
+                             + (f" (⚠ {dv['related_stale']} post(s) with stale judgments -- run judge-related)"
+                                if dv.get('related_stale') else "")
                              + (f" · footer: {dv['footer_years']}" if dv.get("footer_years") else "")
                              + (f" · inside <main> on {dv['end_placed']}" if "end_placed" in dv else ""))
         if obj.get("staging_index"):
