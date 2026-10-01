@@ -812,7 +812,7 @@ def _build_sibling(sdb: str):
     strata Corrections (apparatus header / tangent / quotation) over them."""
     async def go():
         async with open_graph(sdb) as sg:
-            nodes = [{"id": "src-1", "label": "Source", "sources": [],
+            nodes = [{"id": "5c5c5c5c-0000-4000-8000-000000000001", "label": "Source", "sources": [],
                       "properties": {"title": "The Learning Game — 04 - 1. Seven Dangerous Lessons",
                                      "work_structure": {"kind": "chapter", "part": 1, "chapter": 1,
                                                         "title": "Seven Dangerous Lessons",
@@ -827,7 +827,7 @@ def _build_sibling(sdb: str):
                                            ("Kids never build a coherent picture.", 12.0, 14.0)]):
                 nodes.append({"id": f"seg-{i}", "label": "Segment", "sources": [],
                               "properties": {"text": t, "index": i, "start_time": a, "end_time": b,
-                                             "source_id": "src-1", "rendition_id": "rend-1"}})
+                                             "source_id": "5c5c5c5c-0000-4000-8000-000000000001", "rendition_id": "rend-1"}})
             # The real topology (the unit read is the correction core's spine read): Source <- AudioSegment
             # <- AudioRendition <- Segment. One segment a chunk respine REPLACED stays on the graph stamped
             # `superseded_by` — the live view never shows it (the Bonus lecture finding, 2026-09-20).
@@ -836,9 +836,9 @@ def _build_sibling(sdb: str):
                        "properties": {"chain": [], "is_raw": True, "preprocessing": None}},
                       {"id": "seg-old", "label": "Segment", "sources": [],
                        "properties": {"text": "Gatto quit teaching in 1981.", "index": 1, "start_time": 2.0,
-                                      "end_time": 5.0, "source_id": "src-1", "rendition_id": "rend-1",
+                                      "end_time": 5.0, "source_id": "5c5c5c5c-0000-4000-8000-000000000001", "rendition_id": "rend-1",
                                       "superseded_by": "seg-1"}}]
-            spine_edges = [{"id": "e-aseg", "source_id": "aseg-1", "target_id": "src-1", "relation_type": "PART_OF", "properties": {}},
+            spine_edges = [{"id": "e-aseg", "source_id": "aseg-1", "target_id": "5c5c5c5c-0000-4000-8000-000000000001", "relation_type": "PART_OF", "properties": {}},
                            {"id": "e-rend", "source_id": "rend-1", "target_id": "aseg-1", "relation_type": "DERIVED_FROM", "properties": {}}]
             spine_edges += [{"id": f"e-seg-{k}", "source_id": k, "target_id": "rend-1", "relation_type": "PART_OF", "properties": {}}
                             for k in [f"seg-{i}" for i in range(8)] + ["seg-old"]]
@@ -847,7 +847,7 @@ def _build_sibling(sdb: str):
                 nodes.append({"id": cid, "label": "Correction", "sources": [],
                               "properties": {"correction_type": "stratum", "status": "applied", "actor": "human",
                                              "session_id": "s", "created_at": 1.0,
-                                             "payload": {"operation": "classify", "source_id": "src-1", "category": cat,
+                                             "payload": {"operation": "classify", "source_id": "5c5c5c5c-0000-4000-8000-000000000001", "category": cat,
                                                          "segment_ids": sids, "start_time": st}}})
             await extend_graph(sg.queue, sg.graph_id, nodes, spine_edges)
     asyncio.run(go())
@@ -867,7 +867,7 @@ def _build_lecture_sibling(sdb: str):
     and the series title read (finding baa640e8)."""
     async def go():
         async with open_graph(sdb) as sg:
-            nodes = [{"id": "src-lec", "label": "Source", "sources": [],
+            nodes = [{"id": "5c5c5c5c-0000-4000-8000-00000000001e", "label": "Source", "sources": [],
                       "properties": {"title": "Bonus Lecture： CUDA C++ llm.cpp", "media_type": "audio",
                                      "public_url": "https://www.youtube.com/watch?v=abc",
                                      "public_url_evidence": {"kind": "playlist-metadata", "playlist_title": "Bonus Lecture: CUDA C++ llm.cpp"},
@@ -882,10 +882,10 @@ def _build_lecture_sibling(sdb: str):
                                            ("Kernels launch through it.", 8.0, 12.0)]):
                 nodes.append({"id": f"lseg-{i}", "label": "Segment", "sources": [],
                               "properties": {"text": t, "index": i, "start_time": a, "end_time": b,
-                                             "source_id": "src-lec", "rendition_id": "rend-l"}})
-            edges = [{"id": "e-l-coll", "source_id": "src-lec", "target_id": "coll-gm", "relation_type": "PART_OF", "properties": {}},
-                     {"id": "e-l-old", "source_id": "src-lec", "target_id": "coll-old", "relation_type": "PART_OF", "properties": {}},
-                     {"id": "e-l-aseg", "source_id": "aseg-l", "target_id": "src-lec", "relation_type": "PART_OF", "properties": {}},
+                                             "source_id": "5c5c5c5c-0000-4000-8000-00000000001e", "rendition_id": "rend-l"}})
+            edges = [{"id": "e-l-coll", "source_id": "5c5c5c5c-0000-4000-8000-00000000001e", "target_id": "coll-gm", "relation_type": "PART_OF", "properties": {}},
+                     {"id": "e-l-old", "source_id": "5c5c5c5c-0000-4000-8000-00000000001e", "target_id": "coll-old", "relation_type": "PART_OF", "properties": {}},
+                     {"id": "e-l-aseg", "source_id": "aseg-l", "target_id": "5c5c5c5c-0000-4000-8000-00000000001e", "relation_type": "PART_OF", "properties": {}},
                      {"id": "e-l-rend", "source_id": "rend-l", "target_id": "aseg-l", "relation_type": "DERIVED_FROM", "properties": {}}]
             edges += [{"id": f"e-lseg-{i}", "source_id": f"lseg-{i}", "target_id": "rend-l", "relation_type": "PART_OF", "properties": {}}
                       for i in range(3)]
@@ -964,7 +964,7 @@ def test_cli_pure_notes_lane_end_to_end_and_replay(tmp_path):
     assert len(ops) == 5 and ops[4]["args"]["point"]["kind"] == "synopsis"
     assert all(len(o["args"]["observations"]) == len(o["args"]["point"]["segment_ids"]) for o in ops)
     assert ops[1]["args"]["point"]["kind"] == "quotation" and ops[1]["args"]["observations"][0]["graph"] == "tx"
-    assert ops[0]["args"]["point"]["unit"]["source_id"] == "src-1" and ops[0]["args"]["point"]["heading"] == "Chapter 1. Seven dangerous lessons."
+    assert ops[0]["args"]["point"]["unit"]["source_id"] == "5c5c5c5c-0000-4000-8000-000000000001" and ops[0]["args"]["point"]["heading"] == "Chapter 1. Seven dangerous lessons."
     assert ops[3]["args"]["point"]["parent_key"] == ops[2]["args"]["point"]["key"]      # the child rides its parent's key
 
     async def _elaborates(db):
@@ -1177,8 +1177,8 @@ def test_cli_points_belong_to_the_source_rehome_and_replay_parity(tmp_path):
     r = _run(*base, "notes-accept", "--slug", slug, "--accept-all")
     assert r.returncode == 0 and "accepted 5" in r.stdout, r.stderr or r.stdout
     ops = [o for o in read_journal(pj) if o["verb"] == "accept-point"]
-    set_id = point_set_node_id("tx", "src-1", "")
-    assert len(ops) == 5 and all(o["args"]["point_set"] == {"graph": "tx", "source_id": "src-1", "unit": ""} for o in ops)
+    set_id = point_set_node_id("tx", "5c5c5c5c-0000-4000-8000-000000000001", "")
+    assert len(ops) == 5 and all(o["args"]["point_set"] == {"graph": "tx", "source_id": "5c5c5c5c-0000-4000-8000-000000000001", "unit": ""} for o in ops)
     r = _run(*base, "notes-render", "--slug", slug)
     assert r.returncode == 0 and "from 5 point(s)" in r.stdout, r.stderr or r.stdout
     staged = (pri_dir / "staging" / "the-learning-game" / "ch01" / "index.md").read_text()
@@ -1204,7 +1204,12 @@ def test_cli_points_belong_to_the_source_rehome_and_replay_parity(tmp_path):
     assert all(s == set_id for rel, s, t, _ in live["edges"] if rel == "HAS_POINT")
     assert sum(1 for e in live["edges"] if e[0] == "ELABORATES") == 1
     assert sum(1 for e in live["edges"] if e[0] == "REFERENCES") == 1
-    assert sum(1 for e in live["edges"] if e[0] == "DERIVED_FROM") == 11        # 1 + 2 + 1 + 2 + 5 segment References
+    # 1 + 2 + 1 + 2 + 5 segment References, and the Note's source minted at birth (722a8232 (3))
+    assert sum(1 for e in live["edges"] if e[0] == "DERIVED_FROM") == 12
+    born = [o["args"] for o in read_journal(pj) if o["verb"] == "link"]
+    assert len(born) == 1 and born[0]["source_id"] == note_id and born[0]["relation"] == "DERIVED_FROM"
+    assert born[0]["observation"]["foreign_id"] == "5c5c5c5c-0000-4000-8000-000000000001"
+    assert any(e[:3] == ("DERIVED_FROM", note_id, born[0]["target_id"]) for e in live["edges"])
     assert _run("--graph-db-path", pdb, "read", note_id).stdout == staged
 
     # (2) a PRE-re-home journal: the same ops without `point_set` land under the NOTE, as they did live
@@ -1262,7 +1267,7 @@ def test_cli_points_belong_to_the_source_rehome_and_replay_parity(tmp_path):
                    "segment_ids": [], "unit": ops[0]["args"]["point"]["unit"]}
             assert deliverable_owns(sec) and not deliverable_owns(ops[0]["args"]["point"])
             r = await accept_point(g, slug, sec, observations=[], actor="user:test",
-                                   point_set={"graph": "tx", "source_id": "src-1", "unit": ""})
+                                   point_set={"graph": "tx", "source_id": "5c5c5c5c-0000-4000-8000-000000000001", "unit": ""})
             assert r["owner_id"] == note_id and r["set_id"] == set_id and r["written"], r
             pts = await load_points(g, note_id)
             assert len(pts) == 6 and {p["owner_id"] for p in pts} == {note_id, set_id}
@@ -1431,15 +1436,15 @@ def test_cli_draft_lifecycle_staging_index_and_work_promotion_gate(tmp_path):
         async with open_graph(sdb) as sg:
             ws = {"kind": "chapter", "part": 1, "chapter": 2, "title": "How Did We Get Here",
                   "work": {"title": "The Learning Game", "author": "Ana Lorena Fábrega"}}
-            nodes = [{"id": "src-2", "label": "Source", "sources": [],
+            nodes = [{"id": "5c5c5c5c-0000-4000-8000-000000000002", "label": "Source", "sources": [],
                       "properties": {"title": "The Learning Game — 05 - 2. How Did We Get Here", "work_structure": ws}},
                      {"id": "seg-b0", "label": "Segment", "sources": [],
-                      "properties": {"text": "Chapter 2. How did we get here.", "index": 0, "start_time": 0.0, "end_time": 2.0, "source_id": "src-2"}},
+                      "properties": {"text": "Chapter 2. How did we get here.", "index": 0, "start_time": 0.0, "end_time": 2.0, "source_id": "5c5c5c5c-0000-4000-8000-000000000002"}},
                      {"id": "seg-b1", "label": "Segment", "sources": [],
-                      "properties": {"text": "Prussia built the modern school.", "index": 1, "start_time": 2.0, "end_time": 5.0, "source_id": "src-2"}},
+                      "properties": {"text": "Prussia built the modern school.", "index": 1, "start_time": 2.0, "end_time": 5.0, "source_id": "5c5c5c5c-0000-4000-8000-000000000002"}},
                      {"id": "cor-bh", "label": "Correction", "sources": [],
                       "properties": {"correction_type": "stratum", "status": "applied", "actor": "human", "session_id": "s",
-                                     "created_at": 1.0, "payload": {"operation": "classify", "source_id": "src-2",
+                                     "created_at": 1.0, "payload": {"operation": "classify", "source_id": "5c5c5c5c-0000-4000-8000-000000000002",
                                                                     "category": "section-header", "segment_ids": ["seg-b0"], "start_time": 0.0}}},
                      {"id": "aseg-2", "label": "AudioSegment", "sources": [], "properties": {"index": 0}},
                      {"id": "rend-2", "label": "AudioRendition", "sources": [],
@@ -1447,7 +1452,7 @@ def test_cli_draft_lifecycle_staging_index_and_work_promotion_gate(tmp_path):
             for n in nodes:
                 if n["label"] == "Segment":
                     n["properties"]["rendition_id"] = "rend-2"
-            edges = [{"id": "e-aseg-2", "source_id": "aseg-2", "target_id": "src-2", "relation_type": "PART_OF", "properties": {}},
+            edges = [{"id": "e-aseg-2", "source_id": "aseg-2", "target_id": "5c5c5c5c-0000-4000-8000-000000000002", "relation_type": "PART_OF", "properties": {}},
                      {"id": "e-rend-2", "source_id": "rend-2", "target_id": "aseg-2", "relation_type": "DERIVED_FROM", "properties": {}},
                      {"id": "e-seg-b0", "source_id": "seg-b0", "target_id": "rend-2", "relation_type": "PART_OF", "properties": {}},
                      {"id": "e-seg-b1", "source_id": "seg-b1", "target_id": "rend-2", "relation_type": "PART_OF", "properties": {}}]
@@ -1554,13 +1559,13 @@ def test_cli_references_render_into_the_source_card_and_replay(tmp_path):
     async def add_refs():   # what the transcription core's `add-reference` lands
         async with open_graph(sdb) as sg:
             nodes = [{"id": "ref-1", "label": "Reference", "sources": [],
-                      "properties": {"source_id": "src-1", "label": "Dumbing Us Down (publisher page)",
+                      "properties": {"source_id": "5c5c5c5c-0000-4000-8000-000000000001", "label": "Dumbing Us Down (publisher page)",
                                      "url": "https://newsociety.com/dud", "notes_slug": "", "role": "cited-work", "added_by": "human:test"}},
                      {"id": "ref-2", "label": "Reference", "sources": [],
-                      "properties": {"source_id": "src-1", "label": "Notes on Dumbing Us Down",
+                      "properties": {"source_id": "5c5c5c5c-0000-4000-8000-000000000001", "label": "Notes on Dumbing Us Down",
                                      "url": "https://example.org/hand-notes", "notes_slug": "dumbing-us-down/ch01-notes",
                                      "role": "related-notes", "added_by": "human:test"}}]
-            edges = [{"id": f"e-{r}", "source_id": "src-1", "target_id": r, "relation_type": "HAS_REFERENCE", "properties": {}}
+            edges = [{"id": f"e-{r}", "source_id": "5c5c5c5c-0000-4000-8000-000000000001", "target_id": r, "relation_type": "HAS_REFERENCE", "properties": {}}
                      for r in ("ref-1", "ref-2")]
             await extend_graph(sg.queue, sg.graph_id, nodes, edges)
     asyncio.run(add_refs())
@@ -1641,7 +1646,7 @@ def test_cli_lecture_page_reads_series_dates_and_style_live_and_replays(tmp_path
     # the accepted point's unit snapshot is taken BEFORE the dates exist on the Source: strip them first
     async def strip_dates():
         async with open_graph(sdb) as sg:
-            await graph_task(sg.queue, sg.graph_id, "update_node", node_id="src-lec",
+            await graph_task(sg.queue, sg.graph_id, "update_node", node_id="5c5c5c5c-0000-4000-8000-00000000001e",
                              properties={"published_at": "", "recorded_at": "", "recorded_at_precision": ""})
     asyncio.run(strip_dates())
     r = _run(*base, "notes-pack", "--source", "llm.cpp", "--type", "lecture-notes")
@@ -1661,7 +1666,7 @@ def test_cli_lecture_page_reads_series_dates_and_style_live_and_replays(tmp_path
     # the dates land AFTER the accept (bind-source-dates); the render reads them live all the same
     async def bind_dates():
         async with open_graph(sdb) as sg:
-            await graph_task(sg.queue, sg.graph_id, "update_node", node_id="src-lec",
+            await graph_task(sg.queue, sg.graph_id, "update_node", node_id="5c5c5c5c-0000-4000-8000-00000000001e",
                              properties={"published_at": "2024-04-27", "recorded_at": "2024-04-27", "recorded_at_precision": "around"})
     asyncio.run(bind_dates())
     r = _run(*base, "notes-render", "--slug", "gpu-mode-notes/bonus")
@@ -1755,36 +1760,36 @@ def test_cli_work_page_binds_by_edge_renders_the_toc_gates_on_published_chapters
 
     async def more_sibling():   # a foreword, a second chapter, the work's Collection + a work-level link
         async with open_graph(sdb) as sg:
-            await graph_task(sg.queue, sg.graph_id, "update_node", node_id="src-1",
+            await graph_task(sg.queue, sg.graph_id, "update_node", node_id="5c5c5c5c-0000-4000-8000-000000000001",
                              properties={"title": "The Learning Game — 04 - 1. Seven Dangerous Lessons",
                                          "work_structure": {"kind": "chapter", "part": 1, "chapter": 1, "file": 4,
                                                             "title": "Seven Dangerous Lessons", "work": work}})
-            nodes = [{"id": "src-0", "label": "Source", "sources": [],
+            nodes = [{"id": "5c5c5c5c-0000-4000-8000-000000000000", "label": "Source", "sources": [],
                       "properties": {"title": "02 - Foreword",
                                      "work_structure": {"kind": "front-matter", "unit": "foreword", "file": 2, "title": "Foreword", "work": work}}},
-                     {"id": "src-2", "label": "Source", "sources": [],
+                     {"id": "5c5c5c5c-0000-4000-8000-000000000002", "label": "Source", "sources": [],
                       "properties": {"title": "05 - 2. How Did We Get Here",
                                      "work_structure": {"kind": "chapter", "part": 1, "chapter": 2, "file": 5, "title": "How Did We Get Here", "work": work}}},
                      {"id": "seg-b0", "label": "Segment", "sources": [],
-                      "properties": {"text": "Chapter 2. How did we get here.", "index": 0, "start_time": 0.0, "end_time": 2.0, "source_id": "src-2"}},
+                      "properties": {"text": "Chapter 2. How did we get here.", "index": 0, "start_time": 0.0, "end_time": 2.0, "source_id": "5c5c5c5c-0000-4000-8000-000000000002"}},
                      {"id": "seg-b1", "label": "Segment", "sources": [],
-                      "properties": {"text": "Prussia built the modern school.", "index": 1, "start_time": 2.0, "end_time": 5.0, "source_id": "src-2"}},
+                      "properties": {"text": "Prussia built the modern school.", "index": 1, "start_time": 2.0, "end_time": 5.0, "source_id": "5c5c5c5c-0000-4000-8000-000000000002"}},
                      {"id": "cor-bh", "label": "Correction", "sources": [],
                       "properties": {"correction_type": "stratum", "status": "applied", "actor": "human", "session_id": "s",
-                                     "created_at": 1.0, "payload": {"operation": "classify", "source_id": "src-2",
+                                     "created_at": 1.0, "payload": {"operation": "classify", "source_id": "5c5c5c5c-0000-4000-8000-000000000002",
                                                                     "category": "section-header", "segment_ids": ["seg-b0"], "start_time": 0.0}}},
                      {"id": COL, "label": "Collection", "sources": [], "properties": {"title": "The Learning Game", "status": "confirmed"}},
                      {"id": "ref-1", "label": "Reference", "sources": [],
                       "properties": {"source_id": COL, "label": "Publisher page", "url": "https://x.test/tlg", "notes_slug": "", "role": "publisher-page"}}]
-            edges = [make_edge(s, COL, "PART_OF") for s in ("src-0", "src-1", "src-2")] + [make_edge(COL, "ref-1", "HAS_REFERENCE")]
-            # src-2's spine hangs under a rendition, as the correction core's spine read expects
+            edges = [make_edge(s, COL, "PART_OF") for s in ("5c5c5c5c-0000-4000-8000-000000000000", "5c5c5c5c-0000-4000-8000-000000000001", "5c5c5c5c-0000-4000-8000-000000000002")] + [make_edge(COL, "ref-1", "HAS_REFERENCE")]
+            # 5c5c5c5c-0000-4000-8000-000000000002's spine hangs under a rendition, as the correction core's spine read expects
             nodes += [{"id": "aseg-2", "label": "AudioSegment", "sources": [], "properties": {"index": 0}},
                       {"id": "rend-2", "label": "AudioRendition", "sources": [],
                        "properties": {"chain": [], "is_raw": True, "preprocessing": None}}]
             for n in nodes:
                 if n["label"] == "Segment":
                     n["properties"]["rendition_id"] = "rend-2"
-            edges += [make_edge("aseg-2", "src-2", "PART_OF"), make_edge("rend-2", "aseg-2", "DERIVED_FROM"),
+            edges += [make_edge("aseg-2", "5c5c5c5c-0000-4000-8000-000000000002", "PART_OF"), make_edge("rend-2", "aseg-2", "DERIVED_FROM"),
                       make_edge("seg-b0", "rend-2", "PART_OF"), make_edge("seg-b1", "rend-2", "PART_OF")]
             await extend_graph(sg.queue, sg.graph_id, nodes, edges)
     asyncio.run(more_sibling())
@@ -1879,7 +1884,7 @@ def _lecture_points():
     """A lecture in miniature (work item e370e5db; rulings bc62c727, ba341c72): two presenters, a
     host relaying a chat question, an anonymous audience voice, two synthesized sections, a glossary
     term the ASR mangled, an unverified code identifier, and an answer leaning back on the body."""
-    unit = {"graph": "tx", "source_id": "src-lec", "title": "Bonus Lecture", "public_url": "https://www.youtube.com/watch?v=abc",
+    unit = {"graph": "tx", "source_id": "5c5c5c5c-0000-4000-8000-00000000001e", "title": "Bonus Lecture", "public_url": "https://www.youtube.com/watch?v=abc",
             "speaker_roster": [{"speaker": "Georgii", "name": "Georgii", "role": ""},
                                {"speaker": "SPEAKER_07", "name": "", "role": ""},
                                {"speaker": "Mark", "name": "Mark", "role": "host"},

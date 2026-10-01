@@ -27,6 +27,10 @@ def test_render_end_variants():
                          comments="::: {.post-comments}\nAsk below.\n:::\n")
     assert "Hire me for CV, Data: [how](/work/)." in pitched
     assert pitched.index("Hire") < pitched.index("[About]") < pitched.index("::: {.post-comments}")
+    # the sources open the end matter, before the related posts (722a8232)
+    sourced = render_end(COPY, sources="::: {.post-sources}\n**Source**\n\n- S\n:::\n",
+                         related=[{"title": "R", "href": "/r/", "reason": "linked"}])
+    assert sourced.index("post-sources") < sourced.index("related-posts") < sourced.index("author-strip")
 
 
 def test_end_plan_pitches_only_with_a_published_target():

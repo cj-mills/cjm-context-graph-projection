@@ -434,13 +434,15 @@ async def observe_foreign(
     foreign_ref: str,   # The node id in that graph — full, or a unique id prefix
     siblings: Dict[str, str],                 # {graph key: db path} — the addressing graph's `sibling_graphs`
     manifests_dir: str = DEFAULT_MANIFESTS,   # Where the graph-storage capability manifest lives
-) -> Dict[str, Any]:  # {reference: ReferenceNode} | {error}
+) -> Dict[str, Any]:  # {reference: ReferenceNode, facts: {locator?, citation?}} | {error}
     """Open the sibling graph READ-ONLY, resolve the foreign node, and take the observation.
 
     The one place the write path touches another graph — and it only reads: the
     Reference carries the foreign label, a display title and the content hash over the
     foreign node's label + properties as of now (`ReferenceNode.observe`). An unknown key
-    or an unresolvable id refuses loudly (a reference to nothing is not a reference)."""
+    or an unresolvable id refuses loudly (a reference to nothing is not a reference).
+    A Source or a Collection also states its LOCATOR and CITATION (amendment 722a8232),
+    read here with the observation so the op carries them (`sources.observed_facts`)."""
     path = siblings.get(graph_key)
     if not path:
         return {"error": f"no sibling graph `{graph_key}` in this graph's config "
@@ -456,7 +458,10 @@ async def observe_foreign(
             wire = node if isinstance(node, dict) else {
                 "id": getattr(node, "id", ""), "label": getattr(node, "label", ""),
                 "properties": getattr(node, "properties", {}) or {}}
-            return {"reference": ReferenceNode.observe(graph_key, wire, observed_at=PROVENANCE_TS.get())}
+            from .sources import collection_members, observed_facts
+            members = await collection_members(sg, str(wire.get("id") or "")) if wire.get("label") == "Collection" else []
+            return {"reference": ReferenceNode.observe(graph_key, wire, observed_at=PROVENANCE_TS.get()),
+                    "facts": observed_facts(wire, members)}
     except RuntimeError as e:  # the db is absent / the capability failed to load
         return {"error": f"sibling graph `{graph_key}` unavailable: {e}"}
 
@@ -470,6 +475,7 @@ async def link(
     actor: str = "agent:session",  # Who asserted the link (recorded on the edge, not its identity)
     siblings: Optional[Dict[str, str]] = None,        # {graph key: db path} for a foreign target (the config's `sibling_graphs`)
     observation: Optional[Dict[str, Any]] = None,     # REPLAY: the journaled observation — the Reference is rebuilt from it, no sibling opened
+    source_facts: Optional[Dict[str, Any]] = None,    # REPLAY: the journaled facts a Source / Collection stated at observation (722a8232)
     manifests_dir: str = DEFAULT_MANIFESTS,           # For opening the sibling read-only
 ) -> Dict[str, Any]:  # The write result (incl. error when an endpoint is missing/ambiguous)
     """Mint a deliberate edge between two EXISTING nodes (heterogeneous interlink).
@@ -492,7 +498,9 @@ async def link(
     observation is returned for the journal; replay passes it back as `observation`
     and rebuilds the Reference without opening the sibling (the foreign graph is never
     written, never needed for a rebuild). Re-linking an existing Reference RE-OBSERVES:
-    a moved hash updates the node in place (the journal carries the new observation)."""
+    a moved hash updates the node in place (the journal carries the new observation).
+    A Source or a Collection's locator and citation land with it as observed facts on the
+    Reference (`sources.apply_source_facts`); the op carries them as `source_facts`."""
     src_res = await resolve_node_ref(gx, source_id)
     if "candidates" in src_res:
         return {"error": ambiguity_error(source_id, src_res["candidates"]), "source_id": source_id,
@@ -509,6 +517,7 @@ async def link(
                    or p.get("statement") or "")[:120]
 
     reference: Optional[ReferenceNode] = None
+    facts: Dict[str, Any] = dict(source_facts or {})
     if observation:
         reference = ReferenceNode.from_observation(observation)
     else:
@@ -519,6 +528,7 @@ async def link(
                 return {"error": obs["error"], "source_id": source_id, "target_id": target_id,
                         "relation": relation, "written": False}
             reference = obs["reference"]
+            facts = obs.get("facts") or {}
 
     nodes: List[Dict[str, Any]] = []
     reobserved = False
@@ -556,9 +566,16 @@ async def link(
         out["observation"] = reference.observation()
         out["reference_added"] = res.nodes_added
         out["reobserved"] = reobserved
+        applied: Dict[str, Any] = {"asserted": [], "held": []}
+        if facts:
+            from .sources import apply_source_facts
+            applied = await apply_source_facts(gx, target_id, facts, actor=actor)
+            out["source_facts"] = facts
+            out["facts_asserted"] = applied["asserted"]
+            out["facts_held"] = applied["held"]
         # An unchanged re-link is a verified no-op: nothing to journal (a fresh observed_at
         # alone would defeat append_write's dedup and pile identical observations up).
-        out["noop"] = not (res.nodes_added or res.edges_added or reobserved)
+        out["noop"] = not (res.nodes_added or res.edges_added or reobserved or applied["asserted"])
     return out
 
 

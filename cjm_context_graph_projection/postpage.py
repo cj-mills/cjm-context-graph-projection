@@ -11,7 +11,8 @@ only once the page it points at is published. Until the Work-with-me page (903bc
 on-graph every post takes the no-pitch variant and the plan counts the posts that would pitch.
 Every post closes on its COMMENTS block (`comments`, 39c51c15 (1)): the thread its discussion
 fact names, else its canonical path; a tutorial's questions line opens it (the questions
-callout 32 posts included, now a line derived from the kind)."""
+callout 32 posts included, now a line derived from the kind). A post that derives from a source
+opens its end matter on the SOURCES block (`sources`, 39c51c15 (3), amendment 722a8232)."""
 
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -83,15 +84,17 @@ def render_end(
     comments: str = "",                     # The post's comments block (comments.render_comments)
     related: Optional[List[Dict[str, str]]] = None,  # related_posts' result
     reuse: str = "",                        # render_reuse's appendix
-) -> str:  # The post's end matter (markdown): related posts, the author strip, the comments, Reuse
-    """Related posts, the author strip (with the pitch line when given) and the comments block."""
+    sources: str = "",                      # The post's sources block (sources.render_sources)
+) -> str:  # The post's end matter (markdown): sources, related posts, the author strip, the comments, Reuse
+    """The sources, related posts, the author strip (with the pitch line when given) and the comments block."""
     lines = [copy["byline"]]
     if pitch:
         lines.append(copy["pitch"].format(claims=pitch["claims"], href=pitch["href"]))
     lines.append(copy["links"])
     # Plain classed divs: a callout a user filter inserts is never converted by Quarto, so its
     # look is the site stylesheet's (.author-strip / .comments-invite)
-    out = ([render_related(related)] if related else []) + ["::: {.author-strip}\n" + "  \n".join(lines) + "\n:::\n"]
+    out = (([sources] if sources else []) + ([render_related(related)] if related else [])
+           + ["::: {.author-strip}\n" + "  \n".join(lines) + "\n:::\n"])
     if comments:
         out.append(comments)
     if reuse:
@@ -134,6 +137,7 @@ def end_plan(
     licenses: Optional[Dict[str, Dict[str, Any]]] = None,       # {note id: post_licenses' result}
     comments_config: Optional[Dict[str, Any]] = None,           # comments.load_comments_config's config
     page_threads: Optional[Dict[str, Dict[str, Any]]] = None,   # {note id: comments.page_comments' result}
+    sources: Optional[Dict[str, str]] = None,                   # {note id: its sources block} (sources.source_plan)
 ) -> Dict[str, Any]:  # {ends: {note id: markdown}, counts}
     """Every post's end matter. A Note of no post kind (a site page, an untyped Note) has none."""
     from .comments import render_comments
@@ -152,7 +156,7 @@ def end_plan(
         block = (render_comments(comments_config, **pc, questions=copy["questions"] if kind == TUTORIAL_KIND else "")
                  if comments_config and pc else "")
         ends[nid] = render_end(copy, pitch=pitch, comments=block, related=rel,
-                               reuse=render_reuse(lic) if lic else "")
+                               reuse=render_reuse(lic) if lic else "", sources=(sources or {}).get(nid, ""))
         if block:
             counts["comments_thread" if pc["number"] is not None else "comments_term"] += 1
             counts["comments_earlier"] += bool(pc["earlier"])

@@ -216,8 +216,10 @@ async def _apply_op(
         # A cross-graph link (0154f5e4) carries its OBSERVATION: replay rebuilds the
         # Reference stand-in from the journaled hash/label/title — the sibling graph is
         # never opened on a rebuild, so a rebuild is reproducible with the sibling absent.
+        # A Source's locator + citation ride the same op (722a8232): replay lands them as observed.
         await link(gx, a["source_id"], a["target_id"], a["relation"],
-                   actor=a.get("actor", "agent:session"), observation=a.get("observation"))
+                   actor=a.get("actor", "agent:session"), observation=a.get("observation"),
+                   source_facts=a.get("source_facts"))
     elif verb == "unlink":
         # Edge retraction (2f1d9382): replayed in append order AFTER the link it
         # retracts, so a rebuild converges with the edge absent. A missing edge

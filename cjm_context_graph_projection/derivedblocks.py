@@ -351,6 +351,7 @@ async def derived_plan(
     post_lic: Dict[str, Dict[str, Any]] = {}
     ends_stale: List[Dict[str, str]] = []
     comments_unrendered: List[Dict[str, Any]] = []
+    srcs: Dict[str, Any] = {"blocks": {}, "unrendered": [], "missing": [], "counts": {}}
     if any((types.get(n) or {}).get("kind") in POST_KINDS for n in src_of):
         strip = load_strip_copy(website_root)
         errors += strip["errors"]
@@ -392,9 +393,18 @@ async def derived_plan(
             comments_unrendered = [{"id": n, "title": str(F.prop(notes[n], "title") or "") if n in notes else "",
                                     "threads": threads[n]["active"] + threads[n]["earlier"]}
                                    for n in sorted(threads) if n not in cands]
+            # The sources (39c51c15 (3), amendment 722a8232): each Source / Collection a post derives
+            # from, named by its citation and linked by its locator; a source with neither, and a
+            # born post deriving from a sibling with no source named, are reported
+            from .sources import load_sources, source_plan
+            srcs = source_plan(await load_sources(gx),
+                               {n: {"title": c["title"], "origin": (types.get(n) or {}).get("origin", "")}
+                                for n, c in cands.items()})
             ends = end_plan(strip["copy"], src_of, types, await offered_backing(gx),
                             pitch_target(planned_pages), related, post_lic,
-                            comments_config=ccfg["config"] or None, page_threads=page_threads)
+                            comments_config=ccfg["config"] or None, page_threads=page_threads,
+                            sources=srcs["blocks"])
+            ends["counts"].update(srcs["counts"])
     for nid, md in ends["ends"].items():
         posts.setdefault(src_of[nid], {"drop": [], "nav": "", "end": ""})["end"] = md
     # The header (39c51c15 (2)): the kind label and the dated facts, as metadata the filter sets
@@ -439,7 +449,8 @@ async def derived_plan(
     for role in ROLES:
         counts[role] = sum(1 for p in posts.values() for d in p["drop"] if d["role"] == role)
     return {"posts": dict(sorted(posts.items())), "counts": counts, "errors": errors, "footer": footer,
-            "related_stale": ends_stale, "comments_unrendered": comments_unrendered}
+            "related_stale": ends_stale, "comments_unrendered": comments_unrendered,
+            "sources_unrendered": srcs["unrendered"], "sources_missing": srcs["missing"]}
 
 
 def write_derived(
@@ -512,8 +523,8 @@ def check_end_placement(
     output_dir: str,       # The profile's output dir
     plan: Dict[str, Any],  # derived_plan's report
 ) -> Dict[str, Any]:  # {checked, errors}
-    """After the render: every post's end matter -- the author strip, and the comments block
-    when it carries one -- sits inside the page's <main>. A source that leaves an element open
+    """After the render: every post's end matter -- the author strip, and the comments and
+    sources blocks when it carries them -- sits inside the page's <main>. A source that leaves an element open
     can push the blocks after it out of the content (ruling ea676ba0: such a defect is fixed at
     the source), so the build names the post instead of shipping it."""
     out = Path(output_dir)
@@ -533,6 +544,10 @@ def check_end_placement(
         if "post-comments" in entry["end"] and (com < 0 or main_end < 0 or com > main_end):
             errors.append({"kind": "derived-comments-placement", "source": src,
                            "why": "the post's comments block is missing or renders outside <main>"})
+        sb = html.find("post-sources")
+        if "post-sources" in entry["end"] and (sb < 0 or main_end < 0 or sb > main_end):
+            errors.append({"kind": "derived-sources-placement", "source": src,
+                           "why": "the post's sources block is missing or renders outside <main>"})
         # One thread per page: a widget Quarto adds from the post's own `comments` metadata
         # (added before any filter runs, so the render cannot drop it) would load a second one
         if "post-comments" in entry["end"] and ("utteranc.es/client.js" in html

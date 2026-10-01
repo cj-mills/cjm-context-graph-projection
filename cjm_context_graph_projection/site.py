@@ -316,6 +316,10 @@ async def site_build(
     rep["errors"] += derived["errors"]
     # Related posts rank by stored judgments (amendment e09e262b): a public build with a stale
     # post is not fit to publish -- the publish step runs `judge-related` first
+    # The sources the build cannot render, and the born posts that name none (722a8232): reported
+    if derived.get("sources_unrendered") or derived.get("sources_missing"):
+        rep["sources_report"] = {"unrendered": derived.get("sources_unrendered") or [],
+                                 "missing": derived.get("sources_missing") or []}
     stale = derived.get("related_stale") or []
     if profile == "public" and stale:
         rep["errors"].append({"kind": "related-stale",

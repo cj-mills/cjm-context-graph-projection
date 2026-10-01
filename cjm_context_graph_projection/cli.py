@@ -1153,19 +1153,7 @@ async def _dispatch(args) -> int:
                              manifests_dir=args.manifests_dir)
             print(render("link", res, args.format))
             if args.journal_path and res.get("written") and not res.get("noop"):
-                # Endpoint labels are AUDIT-ONLY (replay ignores them): they are what
-                # lets the orphaned-edge detector propose a remap after a code rename
-                # deletes the deterministic old id. Journal the RESOLVED ids (a prefix
-                # resolves against TODAY's db; replay must land on the same nodes). A
-                # cross-graph link journals its OBSERVATION too — replay rebuilds the
-                # Reference from it, never from the sibling.
-                op = {"source_id": res["source_id"], "target_id": res["target_id"],
-                      "relation": args.relation, "actor": args.actor,
-                      "source_label": res.get("source_label"),
-                      "target_label": res.get("target_label")}
-                if res.get("observation"):
-                    op["observation"] = res["observation"]
-                append_write(args.journal_path, "link", op)
+                append_write(args.journal_path, "link", _link_op(res, args.relation, args.actor))
             return 1 if res.get("error") else 0
         elif args.command == "unlink":
             if args.journal_path and not args.force:
@@ -1791,6 +1779,23 @@ def _apply_graph_config(args) -> None:
                 setattr(args, attr, cfg[key])
 
 
+def _link_op(
+    res: Dict[str, Any],  # link's result
+    relation: str,
+    actor: str,
+) -> Dict[str, Any]:  # The journaled `link` op's args
+    """A link's op: the RESOLVED ids (a prefix resolves against today's db; replay must land on
+    the same nodes), audit-only endpoint labels (the orphaned-edge detector's remap input), and a
+    cross-graph link's observation plus a source's facts (722a8232) -- replay never opens the sibling."""
+    op = {"source_id": res["source_id"], "target_id": res["target_id"], "relation": relation,
+          "actor": actor, "source_label": res.get("source_label"), "target_label": res.get("target_label")}
+    if res.get("observation"):
+        op["observation"] = res["observation"]
+    if res.get("source_facts"):
+        op["source_facts"] = res["source_facts"]
+    return op
+
+
 def _notes_lane_root(args: argparse.Namespace) -> Path:
     """Where the lane's packs + proposal sets live: `--out-dir`, else `<journal dir>/purenotes`
     (the PRIVATE repo beside the notes journal — inference output is provenance, never public)."""
@@ -2271,6 +2276,23 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
         if args.text and len(picked) != 1:
             print("error: --text applies to exactly ONE --accept", file=sys.stderr)
             return 1
+        # A born post carries its source from birth (amendment 722a8232 (3)): the accept that
+        # drafts from a Source links the Note to it FIRST -- the same journaled `link` op a hand
+        # link writes, its observation and the source's facts riding it -- so a source that cannot
+        # be linked refuses before anything lands; an unchanged re-link is a verified no-op
+        source_link = None
+        if picked and source.get("source_id"):
+            if await graph_task(gx.queue, gx.graph_id, "get_node", node_id=note_id) is None:
+                print(f"error: no note `{args.slug}` — birth the deliverable first (new-note --slug {args.slug} …)",
+                      file=sys.stderr)
+                return 1
+            source_link = await link(gx, note_id, f"{key}:{source['source_id']}", "DERIVED_FROM",
+                                     actor=args.actor, siblings=siblings, manifests_dir=args.manifests_dir)
+            if source_link.get("error"):
+                print(f"error: the source link (nothing accepted): {source_link['error']}", file=sys.stderr)
+                return 1
+            if args.journal_path and source_link.get("written") and not source_link.get("noop"):
+                append_write(args.journal_path, "link", _link_op(source_link, "DERIVED_FROM", args.actor))
         type_fact = None
         tkey = await note_deliverable_type(gx, note_id)
         if tkey is None:
@@ -2328,7 +2350,9 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
             print(f"error: sibling graph `{key}` unavailable: {e}", file=sys.stderr)
             return 1
         print(render("notes-accept", {"slug": args.slug, "set_id": set_id, "accepted": accepted,
-                                      "skipped": skipped, "type_fact": type_fact}, args.format))
+                                      "skipped": skipped, "type_fact": type_fact,
+                                      "source_link": source_link if source_link and not source_link.get("noop") else None},
+                     args.format))
         return 0
     if cmd == "notes-retract":
         if args.all:

@@ -277,6 +277,14 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                      else "reference minted" if obj.get("reference_added") else "reference unchanged")
             out += (f"\n↳ Reference → `{obs.get('graph')}:{obs.get('foreign_id')}` "
                     f"_{obs.get('foreign_label')}_ — {obs.get('title')} · observed `{h}` · {state}")
+        facts = obj.get("source_facts")
+        if facts:
+            # A source's observed facts (722a8232): what it states, what landed, what an authored value holds
+            stated = ", ".join(sorted(facts))
+            landed = ", ".join(obj.get("facts_asserted") or []) or "none changed"
+            out += f"\n↳ source facts: {stated} · asserted: {landed}"
+            for h in obj.get("facts_held") or []:
+                out += f"\n  ⚠ {h['predicate']} held by an authored value ({h['held_by']}) — observed {h['value']}"
         return out
     if kind == "unlink":
         if obj.get("error"):
@@ -456,6 +464,16 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                              f"{dv.get('comments_earlier', 0)}"
                              + (f" (⚠ {dv['comments_unrendered']} Note(s) hold a thread this profile does not render)"
                                 if dv.get("comments_unrendered") else ""))
+            if "sources" in dv:   # the sources block (39c51c15 (3), amendment 722a8232)
+                sr = obj.get("sources_report") or {}
+                lines.append(f"- sources: a block on {dv['sources']} post(s) · {dv.get('sources_linked', 0)} linked · "
+                             f"{dv.get('sources_cited', 0)} cited without a locator"
+                             + (f" · ⚠ {dv['sources_unrendered']} source(s) with neither a locator nor a citation: "
+                                + ", ".join(f"{u['title']} (on {u['post']})" for u in sr.get("unrendered") or [])
+                                if dv.get("sources_unrendered") else "")
+                             + (f" · ⚠ {dv['sources_missing']} born post(s) derive from a source they do not name: "
+                                + ", ".join(m["title"] for m in sr.get("missing") or [])
+                                if dv.get("sources_missing") else ""))
         if obj.get("staging_index"):
             si = obj["staging_index"]
             lines.append(f"- drafts listings: {si.get('written', 0)} file(s) · "
@@ -1854,6 +1872,8 @@ def _render_notes_lane(kind: str, obj: Dict[str, Any]) -> str:
             lines.append(f"- ✗ `{str(s.get('proposal_id') or '')[:8]}`: {s.get('reason')}")
         if obj.get("type_fact"):
             lines.append(f"deliverable_type asserted: `{obj['type_fact']}`")
+        if obj.get("source_link"):   # the source link minted at birth (722a8232 (3))
+            lines.append("source " + _human("link", obj["source_link"]))
         return "\n".join(lines)
     if kind == "notes-retract":
         state = "retracted (node + edges deleted)" if obj.get("deleted") else "already absent (no-op)"
