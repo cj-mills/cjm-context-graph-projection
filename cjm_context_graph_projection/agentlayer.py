@@ -206,6 +206,29 @@ def _line(title: str, url: str, description: str = "") -> str:
     return f"- [{text}]({url})" + (f": {desc}" if desc else "")
 
 
+def build_lines(
+    licenses: List[Dict[str, Any]],  # postpage.post_licenses' results of the listed posts
+    optional: bool,                  # Whether the file has an Optional section
+) -> List[str]:  # The build's paragraphs under the author's intro (amendment 465ab923 (2))
+    """What the build knows and the author never types: how the links work, the licenses from the
+    license facts (a relicensing changes them by supersession), and the key to the Optional section."""
+    out = ["Each link is a markdown copy of its page; the page itself is at the same address with "
+           "`.html` in place of `.llms.md`."]
+    if licenses:
+        parts = []
+        for key, what in (("content", "text"), ("code", "code samples")):
+            vals = {tuple(lic[key]) for lic in licenses if key in lic}
+            if len(vals) == 1:
+                name, url = vals.pop()
+                parts.append(f"{what}: {name} ({url})")
+            else:
+                parts.append(f"{what}: varies by page (each page's Reuse section states its own)")
+        out.append("Licenses — " + "; ".join(parts) + ".")
+    if optional:
+        out.append("The Optional section lists project logs; it can be skipped.")
+    return out
+
+
 def llms_index(
     site_title: str,                     # The profile's website title
     site_url: str,                       # The site URL
@@ -214,11 +237,13 @@ def llms_index(
     collections: List[Dict[str, str]],  # [{title, source, description}] -- the topic pages
     series: List[Dict[str, Any]],        # [{title, source, description, updated, members: [note id]}]
     posts: Dict[str, Dict[str, Any]],    # {note id: {title, source, description, kind, date}} -- the rendered posts
+    licenses: Optional[List[Dict[str, Any]]] = None,  # postpage.post_licenses' results of the listed posts
 ) -> Dict[str, Any]:  # {text, links: [.llms.md paths relative to the output dir], counts}
-    """llms.txt (amendment 23a49667 (2)): the intro, then the site pages and the collections, a
-    section per series in the kind order (newest-updated first), the posts in no series by kind
-    (Tutorials, Notes, Work), and `## Optional` for the project logs. Each post is listed once: in
-    the first series that lists it, else in its kind's section."""
+    """llms.txt (amendment 23a49667 (2), 465ab923): the author's intro, the build's own lines,
+    then the site pages and the collections, a section per series headed by its kind (newest-updated
+    first, in the kind order), the posts in no series by kind (Tutorials, Notes, Work), and
+    `## Optional` for the project logs. Each post is listed once: in the first series that lists
+    it, else in its kind's section."""
     base = site_url.rstrip("/") + "/"
     links: List[str] = []
 
@@ -255,7 +280,8 @@ def llms_index(
             if not members:
                 continue
             placed.update(members)
-            sections.append((s["title"], [entry(s)] + [entry(posts[m]) for m in members]))
+            # the heading names the kind, so guidance scoped to a kind reaches every page of it (465ab923 (3))
+            sections.append((f"{STANDALONE[kind]}: {s['title']}", [entry(s)] + [entry(posts[m]) for m in members]))
     by_date = sorted(posts, key=lambda n: (posts[n]["title"],))
     by_date = sorted(by_date, key=lambda n: posts[n].get("date") or "", reverse=True)
     for kind in SECTION_KINDS:
@@ -270,6 +296,7 @@ def llms_index(
     optional += [entry(posts[n]) for n in by_date if n not in placed and posts[n]["kind"] in OPTIONAL_KINDS]
     if optional:
         sections.append(("Optional", optional))
+    lines += [ln for b in build_lines(licenses or [], bool(optional)) for ln in (b, "")]
     for head, rows in sections:
         lines += [f"## {head}", ""] + rows + [""]
     counts = {"llms_sections": len(sections), "llms_links": len(links)}
@@ -343,7 +370,8 @@ async def agent_plan(
         [page_item(p) for p in planned_pages if p["kind"] == DevNodeKinds.SERIES],
         {n: {"title": stated(n, "title"), "source": src_of[n], "description": stated(n, "description"),
              "kind": posts[n]["kind"], "date": (dates.get(n) or {}).get("published") or ""}
-         for n in posts})
+         for n in posts},
+        licenses=[licenses[n] for n in sorted(posts) if n in licenses])
     return {"heads": heads, "llms": index, "errors": errors}
 
 

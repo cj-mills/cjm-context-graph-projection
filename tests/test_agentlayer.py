@@ -3,7 +3,7 @@ llms.txt from the graph's structure, links kept in the markdown layer."""
 
 import inspect
 
-from cjm_context_graph_projection.agentlayer import (_line, check_jsonld, directory_author, JSONLD_KEYS,
+from cjm_context_graph_projection.agentlayer import (_line, build_lines, check_jsonld, directory_author, JSONLD_KEYS,
                                                      jsonld_script, llms_index, load_index_copy, plain,
                                                      post_jsonld, read_jsonld, rewrite_llms_links,
                                                      rewrite_markdown_links, write_llms_txt)
@@ -59,6 +59,16 @@ def test_directory_author(tmp_path):
     assert directory_author(str(tmp_path), "drafts/y/index.md", {}) == []
 
 
+def test_build_lines_state_the_licenses_and_the_key():
+    by, mit, sa = (("CC BY 4.0", "https://c/by"), ("MIT License", "https://o/mit"), ("CC BY-SA 4.0", "https://c/sa"))
+    shared = build_lines([{"content": by, "code": mit}] * 2, optional=True)
+    assert shared[1] == "Licenses — text: CC BY 4.0 (https://c/by); code samples: MIT License (https://o/mit)."
+    assert shared[2] == "The Optional section lists project logs; it can be skipped."
+    mixed = build_lines([{"content": by, "code": mit}, {"content": sa, "code": mit}], optional=False)
+    assert mixed[1].startswith("Licenses — text: varies by page") and mixed[1].endswith("MIT License (https://o/mit).")
+    assert len(mixed) == 2 and len(build_lines([], optional=False)) == 1
+
+
 def test_descriptions_are_plain_text():
     desc = "Modify the [fastai-to-unity tutorial](../../f/part-1/) to use\n [LibTorch](https://p.org)."
     assert plain(desc) == "Modify the fastai-to-unity tutorial to use LibTorch."
@@ -94,14 +104,16 @@ def test_llms_index_structure():
                      [{"title": "Topic", "source": "series/topic.qmd", "description": ""}], series, posts)
     txt = idx["text"]
     heads = [ln for ln in txt.splitlines() if ln.startswith("## ")]
-    assert heads == ["## Site", "## Collections", "## New", "## Old", "## Notes", "## Work", "## Optional"]
+    assert heads == ["## Site", "## Collections", "## Tutorials: New", "## Tutorials: Old", "## Notes", "## Work",
+                     "## Optional"]
     assert "## Work\n\n- [W1](https://x.org/posts/w1/index.llms.md): W1 desc\n" in txt   # paid work, ff12a19a
-    assert txt.startswith("# Site\n\n> S.\n\nD.\n\n## Site\n\n- [About](https://x.org/about.llms.md): Me.\n")
-    new = txt.split("## New\n\n")[1].split("\n\n")[0].splitlines()
+    assert txt.startswith("# Site\n\n> S.\n\nD.\n\nEach link is a markdown copy of its page;")
+    assert "it can be skipped.\n\n## Site\n\n- [About](https://x.org/about.llms.md): Me.\n" in txt
+    new = txt.split("## Tutorials: New\n\n")[1].split("\n\n")[0].splitlines()
     assert new == ["- [New](https://x.org/series/new.llms.md): The new one.",
                    "- [T2](https://x.org/posts/t2/index.llms.md): T2 desc",
                    "- [T1](https://x.org/posts/t1/index.llms.md): T1 desc"]
-    assert txt.count("posts/t1/index.llms.md") == 1 and "## Tutorials" not in txt
+    assert txt.count("posts/t1/index.llms.md") == 1 and "## Tutorials\n" not in txt
     optional = txt.split("## Optional\n\n")[1].strip().splitlines()
     assert [ln.split("]")[0][3:] for ln in optional] == ["Logs", "L2", "L1"]   # series page, then newest first
     assert len(idx["links"]) == 1 + 1 + 3 + 2 + 1 + 4
