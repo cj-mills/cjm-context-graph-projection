@@ -10,8 +10,8 @@ Three surfaces an agent reads, each a projection, nothing stored:
    rewritten to it.
 2. LLMS.TXT -- written by the build after the render, over Quarto's flat list, from the graph's
    structure: the site pages, the collection pages, one section per series (its page, then its
-   members in their authored order), the tutorials and the notes in no series, and the logs and
-   archive work under `## Optional`. Every post is listed once, each link a page's `.llms.md` with
+   members in their authored order), the tutorials, the notes and the paid work in no series, and
+   the project logs under `## Optional` (ruling ff12a19a). Every post is listed once, each link a page's `.llms.md` with
    its description; the intro is the author's copy under the site config's `llms-index` (a missing
    summary refuses -- never words the author did not write), and every link must name a `.llms.md`
    the render produced.
@@ -38,9 +38,9 @@ INDEX_REQUIRED = ("summary",)       # The copy llms.txt cannot be written withou
 INDEX_OPTIONAL = ("details",)       # Copy rendered when given
 LLMS_SUFFIX = ".llms.md"            # Quarto's per-page markdown, beside the page's .html
 LLMS_TXT = "llms.txt"
-OPTIONAL_KINDS = ("log", "work")    # Post kinds listed under `## Optional` (amendment 23a49667 (2))
-SECTION_KINDS = ("tutorial", "notes")   # Post kinds a series section lists, in section order
-STANDALONE = {"tutorial": "Tutorials", "notes": "Notes"}   # The section of a post in no series
+OPTIONAL_KINDS = ("log",)           # Post kinds listed under `## Optional` (amendment 23a49667 (2), ruling ff12a19a)
+SECTION_KINDS = ("tutorial", "notes", "work")   # Post kinds a series section lists, in section order
+STANDALONE = {"tutorial": "Tutorials", "notes": "Notes", "work": "Work"}   # The section of a post in no series
 EXCLUDED_PAGES = ("index.html", "404.html")   # The site root (llms.txt stands in for it) and Quarto's 404
 # The JSON-LD type by post kind (amendment 23a49667 (4)), and every key an object may carry
 JSONLD_TYPES = {"tutorial": "TechArticle"}
@@ -216,9 +216,9 @@ def llms_index(
     posts: Dict[str, Dict[str, Any]],    # {note id: {title, source, description, kind, date}} -- the rendered posts
 ) -> Dict[str, Any]:  # {text, links: [.llms.md paths relative to the output dir], counts}
     """llms.txt (amendment 23a49667 (2)): the intro, then the site pages and the collections, a
-    section per series in the kind order (newest-updated first), the posts in no series by kind,
-    and `## Optional` for the logs and archive work. Each post is listed once: in the first series
-    that lists it, else in its kind's section."""
+    section per series in the kind order (newest-updated first), the posts in no series by kind
+    (Tutorials, Notes, Work), and `## Optional` for the project logs. Each post is listed once: in
+    the first series that lists it, else in its kind's section."""
     base = site_url.rstrip("/") + "/"
     links: List[str] = []
 
@@ -263,7 +263,7 @@ def llms_index(
         placed.update(n for n in by_date if posts[n]["kind"] == kind)
         if rows:
             sections.append((STANDALONE[kind], rows))
-    # The logs and archive work: their series' pages first (in series order), then every such post
+    # The project logs: their series' pages first (in series order), then every log
     for s in ordered:
         if series_kind(s) is None and any(m in posts for m in s["members"]):
             optional.append(entry(s))
