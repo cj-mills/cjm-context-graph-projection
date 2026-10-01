@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from cjm_context_graph_layer.ops import extend_graph
+from cjm_context_graph_layer.ops import extend_graph, graph_task
 from cjm_context_graph_primitives.journal import append_write, op_clock, op_now, read_journal
 
 from .authoring import add_symbol, author, emit_artifact, emit_post, read_node, read_slot
@@ -364,6 +364,7 @@ async def _dispatch(args) -> int:
                   f"{res.edges_added} edges added / {res.edges_existing} existing")
             if "repo_map" in dev_report:
                 _report_git_sources(dev_report["repo_map"], "repo map")
+            await _record_ingest_sources(gx, (dev_report.get("repo_map") or {}).get("sources") or {})
             if code_fold is not None:
                 _report_code_fold(code_fold, args)
             if args.journal_path:
@@ -393,6 +394,7 @@ async def _dispatch(args) -> int:
             print(f"ingested notes: {res.nodes_added} nodes added / {res.nodes_verified} verified, "
                   f"{res.edges_added} edges added / {res.edges_existing} existing")
             _report_git_sources(archive_report, "archive")
+            await _record_ingest_sources(gx, archive_report.get("sources") or {})
             if args.journal_path:
                 rc = await replay_journal(gx, args.journal_path, emit_root=args.emit_root)
                 print(f"replayed journal: {rc}")
@@ -3632,6 +3634,17 @@ def _cli_import_smoke(res: Dict[str, Any]) -> None:
               "then re-land the SAME OLD->NEW through cg-write author — the "
               "convergent repair the stale-wires guard allows; never flip-module "
               "for this class.", file=sys.stderr)
+
+
+async def _record_ingest_sources(
+    gx,                       # The open graph the ingest just built
+    sources: Dict[str, str],  # source id -> the HEAD the ingest read
+) -> None:
+    """Write the ingest record (DEC a9176261) into the db the ingest built — before replay,
+    inside the same invocation, so the fresh db and its record swap in together. It REPLACES
+    any earlier record: a db's record names exactly the sources of its last ingest."""
+    n = await graph_task(gx.queue, gx.graph_id, "record_ingest_sources", sources=dict(sources))
+    print(f"ingest record: {n} source HEAD(s)")
 
 
 if __name__ == "__main__":  # runtime-order: must trail every def (python -m executes in slot order)

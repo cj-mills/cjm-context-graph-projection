@@ -59,7 +59,7 @@ def notes_corpus_elements(
     site_root: Optional[str] = None,          # The site project root the pages live under
     site_pages: Optional[List[str]] = None,   # The site's own pages, relative to site_root (config DATA)
     retired: Optional[List[Dict[str, Any]]] = None,  # The journal's retire records (archive.retired_sources): restored from git, never read from the tree
-    report: Optional[Dict[str, Any]] = None,  # Filled with what was read: {root, head, commits, versions, uncommitted, untracked}
+    report: Optional[Dict[str, Any]] = None,  # Filled with what was read: {root, head, commits, versions, uncommitted, untracked, sources}
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:  # (nodes, edges), each carrying its created_at / updated_at
     """Decompose a git-held `<dir>/index.md` / `index.qmd` markdown corpus into graph elements.
 
@@ -84,51 +84,21 @@ def notes_corpus_elements(
     history at the element grain (`gitfold`): created_at = the commit that began its current
     continuous run, updated_at = the commit that last changed it. A file with uncommitted
     changes is reported and ingested at HEAD; an untracked one is reported and absent until
-    committed. A corpus under no git history has no durable time and is refused."""
-    root = Path(corpus_root)
-    top = git_toplevel(str(root))
-    if top is None:
-        raise ValueError(f"the archive {corpus_root} is under no git history — its times come from "
-                         "git (design amendment 19edbe97): commit it first")
-    retired = list(retired or [])
-    if retired and not site_root:
-        raise ValueError("retired sources need the site root they are restored from (`website_root`)")
-    if site_pages and not site_root:
-        raise ValueError("site_pages need the site root they live under (`website_root`)")
-    if site_root and str(Path(site_root).resolve()) != top:
-        raise ValueError(f"the site root {site_root} is not the archive's work tree {top}")
-    rel = root.resolve().relative_to(top).as_posix()
-    prefix = "" if rel == "." else rel + "/"
-    # A RETIRED archive source (design amendment e916a4b9 (2)) is restored from the commit its
-    # retire op recorded, never read from HEAD: its file may be gone, and a copy still at HEAD
-    # must not claim the same identity twice. Its times stop at that commit (19edbe97 (7)).
-    by_retired = {r["path"]: r for r in retired}
-    # The site's own pages (about, the front page, the listing hubs …) ride the same ingest as
-    # archive Sources, so every public page is a node its site_path fact can hold (ruling
-    # 96aff70e; user, 2026-09-28). Identity = the page's path under the site root.
-    pages = {p: site_page_slug(p) for p in (site_pages or []) if p not in by_retired}
-
-    def is_post(path: str) -> bool:
-        return path.startswith(prefix) and PurePosixPath(path).name in INDEX_FILENAMES
-
-    def keep(path: str) -> bool:
-        return (is_post(path) or path in pages) and path not in by_retired
-
-    def decompose(path: str, data: bytes) -> Tuple[Any, List[Dict[str, Any]]]:
-        text = data.decode("utf-8")
-        if path in by_retired or path in pages:
-            slug = by_retired[path]["slug"] if path in by_retired else pages[path]
-            note = note_from_text(str(Path(site_root) / path), text, corpus_root=str(site_root),
-                                  profile=profile, lossless=True, slug=slug)
-        else:
-            note = note_from_text(str(root / path[len(prefix):]), text, corpus_root=str(root),
-                                  profile=profile, lossless=True)
-        n, e = corpus_graph_elements([note], note_aliases)
-        return note, n + e
-
-    hist = fold_history(top, keep, decompose, freeze={p: r["commit"] for p, r in by_retired.items()})
-    tree = head_tree(top)
-    post_paths = sorted((p for p in tree if is_post(p) and p not in by_retired),
+    committed. A corpus under no git history has no durable time and is refused. The
+    report's `sources` is the ingest record's entry (DEC a9176261): the archive and the HEAD read."""
+    # The archive's paths and their decomposition: one definition with rebuild-diff's
+    # attribution of a moved archive (DEC a9176261). A RETIRED archive source (design amendment
+    # e916a4b9 (2)) is restored from the commit its retire op recorded, never read from HEAD: its
+    # file may be gone, and a copy still at HEAD must not claim the same identity twice. Its
+    # times stop at that commit (19edbe97 (7)). The site's own pages (about, the front page, the
+    # listing hubs …) ride the same ingest as archive Sources, so every public page is a node its
+    # site_path fact can hold (ruling 96aff70e; user, 2026-09-28).
+    src = ArchiveSource(corpus_root, profile, note_aliases, site_root=site_root, site_pages=site_pages,
+                        retired=retired)
+    hist = fold_history(src.top, src.keep, src.decompose,
+                        freeze={p: r["commit"] for p, r in src.by_retired.items()})
+    tree = head_tree(src.top)
+    post_paths = sorted((p for p in tree if src.is_post(p) and p not in src.by_retired),
                         key=lambda p: PurePosixPath(p).parts)
     by_dir: Dict[str, List[str]] = {}
     for p in post_paths:
@@ -139,16 +109,16 @@ def notes_corpus_elements(
                          f"({', '.join(INDEX_FILENAMES)}): " + ", ".join(both))
     notes = [hist.payloads[p] for p in post_paths]
     posts = {n.slug for n in notes}
-    missing = sorted(p for p in pages if p not in tree and p not in hist.untracked)
+    missing = sorted(p for p in src.pages if p not in tree and p not in hist.untracked)
     if missing:
         raise ValueError(f"site pages HEAD does not hold: {', '.join(missing)}")
-    page_notes = [hist.payloads[p] for p in pages if p in tree]
+    page_notes = [hist.payloads[p] for p in src.pages if p in tree]
     clash = sorted(p.slug for p in page_notes if p.slug in posts)
     if clash:
         raise ValueError(f"site page identities collide with posts: {', '.join(clash)}")
     notes += page_notes
     back = []
-    for p, r in by_retired.items():
+    for p, r in src.by_retired.items():
         note = hist.payloads.get(p)
         if note is None:
             raise ValueError(f"retired source {p} is not at commit {r['commit'][:12]} in {site_root} "
@@ -167,8 +137,9 @@ def notes_corpus_elements(
         raise ValueError(f"{len(timeless)} archive element(s) the history fold holds no time for "
                          f"(first: {timeless[0]}) — the fold and the ingest decompose differently")
     if report is not None:
-        report.update({"root": top, "head": hist.head, "commits": hist.commits, "versions": hist.versions,
-                       "uncommitted": hist.uncommitted, "untracked": hist.untracked})
+        report.update({"root": src.top, "head": hist.head, "commits": hist.commits, "versions": hist.versions,
+                       "uncommitted": hist.uncommitted, "untracked": hist.untracked,
+                       "sources": {source_id(ARCHIVE_SOURCE, corpus_root): hist.head} if hist.head else {}})
     return stamp_note_profile(nodes, profile), edges   # the profile is READABLE at edit time (cbde404c)
 
 
@@ -203,7 +174,7 @@ def stamp_note_profile(
 
 def repo_map_elements(
     repos_dir: str,  # Dir holding the cjm-* repos (the active tree)
-    report: Optional[Dict[str, Any]] = None,  # Filled with {repos, no_history, uncommitted}
+    report: Optional[Dict[str, Any]] = None,  # Filled with {repos, no_history, uncommitted, sources}
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:  # (Entity nodes, DEPENDS_ON edges), each carrying its times
     """One repo Entity per cjm-* repo (RENAME-STABLE keys) + DEPENDS_ON from pyproject.
 
@@ -225,6 +196,7 @@ def repo_map_elements(
     edges: List[Dict[str, Any]] = []
     no_history: List[str] = []
     uncommitted: List[str] = []
+    sources: Dict[str, str] = {}   # the ingest record's entries: each repo and the HEAD read (DEC a9176261)
     for d in sorted(root.iterdir()):
         if not d.is_dir() or not d.name.startswith("cjm-"):
             continue
@@ -232,10 +204,8 @@ def repo_map_elements(
         if born is None:
             no_history.append(d.name)
             continue
-        key = conceptual_key(d.name)
         aliases = aliases_for(d.name)
-        ent = EntityNode(kind="repo", key=key, name=d.name, aliases=aliases,
-                         properties={"path": str(d), "tier": "active"})
+        ent = repo_entity(str(d))
         wire = ent.to_graph_node()
         wire["created_at"] = born
         wire["updated_at"] = max(born, RENAME_ALIASES_AUTHORED) if aliases else born
@@ -247,8 +217,10 @@ def repo_map_elements(
             raise ValueError(f"{d.name}: {len(timeless)} DEPENDS_ON edge(s) with no time in its history")
         edges.extend(deps)
         uncommitted += [f"{d.name}/{p}" for p in hist.uncommitted]
+        sources[source_id(REPO_SOURCE, str(d))] = hist.head
     if report is not None:
-        report.update({"repos": len(nodes), "no_history": no_history, "uncommitted": uncommitted})
+        report.update({"repos": len(nodes), "no_history": no_history, "uncommitted": uncommitted,
+                       "sources": sources})
     return nodes, edges
 
 
@@ -296,3 +268,94 @@ def site_page_slug(
     the root index keeps "index" (the empty path names no page)."""
     stem = Path(rel).with_suffix("").as_posix()
     return stem[: -len("/index")] if stem.endswith("/index") else stem
+
+
+def source_id(
+    kind: str,  # ARCHIVE_SOURCE | REPO_SOURCE
+    root: str,  # The source's root (the archive's corpus root; a repo's dir)
+) -> str:  # Its id in the ingest record: "<kind>:<resolved root>"
+    """An ingested git source's id (DEC a9176261): its kind and where it lives — the root a
+    rebuild-diff runs git in, rewritten by a path map like every other path."""
+    return f"{kind}:{Path(root).resolve()}"
+
+
+def parse_source_id(
+    sid: str,  # An ingest-record source id
+) -> Tuple[str, str]:  # (kind, root)
+    kind, sep, root = sid.partition(":")
+    if not sep or not root:
+        raise ValueError(f"not an ingest-record source id: {sid!r}")
+    return kind, root
+
+
+def repo_entity(
+    repo_dir: str,  # A cjm-* repo dir under the repos dir
+) -> EntityNode:  # Its repo Entity: the rename-stable key, the current name, prior names as aliases
+    d = Path(repo_dir)
+    return EntityNode(kind="repo", key=conceptual_key(d.name), name=d.name, aliases=aliases_for(d.name),
+                      properties={"path": str(d), "tier": "active"})
+
+
+class ArchiveSource:
+    """The archive's kept paths and their decomposition — ONE definition for the ingest that
+    folds it (`notes_corpus_elements`) and for rebuild-diff's attribution of a moved archive
+    (DEC a9176261), so the rows a moved path accounts for are exactly the rows it ingests to.
+
+    Paths are relative to the archive's work tree (`top`): the posts under the corpus root
+    (`<prefix>.../index.md|qmd`), the site's own pages (identity = their path, 96aff70e) and
+    the retired sources (restored from the commit their retire op recorded, e916a4b9 (2) —
+    never kept from HEAD)."""
+
+    def __init__(
+        self,
+        corpus_root: str,              # Root of the posts corpus (e.g. christianjmills/posts)
+        profile: str = "quarto_post",  # Relationship-harvest profile
+        note_aliases: Optional[Dict[str, str]] = None,  # Confirmed {drifted-slug: canonical-slug} link aliases
+        *,
+        site_root: Optional[str] = None,          # The site project root the pages live under
+        site_pages: Optional[List[str]] = None,   # The site's own pages, relative to site_root
+        retired: Optional[List[Dict[str, Any]]] = None,  # The journal's retire records
+    ):
+        self.root = Path(corpus_root)
+        top = git_toplevel(str(self.root))
+        if top is None:
+            raise ValueError(f"the archive {corpus_root} is under no git history — its times come from "
+                             "git (design amendment 19edbe97): commit it first")
+        retired = list(retired or [])
+        if retired and not site_root:
+            raise ValueError("retired sources need the site root they are restored from (`website_root`)")
+        if site_pages and not site_root:
+            raise ValueError("site_pages need the site root they live under (`website_root`)")
+        if site_root and str(Path(site_root).resolve()) != top:
+            raise ValueError(f"the site root {site_root} is not the archive's work tree {top}")
+        self.top, self.profile, self.note_aliases, self.site_root = top, profile, note_aliases, site_root
+        rel = self.root.resolve().relative_to(top).as_posix()
+        self.prefix = "" if rel == "." else rel + "/"
+        self.by_retired = {r["path"]: r for r in retired}
+        self.pages = {p: site_page_slug(p) for p in (site_pages or []) if p not in self.by_retired}
+
+    def is_post(self, path: str) -> bool:  # A post's index file under the corpus root
+        return path.startswith(self.prefix) and PurePosixPath(path).name in INDEX_FILENAMES
+
+    def keep(self, path: str) -> bool:  # What HEAD's walk ingests (a retired source is frozen instead)
+        return (self.is_post(path) or path in self.pages) and path not in self.by_retired
+
+    def decompose(
+        self,
+        path: str,   # A kept (or frozen) path, relative to the work tree
+        data: bytes,  # One version's bytes
+    ) -> Tuple[Any, List[Dict[str, Any]]]:  # (the Note, its element wires)
+        text = data.decode("utf-8")
+        if path in self.by_retired or path in self.pages:
+            slug = self.by_retired[path]["slug"] if path in self.by_retired else self.pages[path]
+            note = note_from_text(str(Path(self.site_root) / path), text, corpus_root=str(self.site_root),
+                                  profile=self.profile, lossless=True, slug=slug)
+        else:
+            note = note_from_text(str(self.root / path[len(self.prefix):]), text, corpus_root=str(self.root),
+                                  profile=self.profile, lossless=True)
+        n, e = corpus_graph_elements([note], self.note_aliases)
+        return note, n + e
+
+
+ARCHIVE_SOURCE = "archive"  # The ingest record's kind for the notes lane's archive clone (DEC a9176261)
+REPO_SOURCE = "repo"        # The ingest record's kind for one repo of the repo map

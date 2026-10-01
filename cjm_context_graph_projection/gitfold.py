@@ -338,3 +338,44 @@ def root_commit_time(
     times = [float(line.split()[1]) for line in
              _git(root, "log", "--max-parents=0", "--format=%H %ct", "HEAD").splitlines() if line.strip()]
     return min(times) if times else None
+
+
+def commit_exists(
+    root: str,    # A git work tree
+    commit: str,  # A commit id
+) -> bool:  # Whether the clone holds that commit
+    r = subprocess.run(["git", "-C", root, "rev-parse", "--verify", "-q", f"{commit}^{{commit}}"],
+                       capture_output=True, text=True)
+    return r.returncode == 0
+
+
+def paths_between(
+    root: str,            # A git work tree
+    a: Optional[str],     # The earlier commit (None: the source did not exist — every path at b)
+    b: Optional[str],     # The later commit (None: the source is gone — every path at a)
+) -> List[str]:  # Relative paths whose blob differs between the two commits (added and deleted too)
+    """What moved between two commits of one source (renames are a delete + an add: identity
+    is the path, as in the fold)."""
+    if a is None or b is None:
+        return sorted(p for p in _git(root, "ls-tree", "-r", "-z", "--name-only", a or b).split("\0") if p)
+    return sorted(p for p in _git(root, "diff", "--no-renames", "--name-only", "-z", a, b).split("\0") if p)
+
+
+def blobs_at(
+    root: str,             # A git work tree
+    commit: str,           # A commit id
+    paths: Iterable[str],  # Relative paths
+) -> Dict[str, bytes]:  # path -> its bytes at that commit (a path the commit does not hold is absent)
+    """Several paths' contents at one commit through one ls-tree + one cat-file batch."""
+    want = sorted(set(paths))
+    if not want:
+        return {}
+    ids: Dict[str, str] = {}
+    for entry in _git(root, "ls-tree", "-r", "-z", commit, "--", *(f":(literal){p}" for p in want)).split("\0"):
+        if not entry:
+            continue
+        meta, path = entry.split("\t", 1)
+        if meta.split()[1] == "blob":
+            ids[path] = meta.split()[2]
+    data = read_blobs(root, ids.values())
+    return {p: data[i] for p, i in ids.items()}
