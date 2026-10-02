@@ -229,10 +229,54 @@ local function apply(doc)
   return doc
 end
 
+-- Pass 4, every document (design b82d2a98): an anchor token before each id the page carries -- a
+-- heading's, a span's, a link's, and a plain div's at its first text -- in a
+-- .llms-conditional-content span. Quarto's llms finalizer converts the page before it removes
+-- those, so the token reaches the page's .llms.md where the id stands and never the HTML;
+-- site-build writes each one there as an anchor (agentlayer.ANCHOR_TOKEN is this prefix).
+local function anchor_token(id)
+  return pandoc.Span({ pandoc.Str("⟦cjm-anchor:" .. id .. "⟧") }, pandoc.Attr("", { "llms-conditional-content" }))
+end
+local function anchor_inlines(inlines)
+  local out, changed = {}, false
+  for _, il in ipairs(inlines) do
+    if (il.t == "Span" or il.t == "Link") and il.identifier ~= "" then
+      table.insert(out, anchor_token(il.identifier))
+      changed = true
+    end
+    table.insert(out, il)
+  end
+  if changed then return pandoc.Inlines(out) end
+  return nil
+end
+-- A div's first text: its first block when that block holds text, through plain nested divs
+-- (Quarto's typed placeholders are its own and are not entered)
+local function first_text(blocks)
+  local b = blocks[1]
+  if b == nil then return nil end
+  if b.t == "Para" or b.t == "Plain" or b.t == "Header" then return b end
+  if b.t == "Div" and not b.attributes["__quarto_custom_type"] then return first_text(b.content) end
+  return nil
+end
+local function anchor_header(h)
+  if h.identifier == "" then return nil end
+  h.content:insert(1, anchor_token(h.identifier))
+  return h
+end
+local function anchor_div(d)
+  if d.identifier == "" or d.attributes["__quarto_custom_type"] then return nil end
+  local b = first_text(d.content)
+  if b == nil then return nil end
+  b.content:insert(1, anchor_token(d.identifier))
+  return d
+end
+
 return {
   { Callout = mark_includes },
   { Blocks = drop_marked },
   { Pandoc = apply },
+  { Inlines = anchor_inlines },
+  { Header = anchor_header, Div = anchor_div },
 }
 '''
 
@@ -287,9 +331,10 @@ def _nav_step(
     pages: Dict[str, Dict[str, Any]],   # redirect_plan's {subject: {active, superseded}}
 ) -> Optional[Dict[str, str]]:  # {title, href}, or None past either end
     """One previous / next step of the post navigation."""
+    from .site import stated
     if not 0 <= j < len(run):
         return None
-    return {"title": str(F.prop(notes[run[j]], "title") or ""), "href": _post_href(run[j], src_of[run[j]], pages)}
+    return {"title": stated(notes[run[j]], "title"), "href": _post_href(run[j], src_of[run[j]], pages)}
 
 
 async def derived_plan(
@@ -367,6 +412,7 @@ async def derived_plan(
     from .postpage import (POST_KINDS, end_plan, license_facts, load_strip_copy, offered_backing,
                            pitch_target, post_licenses, related_context, related_posts)
     from .purenotes import note_types
+    from .site import stated
     types = await note_types(gx)
     ends: Dict[str, Any] = {"ends": {}, "counts": {}}
     post_lic: Dict[str, Dict[str, Any]] = {}
@@ -379,7 +425,7 @@ async def derived_plan(
         if not strip["errors"]:
             # Related posts, among the posts this profile renders (39c51c15 (4))
             ctx = await related_context(gx)
-            cands = {n: {"title": str(F.prop(notes[n], "title") or ""), "href": _post_href(n, s, pages),
+            cands = {n: {"title": stated(notes[n], "title"), "href": _post_href(n, s, pages),
                          "kind": (types.get(n) or {}).get("kind"),
                          "date": (F.prop(notes[n], "metadata") or {}).get("date")}
                      for n, s in src_of.items() if (types.get(n) or {}).get("kind") in POST_KINDS}
@@ -411,7 +457,7 @@ async def derived_plan(
                     errors.append({"kind": "post-comments", "source": src_of[n], "why": pc["error"]})
                 else:
                     page_threads[n] = pc
-            comments_unrendered = [{"id": n, "title": str(F.prop(notes[n], "title") or "") if n in notes else "",
+            comments_unrendered = [{"id": n, "title": stated(notes.get(n), "title"),
                                     "threads": threads[n]["active"] + threads[n]["earlier"]}
                                    for n in sorted(threads) if n not in cands]
             # Draws on (design 37f82f72, amending 722a8232's rendering): the works and units a post

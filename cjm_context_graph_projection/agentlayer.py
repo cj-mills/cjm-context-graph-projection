@@ -26,6 +26,7 @@ from the guarded page, and the publish guard scans the `.md` and `.txt` outputs.
 import json
 import posixpath
 import re
+from html import escape as html_escape, unescape as html_unescape
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import unquote, urljoin, urlsplit
@@ -55,7 +56,15 @@ _JSONLD_RE = re.compile(r'<script type="application/ld\+json">(.*?)</script>', r
 # A markdown link's target in Pandoc's gfm (`](target)` / `](target "title")`), a fenced code
 # line, and an inline code span (links inside code are text, never rewritten)
 _LINK_RE = re.compile(r'\]\((<[^>]*>|[^)\s]+)((?:\s+"[^"]*")?)\)')
-_FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+# A fence opens after any container prefix too -- a blockquote's `>`, a list item's own marker
+_FENCE_RE = re.compile(r"^(?:[ \t]*(?:>[ \t]?|[-*+][ \t]+|\d{1,9}[.)][ \t]+))*[ \t]*(`{3,}|~{3,})")
+# The anchor token the derived-blocks filter places before each id the page carries (design
+# b82d2a98): Quarto's llms finalizer converts the page before it removes `.llms-conditional-content`,
+# so the token reaches the page's .llms.md where the id stands, and never the HTML
+ANCHOR_TOKEN = "⟦cjm-anchor:"
+_ANCHOR_RE = re.compile(r"⟦cjm-anchor:((?:\\.|[^⟧\\])*)⟧")
+_ANCHOR_TAG_RE = re.compile(r'<a id="([^"]*)"></a>')
+_HTML_ID_RE = re.compile(r'\sid="([^"]*)"')
 _CODE_SPAN_RE = re.compile(r"(`+)(?:.+?)\1")
 _SCHEME_RE = re.compile(r"^[A-Za-z][\w+.-]*:|^//")
 _MD_LINK_RE = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")   # a markdown link or image, its text kept
@@ -372,12 +381,9 @@ async def agent_plan(
                                                        "(the JSON-LD urls and llms.txt's links need it)"}]}
 
     def stated(nid: str, key: str) -> str:
-        # The page's front matter first: a born Note's own title and description are its working
-        # ones, while the page states what its front matter says
-        from .site import _front_matter
-        front = _front_matter(str(F.prop(notes[nid], "frontmatter_raw") or ""))
-        md = F.prop(notes[nid], "metadata") or {}
-        return str(front.get(key) or md.get(key) or F.prop(notes[nid], key) or "")
+        # What the page states, read by the one reader every leg shares (finding 12d98020)
+        from .site import stated as page_stated
+        return page_stated(notes[nid], key)
     # What each post draws on, as the Library index planned it (design 37f82f72 (5)); a drawn-on
     # work whose form has no schema.org type refuses
     from .librarypage import LAYOUT as LIBRARY_LAYOUT
@@ -487,8 +493,6 @@ def rewrite_markdown_links(
     resolve: Any,                   # (target) -> rewritten target or None
 ) -> tuple:  # (text, rewritten count)
     """Rewrite each link target `resolve` maps, outside fenced code and inline code spans."""
-    out: List[str] = []
-    fence: Optional[str] = None
     count = 0
 
     def link(m: "re.Match") -> str:
@@ -502,25 +506,8 @@ def rewrite_markdown_links(
         count += 1
         target = new + inner[cut:]
         return f"]({'<' + target + '>' if raw.startswith('<') else target}{m.group(2)})"
-    for line in text.split("\n"):
-        f = _FENCE_RE.match(line)
-        if fence is not None:
-            if f and f.group(1)[0] == fence[0] and len(f.group(1)) >= len(fence) and not line.strip()[len(f.group(1)):].strip():
-                fence = None
-            out.append(line)
-            continue
-        if f:
-            fence = f.group(1)
-            out.append(line)
-            continue
-        parts, pos = [], 0
-        for c in _CODE_SPAN_RE.finditer(line):
-            parts.append(_LINK_RE.sub(link, line[pos:c.start()]))
-            parts.append(c.group(0))
-            pos = c.end()
-        parts.append(_LINK_RE.sub(link, line[pos:]))
-        out.append("".join(parts))
-    return "\n".join(out), count
+    new = map_outside_code(text, lambda seg: _LINK_RE.sub(link, seg))
+    return new, count
 
 
 def rewrite_llms_links(
@@ -543,3 +530,117 @@ def rewrite_llms_links(
             p.write_text(new, encoding="utf-8")
             changed += 1
     return {"files": files, "rewritten": rewritten, "changed": changed}
+
+
+def map_outside_code(
+    text: str,  # Markdown text (a .llms.md file's)
+    fn: Any,    # (segment) -> segment, applied to each stretch outside code
+) -> str:  # The text with `fn` applied outside fenced code and inline code spans
+    """The ONE walker of the markdown layer's code regions (design b82d2a98 (3)), shared by the
+    link rewrite and the anchors: a fence opens after any container prefix (a list item's own
+    marker, a blockquote's `>`), and closes on a fence of its character at least as long with
+    nothing after it. A fence missed on a list item's line once let its closer open a phantom
+    fence that hid every later line."""
+    out: List[str] = []
+    fence: Optional[str] = None
+    for line in text.split("\n"):
+        f = _FENCE_RE.match(line)
+        if fence is not None:
+            if f and f.group(1)[0] == fence[0] and len(f.group(1)) >= len(fence) and not line[f.end():].strip():
+                fence = None
+            out.append(line)
+            continue
+        if f:
+            fence = f.group(1)
+            out.append(line)
+            continue
+        parts, pos = [], 0
+        for c in _CODE_SPAN_RE.finditer(line):
+            parts.append(fn(line[pos:c.start()]))
+            parts.append(c.group(0))
+            pos = c.end()
+        parts.append(fn(line[pos:]))
+        out.append("".join(parts))
+    return "\n".join(out)
+
+
+def restore_llms_anchors(
+    output_dir: str,  # The profile's output dir
+) -> Dict[str, Any]:  # {files, anchors, changed}
+    """The markdown layer carries the ids its page carries (design b82d2a98 (1)): each anchor
+    token the render left in a `.llms.md` is written as `<a id="..."></a>` where it stands --
+    raw HTML is gfm's only form for an id, and Quarto's converter can write none. Every token
+    becomes an anchor (none is stripped), so the converter's text around each one is exactly
+    what it wrote. Idempotent: a second run finds no token."""
+    out = Path(output_dir)
+    files = anchors = changed = 0
+
+    def tag(m: "re.Match") -> str:
+        nonlocal anchors
+        anchors += 1
+        name = re.sub(r"\\(.)", r"\1", m.group(1))   # the gfm writer's escapes undone
+        return f'<a id="{html_escape(name, quote=True)}"></a>'
+    for p in sorted(out.rglob("*" + LLMS_SUFFIX)):
+        if "site_libs" in p.parts:
+            continue
+        files += 1
+        text = p.read_text(encoding="utf-8")
+        new = map_outside_code(text, lambda seg: _ANCHOR_RE.sub(tag, seg))
+        if new != text:
+            p.write_text(new, encoding="utf-8")
+            changed += 1
+    return {"files": files, "anchors": anchors, "changed": changed}
+
+
+def check_llms_fragments(
+    output_dir: str,  # The profile's output dir
+) -> Dict[str, Any]:  # {checked, dead: [{file, link}], errors}
+    """After the anchors (design b82d2a98 (2)), failing closed: every fragment a `.llms.md` links
+    -- to another page's markdown or within its own -- resolves to an anchor in its target, or
+    the build names it. A fragment the target's HTML page does not carry either is DEAD: the
+    layer states it as the page does, a source defect reported, never failed. And no anchor
+    token reaches the HTML layer (Quarto removes one only where its llms finalizer runs)."""
+    out = Path(output_dir)
+    anchors: Dict[Path, set] = {}
+    page_ids: Dict[Path, set] = {}
+
+    def ids(path: Path, cache: Dict[Path, set], pattern: "re.Pattern") -> set:
+        if path not in cache:
+            text = path.read_text(encoding="utf-8") if path.is_file() else ""
+            cache[path] = {html_unescape(i) for i in pattern.findall(text)}
+        return cache[path]
+    checked, dead, errors = 0, [], []
+    for p in sorted(out.rglob("*" + LLMS_SUFFIX)):
+        if "site_libs" in p.parts:
+            continue
+        links: List[str] = []
+
+        def collect(seg: str) -> str:
+            for m in _LINK_RE.finditer(seg):
+                raw = m.group(1)
+                links.append(raw[1:-1] if raw.startswith("<") else raw)
+            return seg
+        map_outside_code(p.read_text(encoding="utf-8"), collect)
+        rel = p.relative_to(out).as_posix()
+        for link in links:
+            path, sep, frag = link.partition("#")
+            path = path.split("?", 1)[0]
+            if not (sep and frag) or _SCHEME_RE.match(path) or (path and not path.endswith(LLMS_SUFFIX)):
+                continue
+            checked += 1
+            target = (out / unquote(path).lstrip("/") if path.startswith("/")
+                      else p.parent / unquote(path) if path else p).resolve()
+            frag = unquote(frag)
+            if frag in ids(target, anchors, _ANCHOR_TAG_RE):
+                continue
+            page = target.with_name(target.name[:-len(LLMS_SUFFIX)] + ".html")
+            if frag in ids(page, page_ids, _HTML_ID_RE):
+                errors.append({"kind": "llms-fragment", "file": rel, "link": link,
+                               "why": "the page carries the id, its markdown has no anchor for it"})
+            else:
+                dead.append({"file": rel, "link": link})
+    for p in sorted(out.rglob("*.html")) + [out / "search.json"]:
+        if p.is_file() and ANCHOR_TOKEN in p.read_text(encoding="utf-8", errors="replace"):
+            errors.append({"kind": "llms-anchor-leak", "file": p.relative_to(out).as_posix(),
+                           "why": "an anchor token reached the HTML layer"})
+    return {"checked": checked, "dead": dead, "errors": errors}

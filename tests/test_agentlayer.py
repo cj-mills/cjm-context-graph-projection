@@ -5,10 +5,13 @@ import inspect
 
 from cjm_dev_graph_schema import predicates as P
 
-from cjm_context_graph_projection.agentlayer import (_line, based_on, build_lines, check_jsonld, directory_author,
-                                                     JSONLD_KEYS, jsonld_script, llms_index, load_index_copy, plain,
-                                                     post_jsonld, read_jsonld, rewrite_llms_links,
-                                                     rewrite_markdown_links, write_llms_txt, WORK_JSONLD_TYPES)
+from cjm_context_graph_projection.agentlayer import (_line, ANCHOR_TOKEN, based_on, build_lines, check_jsonld,
+                                                     check_llms_fragments, directory_author, JSONLD_KEYS,
+                                                     jsonld_script, llms_index, load_index_copy, plain,
+                                                     post_jsonld, read_jsonld, restore_llms_anchors,
+                                                     rewrite_llms_links, rewrite_markdown_links, write_llms_txt,
+                                                     WORK_JSONLD_TYPES)
+from cjm_context_graph_projection.derivedblocks import LUA_FILTER
 from cjm_context_graph_projection.site import _DRAFTS_REF
 
 DATES = {"published": "2024-05-01", "updated": "2024-06-02"}
@@ -215,3 +218,49 @@ def test_publish_guard_scans_markdown_links_into_drafts():
     assert _DRAFTS_REF.search("[x](../../drafts/posts/y/index.llms.md)")
     assert _DRAFTS_REF.search("- [Y](https://x.org/drafts/posts/y/index.llms.md): d")
     assert not _DRAFTS_REF.search("[x](../posts/y/index.llms.md) on drafting")
+
+
+def test_a_fence_opened_on_a_list_item_line_closes(tmp_path):
+    # The one walker (design b82d2a98 (3)): a fence opening after a list marker or a blockquote's
+    # `>` is a fence, so its closer closes it and the links after it are rewritten
+    for p in ("posts/a/index.llms.md", "posts/b/index.llms.md"):
+        (tmp_path / p).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / p).write_text("")
+    text = "\n".join(["- ``` c", "  [in](../b/)", "  ```", "> ~~~", "> [quoted](../b/)", "> ~~~",
+                      "[after](../b/)"])
+    (tmp_path / "posts/a/index.llms.md").write_text(text)
+    assert rewrite_llms_links(str(tmp_path))["rewritten"] == 1
+    got = (tmp_path / "posts/a/index.llms.md").read_text().splitlines()
+    assert got[1] == "  [in](../b/)" and got[4] == "> [quoted](../b/)" and got[6] == "[after](../b/index.llms.md)"
+
+
+def test_the_markdown_layer_carries_the_page_ids(tmp_path):
+    # Design b82d2a98: the filter's token is the agent layer's, every token becomes an anchor where
+    # it stands, and every fragment the layer links resolves -- or the build names it
+    assert '"' + ANCHOR_TOKEN in LUA_FILTER
+    a, b = tmp_path / "posts/a", tmp_path / "posts/b"
+    for d in (a, b):
+        d.mkdir(parents=True)
+    (b / "index.llms.md").write_text("## ⟦cjm-anchor:setup\\_env⟧Setup\n\n- ⟦cjm-anchor:pt-1⟧[§](#pt-1) A point\n\n"
+                                     "```\n⟦cjm-anchor:in-code⟧\n```\n")
+    (b / "index.html").write_text('<section id="setup_env"><h2>Setup</h2></section><a id="pt-1" href="#pt-1">§</a>'
+                                  '<span id="stale">x</span>')
+    (a / "index.llms.md").write_text("[setup](../b/index.llms.md#setup_env) [gone](../b/index.llms.md#call) "
+                                     "[web](https://x.org/b/#y) [page](../b/index.llms.md)")
+    (a / "index.html").write_text("<p>a</p>")
+    res = restore_llms_anchors(str(tmp_path))
+    assert res == {"files": 2, "anchors": 2, "changed": 1}
+    assert (b / "index.llms.md").read_text().splitlines()[:3] == [
+        '## <a id="setup_env"></a>Setup', "", '- <a id="pt-1"></a>[§](#pt-1) A point']
+    assert "⟦cjm-anchor:in-code⟧" in (b / "index.llms.md").read_text()   # code is text, never an anchor
+    assert restore_llms_anchors(str(tmp_path))["anchors"] == 0           # idempotent
+    chk = check_llms_fragments(str(tmp_path))
+    # #pt-1 within b and #setup_env from a resolve; #call is on neither the page nor its markdown
+    assert chk == {"checked": 3, "dead": [{"file": "posts/a/index.llms.md", "link": "../b/index.llms.md#call"}],
+                   "errors": []}
+    # An id the page carries that the markdown has no anchor for fails closed, as does a token in HTML
+    (a / "index.llms.md").write_text("[stale](../b/index.llms.md#stale)")
+    (a / "index.html").write_text("<p>⟦cjm-anchor:leak⟧</p>")
+    chk = check_llms_fragments(str(tmp_path))
+    assert [(e["kind"], e["file"]) for e in chk["errors"]] == [("llms-fragment", "posts/a/index.llms.md"),
+                                                               ("llms-anchor-leak", "posts/a/index.html")]

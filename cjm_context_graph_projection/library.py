@@ -342,11 +342,14 @@ async def library_index(
     born_sources = {n: sorted({set_ref[s] for s in ss}) for n, ss in sets_of.items()}
     types = {str(F.prop(t, "key")): F.props(t) for t in await F.load_label(gx, DevNodeKinds.DELIVERABLE_TYPE)}
     public = await public_deliverables(gx)
-    titles = {F.nid(n): F.props(n) for n in await F.load_label(gx, DevNodeKinds.NOTE)}
+    from .site import stated
+    nodes = {F.nid(n): n for n in await F.load_label(gx, DevNodeKinds.NOTE)}
     notes = {}
     for nid, t in (await note_types(gx)).items():
-        p = titles.get(nid, {})
-        notes[nid] = {"slug": p.get("slug") or p.get("name") or "", "title": p.get("title") or p.get("name") or "",
+        p = F.props(nodes[nid]) if nid in nodes else {}
+        # an output is named as its page states it (finding 12d98020)
+        notes[nid] = {"slug": p.get("slug") or p.get("name") or "",
+                      "title": stated(nodes.get(nid), "title") or p.get("name") or "",
                       "type": t.get("type"), "kind": t.get("kind"), "origin": t.get("origin"),
                       "output_class": str((types.get(t.get("type") or "") or {}).get("output_class") or ""),
                       "public": nid in public}

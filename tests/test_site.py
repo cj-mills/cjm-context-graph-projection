@@ -8,7 +8,8 @@ from pathlib import Path
 import pytest
 
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
-from cjm_context_graph_projection.site import output_href, publish_guard, redirect_page, site_build
+from cjm_context_graph_projection.derivedblocks import _nav_step
+from cjm_context_graph_projection.site import output_href, publish_guard, redirect_page, site_build, stated
 from cjm_context_graph_projection.write import assert_value, decide
 
 _HAVE_GRAPH = (Path(DEFAULT_MANIFESTS) / f"{DEFAULT_GRAPH_ID}.json").exists()
@@ -102,3 +103,24 @@ def test_site_build_projects_redirects_checks_aliases_and_guards(tmp_path):
             assert [(e["kind"], e["alias"]) for e in rep["errors"]] == [("alias", "/Stray/")]
 
     asyncio.run(go())
+
+
+def test_stated_reads_what_the_page_states():
+    # A born Note: its own title and description are its working ones, its page states the
+    # front matter's (finding 12d98020)
+    born = {"properties": {
+        "title": "GPU MODE Bonus Lecture notes: CUDA C++ llm.cpp", "description": "Working description",
+        "frontmatter_raw": "---\ntitle: CUDA C++ llm.cpp\nsubtitle: Notes on the GPU MODE Bonus Lecture\n---\n"}}
+    assert stated(born, "title") == "CUDA C++ llm.cpp"
+    assert stated(born, "subtitle") == "Notes on the GPU MODE Bonus Lecture"
+    # A field the front matter leaves off falls to the metadata, then to the Note's own
+    assert stated(born, "description") == "Working description"
+    noted = {"properties": {"title": "Post", "metadata": {"description": "From metadata"}}}
+    assert (stated(noted, "title"), stated(noted, "description")) == ("Post", "From metadata")
+    assert stated(None, "title") == ""
+    # Ingest stripped an archive Note's front-matter title; the page states no edge whitespace either
+    padded = {"properties": {"title": "Padded", "frontmatter_raw": "---\ntitle: 'Padded '\n---\n"}}
+    assert stated(padded, "title") == "Padded"
+    # The series navigation names a post the way its page does
+    step = _nav_step(["b"], 0, {"b": born}, {"b": "drafts/posts/b/index.md"}, {})
+    assert step == {"title": "CUDA C++ llm.cpp", "href": "/drafts/posts/b/"}

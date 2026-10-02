@@ -327,9 +327,10 @@ async def _harvest_index(
     for subject, page in (await redirect_plan(gx))["pages"].items():
         for v in [page["active"], *page["superseded"]]:
             paths.setdefault(v, []).append(subject)
+    from .site import stated
     titles: Dict[str, List[str]] = {}
     for i, n in notes.items():
-        t = str(F.prop(n, "title") or "").strip()
+        t = stated(n, "title").strip()   # a thread names the page as the page states it
         if t:
             titles.setdefault(t, []).append(i)
     return {"paths": paths, "titles": titles, "notes": notes}
@@ -417,7 +418,8 @@ async def harvest_discussions(
         return {"error": str(e)[:300], "written": False}
     mapped = map_threads(threads, idx["paths"], idx["titles"], resolved, cfg["site_title"], conf["base-paths"])
     planned = plan_threads(mapped)
-    title = lambda n: str(F.prop(idx["notes"][n], "title") or "") if n in idx["notes"] else ""
+    from .site import stated
+    title = lambda n: stated(idx["notes"].get(n), "title")
     out: Dict[str, Any] = {
         "repo": conf["repo"],
         "threads": [{**{k: t[k] for k in ("number", "kind", "title", "comments", "created", "last_comment", "via")},

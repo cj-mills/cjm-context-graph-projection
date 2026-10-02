@@ -203,6 +203,9 @@ def test_derived_blocks_leave_the_render_and_the_navigation_replaces_them(tmp_pa
     assert lc["license"] == "https://creativecommons.org/licenses/by/4.0/"
     # Links stay in the markdown layer; llms.txt is the build's, from the graph's structure
     assert pub["agent"]["links_rewritten"] > 0 and "](../b/index.llms.md)" in agent["a_md"]
+    # The page's ids carried into its markdown (design b82d2a98), never into its HTML
+    assert pub["agent"]["anchors"] > 0 and '## <a id="overview"></a>Overview' in agent["a_md"]
+    assert pub["agent"]["fragments_dead"] == 0 and "cjm-anchor" not in html["a"]
     txt = agent["txt"]
     assert txt.startswith("# t\n\n> The test site.\n\n")
     assert all(txt.count(f"https://example.org/posts/{s}/index.llms.md") == 1 for s in ("a", "b", "c"))

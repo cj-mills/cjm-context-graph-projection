@@ -194,7 +194,8 @@ async def plan_matrix_page(
         errors.append({"kind": "matrix-population", "subject": sid, "members": stray,
                        "why": "the coverage-matrix Lens selected a non-tutorial"})
     vocab = await load_vocab(gx)
-    tutorials = {i: {"title": F.prop(by_id[i], "title") or "", "slug": F.prop(by_id[i], "slug") or ""}
+    from .site import stated
+    tutorials = {i: {"title": stated(by_id[i], "title"), "slug": F.prop(by_id[i], "slug") or ""}
                  for i in listed["ids"]}
     matrix = project_matrix(vocab[P.ENTITY_TASK], vocab[P.ENTITY_STAGE], tutorials,
                             await load_coverage_facts(gx))
@@ -213,9 +214,9 @@ async def plan_matrix_page(
         md = F.prop(n, "metadata") or {}
         from .sitepages import parse_date
         born = parse_date(md.get("date"))
-        items[i] = {"title": F.prop(n, "title") or F.prop(n, "slug"), "href": href,
+        items[i] = {"title": stated(n, "title") or F.prop(n, "slug"), "href": href,
                     "date": born.isoformat() if born else (d.isoformat() if d else ""),
-                    "description": F.prop(n, "description") or "", "marks": marks.get(i, [])}
+                    "description": stated(n, "description"), "marks": marks.get(i, [])}
     front: Dict[str, Any] = {"title": F.prop(node, "title") or key}
     for k in ("description", "date"):
         if F.prop(node, k):

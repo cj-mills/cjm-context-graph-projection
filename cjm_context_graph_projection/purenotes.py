@@ -4444,6 +4444,7 @@ async def staging_index(
     table is an underscore file (includable via the include shortcode, never rendered as a
     page of its own)."""
     root = Path(project_root)
+    from .site import stated
     lists_dir = root / "lists"
     pred = P.get_predicate(P.PUBLISH_STATE)
     order = list(pred.order_values or ()) + list(pred.terminal_values or ())
@@ -4459,7 +4460,7 @@ async def staging_index(
             rel = os.path.relpath(Path(path).resolve(), lists_dir.resolve()) if path else ""
         except ValueError:
             rel = path
-        item: Dict[str, Any] = {"path": rel, "title": fm.get("title") or str(F.prop(node, "title") or "")}
+        item: Dict[str, Any] = {"path": rel, "title": stated(node, "title")}
         for k in ("date", "description", "categories"):
             if fm.get(k):
                 item[k] = fm[k]

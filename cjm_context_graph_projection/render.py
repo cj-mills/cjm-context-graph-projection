@@ -515,7 +515,12 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             lines.append(f"- agent layer: JSON-LD on {dv.get('jsonld', 0)} post(s)"
                          + (f" (read back on {dv['jsonld_checked']})" if "jsonld_checked" in dv else "")
                          + f" · {ag.get('llms_md', 0)} .llms.md page(s), {ag.get('links_rewritten', 0)} link(s) "
-                         f"kept in the markdown layer · llms.txt: {ag.get('llms_links', 0)} link(s) in "
+                         f"kept in the markdown layer, {ag.get('anchors', 0)} id(s) carried into it, "
+                         f"{ag.get('fragments_checked', 0)} fragment(s) checked"
+                         + (f" (⚠ {ag['fragments_dead']} dead, as on the page: "
+                            + ", ".join(f"{d['file']} → {d['link']}" for d in ag.get("dead_fragments") or []) + ")"
+                            if ag.get("fragments_dead") else "")
+                         + f" · llms.txt: {ag.get('llms_links', 0)} link(s) in "
                          f"{ag.get('llms_sections', 0)} section(s)"
                          + ("" if ag.get("llms_txt_written") else " (unchanged)"))
         if obj.get("staging_index"):

@@ -287,7 +287,8 @@ async def site_build(
     """Build the site under one profile: generated inputs, render, the redirect projection,
     and (public) the publish guard. `ok` is False on any error row — the output is then not
     fit to publish, and the report names why."""
-    from .agentlayer import check_jsonld, rewrite_llms_links, write_llms_txt
+    from .agentlayer import (check_jsonld, check_llms_fragments, restore_llms_anchors, rewrite_llms_links,
+                             write_llms_txt)
     from .derivedblocks import check_derived, check_end_placement, derived_plan, write_derived
     from .sitepages import check_page_outputs, project_pages
     rep: Dict[str, Any] = {"profile": profile, "errors": []}
@@ -356,14 +357,20 @@ async def site_build(
         jl = check_jsonld(info["output_dir"], derived)
         rep["derived"]["jsonld_checked"] = jl["checked"]
         rep["errors"] += jl["errors"]
-    # The agent layer (amendment 23a49667 (2), (3)): links kept in the markdown layer, then the
-    # projected llms.txt over Quarto's flat list
+    # The agent layer (amendment 23a49667 (2), (3)): links kept in the markdown layer, the page's
+    # ids carried into it and every fragment checked (design b82d2a98), then the projected
+    # llms.txt over Quarto's flat list
     if derived.get("llms"):
         rew = rewrite_llms_links(info["output_dir"])
+        anc = restore_llms_anchors(info["output_dir"])
+        frag = check_llms_fragments(info["output_dir"])
         wr = write_llms_txt(info["output_dir"], derived["llms"])
-        rep["agent"] = {"llms_md": rew["files"], "links_rewritten": rew["rewritten"],
+        rep["agent"] = {"llms_md": rew["files"], "links_rewritten": rew["rewritten"], "anchors": anc["anchors"],
+                        "fragments_checked": frag["checked"], "fragments_dead": len(frag["dead"]),
                         "llms_txt_written": wr["written"], **derived["llms"]["counts"]}
-        rep["errors"] += wr["errors"]
+        if frag["dead"]:   # a source defect the page shares, reported (b82d2a98 (2))
+            rep["agent"]["dead_fragments"] = frag["dead"]
+        rep["errors"] += frag["errors"] + wr["errors"]
     red = write_redirects(info["output_dir"], plan["stubs"], page_outputs(website_root, info["inputs"]))
     rep["redirects"] = {"stubs": len(plan["stubs"]), "written": red["written"], "unchanged": red["unchanged"]}
     rep["errors"] += red["errors"]
@@ -373,3 +380,22 @@ async def site_build(
         rep["errors"] += guard["errors"]
     rep["ok"] = not rep["errors"]
     return rep
+
+
+def stated(
+    note: Any,  # A Note node (None reads as nothing)
+    key: str,   # A front-matter field: "title", "description", "subtitle"
+) -> str:  # What the page states for it ("" when nothing does)
+    """The ONE reader of what a post's page states (finding 12d98020): its front matter first,
+    then its metadata, then the Note's own property. A born Note's title and description are
+    its working ones while its page states its front matter's (the type may derive them at
+    render), so every leg that names a post -- its navigation, related posts, the Library, the
+    Tutorials matrix, the claims report, the agent layer, the judge's view -- reads it here and
+    a post is named one way everywhere. An archive Note's property came from its front matter
+    at ingest, so it reads the same either way."""
+    if note is None:
+        return ""
+    front = _front_matter(str(F.prop(note, "frontmatter_raw") or ""))
+    md = F.prop(note, "metadata") or {}
+    value = (front.get(key) if isinstance(front, dict) else None) or md.get(key) or F.prop(note, key)
+    return str(value or "").strip()   # a page states no edge whitespace (ingest stripped it too)

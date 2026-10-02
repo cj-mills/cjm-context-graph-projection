@@ -214,7 +214,8 @@ async def load_post_views(
         name = str(F.prop(sec, "name") or "") if sec is not None else ""
         if name and not name.startswith("_"):   # `_preamble` and the derived blocks are no heading
             heads.setdefault(str(s), []).append((int(F.prop(sec, "order") or 0), name))
-    return {n: post_view(str(F.prop(notes[n], "title") or ""), str(F.prop(notes[n], "description") or ""),
+    from .site import stated   # the judge sees what the page states (finding 12d98020)
+    return {n: post_view(stated(notes[n], "title"), stated(notes[n], "description"),
                          str((types.get(n) or {}).get("kind") or ""), tags.get(n, []),
                          [h for _, h in sorted(heads.get(n, []))])
             for n in posts}

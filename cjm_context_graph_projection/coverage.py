@@ -300,6 +300,7 @@ async def coverage_matrix(
     vocabulary, optionally narrowed by the hardware filter."""
     from .archive import is_retired
     from .purenotes import note_publish_states, note_types
+    from .site import stated
     vocab = await load_vocab(gx)
     typed = await note_types(gx)
     states = await note_publish_states(gx)
@@ -307,7 +308,7 @@ async def coverage_matrix(
     tutorials: Dict[str, Dict[str, Any]] = {}
     for nid in ids:
         node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=nid)
-        tutorials[nid] = {"title": F.prop(node, "title") or "", "slug": F.prop(node, "slug") or ""}
+        tutorials[nid] = {"title": stated(node, "title"), "slug": F.prop(node, "slug") or ""}
     include, label = None, None
     if hardware or in_set:
         devices = await load_hardware(gx)

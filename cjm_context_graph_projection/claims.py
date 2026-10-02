@@ -155,11 +155,12 @@ async def claims_report(
 ) -> Dict[str, Any]:  # project_claims' result (+ `public` = the filtered claims when asked)
     """The claims over the live graph: every claim Entity with its state and backing."""
     from .purenotes import public_deliverables
+    from .site import stated
     supports = await load_supports(gx)
     ids = sorted({str(e["source_id"]) for e in supports})
     nodes = await F.load_nodes(gx, ids)
     pub = await public_deliverables(gx)
-    deliverables = {i: {"title": str(F.prop(nodes.get(i), "title") or ""),
+    deliverables = {i: {"title": stated(nodes.get(i), "title"),
                         "slug": str(F.prop(nodes.get(i), "slug") or ""), "public": i in pub}
                     for i in ids}
     res = project_claims(await load_claims(gx), await load_claim_states(gx), supports, deliverables)
