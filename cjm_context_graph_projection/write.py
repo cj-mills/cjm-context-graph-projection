@@ -434,15 +434,16 @@ async def observe_foreign(
     foreign_ref: str,   # The node id in that graph — full, or a unique id prefix
     siblings: Dict[str, str],                 # {graph key: db path} — the addressing graph's `sibling_graphs`
     manifests_dir: str = DEFAULT_MANIFESTS,   # Where the graph-storage capability manifest lives
-) -> Dict[str, Any]:  # {reference: ReferenceNode, facts: {locator?, citation?}} | {error}
+) -> Dict[str, Any]:  # {reference: ReferenceNode, facts: {locator?, citation?, resources?}} | {error}
     """Open the sibling graph READ-ONLY, resolve the foreign node, and take the observation.
 
     The one place the write path touches another graph — and it only reads: the
     Reference carries the foreign label, a display title and the content hash over the
     foreign node's label + properties as of now (`ReferenceNode.observe`). An unknown key
     or an unresolvable id refuses loudly (a reference to nothing is not a reference).
-    A Source or a Collection also states its LOCATOR and CITATION (amendment 722a8232),
-    read here with the observation so the op carries them (`sources.observed_facts`)."""
+    A Source or a Collection also states its LOCATOR and CITATION (amendment 722a8232) and
+    its human-added links (capture a2936020), read here with the observation so the op carries
+    them (`sources.observed_facts`)."""
     path = siblings.get(graph_key)
     if not path:
         return {"error": f"no sibling graph `{graph_key}` in this graph's config "
@@ -458,10 +459,14 @@ async def observe_foreign(
             wire = node if isinstance(node, dict) else {
                 "id": getattr(node, "id", ""), "label": getattr(node, "label", ""),
                 "properties": getattr(node, "properties", {}) or {}}
-            from .sources import collection_members, observed_facts
+            from .purenotes import read_source_references
+            from .sources import SOURCE_LABELS, collection_members, observed_facts
             members = await collection_members(sg, str(wire.get("id") or "")) if wire.get("label") == "Collection" else []
+            # A source's human-added links ride the observation too (capture a2936020)
+            links = (await read_source_references(sg, str(wire.get("id") or ""))
+                     if wire.get("label") in SOURCE_LABELS else None)
             return {"reference": ReferenceNode.observe(graph_key, wire, observed_at=PROVENANCE_TS.get()),
-                    "facts": observed_facts(wire, members)}
+                    "facts": observed_facts(wire, members, links)}
     except RuntimeError as e:  # the db is absent / the capability failed to load
         return {"error": f"sibling graph `{graph_key}` unavailable: {e}"}
 

@@ -3,10 +3,12 @@ llms.txt from the graph's structure, links kept in the markdown layer."""
 
 import inspect
 
-from cjm_context_graph_projection.agentlayer import (_line, build_lines, check_jsonld, directory_author, JSONLD_KEYS,
-                                                     jsonld_script, llms_index, load_index_copy, plain,
+from cjm_dev_graph_schema import predicates as P
+
+from cjm_context_graph_projection.agentlayer import (_line, based_on, build_lines, check_jsonld, directory_author,
+                                                     JSONLD_KEYS, jsonld_script, llms_index, load_index_copy, plain,
                                                      post_jsonld, read_jsonld, rewrite_llms_links,
-                                                     rewrite_markdown_links, write_llms_txt)
+                                                     rewrite_markdown_links, write_llms_txt, WORK_JSONLD_TYPES)
 from cjm_context_graph_projection.site import _DRAFTS_REF
 
 DATES = {"published": "2024-05-01", "updated": "2024-06-02"}
@@ -30,6 +32,28 @@ def test_post_jsonld_by_kind_and_draft():
                     ["A", "B"], "", [], "https://x.org")
     assert n["@type"] == "BlogPosting" and "datePublished" not in n and "dateModified" not in n
     assert not {"description", "license", "isPartOf"} & set(n) and len(n["author"]) == 2
+
+
+def test_is_based_on_names_what_the_post_draws_on():
+    # design 37f82f72 (5): a work typed by its form; a unit as part of its work -- a volume (its own
+    # ISBN) a Book, a book's other units Chapters, another form's units CreativeWorks
+    work = {"work": "Chip War", "form": "book", "author": "Chris Miller", "year": "2022", "isbn": "978",
+            "href": "/library/#chip-war", "locators": []}
+    chapter = {"work": "Deep Learning", "form": "book", "author": "J & S", "isbn": "", "unit": "Chapter 1",
+               "unit_isbn": "", "href": "/library/fastai-book/#chapter-1"}
+    volume = {**chapter, "work": "The Great Mental Models", "unit": "Volume 1", "unit_isbn": "979"}
+    lecture = {**chapter, "work": "GPU MODE", "form": "lecture-series", "unit": "Lecture 1"}
+    got = based_on([work, chapter, volume, lecture], "https://x.org")
+    assert got[0] == {"@type": "Book", "name": "Chip War", "author": "Chris Miller", "isbn": "978",
+                      "url": "https://x.org/library/#chip-war"}
+    assert got[1] == {"@type": "Chapter", "name": "Chapter 1", "url": "https://x.org/library/fastai-book/#chapter-1",
+                      "isPartOf": {"@type": "Book", "name": "Deep Learning", "author": "J & S"}}
+    assert (got[2]["@type"], got[2]["isbn"]) == ("Book", "979")
+    assert (got[3]["@type"], got[3]["isPartOf"]["@type"]) == ("CreativeWork", "CreativeWorkSeries")
+    assert set(WORK_JSONLD_TYPES) == set(P.WORK_FORMS)       # one type per form of the slate
+    obj = post_jsonld("notes", "N", "", "u", DATES, ["A"], "", [], "https://x.org", based=got[:1])
+    assert list(obj)[-1] == "isBasedOn" and obj["isBasedOn"] == got[:1]
+    assert "isBasedOn" not in post_jsonld("notes", "N", "", "u", DATES, ["A"], "", [], "https://x.org")
 
 
 def test_jsonld_carries_no_claim_by_construction():

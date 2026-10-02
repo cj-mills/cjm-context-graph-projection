@@ -125,9 +125,9 @@ def render_end(
     comments: str = "",                     # The post's comments block (comments.render_comments)
     related: Optional[List[Dict[str, str]]] = None,  # related_posts' result
     reuse: str = "",                        # render_reuse's appendix
-    sources: str = "",                      # The post's sources block (sources.render_sources)
-) -> str:  # The post's end matter (markdown): sources, related posts, the author strip, the comments, Reuse
-    """The sources, related posts, the author strip (with the pitch line when given) and the comments block."""
+    sources: str = "",                      # The post's draws-on block (sources.render_draws)
+) -> str:  # The post's end matter (markdown): draws on, related posts, the author strip, the comments, Reuse
+    """What the post draws on, related posts, the author strip (with the pitch line when given) and the comments block."""
     lines = [copy["byline"]]
     if pitch:
         lines.append(copy["pitch"].format(claims=pitch["claims"], href=pitch["href"]))
@@ -178,7 +178,7 @@ def end_plan(
     licenses: Optional[Dict[str, Dict[str, Any]]] = None,       # {note id: post_licenses' result}
     comments_config: Optional[Dict[str, Any]] = None,           # comments.load_comments_config's config
     page_threads: Optional[Dict[str, Dict[str, Any]]] = None,   # {note id: comments.page_comments' result}
-    sources: Optional[Dict[str, str]] = None,                   # {note id: its sources block} (sources.source_plan)
+    sources: Optional[Dict[str, str]] = None,                   # {note id: its draws-on block} (sources.draws_plan)
 ) -> Dict[str, Any]:  # {ends: {note id: markdown}, counts}
     """Every post's end matter. A Note of no post kind (a site page, an untyped Note) has none."""
     from .comments import render_comments

@@ -17,6 +17,7 @@ Three surfaces an agent reads, each a projection, nothing stored:
    the render produced.
 3. JSON-LD per post -- TechArticle for a tutorial, BlogPosting for the other post kinds -- carried
    by the derived-blocks filter into the page head and read back after the render against the plan.
+   Its isBasedOn names what the post draws on, from the Library index's plan (design 37f82f72 (5)).
 
 The claims guard (49c0f3c7) holds by construction: no claim reaches these builders (a JSON-LD
 object carries only JSONLD_KEYS; llms.txt carries titles and descriptions), the `.llms.md` derive
@@ -46,7 +47,10 @@ EXCLUDED_PAGES = ("index.html", "404.html")   # The site root (llms.txt stands i
 JSONLD_TYPES = {"tutorial": "TechArticle"}
 JSONLD_DEFAULT_TYPE = "BlogPosting"
 JSONLD_KEYS = ("@context", "@type", "headline", "description", "url", "author", "datePublished",
-               "dateModified", "license", "isPartOf")
+               "dateModified", "license", "isPartOf", "isBasedOn")
+# A drawn-on work's schema.org type by its form (design 37f82f72 (5)), one per form of the slate
+WORK_JSONLD_TYPES = {"book": "Book", "course": "Course", "lecture-series": "CreativeWorkSeries",
+                     "talk": "CreativeWork", "video": "VideoObject", "documentation": "TechArticle"}
 _JSONLD_RE = re.compile(r'<script type="application/ld\+json">(.*?)</script>', re.S)
 # A markdown link's target in Pandoc's gfm (`](target)` / `](target "title")`), a fenced code
 # line, and an inline code span (links inside code are text, never rewritten)
@@ -139,6 +143,7 @@ def post_jsonld(
     series: List[Dict[str, str]],       # [{title, url}] -- every series the post belongs to
     site_url: str,                      # The site URL (an author's url)
     job_titles: Optional[Dict[str, str]] = None,  # {author name: role} -- the site author's (amendment fe6f0fb7)
+    based: Optional[List[Dict[str, Any]]] = None,  # based_on's objects -- what the post draws on (design 37f82f72 (5))
 ) -> Dict[str, Any]:  # The post's JSON-LD object (keys in JSONLD_KEYS order, empties dropped)
     """A post's structured data (39c51c15 (7), amendment 23a49667 (4)): a draft has no
     datePublished, and dateModified shows only beside a publication."""
@@ -155,10 +160,35 @@ def post_jsonld(
         "dateModified": (dates.get("updated") or "") if dates.get("published") else "",
         "license": license_url,
         "isPartOf": [{"@type": "CreativeWorkSeries", "name": s["title"], "url": s["url"]} for s in series],
+        "isBasedOn": list(based or []),
     }
     if len(obj["author"]) == 1:
         obj["author"] = obj["author"][0]
     return {k: obj[k] for k in JSONLD_KEYS if obj.get(k) not in ("", [], None)}
+
+
+def based_on(
+    lines: List[Dict[str, Any]],  # The post's draws-on lines (the Library index's `draws` entries)
+    site_url: str,                # The site URL (a line's href is a site path)
+) -> List[Dict[str, Any]]:  # The post's isBasedOn objects, in the lines' order
+    """What the post draws on, as structured data (design 37f82f72 (5)): a work typed by its form,
+    or a unit as part of its work -- a unit holding its own ISBN is a volume (a Book), a book's
+    other units its Chapters, any other form's units plain CreativeWorks; url = its Library page.
+    The author is the work's display string: the graph holds no type for it (a person, a channel,
+    a company), so none is guessed. Pure."""
+    out = []
+    for d in lines:
+        work = {"@type": WORK_JSONLD_TYPES[d["form"]], "name": d["work"], "author": d.get("author") or "",
+                "isbn": d.get("isbn") or ""}
+        work = {k: v for k, v in work.items() if v}
+        if d.get("unit"):
+            kind = "Book" if d.get("unit_isbn") else ("Chapter" if d["form"] == "book" else "CreativeWork")
+            obj = {"@type": kind, "name": d["unit"], "isbn": d.get("unit_isbn") or "",
+                   "url": site_url + d["href"], "isPartOf": work}
+        else:
+            obj = {**work, "url": site_url + d["href"]}
+        out.append({k: v for k, v in obj.items() if v})
+    return out
 
 
 def jsonld_script(
@@ -348,6 +378,15 @@ async def agent_plan(
         front = _front_matter(str(F.prop(notes[nid], "frontmatter_raw") or ""))
         md = F.prop(notes[nid], "metadata") or {}
         return str(front.get(key) or md.get(key) or F.prop(notes[nid], key) or "")
+    # What each post draws on, as the Library index planned it (design 37f82f72 (5)); a drawn-on
+    # work whose form has no schema.org type refuses
+    from .librarypage import LAYOUT as LIBRARY_LAYOUT
+    draws = next((p.get("draws") or {} for p in planned_pages if p.get("layout") == LIBRARY_LAYOUT), {})
+    untyped = sorted({d["form"] for ls in draws.values() for d in ls} - set(WORK_JSONLD_TYPES))
+    if untyped:
+        return {"heads": {}, "llms": None,
+                "errors": [{"kind": "jsonld-form", "forms": untyped,
+                            "why": "a drawn-on work's form has no schema.org type for isBasedOn"}]}
     in_series: Dict[str, List[Dict[str, str]]] = {}
     for page in planned_pages:
         if page.get("sequence"):   # a Series page or a work page (design 638b7b85 (5))
@@ -367,7 +406,8 @@ async def agent_plan(
         obj = post_jsonld(t.get("kind", ""), stated(nid, "title"), stated(nid, "description"),
                           site_url + posts[nid]["href"], dates[nid],
                           directory_author(website_root, src_of[nid], md),
-                          licenses[nid]["content"][1], in_series.get(nid, []), site_url, job_titles)
+                          licenses[nid]["content"][1], in_series.get(nid, []), site_url, job_titles,
+                          based_on(draws.get(nid) or [], site_url))
         heads[nid] = jsonld_script(obj)
     copy = load_index_copy(website_root)
     errors += copy["errors"]

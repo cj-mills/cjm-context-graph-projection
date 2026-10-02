@@ -15,6 +15,12 @@ the index (5de7fae9 (2)). Staging lists the drafts too, marked, with each unit's
 JSON-LD isPartOf and llms.txt read it as they read a Series page, over the outputs of one class
 in unit order (638b7b85 (5)).
 
+DRAWS ON (design 37f82f72): every index entry and unit row carries an anchor from its key, and
+the index's plan carries `draws` -- each shown output's lines (its unit's row on the work page,
+else the work page, else the work's index entry; the observed locators of the work's or unit's
+sibling Sources) -- and `placed`, every Reference the Library places, for the post page's block
+and its JSON-LD isBasedOn.
+
 REFUSED, never dropped (6752db0a (9)): a Library refusal, a form with no group heading, a work
 whose units show with no site_path to hold its page, a work page whose superseded paths would
 redirect to a page the profile does not render, a topic page mixing notes with other kinds."""
@@ -52,6 +58,12 @@ def form_name(form: str) -> str:
     return str(form or "").replace("-", " ")
 
 
+def unit_anchor(
+    key: str,  # A unit's key (<work key>/<slug>)
+) -> str:  # Its row's anchor on the work page: the slug's, never a node id
+    return anchor(key.partition(P.UNIT_KEY_SEP)[2] or key)
+
+
 def _link(title: str, href: str) -> str:
     return f"[{_md_text(title)}]({href})"
 
@@ -62,13 +74,14 @@ def _stage(out: Dict[str, Any], profile: str) -> str:
 
 
 def render_index(
-    groups: List[Dict[str, Any]],   # [{form, heading, works: [entry]}] in slate order, each work entry {name, author, year, page, classes: [{name, outputs: [{title, href, public}]}]}
+    groups: List[Dict[str, Any]],   # [{form, heading, works: [entry]}] in slate order, each work entry {key, name, author, year, page, classes: [{name, outputs: [{title, href, public}]}]}
     topics: List[Dict[str, str]],   # [{title, href}] the topical Lens pages, title order
     profile: str,                   # public | staging
 ) -> str:  # The index body (markdown)
     """The topic line, then one section per form: each work's name (linked to its work page when
     it has one), author and year, then its outputs by class -- a paged work as a count linking
-    its page, a unitless work as the links themselves. Pure."""
+    its page, a unitless work as the links themselves. Each entry carries an anchor from its
+    work's key, the target a post's draws-on line links (design 37f82f72 (3)). Pure."""
     out: List[str] = []
     if topics:
         out += ["**By topic:** " + " · ".join(_link(t["title"], t["href"]) for t in topics), ""]
@@ -85,28 +98,33 @@ def render_index(
                 else:
                     parts.append(f"{c['name']}: " + " · ".join(_link(o["title"], o["href"]) + _stage(o, profile)
                                                              for o in c["outputs"]))
-            out.append(f"- {head} — " + "; ".join(parts))
+            out.append(f"- []{{#{anchor(w['key'])}}}{head} — " + "; ".join(parts))
         out.append("")
     return "\n".join(out).rstrip("\n") + "\n"
 
 
 def render_work(
-    work: Dict[str, Any],           # {form, author?, year?, isbn?, locator?}
-    units: List[Dict[str, Any]],    # [{name, part?, sources, outputs: [{title, href, public, class_name, synopsis}]}] in position order, visible ones only
+    work: Dict[str, Any],           # {form, author?, year?, isbn?, locator?, resources?: [{label, url}]}
+    units: List[Dict[str, Any]],    # [{key, name, part?, sources, outputs: [{title, href, public, class_name, synopsis}]}] in position order, visible ones only
     whole: List[Dict[str, Any]],    # The outputs on the whole work (same shape)
     profile: str,                   # public | staging
 ) -> str:  # The work page body (markdown)
     """The card, the units grouped by part, and the outputs on the whole work. A unit with one
     output links its name to it; a pure-notes output's synopsis follows it (the executive
     summary by construction, a7ca900d (2)); the class is named only when the page shows more
-    than one. Staging marks the drafts and counts each unit's sources. Pure."""
+    than one. Each unit row carries an anchor from its key (a draws-on line's target, design
+    37f82f72 (2)). Staging marks the drafts and counts each unit's sources. Pure."""
     card = [form_name(work.get("form", "")).capitalize()]
     card += [_md_text(b) for b in (work.get("author"), work.get("year")) if b]
     if work.get("isbn"):
         card.append(f"ISBN {work['isbn']}")
     if work.get("locator"):
         card.append(f"[Link]({work['locator']})")
-    out = ["::: {.library-work-card}", " · ".join(card), ":::", ""]
+    out = ["::: {.library-work-card}", " · ".join(card)]
+    if work.get("resources"):
+        # The work's human-added links, observed from its sibling Collection (capture a2936020)
+        out += ["", "Resources: " + " · ".join(_link(r["label"], r["url"]) for r in work["resources"])]
+    out += [":::", ""]
     classes = {o["class_name"] for u in units for o in u["outputs"]} | {o["class_name"] for o in whole}
     named = len(classes) > 1
 
@@ -125,7 +143,8 @@ def render_work(
             if headed and u.get("part") and u["part"] != part:
                 out += ["", f"### {_md_text(u['part'])}", ""]
                 part = u["part"]
-            label = f"*{_md_text(u['part'])}* · " if u.get("part") and not headed else ""
+            label = (f"[]{{#{unit_anchor(u['key'])}}}"
+                     + (f"*{_md_text(u['part'])}* · " if u.get("part") and not headed else ""))
             n = len(u.get("sources") or [])
             src = f" _({n} source{'s' if n != 1 else ''})_" if profile == "staging" and n else ""
             if len(u["outputs"]) == 1:
@@ -195,6 +214,15 @@ async def _locators(gx: GraphHandle) -> Dict[str, str]:
             for a in F.active_assertions(rows, await F.load_supersedes(gx))}
 
 
+async def _resources(gx: GraphHandle) -> Dict[str, List[Dict[str, Any]]]:
+    """{Reference id: its active links} -- the human-added links observed on a source (a2936020)."""
+    rows = await F.load_label_where(gx, DevNodeKinds.ASSERTION, [PropertyPredicate("predicate", "eq", P.RESOURCES)])
+    if not rows:
+        return {}
+    return {str(F.prop(a, "subject_id")): P.resources_links(str(F.prop(a, "value") or ""))
+            for a in F.active_assertions(rows, await F.load_supersedes(gx))}
+
+
 def _front(
     title: str,
     fields: Dict[str, Any],          # description, subtitle, date -- each only when present
@@ -232,6 +260,9 @@ async def plan_library_pages(
     errors: List[Dict[str, Any]] = [
         {"kind": "library-refusal", "subject": sid, "deliverable": r["deliverable"], "reason": r["reason"],
          "why": f"the Library refuses a deliverable ({r['reason']}: {r['detail']})"} for r in lib["refusals"]]
+    # Every Reference the Library places (PART_OF a unit or work): a post's source outside it refuses
+    placed = sorted({r for w in lib["works"] for r in list(w.get("sources") or [])
+                     + [r for u in w["units"] for r in u["sources"]]})
     errors += [{"kind": "work-form", "subject": sid, "work": w["key"], "form": w.get("form"),
                 "why": "a work's form has no group heading on the index"}
                for w in lib["works"] if w.get("form") not in FORM_GROUPS]
@@ -242,7 +273,7 @@ async def plan_library_pages(
     class_names = {c["key"]: c["name"] for c in lib["classes"]}
     out_ids = sorted({o["id"] for w in lib["works"] for o in w["outputs"] + [o for u in w["units"] for o in u["outputs"]]})
     nodes = await F.load_nodes(gx, out_ids)
-    synopsis_types, locators = await _synopsis_types(gx), await _locators(gx)
+    synopsis_types, locators, links = await _synopsis_types(gx), await _locators(gx), await _resources(gx)
     # The accepted synopsis POINT of each typed deliverable (a7ca900d (2)); none yet = the link alone
     from .purenotes import born_notes_by_unit
     synopses = {r["note_id"]: r["synopsis"] for rows in (await born_notes_by_unit(gx)).values() for r in rows}
@@ -268,6 +299,7 @@ async def plan_library_pages(
 
     planned_out: List[Dict[str, Any]] = []
     entries: Dict[str, List[Dict[str, Any]]] = {f: [] for f in FORM_GROUPS}
+    draws: Dict[str, List[Dict[str, Any]]] = {}
     all_listed: List[str] = []
     dates: List[str] = []
     for w in lib["works"]:
@@ -298,7 +330,28 @@ async def plan_library_pages(
             continue
         rec = {"name": w["name"], "form": w.get("form", ""), "author": w.get("author", ""),
                "year": year(w.get("published")), "isbn": w.get("isbn", ""),
-               "locator": next((locators[r] for r in w.get("sources") or [] if locators.get(r)), "") or w.get("locator", "")}
+               "locator": next((locators[r] for r in w.get("sources") or [] if locators.get(r)), "") or w.get("locator", ""),
+               "resources": [link for r in w.get("sources") or [] for link in links.get(r, [])]}
+        # A link naming a notes slug is a site link the card cannot resolve: refused, never dropped
+        inner = [link["label"] for link in rec["resources"] if link.get("notes_slug")]
+        if inner:
+            errors.append({"kind": "work-resource-internal", "subject": w["id"], "work": w["key"], "links": inner,
+                           "why": "a work's human-added link names a notes slug; the work card renders outside links only"})
+            continue
+        # What each shown output draws on (design 37f82f72 (2)-(3)): its unit's row on the work
+        # page, else the work page, else the work's index entry -- site paths, as the navigation's
+        line = {"work": w["name"], "work_key": w["key"], "form": rec["form"], "author": rec["author"],
+                "year": rec["year"], "isbn": rec["isbn"]}
+        for u in units:
+            for o in u["outputs"]:
+                draws.setdefault(o["id"], []).append({
+                    **line, "unit": u["name"], "unit_isbn": u.get("isbn", ""),
+                    "href": f"{wpage['active']}#{unit_anchor(u['key'])}",
+                    "locators": [locators[r] for r in u["sources"] if locators.get(r)]})
+        for o in whole:
+            draws.setdefault(o["id"], []).append({
+                **line, "href": wpage["active"] if has_page else f"{page['href']}#{anchor(w['key'])}",
+                "locators": [locators[r] for r in w.get("sources") or [] if locators.get(r)]})
         order = [c["key"] for c in lib["classes"]]
         by_class: Dict[str, List[Dict[str, Any]]] = {}
         for o in sorted(shown, key=lambda o: (order.index(o["output_class"]) if o["output_class"] in order else len(order))):
@@ -325,7 +378,7 @@ async def plan_library_pages(
         for c in classes:
             c["outputs"] = [{**o, "href": idx[o["id"]]["href"]} for o in c["outputs"] if o["id"] in idx]
         newest = max((o["date"] for o in shown if o["date"]), default="")
-        entries[rec["form"]].append({**rec, "page": href, "classes": classes, "newest": newest})
+        entries[rec["form"]].append({**rec, "key": w["key"], "page": href, "classes": classes, "newest": newest})
         all_listed += [o["id"] for o in shown if o["id"] not in all_listed]
         dates += [o["updated"].isoformat() for o in shown if o["updated"]]
     if errors:
@@ -344,5 +397,8 @@ async def plan_library_pages(
     index = {"source": src, "kind": "Lens", "key": key, "subject": sid, "members": len(all_listed),
              "updated": updated, "listed": all_listed, "href": page["href"],
              "title": str(F.prop(node, "title") or key), "layout": LAYOUT,
-             "works": sum(len(g["works"]) for g in groups), "text": text}
+             "works": sum(len(g["works"]) for g in groups), "text": text,
+             "draws": {k: sorted(v, key=lambda d: (d["work"].casefold(), d.get("unit") or ""))
+                       for k, v in sorted(draws.items())},
+             "placed": placed}
     return {"pages": [index] + planned_out, "errors": []}

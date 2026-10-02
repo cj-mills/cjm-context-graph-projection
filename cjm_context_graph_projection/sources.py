@@ -12,17 +12,23 @@ journaled op carries them, so replay never opens the sibling:
 - the CITATION -- the PARTS of how the source names itself to a reader: a book chapter's work,
   author, part and chapter (its `work_structure`); a Collection's work, when every member Source
   names the same one; else the title a linked source was published under (its URL evidence).
-Both land as facts on the Reference with method `observed`. A changed observation supersedes the
+And its RESOURCES -- the human-added links a person attached upstream (ruling a7ca900d (3); capture
+a2936020), each its label, url, role and notes slug, read from the sibling's Reference nodes.
+All land as facts on the Reference with method `observed`. A changed observation supersedes the
 observed value it replaces; a value a human authored (a hand locator for a source the sibling
 cannot know) is intent, and an observation never supersedes it -- it is reported as held.
 
-THE BLOCK renders each source through its facts: the citation linked by the locator, a citation
-alone when there is no locator, the locator under the source's own title when there is no
-citation. A source with neither is REPORTED, never rendered as an internal id (87aaa212). So is a
-BORN post whose Points derive from the sibling while its Note names no source (722a8232 (3): the
-drafting verb mints that link at birth; the report catches any post born before it)."""
+THE BLOCK is DRAWS ON, grounded in the Library (design 37f82f72 (2), amending 722a8232's
+rendering): one line per work or unit the post derives from -- an archive post through its
+asserted DERIVED_FROM, a born post through its point sets' Sources' place in a unit -- named from
+the Library's record, linked to its Library page, then the observed locator(s) of the sibling
+Sources in that unit or work. The Library index plans the lines (librarypage); the observed
+citation stays on its Reference as the observation it is. A source a post derives from that the
+Library places in no unit or work is REFUSED, never rendered. A BORN post whose Points derive from
+the sibling while its Note names no source is REPORTED (722a8232 (3): the drafting verb mints
+that link at birth; the report catches any post born before it)."""
 
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Optional
 
 from cjm_context_graph_layer.ops import graph_task
 from cjm_context_graph_primitives.query import EdgeQuery, PropertyPredicate
@@ -36,7 +42,8 @@ from .runtime import GraphHandle
 SOURCE_LABELS = ("Source", "Collection")   # The foreign kinds a sources block lists
 OBSERVED = "observed"                      # The method an observed fact carries (an authored one has none)
 MEMBER_OF = "PART_OF"                      # A Source's edge to its Collection in the sibling graph
-FACT_PREDICATES = (P.LOCATOR, P.CITATION)
+FACT_PREDICATES = (P.LOCATOR, P.CITATION, P.RESOURCES)
+NO_RESOURCES = "[]"                        # The resources value of a source with no links (clears, never mints)
 
 
 def _work_parts(work_structure: Dict[str, Any]) -> Dict[str, Any]:
@@ -54,8 +61,10 @@ def _work_parts(work_structure: Dict[str, Any]) -> Dict[str, Any]:
 def observed_facts(
     node: Dict[str, Any],                         # The foreign node's wire dict ({id, label, properties})
     members: Iterable[Dict[str, Any]] = (),       # A Collection's member Sources' properties (ignored otherwise)
-) -> Dict[str, Any]:  # {locator?: {value, evidence}, citation?: parts} -- {} for a node that is no source
-    """The facts a source states about itself, read at observation (722a8232 (1), (2))."""
+    resources: Optional[Iterable[Dict[str, Any]]] = None,  # Its human-added links in the sibling (None = not read)
+) -> Dict[str, Any]:  # {locator?: {value, evidence}, citation?: parts, resources?: [link]} -- {} for a node that is no source
+    """The facts a source states about itself, read at observation (722a8232 (1), (2)); its
+    human-added links when they were read (capture a2936020), each kept to RESOURCE_FIELDS."""
     label = str(node.get("label") or "")
     if label not in SOURCE_LABELS:
         return {}
@@ -77,6 +86,8 @@ def observed_facts(
         parts = {"title": str(evidence["playlist_title"]).strip()}   # the title it was published under
     if parts:
         out[P.CITATION] = dict(sorted(parts.items()))
+    if resources is not None:
+        out[P.RESOURCES] = [{k: r[k] for k in P.RESOURCE_FIELDS if r.get(k)} for r in resources]
     return out
 
 
@@ -96,6 +107,8 @@ async def collection_members(
 def _fact_value(predicate: str, fact: Any) -> str:
     if predicate == P.LOCATOR:
         return str(fact["value"])
+    if predicate == P.RESOURCES:
+        return P.resources_value(fact)
     return P.citation_value(fact)
 
 
@@ -118,7 +131,8 @@ async def apply_source_facts(
     actor: str = "agent:session",
 ) -> Dict[str, Any]:  # {asserted: [predicate], held: [{predicate, value, held_by}]}
     """Land an observation's facts on its Reference -- live and replay alike. An unchanged value
-    is a no-op; a changed one supersedes the OBSERVED value it replaces; an authored value holds."""
+    is a no-op; a changed one supersedes the OBSERVED value it replaces; an authored value holds.
+    A source observed with no links clears an earlier links value and never mints an empty one."""
     from .write import assert_value
     asserted: List[str] = []
     held: List[Dict[str, Any]] = []
@@ -128,6 +142,8 @@ async def apply_source_facts(
         value = _fact_value(predicate, facts[predicate])
         active = await _slot(gx, reference_id, predicate)
         if any(str(F.prop(a, "value") or "") == value for a in active):
+            continue
+        if value == NO_RESOURCES and not active:
             continue
         authored = [a for a in active if F.prop(a, "method") != OBSERVED]
         if authored:
@@ -213,54 +229,55 @@ def source_text(
     return citation_text(source.get("citation") or {}) or str(source.get("title") or "")
 
 
-def renderable(
-    source: Dict[str, Any],  # load_sources' entry
-) -> bool:
-    """A source renders through a locator or a citation -- never through an internal id alone."""
-    return bool(source.get("locator") or source.get("citation"))
-
-
 def _md(text: str) -> str:
-    """Link text safe inside markdown brackets."""
+    """Text safe inside markdown brackets."""
     return text.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
 
 
-def render_sources(
-    sources: List[Dict[str, Any]],  # The post's renderable sources (load_sources' entries)
-) -> str:  # The sources block (markdown), "" when there are none
-    """The post's sources: each named by its citation, linked by its locator."""
-    lines = []
-    for s in sources:
-        text = _md(source_text(s))
-        lines.append(f"- [{text}]({s['locator']})" if s.get("locator") else f"- {text}")
-    if not lines:
+def render_draws(
+    lines: List[Dict[str, Any]],  # The post's draws-on lines (the Library index's `draws` entries)
+) -> str:  # The draws-on block (markdown), "" when there are none
+    """What the post draws on (design 37f82f72 (2)): each work or unit named from the Library's
+    record and linked to its Library page, then its author and year, then the outside source's
+    observed locator(s). Pure."""
+    out = []
+    for d in lines:
+        name = d["work"] + (f" — {d['unit']}" if d.get("unit") else "")
+        bits = [f"[{_md(name)}]({d['href']})"] + [_md(str(b)) for b in (d.get("author"), d.get("year")) if b]
+        locs = d.get("locators") or []
+        bits += [f"[source{f' {i}' if len(locs) > 1 else ''}]({u})" for i, u in enumerate(locs, 1)]
+        out.append("- " + " · ".join(bits))
+    if not out:
         return ""
-    head = "Source" if len(lines) == 1 else "Sources"
-    return "::: {.post-sources}\n**" + head + "**\n\n" + "\n".join(lines) + "\n:::\n"
+    return "::: {.post-sources}\n**Draws on**\n\n" + "\n".join(out) + "\n:::\n"
 
 
-def source_plan(
+def draws_plan(
     loaded: Dict[str, Any],                  # load_sources' result
+    draws: Dict[str, List[Dict[str, Any]]],  # The Library index's {output id: draws-on lines} ({} = no Library planned)
+    placed: Iterable[str],                   # Every Reference id the Library places (PART_OF a unit or work)
     rendered: Dict[str, Dict[str, Any]],     # {note id: {title, origin}} -- the posts this profile renders
-) -> Dict[str, Any]:  # {blocks: {note id: markdown}, unrendered: [...], missing: [...], counts}
-    """Each rendered post's sources block, the sources it cannot render, and the born posts that
-    derive from a sibling while naming no source."""
+) -> Dict[str, Any]:  # {blocks: {note id: markdown}, unplaced: [...], missing: [...], counts}
+    """Each rendered post's draws-on block; every source a post derives from that the Library
+    places in no unit or work (REFUSED by the build, never rendered -- 37f82f72 (2)); and the born
+    posts that derive from a sibling while naming no source (reported, 722a8232 (3))."""
+    placed = set(placed)
     blocks: Dict[str, str] = {}
-    unrendered: List[Dict[str, str]] = []
+    unplaced: List[Dict[str, str]] = []
     missing: List[Dict[str, str]] = []
-    counts = {"sources": 0, "sources_linked": 0, "sources_cited": 0}
+    counts = {"draws_on": 0, "draws_lines": 0, "draws_located": 0}
     for nid in sorted(rendered):
         srcs = loaded["posts"].get(nid) or []
-        ok = [s for s in srcs if renderable(s)]
-        unrendered += [{"post": rendered[nid]["title"], "reference": s["id"], "title": s["title"]}
-                       for s in srcs if not renderable(s)]
-        if ok:
-            blocks[nid] = render_sources(ok)
-            counts["sources"] += 1
-            counts["sources_linked"] += sum(1 for s in ok if s.get("locator"))
-            counts["sources_cited"] += sum(1 for s in ok if not s.get("locator"))
+        unplaced += [{"id": nid, "post": rendered[nid]["title"], "reference": s["id"], "title": source_text(s)}
+                     for s in srcs if s["id"] not in placed]
+        lines = draws.get(nid) or []
+        if lines:
+            blocks[nid] = render_draws(lines)
+            counts["draws_on"] += 1
+            counts["draws_lines"] += len(lines)
+            counts["draws_located"] += sum(1 for d in lines if d.get("locators"))
         if rendered[nid].get("origin") == "born" and nid in loaded["derived"] and not srcs:
             missing.append({"id": nid, "title": rendered[nid]["title"]})
-    counts["sources_unrendered"] = len(unrendered)
+    counts["draws_unplaced"] = len(unplaced)
     counts["sources_missing"] = len(missing)
-    return {"blocks": blocks, "unrendered": unrendered, "missing": missing, "counts": counts}
+    return {"blocks": blocks, "unplaced": unplaced, "missing": missing, "counts": counts}

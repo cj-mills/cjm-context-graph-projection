@@ -186,7 +186,7 @@ def test_derived_blocks_leave_the_render_and_the_navigation_replaces_them(tmp_pa
     assert derived == {"posts": 3, "series_nav": 2, "collections": 3, "related_stale": 0, "strips": 3,
                        "pitch": 0, "headers": 3, "comments_unrendered": 0, "comments_thread": 1,
                        "comments_term": 2, "comments_earlier": 1,
-                       "sources": 0, "sources_linked": 0, "sources_cited": 0, "sources_unrendered": 0,
+                       "draws_on": 0, "draws_lines": 0, "draws_located": 0, "draws_unplaced": 0,
                        "sources_missing": 0,
                               "pitch_pending": 0, "questions": 1, "related": 0, "series_callout": 2, "hand_toc": 2,
                               "series_nav_line": 1, "chrome_include": 4, "reported": 3, "end_placed": 3,

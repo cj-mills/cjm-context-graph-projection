@@ -372,7 +372,7 @@ async def derived_plan(
     post_lic: Dict[str, Dict[str, Any]] = {}
     ends_stale: List[Dict[str, str]] = []
     comments_unrendered: List[Dict[str, Any]] = []
-    srcs: Dict[str, Any] = {"blocks": {}, "unrendered": [], "missing": [], "counts": {}}
+    srcs: Dict[str, Any] = {"blocks": {}, "unplaced": [], "missing": [], "counts": {}}
     if any((types.get(n) or {}).get("kind") in POST_KINDS for n in src_of):
         strip = load_strip_copy(website_root)
         errors += strip["errors"]
@@ -414,13 +414,19 @@ async def derived_plan(
             comments_unrendered = [{"id": n, "title": str(F.prop(notes[n], "title") or "") if n in notes else "",
                                     "threads": threads[n]["active"] + threads[n]["earlier"]}
                                    for n in sorted(threads) if n not in cands]
-            # The sources (39c51c15 (3), amendment 722a8232): each Source / Collection a post derives
-            # from, named by its citation and linked by its locator; a source with neither, and a
-            # born post deriving from a sibling with no source named, are reported
-            from .sources import load_sources, source_plan
-            srcs = source_plan(await load_sources(gx),
-                               {n: {"title": c["title"], "origin": (types.get(n) or {}).get("origin", "")}
-                                for n, c in cands.items()})
+            # Draws on (design 37f82f72, amending 722a8232's rendering): the works and units a post
+            # derives from, as the Library index planned them; a source the Library places nowhere
+            # refuses, a born post deriving from a sibling with no source named is reported
+            from .librarypage import LAYOUT as LIBRARY_LAYOUT
+            from .sources import draws_plan, load_sources
+            lib = next((p for p in planned_pages if p.get("layout") == LIBRARY_LAYOUT), {})
+            srcs = draws_plan(await load_sources(gx), lib.get("draws") or {}, lib.get("placed") or [],
+                              {n: {"title": c["title"], "origin": (types.get(n) or {}).get("origin", "")}
+                               for n, c in cands.items()})
+            errors += [{"kind": "draws-unplaced", "source": src_of[u["id"]], "reference": u["reference"],
+                        "title": u["title"],
+                        "why": "a post derives from a source the Library places in no unit or work"}
+                       for u in srcs["unplaced"]]
             ends = end_plan(strip["copy"], src_of, types, await offered_backing(gx),
                             pitch_target(planned_pages), related, post_lic,
                             comments_config=ccfg["config"] or None, page_threads=page_threads,
@@ -479,7 +485,7 @@ async def derived_plan(
         counts[role] = sum(1 for p in posts.values() for d in p["drop"] if d["role"] == role)
     return {"posts": dict(sorted(posts.items())), "counts": counts, "errors": errors, "footer": footer,
             "related_stale": ends_stale, "comments_unrendered": comments_unrendered,
-            "sources_unrendered": srcs["unrendered"], "sources_missing": srcs["missing"], "llms": llms}
+            "sources_missing": srcs["missing"], "llms": llms}
 
 
 def write_derived(

@@ -30,18 +30,19 @@ _HAVE_GRAPH = (Path(DEFAULT_MANIFESTS) / f"{DEFAULT_GRAPH_ID}.json").exists()
 
 def test_the_index_groups_works_and_links_their_outputs():
     groups = [{"form": "lecture-series", "heading": "Lecture series", "works": [
-                  {"name": "GPU MODE", "author": "A & B", "year": "", "page": "gpu-mode/index.qmd",
+                  {"key": "gpu-mode", "name": "GPU MODE", "author": "A & B", "year": "", "page": "gpu-mode/index.qmd",
                    "classes": [{"name": "Notes", "outputs": [{"title": "L1", "href": "x", "public": True}] * 2}]}]},
               {"form": "book", "heading": "Books", "works": [
-                  {"name": "The [Kill] Chain", "author": "C", "year": "2020", "page": None,
+                  {"key": "kill-chain", "name": "The [Kill] Chain", "author": "C", "year": "2020", "page": None,
                    "classes": [{"name": "Notes", "outputs": [{"title": "Notes on it", "href": "../posts/k/index.md",
                                                               "public": False}]}]}]}]
     topics = [{"title": "Books", "href": "../series/notes/book-notes.qmd"}]
     pub = render_index(groups, topics, "public")
     assert pub.startswith("**By topic:** [Books](../series/notes/book-notes.qmd)\n")
     assert "## Lecture series {#lecture-series}" in pub and "## Books {#book}" in pub
-    assert "- **[GPU MODE](gpu-mode/index.qmd)** · A & B — Notes: [2 pages](gpu-mode/index.qmd)" in pub
-    assert "- **The \\[Kill\\] Chain** · C · 2020 — Notes: [Notes on it](../posts/k/index.md)\n" in pub
+    # each entry carries its work key's anchor, the target of a post's draws-on line (37f82f72 (3))
+    assert "- []{#gpu-mode}**[GPU MODE](gpu-mode/index.qmd)** · A & B — Notes: [2 pages](gpu-mode/index.qmd)" in pub
+    assert "- []{#kill-chain}**The \\[Kill\\] Chain** · C · 2020 — Notes: [Notes on it](../posts/k/index.md)\n" in pub
     assert "_(draft)_" in render_index(groups, topics, "staging")
     assert year("2019-10-08") == "2019" and year(None) == ""
 
@@ -50,30 +51,35 @@ def test_the_work_page_card_units_and_synopses():
     o = lambda t, cls="Notes", public=True, syn="": {"title": t, "href": f"../../posts/{t}/index.md",
                                                      "public": public, "class_name": cls, "synopsis": syn}
     work = {"form": "lecture-series", "author": "A & B", "year": "2024", "isbn": "", "locator": "https://y.t/p"}
-    units = [{"name": "Lecture 1", "part": "Part I", "sources": [], "outputs": [o("l1", syn="What it says.")]},
-             {"name": "Lecture 2", "part": "Part I", "sources": ["r1", "r2"], "outputs": [o("l2", public=False)]},
-             {"name": "Bonus", "part": "Part II", "sources": ["r3"],
+    units = [{"key": "w/l1", "name": "Lecture 1", "part": "Part I", "sources": [], "outputs": [o("l1", syn="What it says.")]},
+             {"key": "w/l2", "name": "Lecture 2", "part": "Part I", "sources": ["r1", "r2"], "outputs": [o("l2", public=False)]},
+             {"key": "w/bonus", "name": "Bonus", "part": "Part II", "sources": ["r3"],
               "outputs": [o("b-notes"), o("b-res", cls="Standalone resources")]}]
     pub = render_work(work, units[:1], [], "public")
     assert pub.startswith("::: {.library-work-card}\nLecture series · A & B · 2024 · [Link](https://y.t/p)\n:::\n")
     assert "## Contents" in pub and "### Part I" in pub
-    assert "- [Lecture 1](../../posts/l1/index.md) — What it says.\n" in pub
+    # each row carries its unit slug's anchor (37f82f72 (2))
+    assert "- []{#l1}[Lecture 1](../../posts/l1/index.md) — What it says.\n" in pub
     stg = render_work(work, units, [o("whole")], "staging")
     # several classes on the page: each output names its class; staging marks drafts and sources
-    assert "- [Lecture 2](../../posts/l2/index.md) · *Notes* _(draft)_ _(2 sources)_\n" in stg
+    assert "- []{#l2}[Lecture 2](../../posts/l2/index.md) · *Notes* _(draft)_ _(2 sources)_\n" in stg
     one = render_work(work, [{**units[0], "sources": ["r1"]}], [], "staging")
-    assert "- [Lecture 1](../../posts/l1/index.md) _(1 source)_ — What it says.\n" in one
-    assert ("- Bonus _(1 source)_ — [b-notes](../../posts/b-notes/index.md) · *Notes* · "
+    assert "- []{#l1}[Lecture 1](../../posts/l1/index.md) _(1 source)_ — What it says.\n" in one
+    assert ("- []{#bonus}Bonus _(1 source)_ — [b-notes](../../posts/b-notes/index.md) · *Notes* · "
             "[b-res](../../posts/b-res/index.md) · *Standalone resources*") in stg
     assert "## On the whole work\n\n- [whole](../../posts/whole/index.md) · *Notes*" in stg
     assert "\n\n\n" not in stg
     # parts that interleave keep the work's order: no headings, each row labelled by its part
-    course = [{"name": "Workshop 1", "part": "Workshops", "sources": [], "outputs": [o("w1")]},
-              {"name": "Office Hours 1", "part": "Office Hours", "sources": [], "outputs": [o("h1")]},
-              {"name": "Workshop 2", "part": "Workshops", "sources": [], "outputs": [o("w2")]}]
+    course = [{"key": "c/w1", "name": "Workshop 1", "part": "Workshops", "sources": [], "outputs": [o("w1")]},
+              {"key": "c/h1", "name": "Office Hours 1", "part": "Office Hours", "sources": [], "outputs": [o("h1")]},
+              {"key": "c/w2", "name": "Workshop 2", "part": "Workshops", "sources": [], "outputs": [o("w2")]}]
     mixed = render_work(work, course, [], "public")
     assert "###" not in mixed and mixed.index("Workshop 1") < mixed.index("Office Hours 1") < mixed.index("Workshop 2")
-    assert "- *Workshops* · [Workshop 1](../../posts/w1/index.md)\n" in mixed
+    assert "- []{#w1}*Workshops* · [Workshop 1](../../posts/w1/index.md)\n" in mixed
+    # the work's human-added links close the card (capture a2936020)
+    linked = render_work({**work, "resources": [{"label": "Book [page]", "url": "https://b"}]}, units[:1], [], "public")
+    assert linked.startswith("::: {.library-work-card}\nLecture series · A & B · 2024 · [Link](https://y.t/p)\n\n"
+                             "Resources: [Book \\[page\\]](https://b)\n:::\n")
     assert work_description({"name": "GPU MODE", "form": "lecture-series", "author": "A"},
                             ["Notes", "Standalone resources"]) == \
         "Notes and standalone resources from *GPU MODE*, a lecture series by A, in the work's own order."
@@ -151,16 +157,27 @@ def test_the_library_lens_projects_the_index_and_the_work_pages(tmp_path):
     index = by_src["library/index.qmd"]["text"]
     assert index.startswith(f"---\n{GENERATED}\ntitle: Library\ndescription: What came of each work.\n")
     assert "**By topic:** [Books](../series/notes/book-notes.qmd)" in index
-    assert "- **[GPU MODE](gpu-mode/index.qmd)** · A & B — Notes: [1 page](gpu-mode/index.qmd)" in index
-    assert "- **The Kill Chain** · C · 2020 — Notes: [Notes on The Kill Chain](../posts/kill-chain/index.md)" in index
+    assert "- []{#gpu-mode}**[GPU MODE](gpu-mode/index.qmd)** · A & B — Notes: [1 page](gpu-mode/index.qmd)" in index
+    assert "- []{#kill-chain}**The Kill Chain** · C · 2020 — Notes: [Notes on The Kill Chain](../posts/kill-chain/index.md)" in index
     assert index.index("## Books") < index.index("## Lecture series")   # the slate's order
     work = by_src["library/gpu-mode/index.qmd"]
     assert work["sequence"] and work["listed"] == [note_node_id("gpu-1")] and work["title"] == "GPU MODE"
     assert work["groups"] == {note_node_id("gpu-1"): "notes"} and work["kind"] == "work"
-    assert "- [Lecture 1](../../posts/gpu-1/index.md)\n" in work["text"] and "Lecture 2" not in work["text"]
+    assert "- []{#gpu-1}[Lecture 1](../../posts/gpu-1/index.md)\n" in work["text"] and "Lecture 2" not in work["text"]
     assert "description: Notes from *GPU MODE*, a lecture series by A & B, in the work's own order." in work["text"]
     staged = {p["source"]: p for p in stg["pages"]}
-    assert "- [Lecture 2](../../posts/gpu-2/index.md) _(draft)_" in staged["library/gpu-mode/index.qmd"]["text"]
+    assert "- []{#gpu-2}[Lecture 2](../../posts/gpu-2/index.md) _(draft)_" in staged["library/gpu-mode/index.qmd"]["text"]
+    # What each shown output draws on (design 37f82f72 (2)-(3)): a unit's row on its work page, a
+    # unitless work's index entry -- site paths; a draft draws only under staging
+    draws = by_src["library/index.qmd"]["draws"]
+    assert sorted(draws) == sorted([note_node_id("gpu-1"), note_node_id("kill-chain")])
+    assert draws[note_node_id("gpu-1")] == [{"work": "GPU MODE", "work_key": "gpu-mode", "form": "lecture-series",
+                                             "author": "A & B", "year": "", "isbn": "", "unit": "Lecture 1",
+                                             "unit_isbn": "", "href": "/library/gpu-mode/#gpu-1", "locators": []}]
+    assert draws[note_node_id("kill-chain")][0]["href"] == "/library/#kill-chain"
+    assert "unit" not in draws[note_node_id("kill-chain")][0] and draws[note_node_id("kill-chain")][0]["year"] == "2020"
+    assert staged["library/index.qmd"]["draws"][note_node_id("gpu-2")][0]["href"] == "/library/gpu-mode/#gpu-2"
+    assert by_src["library/index.qmd"]["placed"] == []   # no Reference is PART_OF a unit here
     assert "Notes: [2 pages](gpu-mode/index.qmd)" in staged["library/index.qmd"]["text"]
     assert [(e["kind"], e.get("work")) for e in refused["errors"]] == [("work-unpaged", "solo")]
 

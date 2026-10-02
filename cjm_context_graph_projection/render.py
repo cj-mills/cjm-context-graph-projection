@@ -503,13 +503,10 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                              f"{dv.get('comments_earlier', 0)}"
                              + (f" (⚠ {dv['comments_unrendered']} Note(s) hold a thread this profile does not render)"
                                 if dv.get("comments_unrendered") else ""))
-            if "sources" in dv:   # the sources block (39c51c15 (3), amendment 722a8232)
+            if "draws_on" in dv:   # the draws-on block (design 37f82f72, amending 722a8232)
                 sr = obj.get("sources_report") or {}
-                lines.append(f"- sources: a block on {dv['sources']} post(s) · {dv.get('sources_linked', 0)} linked · "
-                             f"{dv.get('sources_cited', 0)} cited without a locator"
-                             + (f" · ⚠ {dv['sources_unrendered']} source(s) with neither a locator nor a citation: "
-                                + ", ".join(f"{u['title']} (on {u['post']})" for u in sr.get("unrendered") or [])
-                                if dv.get("sources_unrendered") else "")
+                lines.append(f"- draws on: a block on {dv['draws_on']} post(s) · {dv.get('draws_lines', 0)} line(s) · "
+                             f"{dv.get('draws_located', 0)} with an observed source link"
                              + (f" · ⚠ {dv['sources_missing']} born post(s) derive from a source they do not name: "
                                 + ", ".join(m["title"] for m in sr.get("missing") or [])
                                 if dv.get("sources_missing") else ""))
