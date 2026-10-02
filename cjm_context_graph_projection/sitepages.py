@@ -11,7 +11,12 @@ node's data through one template per node kind:
 - a Lens lists the notes it selects, sorted by the Lens's own `view.sort` (handed to Quarto's
   listing sorter, the one the hand pages used), with the sort and filter UI of a filter;
 - a Lens whose view layout is `coverage-matrix` projects the Tutorials page instead
-  (tutorialspage.py, design 7f200ecb): the grid, the learning paths, the tutorials by task.
+  (tutorialspage.py, design 7f200ecb): the grid, the learning paths, the tutorials by task;
+- a Lens whose view layout is `library` projects the Library index instead, with a work page
+  for every work with units (librarypage.py, design 638b7b85).
+
+A Series page and a work page are ORDERED collections (`sequence` on the planned entry): the
+post navigation, JSON-LD isPartOf and llms.txt walk them in order (638b7b85 (5)).
 
 A RETIRED source (publish_state retired, design amendment e916a4b9) is never listed, under
 any profile.
@@ -42,6 +47,7 @@ from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 from . import factlayer as F
 from .archive import is_retired
 from .lens import apply_lens, LENS_LABEL
+from .librarypage import LAYOUT as LIBRARY_LAYOUT, plan_library_pages
 from .runtime import GraphHandle
 from .series import series_order
 from .tutorialspage import LAYOUT as MATRIX_LAYOUT, plan_matrix_page
@@ -238,6 +244,7 @@ async def page_plan(
     unpaged: List[str] = []
     errors: List[Dict[str, Any]] = []
     matrix_pages: List[Any] = []   # coverage-matrix Lenses, planned after every collection page
+    library_pages: List[Any] = []  # the library Lens, planned after them all (its topic line reads them)
     for kind, nodes in ((DevNodeKinds.SERIES, series), (LENS_LABEL, lenses)):
         for node in sorted(nodes, key=lambda n: str(F.prop(n, "key") or "")):
             sid, key = str(F.nid(node)), str(F.prop(node, "key") or "")
@@ -273,6 +280,10 @@ async def page_plan(
                     # other planned pages, so it is planned after all of them
                     matrix_pages.append((node, members, {"source": src, "href": page["active"]}))
                     continue
+                if (applied.get("view") or {}).get("layout") == LIBRARY_LAYOUT:
+                    # The Library index (design 638b7b85): its work pages are planned with it
+                    library_pages.append((node, {"source": src, "href": page["active"]}))
+                    continue
                 listing, cats = dict(LENS_LISTING), None
                 sort = (applied.get("view") or {}).get("sort")
                 if sort:
@@ -283,6 +294,7 @@ async def page_plan(
             planned.append({"source": src, "kind": kind, "key": key, "subject": sid,
                             "members": len(listed["contents"]), "updated": listed["updated"],
                             "listed": listed["ids"], "href": page["active"],
+                            "sequence": kind == DevNodeKinds.SERIES,
                             "title": str(F.prop(node, "title") or key),
                             "text": render_page(_front(node, listing, listed["updated"], cats))})
     for node, members, page in matrix_pages:
@@ -291,6 +303,11 @@ async def page_plan(
         errors += got.get("errors", [])
         if got.get("page"):
             planned.append(got["page"])
+    for node, page in library_pages:
+        got = await plan_library_pages(gx, node, page, pages, root, profile, states, types, drafts,
+                                       list(planned))
+        errors += got.get("errors", [])
+        planned += got.get("pages", [])
     seen: Dict[str, str] = {}
     for p in planned:
         if p["source"] in seen:

@@ -350,7 +350,7 @@ async def agent_plan(
         return str(front.get(key) or md.get(key) or F.prop(notes[nid], key) or "")
     in_series: Dict[str, List[Dict[str, str]]] = {}
     for page in planned_pages:
-        if page["kind"] == DevNodeKinds.SERIES:
+        if page.get("sequence"):   # a Series page or a work page (design 638b7b85 (5))
             for m in page["listed"]:
                 in_series.setdefault(m, []).append({"title": page["title"], "url": site_url + page["href"]})
     heads: Dict[str, str] = {}
@@ -377,7 +377,7 @@ async def agent_plan(
 
     def page_item(p: Dict[str, Any]) -> Dict[str, Any]:
         return {"title": p["title"], "source": p["source"], "updated": p.get("updated") or "",
-                "description": str(F.prop(page_nodes.get(p["subject"]), "description") or ""),
+                "description": p.get("description") or str(F.prop(page_nodes.get(p["subject"]), "description") or ""),
                 "members": list(p["listed"])}
     site_pages = [{"title": stated(n, "title"), "source": s, "description": stated(n, "description")}
                   for n, s in sorted(src_of.items(), key=lambda x: x[1])
@@ -385,8 +385,8 @@ async def agent_plan(
                   and posixpath.splitext(s)[0] + ".html" not in EXCLUDED_PAGES]
     index = llms_index(
         str(site.get("title") or ""), site_url, copy["copy"], site_pages,
-        [page_item(p) for p in planned_pages if p["kind"] != DevNodeKinds.SERIES],
-        [page_item(p) for p in planned_pages if p["kind"] == DevNodeKinds.SERIES],
+        [page_item(p) for p in planned_pages if not p.get("sequence")],
+        [page_item(p) for p in planned_pages if p.get("sequence")],
         {n: {"title": stated(n, "title"), "source": src_of[n], "description": stated(n, "description"),
              "kind": posts[n]["kind"], "date": (dates.get(n) or {}).get("published") or ""}
          for n in posts},

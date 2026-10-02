@@ -279,6 +279,19 @@ def _post_href(
     return "/" + (d + "/" if posixpath.basename(src).startswith("index.") else src.rsplit(".", 1)[0] + ".html")
 
 
+def _nav_step(
+    run: List[str],                     # One sequence's members, in order
+    j: int,                             # The index to step to
+    notes: Dict[str, Any],              # {note id: Note node}
+    src_of: Dict[str, str],             # {note id: source, relative to the root}
+    pages: Dict[str, Dict[str, Any]],   # redirect_plan's {subject: {active, superseded}}
+) -> Optional[Dict[str, str]]:  # {title, href}, or None past either end
+    """One previous / next step of the post navigation."""
+    if not 0 <= j < len(run):
+        return None
+    return {"title": str(F.prop(notes[run[j]], "title") or ""), "href": _post_href(run[j], src_of[run[j]], pages)}
+
+
 async def derived_plan(
     gx: GraphHandle,
     website_root: str,                  # The site project root
@@ -331,13 +344,18 @@ async def derived_plan(
     collections: Dict[str, List[Dict[str, str]]] = {}
     for page in planned_pages:
         members = [m for m in page["listed"] if m in src_of]
-        if page["kind"] == DevNodeKinds.SERIES:
-            for i, m in enumerate(members):
-                step = lambda j: ({"title": str(F.prop(notes[members[j]], "title") or ""),
-                                   "href": _post_href(members[j], src_of[members[j]], pages)}
-                                  if 0 <= j < len(members) else None)
-                series_nav[m] = {"title": page["title"], "href": page["href"], "part": i + 1,
-                                 "total": len(members), "prev": step(i - 1), "next": step(i + 1)}
+        if page.get("sequence"):
+            # A Series page walks its members in order; a work page walks the outputs of one
+            # output class at a time, in unit order (design 638b7b85 (5))
+            groups = page.get("groups") or {}
+            runs: Dict[Any, List[str]] = {}
+            for m in members:
+                runs.setdefault(groups.get(m), []).append(m)
+            for run in runs.values():
+                for i, m in enumerate(run):
+                    series_nav[m] = {"title": page["title"], "href": page["href"], "part": i + 1,
+                                     "total": len(run), "prev": _nav_step(run, i - 1, notes, src_of, pages),
+                                     "next": _nav_step(run, i + 1, notes, src_of, pages)}
         else:
             for m in members:
                 collections.setdefault(m, []).append({"title": page["title"], "href": page["href"]})

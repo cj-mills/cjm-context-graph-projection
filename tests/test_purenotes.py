@@ -1833,11 +1833,26 @@ def test_cli_work_page_binds_by_edge_renders_the_toc_gates_on_published_chapters
     r = _run(*base, "assert", wp, "deliverable_type", "work-page")
     assert r.returncode == 0, r.stderr or r.stdout
     r = _run(*base, "notes-render", "--slug", "the-learning-game")
-    assert r.returncode != 0 and "not bound" in (r.stdout + r.stderr)
+    assert r.returncode != 0 and "a retired type" in (r.stdout + r.stderr)
     r = _run(*base, "link", wp, "DERIVED_FROM", f"tx:{COL[:8]}")   # a PREFIX resolves sibling-side
     assert r.returncode == 0, r.stderr or r.stdout
+    # The work-page type is RETIRED (design 638b7b85 (6)): a live render refuses, while the
+    # journal's earlier renders still replay -- so the history is made here as the journal holds it
     r = _run(*base, "notes-render", "--slug", "the-learning-game")
-    assert r.returncode == 0 and "work page" in r.stdout and "1 of 2 chapter(s) born" in r.stdout, r.stderr or r.stdout
+    assert r.returncode != 0 and "a retired type" in (r.stdout + r.stderr), r.stderr or r.stdout
+
+    def legacy_render():
+        from cjm_context_graph_primitives.journal import append_write
+        from cjm_context_graph_projection.purenotes import render_work_page
+
+        async def go():
+            async with open_graph(pdb) as gx:
+                return await render_work_page(gx, "the-learning-game", siblings={"tx": sdb})
+        res = asyncio.run(go())
+        assert not res.get("error"), res
+        append_write(pj, "render-work-page", res["args"])
+        return res
+    assert legacy_render()["chapters_born"] == 1
     page = staging / "posts" / "the-learning-game" / "index.md"
     text = page.read_text()
     assert text.startswith('---\ntitle: "Notes on *The Learning Game*"\ndescription: "Chapter-by-chapter notes on '
@@ -1853,8 +1868,7 @@ def test_cli_work_page_binds_by_edge_renders_the_toc_gates_on_published_chapters
     assert r.returncode == 0 and "work page `the-learning-game`" in r.stdout and "1 of 2" in r.stdout, r.stderr or r.stdout
     # the second chapter born -> a re-render links it (a new op, not a dedup); the condition now holds
     ch2 = born("the-learning-game/ch02", "How Did We", "Prussia built the modern school.", "School descends from Prussia.")
-    r = _run(*base, "notes-render", "--slug", "the-learning-game")
-    assert r.returncode == 0 and "2 of 2 chapter(s) born" in r.stdout, r.stderr or r.stdout
+    assert legacy_render()["chapters_born"] == 2
     text = page.read_text()
     assert "2. [How Did We Get Here](/posts/the-learning-game/ch02/) — School descends from Prussia.\n" in text
     assert sum(1 for o in read_journal(pj) if o["verb"] == "render-work-page") == 2

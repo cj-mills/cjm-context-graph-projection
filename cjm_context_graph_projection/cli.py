@@ -2525,16 +2525,14 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
         return 1 if res.get("error") else 0
     if cmd == "notes-render":
         if await note_deliverable_type(gx, note_node_id(args.slug)) == WORK_PAGE_KEY:
-            # A WORK PAGE (ebb77107) derives from the work — the sibling's structure map (journaled
-            # as the op's observation) + the born chapter notes here — never from Points.
-            res = await render_work_page(gx, args.slug, write_md=not args.no_write, actor=args.actor,
-                                         siblings=siblings, manifests_dir=args.manifests_dir)
-            print(render("notes-render", res, args.format))
-            if res.get("error"):
-                return 1
-            if args.journal_path and not args.no_write:
-                append_write(args.journal_path, "render-work-page", res["args"])
-            return 0
+            # The work-page type is RETIRED (design 638b7b85 (6)): the Library's work page,
+            # projected by site-build from the work Entity, replaced it. Its journaled renders
+            # still replay (journal.py), so its code stays as the replay path; no new one lands.
+            print(render("notes-render", {"error": f"`{args.slug}` is a work page, a retired type: the "
+                                                   "Library's work page, projected by site-build from the "
+                                                   "work Entity, replaced it (design 638b7b85 (6))",
+                                          "slug": args.slug, "written": False}, args.format))
+            return 1
         res = await render_notes(gx, args.slug, rendering=args.rendering, timestamps=args.timestamps,
                                  write_md=not args.no_write, actor=args.actor,
                                  siblings=siblings, manifests_dir=args.manifests_dir)
