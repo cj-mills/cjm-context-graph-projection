@@ -48,6 +48,10 @@ ENTITY_FIELDS: Dict[str, Dict[str, type]] = {
                     "locator": str},
     P.ENTITY_UNIT: {"position": int, "part": str, "isbn": str},
     P.ENTITY_OUTPUT_CLASS: {"description": str, "position": int},
+    # A web deliverable's profile (design 9a7224a7 (3)); its design system is a STYLED_BY edge,
+    # its light / dark override two facts. The design_system kind is NOT here: the artifact
+    # fold derives it, so the entity verb refuses it.
+    P.ENTITY_SITE_PROFILE: {"description": str},
 }
 _REQUIRED = {P.ENTITY_TASK: ("position",), P.ENTITY_STAGE: ("position",),
              P.ENTITY_HARDWARE: ("device_class",), P.ENTITY_CLAIM: ("statement", "position"),
@@ -78,6 +82,10 @@ def validate_entity(
             return f"a unit key is `<work key>{P.UNIT_KEY_SEP}<unit slug>` (got {key!r})"
     elif kind == P.ENTITY_WORK and P.UNIT_KEY_SEP in key:
         return f"a work key carries no `{P.UNIT_KEY_SEP}` -- only its units' keys do (got {key!r})"
+    elif kind == P.ENTITY_SITE_PROFILE:   # the site is part of a profile's identity (9a7224a7 (3))
+        site, sep, profile = key.partition(P.PROFILE_KEY_SEP)
+        if not (site and sep and profile) or P.PROFILE_KEY_SEP in profile:
+            return f"a site_profile key is `<site>{P.PROFILE_KEY_SEP}<profile>` (got {key!r})"
     unknown = sorted(set(fields) - set(spec))
     if unknown:
         return f"`{kind}` carries no field(s) {', '.join(unknown)} (declared: {', '.join(spec)})"

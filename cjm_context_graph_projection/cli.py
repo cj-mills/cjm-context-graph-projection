@@ -101,7 +101,7 @@ MUTATES_SOURCE: Dict[str, bool] = {
     "author": True, "add-symbol": True, "add-text": True, "emit": True,
     "flip-module": True, "flip-to-py": True, "cutover": True, "emit-artifact": True,
     "move": True, "regroup": True, "new-module": True, "rename-module": True,
-    "delete-module": True, "rename-symbol": True,
+    "delete-module": True, "rename-symbol": True, "capture-artifact": True,
 }
 
 # Id-ref registry (work item b73e7688): every POSITIONAL that accepts a node id —
@@ -343,14 +343,21 @@ async def _dispatch(args) -> int:
             note_aliases = await note_alias_map(gx)  # confirmed link aliases heal drifted refs
             # The code lane is a FOLD over the source journal (2cc81d3b): its inventory is the
             # journal's live keys and every code time is the time of the record behind it.
-            code_fold = None
+            code_fold = artifact_fold = None
+            records = None
             if not args.no_code:
                 if not args.source_journal_path:
                     print("error: ingest projects code from the SOURCE journal — pass "
                           "--source-journal-path (cg-rebuild bakes it), or --no-code",
                           file=sys.stderr)
                     return 1
-                code_fold = fold_source_journal(args.source_journal_path, args.repos_dir)
+                # ONE read of the source journal feeds both lanes: the code fold and the
+                # observed-source artifacts (design 9a7224a7)
+                from .artifacts import fold_artifacts
+                from .source_state import read_source_journal
+                records = read_source_journal(args.source_journal_path)
+                code_fold = fold_source_journal(args.source_journal_path, args.repos_dir, records=records)
+                artifact_fold = fold_artifacts(records)
             # Authority flip: notes with a genesis `new-note` op (migrated OR born on-graph)
             # are reconstructed from the journal during replay, so don't read their `.md` here.
             skip_memory_paths = journal_sourced_note_paths(args.journal_path) if args.journal_path else None
@@ -358,7 +365,7 @@ async def _dispatch(args) -> int:
             nodes, edges = build_dev_graph_elements(
                 args.memory_dir, None if args.no_repo_map else args.repos_dir,
                 seed=not args.no_seed, note_aliases=note_aliases, code_fold=code_fold,
-                skip_memory_paths=skip_memory_paths, report=dev_report)
+                artifact_fold=artifact_fold, skip_memory_paths=skip_memory_paths, report=dev_report)
             res = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
             print(f"ingested: {res.nodes_added} nodes added / {res.nodes_verified} verified, "
                   f"{res.edges_added} edges added / {res.edges_existing} existing")
@@ -367,6 +374,7 @@ async def _dispatch(args) -> int:
             await _record_ingest_sources(gx, (dev_report.get("repo_map") or {}).get("sources") or {})
             if code_fold is not None:
                 _report_code_fold(code_fold, args)
+                _report_artifact_fold(artifact_fold, records, sorted({k[0] for k in code_fold.modules}), args)
             if args.journal_path:
                 # Replay born-on-graph writes on top of the fresh projection so
                 # `rm db && ingest` fully reconstructs the graph (the migration story).
@@ -768,17 +776,30 @@ async def _dispatch(args) -> int:
             repos_dir = cfg.get("repos_dir") or args.repos_dir
             rows = uncaptured_modules(args.source_journal_path, libs, repos_dir,
                                       exclude=cfg.get("code_exclude"))
-            if not rows:
-                print(f"every .py in {len(libs)} on-graph repo(s) is journal-captured ✓")
+            # The observed-source artifacts (design 9a7224a7): every file a kind's pattern
+            # matches that no capture holds
+            from .artifacts import uncaptured_artifacts
+            arts = uncaptured_artifacts(args.source_journal_path, repos_dir, libs)
+            if not rows and not arts:
+                print(f"every .py and artifact file in {len(libs)} on-graph repo(s) is journal-captured ✓")
                 return 0
-            total = sum(len(v) for v in rows.values())
-            print(f"## Uncaptured modules ({total} file(s) across {len(rows)} repo(s))")
-            for key in sorted(rows):
-                print(f"- **{key}** ({len(rows[key])}):")
-                for m in rows[key]:
-                    print(f"    {m}")
-            print("_capture: `flip-module <repo_key> <module_path>` then `cutover` — "
-                  "tests/ included (user rule ac3d52f4)_")
+            if rows:
+                total = sum(len(v) for v in rows.values())
+                print(f"## Uncaptured modules ({total} file(s) across {len(rows)} repo(s))")
+                for key in sorted(rows):
+                    print(f"- **{key}** ({len(rows[key])}):")
+                    for m in rows[key]:
+                        print(f"    {m}")
+                print("_capture: `flip-module <repo_key> <module_path>` then `cutover` — "
+                      "tests/ included (user rule ac3d52f4)_")
+            if arts:
+                total = sum(len(v) for v in arts.values())
+                print(f"## Uncaptured artifacts ({total} file(s) across {len(arts)} repo(s))")
+                for key in sorted(arts):
+                    print(f"- **{key}** ({len(arts[key])}):")
+                    for m in arts[key]:
+                        print(f"    {m}")
+                print("_capture: `capture-artifact <repo_key> <path> --kind <kind>`_")
             return 1
         elif args.command == "display-rule":
             res = await set_display_rule(gx, args.for_label, args.title, args.gloss,
@@ -1583,6 +1604,20 @@ async def _dispatch(args) -> int:
                                       repos_dir=args.repos_dir)
             print(render("module", res, args.format))
             return 1 if res.get("error") else 0
+        elif args.command == "capture-artifact":
+            # An observed-source artifact (design 9a7224a7): the file stays the source, the
+            # journal records each captured version, the fold derives its node
+            from .artifacts import capture_artifact
+            if not args.source_journal_path:
+                print("error: capture-artifact needs --source-journal-path (cg-write bakes it)",
+                      file=sys.stderr)
+                return 1
+            res = await capture_artifact(gx, args.repo_key, args.artifact_path, args.kind,
+                                         retire=args.retire, write=not args.no_write,
+                                         source_journal_path=args.source_journal_path,
+                                         repos_dir=args.repos_dir)
+            print(render("capture-artifact", res, args.format))
+            return 1 if res.get("error") else 0
         elif args.command == "rename-symbol":
             # b73e7688 ID_REFS conformance (finding 889b3025 gap 2): the positional takes
             # a full id OR unique prefix; ambiguity and no-match fail loud. Extra
@@ -1660,6 +1695,10 @@ async def _dispatch(args) -> int:
                 print("error: source-check needs --source-journal-path", file=sys.stderr)
                 return 1
             res = source_check(args.source_journal_path, args.repos_dir)
+            # The observed-source artifacts ride the soak as their own line: drift there is
+            # reported, never the regen gate -- the file is the source (design 9a7224a7)
+            from .artifacts import artifact_check
+            res["artifacts"] = artifact_check(args.source_journal_path, args.repos_dir)
             print(render("source-check", res, args.format))
             # Shadow drift is informational (the soak); a GRAPH-SOURCED module failing
             # the regen gate is an error (the artifact diverged from its source).
@@ -1814,6 +1853,33 @@ def _report_code_fold(fold, args) -> None:
     if total:
         print(f"⚠ code fold: {total} uncaptured .py file(s) in on-graph repos are NOT on the "
               f"graph (capture: flip-module + cutover; list: `uncaptured`)", file=sys.stderr)
+
+
+def _report_artifact_fold(fold, records, repos, args) -> None:
+    """Report the artifact lane (design 9a7224a7): what it derived, a record it could not read,
+    two live files deriving one identity, a file whose text is not its latest capture, and
+    every artifact file no capture holds -- reported, never a gate (the file is the source)."""
+    from .artifacts import artifact_check, uncaptured_artifacts
+    nodes, _ = fold.elements()
+    print(f"artifact fold: {fold.records} record(s) -> {len(nodes)} artifact node(s)")
+    for f in fold.failures:
+        print(f"⚠ artifact fold: {f['repo_key']}/{f['artifact_path']} @ {f['ts']} could not be read "
+              f"({f['error']}) — its previous state stands", file=sys.stderr)
+    for c in fold.conflicts():
+        print(f"⚠ artifact fold: {', '.join(c['keys'])} derive one identity — the latest capture holds it",
+              file=sys.stderr)
+    chk = artifact_check(args.source_journal_path, args.repos_dir, records)
+    for label in chk["drift"]:
+        print(f"⚠ artifact drift: {label} differs from its latest capture (capture-artifact)", file=sys.stderr)
+    for label in chk["missing"]:
+        print(f"⚠ artifact missing: {label} (capture-artifact --retire ends it)", file=sys.stderr)
+    for bad in chk["invalid"]:
+        print(f"⚠ artifact invalid: {bad['artifact']} ({bad['error']})", file=sys.stderr)
+    un = uncaptured_artifacts(args.source_journal_path, args.repos_dir, repos, records)
+    total = sum(len(v) for v in un.values())
+    if total:
+        print(f"⚠ artifact fold: {total} uncaptured artifact file(s) in on-graph repos are NOT on the "
+              f"graph (capture-artifact; list: `uncaptured`)", file=sys.stderr)
 
 
 def _report_git_sources(report: Dict[str, Any], lane: str) -> None:
@@ -3629,6 +3695,19 @@ def main() -> int:
     p_dm.add_argument("--no-write", action="store_true", help="Dry run: report the plan, don't touch disk")
     p_dm.add_argument("--repos-dir", default=DEFAULT_REPOS,
                       help="Repos root — the live code fold step derives node paths under it (as ingest does)")
+
+    p_ca = sub.add_parser("capture-artifact",
+                          help="Capture an observed-source artifact (a design system's tokens.json): "
+                               "validated, canonical, journaled as one version; the fold derives its "
+                               "node (design 9a7224a7)")
+    p_ca.add_argument("repo_key", help="The repo the file sits in (its directory under the repos root)")
+    p_ca.add_argument("artifact_path", help="The file's repo-relative path")
+    p_ca.add_argument("--kind", default="design-system",
+                      help="The artifact kind (default design-system: a schema-v1 tokens.json)")
+    p_ca.add_argument("--retire", action="store_true",
+                      help="End the key's life instead of capturing a version (retire is a fact)")
+    p_ca.add_argument("--no-write", action="store_true", help="Dry run: validate and report, journal nothing")
+    p_ca.add_argument("--repos-dir", default=DEFAULT_REPOS, help="Repos root (the file resolves under it)")
 
     p_rs = sub.add_parser("rename-symbol",
                           help="Rename a top-level function/class everywhere (def + refs + importer imports)")

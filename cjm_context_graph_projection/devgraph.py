@@ -230,6 +230,7 @@ def build_dev_graph_elements(
     seed: bool = True,                # Include the hand-seeded fine-tier slots
     note_aliases: Optional[Dict[str, str]] = None,  # Confirmed link aliases (drifted -> canonical)
     code_fold: Optional[CodeFold] = None,  # The code lane folded over the source journal (None = skip code)
+    artifact_fold: Optional[Any] = None,  # The artifact lane (artifacts.ArtifactFold) folded over the same journal (None = skip artifacts; design 9a7224a7)
     skip_memory_paths: Optional[List[str]] = None,  # Memory `.md` paths NOT to read (journal-sourced under M3)
     report: Optional[Dict[str, Any]] = None,  # Filled with {"repo_map": repo_map_elements' report}
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:  # (all nodes, all edges)
@@ -258,6 +259,10 @@ def build_dev_graph_elements(
         cn, ce = code_fold.elements()
         nodes += cn
         edges += ce
+    if artifact_fold is not None:   # the observed-source artifacts: one node per identity (9a7224a7)
+        an, ae = artifact_fold.elements()
+        nodes += an
+        edges += ae
     return nodes, edges
 
 

@@ -467,9 +467,10 @@ class CodeFold:
 def fold_source_journal(
     source_journal_path: str,  # The source journal (segment family)
     repos_dir: str,            # The repos root
+    records: Optional[List[Dict[str, Any]]] = None,  # Already-read records (None = read the journal) -- ingest reads it ONCE for the code and artifact lanes
 ) -> CodeFold:  # The folded corpus (call `elements()` for the wires)
     """Fold every record of the source journal, in append order (the rebuild's code lane)."""
     fold = CodeFold(repos_dir)
-    for rec in read_source_journal(source_journal_path):
+    for rec in records if records is not None else read_source_journal(source_journal_path):
         fold.apply(rec)
     return fold

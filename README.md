@@ -7,21 +7,33 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 ## Modules
 
 - **`cjm_context_graph_projection.__init__`**
+- **`cjm_context_graph_projection.agentlayer`** — The post page's AGENT LAYER (design 39c51c15 (7), amendment 23a49667, under the redesign build
+- **`cjm_context_graph_projection.archive`** — Retiring an archive source, restoring it from git, and moving a page's path between holders
+- **`cjm_context_graph_projection.artifacts`** — Observed-source ARTIFACTS (design 9a7224a7, work item 4765b699): files the graph VERSIONS
 - **`cjm_context_graph_projection.authoring`** — The B write surface: AUTHOR a verbatim-text slot on-graph, emit the canonical artifact.
+- **`cjm_context_graph_projection.claims`** — The claims the site may make about the user's work, and the deliverables that back them
 - **`cjm_context_graph_projection.cli`** — The `cjm-context-graph` CLI — first driver of the projection core.
 - **`cjm_context_graph_projection.code_edges`** — Orphaned code-target edge detector: journaled links whose endpoint no longer resolves.
+- **`cjm_context_graph_projection.codefold`** — The code lane as a FOLD over the source journal (design amendment 2cc81d3b to 8f6f2343).
 - **`cjm_context_graph_projection.cohesion`** — Module cohesion audit over the code graph — the read-only cohesion ORACLE (N+1).
+- **`cjm_context_graph_projection.comments`** — The post page's comments (design 39c51c15 (1), rulings 98d33f9e (2) + 86f4a34d, under the
 - **`cjm_context_graph_projection.config`** — Graph-sibling config discovery — the DEFAULT_* hardcodes retired to DATA
 - **`cjm_context_graph_projection.contradictions`** — The standing dedup query: slots whose ACTIVE assertions disagree.
 - **`cjm_context_graph_projection.conventions`** — Structural convention audit over the code/notebook graph (the enforcement nbdev lacks).
+- **`cjm_context_graph_projection.coverage`** — The Tutorials matrix: its vocabulary as graph data and the task x stage projection
+- **`cjm_context_graph_projection.derivedblocks`** — Derived blocks leave the RENDER; the post navigation replaces them (design 253ac996, amendment
 - **`cjm_context_graph_projection.devgraph`** — Build the dev graph's nodes + edges from its sources (the dev-graph DRIVER).
 - **`cjm_context_graph_projection.display`** — Graph-carried display rules: the presentation vocabulary (DEC `16bcd96e`).
 - **`cjm_context_graph_projection.explorer_page`** — The graph EXPLORER client page — the first client of the `serve` data API.
 - **`cjm_context_graph_projection.factlayer`** — Shared fine-tier reads over the fact-layering schema (slots + assertions).
 - **`cjm_context_graph_projection.filing`** — Filing reconciler: propose PART_OF program anchors for unfiled work items.
+- **`cjm_context_graph_projection.gitfold`** — Ingested sources' times from git history (design amendment 19edbe97 to 8f6f2343; leg C 7ddcea72).
 - **`cjm_context_graph_projection.hybrid_page`** — The HYBRID graph explorer client — GPU physics canvas + DOM overlay (check-in 1233ab46).
 - **`cjm_context_graph_projection.journal`** — The write journal: the durable, replayable source of truth for born-on-graph writes.
+- **`cjm_context_graph_projection.judging`** — Judged related posts (design e09e262b, answering ruling 98d33f9e (1); the spike 245fb5b3).
 - **`cjm_context_graph_projection.lens`** — Lenses: graph-carried, parameterized views (DEC `f1b02b95` — tier 2 of the
+- **`cjm_context_graph_projection.library`** — The Library's provenance (design 5de7fae9, design leg 4a4ef27e).
+- **`cjm_context_graph_projection.librarypage`** — The Library's pages: the index a Lens with the `library` view layout projects, and a work page
 - **`cjm_context_graph_projection.linkaudit`** — Link liveness audit — the derived worklist for the EXTERNAL links a note carries
 - **`cjm_context_graph_projection.listing`** — Structured enumeration: every node of a LABEL / assertion of a PREDICATE / edge of a RELATION.
 - **`cjm_context_graph_projection.module_ops`** — Module-edit ops — create / rename / delete / regroup a module as graph edge ops.
@@ -29,6 +41,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - **`cjm_context_graph_projection.notes_place`** — The PLACEMENT PASS of the notes lane — the second of the standalone lecture resource's
 - **`cjm_context_graph_projection.onboarding`** — Project the MEMORY onboarding surface from the graph's ASSERTED lead structure.
 - **`cjm_context_graph_projection.oracle`** — The version oracle: a programmatic Procedure that keeps `version` slots fresh.
+- **`cjm_context_graph_projection.postpage`** — The post page's projected parts (the post page of de808eae (2); its rest designed as 39c51c15
 - **`cjm_context_graph_projection.projection`** — The projection core: schema / show / relevance / state over a context graph.
 - **`cjm_context_graph_projection.propose`** — Triage proposals: an agent DRAFTS the update for a stale deliverable (work item bb015d12).
 - **`cjm_context_graph_projection.prose_refs`** — Prose-ref drift: id-shaped tokens in asserted prose vs the edge layer.
@@ -37,11 +50,12 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - **`cjm_context_graph_projection.readiness`** — The readiness frontier: which work-items are READY vs BLOCKED — derived, never stored.
 - **`cjm_context_graph_projection.readme`** — README-as-projection (v1, STRUCTURAL-ONLY): generate a repo's README FROM THE GRAPH.
 - **`cjm_context_graph_projection.reads`** — The content-access READS ledger: which nodes each read delivered into context.
+- **`cjm_context_graph_projection.rebuilddiff`** — A live graph against its own rebuild, property for property (design 8f6f2343, finding fbce0173).
 - **`cjm_context_graph_projection.reconcile`** — M2b shadow-phase RECONCILE — surface + (explicitly) absorb out-of-band `.md` edits.
 - **`cjm_context_graph_projection.refactor`** — Refactoring-candidate identification over the code graph (the IDENTIFY half of move).
 - **`cjm_context_graph_projection.refactor_ops`** — `move` — relocate a symbol between modules (the EXECUTE half of refactor-candidates).
 - **`cjm_context_graph_projection.registers`** — Register drift-check: each hub note's member-cache vs the active `role` assertions.
-- **`cjm_context_graph_projection.relive`** — Live re-derivation of a module's region nodes from its new text (36f649d3).
+- **`cjm_context_graph_projection.relive`** — The LIVE half of the code fold (design amendment 2cc81d3b, build B2 of leg B 0e3508fd).
 - **`cjm_context_graph_projection.rename_ops`** — Symbol `rename` — the Ext-B increment: scoped identifier substitution INTO bodies.
 - **`cjm_context_graph_projection.render`** — Render projection results for a consumer: agent (JSON) or human (markdown).
 - **`cjm_context_graph_projection.review`** — The review frontier: which APPROVED deliverables have stale upstream — derived, never stored.
@@ -50,15 +64,65 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - **`cjm_context_graph_projection.seeds`** — Hand-seeded load-bearing slots + the rename-stable repo-key machinery.
 - **`cjm_context_graph_projection.series`** — Series born on-graph: the node, its membership and its ORDER as journaled intent
 - **`cjm_context_graph_projection.serve`** — A served, read-only graph EXPLORER data API over the read verbs — the richer-viz INSTRUMENT.
-- **`cjm_context_graph_projection.sitelinks`** — In-body site links, RESOLVED after replay (DEC 72d669c5 (1)).
+- **`cjm_context_graph_projection.site`** — The public site's BUILD: one verb, run where the graph is (ruling 941f7f13; DEC 98293e72 (2)).
+- **`cjm_context_graph_projection.sitelinks`** — In-body site links, RESOLVED through site_path facts (DEC 72d669c5 (1); the step, 9ee4e346).
+- **`cjm_context_graph_projection.sitepages`** — The site's PROJECTED pages: every series page from its Series, every topic page from its Lens
 - **`cjm_context_graph_projection.source_state`** — N+3 Phase 1 (SHADOW): capture a module's canonical source into a SOURCE journal and
+- **`cjm_context_graph_projection.sourcemoves`** — Which rows a moved source accounts for (design amendment a9176261 to 19edbe97 (6)).
+- **`cjm_context_graph_projection.sources`** — The post page's sources (design 39c51c15 (3), amendment 722a8232, under the redesign build
 - **`cjm_context_graph_projection.structure`** — M2a GRADIENT — structural memory authoring: create a note / add a section, born on-graph.
+- **`cjm_context_graph_projection.tutorialspage`** — The Tutorials page: a Lens whose view layout is `coverage-matrix` projects the task x stage
 - **`cjm_context_graph_projection.viz`** — A minimal READ-ONLY visualization: the readiness frontier + its dependency DAG, as HTML.
 - **`cjm_context_graph_projection.workbench`** — Workbench lens layer: the front-door / pin-tree / session-feed derived views.
 - **`cjm_context_graph_projection.worklist`** — The propose/confirm worklist: candidate fixes that need a human decision.
 - **`cjm_context_graph_projection.write`** — The write surface: `assert` a slot value, `decide` a conclusion.
 
 ## API
+
+### `cjm_context_graph_projection.agentlayer`
+
+- `agent_plan` _function_ — The agent layer's plan: each licensed post's JSON-LD and llms.txt. A page's title and
+- `based_on` _function_ — What the post draws on, as structured data (design 37f82f72 (5)): a work typed by its form,
+- `build_lines` _function_ — What the build knows and the author never types: how the links work, the licenses from the
+- `check_jsonld` _function_ — After the render: every planned post page carries exactly one JSON-LD object, equal to the
+- `check_llms_fragments` _function_ — After the anchors (design b82d2a98 (2)), failing closed: every fragment a `.llms.md` links
+- `directory_author` _function_ — The page's author as Quarto merges it: its own front matter, else the nearest directory's
+- `jsonld_script` _function_
+- `llms_index` _function_ — llms.txt (amendment 23a49667 (2), 465ab923): the author's intro, the build's own lines,
+- `llms_path` _function_
+- `load_index_copy` _function_ — llms.txt's intro copy from the site config: a missing key or summary refuses (the build
+- `map_outside_code` _function_ — The ONE walker of the markdown layer's code regions (design b82d2a98 (3)), shared by the
+- `plain` _function_ — A description in llms.txt or JSON-LD is text: the page's link is the only link there, and a
+- `post_jsonld` _function_ — A post's structured data (39c51c15 (7), amendment 23a49667 (4)): a draft has no
+- `read_jsonld` _function_
+- `restore_llms_anchors` _function_ — The markdown layer carries the ids its page carries (design b82d2a98 (1)): each anchor
+- `rewrite_llms_links` _function_ — Keep an agent in the markdown layer (amendment 23a49667 (3)): every internal link in a
+- `rewrite_markdown_links` _function_ — Rewrite each link target `resolve` maps, outside fenced code and inline code spans.
+- `write_llms_txt` _function_ — Write llms.txt over Quarto's flat list -- only when every link names a `.llms.md` the
+
+### `cjm_context_graph_projection.archive`
+
+- `git_blob` _function_
+- `git_head` _function_
+- `is_retired` _function_ — A retired node is never listed, linked to or rendered, under any profile.
+- `path_owners` _function_ — The page each site_path value now belongs to: follow the supersession chain UP from the
+- `restore_retired` _function_ — Rebuild each retired archive source from git, under its original path and slug. A missing
+- `retire_source` _function_ — Retire an archive source (journaled `retire-source`). LIVE, the source must be committed
+- `retired_sources` _function_ — What the ingest restores before replay: every archive source a retire op names.
+- `transfer_site_path` _function_ — Move a page's ACTIVE site_path to another node (journaled `transfer-path`): the target
+
+### `cjm_context_graph_projection.artifacts`
+
+- `ArtifactFold` _class_ — The artifact lane folded over the source journal: one node per live artifact identity,
+- `ArtifactKind` _class_ — One kind of observed artifact: where its files sit, how a file reads canonically (and
+- `append_artifact` _function_ — Append an `artifact` record, skipping a capture identical to the key's latest state.
+- `append_artifact_retire` _function_ — Append an `artifact-retire` record ending a key's life.
+- `apply_artifacts_live` _function_ — THE SAME FOLD a rebuild runs, committed in place: artifact nodes the fold no longer
+- `artifact_check` _function_ — Every live artifact against its file: DRIFT = the file's canonical text is not the
+- `capture_artifact` _function_ — Capture the file's current version (validated, canonical) or retire its key, then the
+- `fold_artifacts` _function_
+- `latest_artifact_ops` _function_ — The LATEST capture per live key (last record wins; a retire ends the key).
+- `uncaptured_artifacts` _function_ — Every file a kind's pattern matches, in every on-graph repo, that no record holds.
 
 ### `cjm_context_graph_projection.authoring`
 
@@ -74,6 +138,16 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `reharvest_note_relations` _function_ — Re-run the relationship harvest on an EDITED note and apply the edge DIFF (finding cbde404c).
 - `section_divergence` _function_ — Read-only: detect, at SECTION grain, where a note's `.md` has drifted from the graph.
 
+### `cjm_context_graph_projection.claims`
+
+- `claims_report` _function_ — The claims over the live graph: every claim Entity with its state and backing.
+- `load_claim_states` _function_ — Every claim's active state(s); more than one is a conflict the report refuses.
+- `load_claims` _function_ — The claim Entities in display order.
+- `load_supports` _function_ — The support edges (deliverable -> claim) with their kind and note.
+- `project_claims` _function_ — The pure projection (no graph access): see the module docstring for the rules.
+- `public_view` _function_ — The public profile's filter (676bac8e (4)): building and retired claims, and supports
+- `record_support` _function_ — Write one SUPPORTS edge with its kind (journaled `supports`), or retract it. A pair has
+
 ### `cjm_context_graph_projection.cli`
 
 - `main` _function_
@@ -84,10 +158,30 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `classify_orphaned_links` _function_ — Pure: the journaled links the next replay will silently drop.
 - `orphaned_edges` _function_ — The derived orphan report over journal `link` ops + the current graph.
 
+### `cjm_context_graph_projection.codefold`
+
+- `CodeFold` _class_ — The projected code corpus as a fold over source-journal records (see module docstring).
+- `fold_source_journal` _function_ — Fold every record of the source journal, in append order (the rebuild's code lane).
+
 ### `cjm_context_graph_projection.cohesion`
 
 - `cohesion` _function_ — Audit module cohesion: grab-bag (under_split) + scattered-helper (over_split) candidates.
 - `compute_cohesion` _function_ — Compute module cohesion candidates from the code graph slices (pure).
+
+### `cjm_context_graph_projection.comments`
+
+- `apply_harvest` _function_ — Land one harvest: each Note's winning thread stands (superseding a different active
+- `fetch_threads` _function_ — Every comment thread on the repo: the utterances issues, and the discussions of the
+- `gh_graphql` _function_ — One GraphQL request through the GitHub CLI (its own authentication).
+- `harvest_discussions` _function_ — The harvest verb: read every comment thread, map it to a Note, land the facts. All or
+- `load_comments_config` _function_ — The widget's settings from the site config (`post-comments`) and the site's title (the
+- `load_threads` _function_ — Every Note's comment threads: the active discussion fact and the superseded ones.
+- `map_threads` _function_ — Each thread's Note: an authored map wins; a path-era title by the page's site_path
+- `page_comments` _function_ — What a page's block loads: its one active thread, else its canonical path as the term.
+- `path_key` _function_ — A pathname (utterances, 'posts/x/' or 'posts/x/index') or a giscus term ('/posts/x/')
+- `plan_threads` _function_ — Per Note, the thread with the MOST comments stands; the others are earlier threads
+- `render_comments` _function_ — The comments block: the questions line, the earlier threads, and the giscus widget --
+- `thread_url` _function_ — A thread's page: comment threads are discussions once the publish converts them.
 
 ### `cjm_context_graph_projection.config`
 
@@ -104,18 +198,41 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `compute_untested` _function_ — The untested-symbol audit (pure): every public top-level PACKAGE symbol (test
 - `conventions` _function_ — Audit notebook-sourced symbols for missing prose/docstrings + non-granular cells,
 
+### `cjm_context_graph_projection.coverage`
+
+- `check_coverage_value` _function_ — A coverage value must name a live vocabulary entry of the predicate's kind, so a
+- `coverage_matrix` _function_ — The Tutorials matrix over the graph: every deliverable whose type's kind is
+- `field_format_error` _function_ — The formats some fields carry beyond their type (design leg 4a4ef27e): `published` is an
+- `load_coverage_facts` _function_ — Every subject's ACTIVE coverage values (both predicates, supersession applied).
+- `load_hardware` _function_ — Every hardware Entity with its ACTIVE standing (None if never asserted; two active
+- `load_verifications` _function_ — The verification edges (deliverable -> device) with their evidence.
+- `load_vocab` _function_ — The live (unretired) vocabulary of both axes, each entry its properties plus `id`.
+- `mint_entity` _function_ — Mint or update a typed Entity from its WHOLE record (journaled `entity`; upsert by
+- `project_matrix` _function_ — The pure projection (no graph access): see the module docstring for the rules. A filter
+- `record_verification` _function_ — Write one VERIFIED_ON edge with its evidence (journaled `verified-on`), or retract it.
+- `resolve_deliverable` _function_ — Resolve a deliverable argument to its Note id (an id first, then a slug).
+- `validate_entity` _function_ — Check one `entity` record against its kind's declared fields.
+
+### `cjm_context_graph_projection.derivedblocks`
+
+- `check_derived` _function_ — After the render: every planned post reported, each named block dropped exactly once, and
+- `check_end_placement` _function_ — After the render: every post's end matter -- the author strip, and the comments and
+- `derived_plan` _function_ — Plan every rendered post's drops and navigation. A derived block with no link target
+- `render_nav` _function_ — The post navigation: the series position, then the collections line, as simple callouts.
+- `write_derived` _function_ — Write the data file and the filter (only what changed) and clear the report.
+
 ### `cjm_context_graph_projection.devgraph`
 
+- `ArchiveSource` _class_ — The archive's kept paths and their decomposition — ONE definition for the ingest that
 - `build_dev_graph_elements` _function_ — Assemble the full dev graph: memory notes (+ refs), the repo map (+ deps),
-- `code_elements` _function_ — Decompose each repo's importable package into code nodes + edges.
 - `memory_elements` _function_ — Decompose every memory markdown file (except MEMORY.md) into graph elements.
-- `notebook_elements` _function_ — Decompose each repo's nbdev notebooks into code/cell nodes + edges.
-- `notes_corpus_elements` _function_ — Decompose an arbitrary `<dir>/index.md` / `index.qmd` markdown corpus into graph elements.
+- `notes_corpus_elements` _function_ — Decompose a git-held `<dir>/index.md` / `index.qmd` markdown corpus into graph elements.
+- `parse_source_id` _function_
+- `repo_entity` _function_
 - `repo_map_elements` _function_ — One repo Entity per cjm-* repo (RENAME-STABLE keys) + DEPENDS_ON from pyproject.
-- `resolve_corpus_code_edges` _function_ — Resolve CALLS/IMPORTS edges ACROSS the whole code + notebook corpus.
-- `resolve_test_edges` _function_ — Resolve TESTS edges across the corpus (the code<->test link).
+- `site_page_slug` _function_ — A site page's slug — "about.qmd" -> "about", "series/notes/index.md" -> "series/notes";
+- `source_id` _function_ — An ingested git source's id (DEC a9176261): its kind and where it lives — the root a
 - `stamp_note_profile` _function_ — Record the relationship-harvest profile on every Note wire dict (in place).
-- `test_elements` _function_ — Decompose each repo's pytest / manual test files into code nodes + edges.
 
 ### `cjm_context_graph_projection.display`
 
@@ -154,6 +271,24 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `near_duplicate_scores` _function_ — IDF-weighted token-set cosine between a new statement and existing items.
 - `near_duplicates` _function_ — Mint-time near-duplicate proposals over the OPEN work-item population.
 
+### `cjm_context_graph_projection.gitfold`
+
+- `ElementFold` _class_ — Element times over file versions: runs by holder count, content changes by wire.
+- `FoldedHistory` _class_ — One work tree's kept paths folded to HEAD: the HEAD-state per-path payloads + the times.
+- `blobs_at` _function_ — Several paths' contents at one commit through one ls-tree + one cat-file batch.
+- `cjm_dep_names` _function_ — The cjm-* dependencies a pyproject declares (an unparseable file declares none).
+- `commit_exists` _function_
+- `fold_history` _function_ — Walk the kept paths' versions, decompose each, fold the element times, check the end
+- `git_toplevel` _function_ — The work tree `path` belongs to (None = no git history: no durable time).
+- `git_versions` _function_ — Every commit in HEAD's ancestry, reverse topological order, with the kept paths it set.
+- `head_commit` _function_
+- `head_tree` _function_ — Every file HEAD holds.
+- `paths_between` _function_ — What moved between two commits of one source (renames are a delete + an add: identity
+- `read_blobs` _function_ — Many blobs through one `git cat-file --batch`.
+- `root_commit_time` _function_ — When a repo began: its root commit (the earliest, when several histories were joined).
+- `unquote_path` _function_ — Undo git's C-style path quoting (core.quotePath=false leaves UTF-8 bare, not `"` / `\`).
+- `worktree_changes` _function_ — What HEAD does not carry: reported by the ingest, never read from the tree.
+
 ### `cjm_context_graph_projection.journal`
 
 - `journal_sourced_note_paths` _function_ — The memory `.md` files `ingest` must NOT read — they're journal-sourced now.
@@ -165,6 +300,24 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `replay_journal` _function_ — Re-apply every journaled write through its core verb (idempotent).
 - `touched_node_ids` _function_ — Best-effort node refs a journaled op touched — the session-lens feed (2f51ff5d).
 
+### `cjm_context_graph_projection.judging`
+
+- `apply_judgments` _function_ — Land one judge run: every stored judgment touching a re-judged post is replaced by the
+- `http_ask` _function_ — The HTTP judge: one POST per pair, retried with backoff on overload and network faults.
+- `judge_pairs` _function_ — Both directions for every stale post, against every other judged post.
+- `judge_related` _function_ — The judge verb: find the stale posts, judge every pair touching them, land the run.
+- `judgment_of` _function_ — The judgment as the edge stores it, from the service's typed answers.
+- `load_judged` _function_ — Every stored judgment.
+- `load_post_views` _function_ — The judged state of every public post (the audience rule: only public posts are sent).
+- `load_records` _function_ — What each judged post's judgments were made against.
+- `post_view` _function_ — What the judge sees of a post -- and what its staleness is measured against.
+- `question_hash` _function_ — The questions' identity: a changed question makes every judgment stale.
+- `read_key` _function_ — The key from KEY_ENV, else KEY_FILE -- never printed, never journaled.
+- `related_stale` _function_ — The public posts whose related judgments are missing or stale -- the build's report.
+- `run_judge` _function_ — Ask the judge about every pair; every answer is kept (the caller applies the floor).
+- `stale_posts` _function_ — A post is stale when it has no record or its record names another state or question.
+- `state_hash` _function_ — A post's judged-state identity.
+
 ### `cjm_context_graph_projection.lens`
 
 - `apply_lens` _function_ — APPLY a lens: bind params -> run each selection clause through the real
@@ -173,6 +326,29 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `load_lenses` _function_ — Every well-formed Lens on this graph (the shelf feed), slug-sorted.
 - `set_lens` _function_ — Author/update a graph-carried Lens (journaled upsert-by-slug).
 - `validate_lens_spec` _function_ — Parse-validate a lens spec against the v1 shape; a bad spec NEVER lands.
+
+### `cjm_context_graph_projection.library`
+
+- `check_survey_targets` _function_ — The graph half of the survey check, run before anything is written: each row's
+- `library_index` _function_ — Load what the Library derives from and project it: the Library entities, the asserted
+- `load_library_entities` _function_ — Every work, unit and output-class Entity on the graph, keyed by sub-kind then key.
+- `plan_survey` _function_ — The pure plan of a survey batch: the works and units to mint and the provenance edge per
+- `project_library` _function_ — The Library as data, deriving everything and storing nothing (design 5de7fae9 (3), leg
+- `read_survey` _function_ — Read the reviewed survey table.
+- `record_provenance` _function_ — Write an ARCHIVE deliverable's one DERIVED_FROM edge to its work or unit (journaled
+- `record_work_member` _function_ — Place a metabolized source in its work (journaled `work-member`): a Source Reference
+- `source_entity_id` _function_ — The Entity a provenance key names: a key carrying the unit separator is a unit's.
+
+### `cjm_context_graph_projection.librarypage`
+
+- `form_name` _function_ — A form key as a reader reads it ("lecture-series" -> "lecture series").
+- `plan_library_pages` _function_ — Plan the Library index and every work page it links: the Library under the profile, a
+- `render_index` _function_ — The topic line, then one section per form: each work's name (linked to its work page when
+- `render_work` _function_ — The card, the units grouped by part, and the outputs on the whole work. A unit with one
+- `topic_pages` _function_ — The topical Lens pages: a Lens page whose listed members are all notes; one mixing notes
+- `unit_anchor` _function_
+- `work_description` _function_
+- `year` _function_
 
 ### `cjm_context_graph_projection.linkaudit`
 
@@ -191,9 +367,9 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 
 ### `cjm_context_graph_projection.module_ops`
 
-- `delete_module` _function_ — Delete a module — drop its file and its whole graph subtree. Guarded: refuses while
+- `delete_module` _function_ — Delete a module — retire its journal key, drop its file, and let the code fold's step
 - `flip_notebook_to_py` _function_ — The golden-reference flip, ONE LOUD VERB (DEC b2c5363d): notebook -> plain `.py`.
-- `new_module` _function_ — Mint an empty CodeModule node (the target a `regroup`/`move` populates).
+- `new_module` _function_ — Mint an EMPTY module, graph-sourced from birth (the target add-text / add-symbol /
 - `regroup` _function_ — Gather symbols into a module — the EXECUTE verb for an `under_split` (extract a
 - `rename_module` _function_ — Rename a `.py` module — re-emit its content at the new path, drop the old file, and
 - `rewrite_module_import` _function_ — Rewrite a module-RENAME across an importer: every `from old import …` and
@@ -223,6 +399,28 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `procedure_node` _function_ — The oracle's Procedure node (the programmatic value-source for its assertions).
 - `read_repo_version` _function_ — Read a repo's version: installed metadata first, else `__version__` on disk.
 - `run_version_oracle` _function_ — Refresh `version` slots for repo entities; report what changed.
+
+### `cjm_context_graph_projection.postpage`
+
+- `display_date` _function_ — Quarto formats a page's dates BEFORE user filters run, so a date the filter sets must
+- `end_plan` _function_ — Every post's end matter. A Note of no post kind (a site page, an untyped Note) has none.
+- `fill_copy` _function_ — Copy names the site author through {name} / {role}; any other placeholder refuses.
+- `header_facts` _function_ — The header's dated facts (39c51c15 (2)): when a deliverable's `published` state was asserted,
+- `header_meta` _function_ — The header's projected metadata (39c51c15 (2)): the kind label; a born post's date is its
+- `license_facts` _function_ — The license facts (39c51c15 (6)): per deliverable class on the DeliverableType, per
+- `load_holder` _function_ — The copyright holder the footer names (`copyright-holder` in the site config): a missing
+- `load_site_author` _function_ — The site's one statement of its author (`site-author` in the site config, amendment
+- `load_strip_copy` _function_ — The strip's copy from the site config: a missing key or field refuses (the build never
+- `offered_backing` _function_ — The posts that back an OFFERED claim through a backing kind, read through the public
+- `pitch_target` _function_ — The page the pitch points at: the Work-with-me page (903bc108 (5)). It is not on-graph
+- `post_dates` _function_ — A post's public dates (39c51c15 (2)): an archive post's own date, a born post's publication;
+- `post_licenses` _function_ — A post's licenses: its own override, else its class's. A post with none, or with an id
+- `related_context` _function_ — The relations related posts rank by (39c51c15 (4), amendment e09e262b): post-to-post links
+- `related_posts` _function_ — Related posts by relation, each with its reason (39c51c15 (4), amendment e09e262b):
+- `render_end` _function_ — What the post draws on, related posts, the author strip (with the pitch line when given) and the comments block.
+- `render_related` _function_ — Related posts, each with its reason, as a plain classed div (styled by the site).
+- `render_reuse` _function_ — The license line, as Quarto's own Reuse section (a filter-set `license` never reaches
+- `site_footer` _function_ — The footer, derived (39c51c15 (6)): the copyright years run from the first publication to
 
 ### `cjm_context_graph_projection.projection`
 
@@ -299,6 +497,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `nest_points` _function_ — The one-level view of `build_point_tree` (kept for callers that only need parent -> children).
 - `note_deliverable_type` _function_ — The Note's bound type slug (the active `deliverable_type` fact).
 - `note_publish_states` _function_ — The publish_state facts as a map: every deliverable's active values. One value is the
+- `note_types` _function_ — Every typed Note's active type with that type's kind and origin (design amendment
 - `observe_segments` _function_ — Observe each segment in the sibling READ-ONLY (label + properties hash + title) — the
 - `open_reference_list` _function_ — Every hinted reference still open in a set, keyed `r01`… in the order of `points_index`
 - `overlapping_points` _function_ — Pure: the duplication candidates — two points deriving from a shared segment — and
@@ -314,6 +513,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `points_as_proposals` _function_ — An accepted draft read as a proposal set — a point's key IS its accepted proposal id, so
 - `points_index` _function_ — Key a set of proposal rows for a reader that cannot see their lines: `p001`… in source
 - `proposals_from_point_rows` _function_ — Resolve validated rows to proposal rows: a minted proposal id (the point's future
+- `public_deliverables` _function_ — The public rule the publish guard enforces, as a set: a Note is public when its active
 - `pure_notes_type` _function_ — The pure-notes profile as data: information policy = a stratum query, presentation
 - `read_source_facts` _function_ — The Source-level facts a rendering's title and card read LIVE from the sibling (finding
 - `read_source_references` _function_ — The Source's human-added resource links (`Reference` nodes minted by the transcription
@@ -375,6 +575,13 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `delivered_ids` _function_ — Node ids a rendered result delivered into the consumer's context.
 - `record_read` _function_ — The render-boundary tap: no-op unarmed, FAIL-OPEN armed.
 
+### `cjm_context_graph_projection.rebuilddiff`
+
+- `diff_graphs` _function_ — The pure comparison: node and edge id sets, then every field on each shared id.
+- `parse_path_map` _function_ — Parse `--path-map OLD=NEW` flags; a pair without `=` is refused loudly.
+- `rebuild_diff` _function_ — Compare two graph dbs property for property — the live-versus-rebuild standing check.
+- `render_rebuild_diff` _function_ — Markdown by class and field (the drift map), or the report as JSON for agents. Rows a
+
 ### `cjm_context_graph_projection.reconcile`
 
 - `reconcile_memory` _function_ — Report `.md`<->graph section drift across the corpus; optionally absorb hand-edits.
@@ -396,8 +603,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 
 ### `cjm_context_graph_projection.relive`
 
-- `relive_module` _function_ — The single-module form of `relive_modules`.
-- `relive_modules` _function_ — Re-derive several modules' region nodes LIVE in one pass — the batch form a move
+- `apply_live` _function_ — Apply the code fold's step to the db for the records a live verb just appended.
 
 ### `cjm_context_graph_projection.rename_ops`
 
@@ -456,15 +662,44 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `graph_names` _function_ — Derive a stable short name per db (its file stem; collisions suffixed `-2`, `-3`, …).
 - `serve_graphs` _function_ — Open every graph once, hold the handles, and serve the API until interrupted.
 
+### `cjm_context_graph_projection.site`
+
+- `check_source_aliases` _function_ — Every front-matter alias must be a superseded `site_path` of the page that declares it:
+- `output_href` _function_ — Quarto's alias `fixupHref`: a trailing slash or an extension-less path names the
+- `page_outputs` _function_
+- `publish_guard` _function_ — Refuse public output that carries a draft (design 13753cbf (1)): no drafts tree, no link
+- `quarto_inspect` _function_ — The profile's output dir and input documents, read from Quarto itself.
+- `redirect_page` _function_ — Quarto's redirect page for one alias location.
+- `redirect_plan` _function_ — The redirect projection from the `site_path` facts: one stub per superseded path, to
+- `site_build` _function_ — Build the site under one profile: generated inputs, render, the redirect projection,
+- `stated` _function_ — The ONE reader of what a post's page states (finding 12d98020): its front matter first,
+- `write_redirects` _function_ — Write each redirect page; a stub landing on a rendered page is an error (Quarto skips it
+
 ### `cjm_context_graph_projection.sitelinks`
 
-- `resolve_after_write` _function_ — The live hook: re-resolve after a write that changed an input, unless deferred.
 - `resolve_site_links` _function_ — Reconcile the `site_link` REFERENCES edges of the scoped notes against the facts.
+- `site_link_window` _function_ — Observe the block's writes, then run the step once at its close (a live write window —
 - `site_path_holders` _function_ — Every site_path value on the graph, keyed for resolution, plus each page's ACTIVE path.
 - `site_path_key` _function_ — The key two URLs of one page share under Quarto's URL rules (the facts stay verbatim).
+- `step_site_links` _function_ — THE STEP (design amendment 9ee4e346): one whole-graph resolve at a window's close, run
+- `touches_inputs` _function_ — Whether a window moved an input of the resolve (design amendment 9ee4e346 (3)).
+
+### `cjm_context_graph_projection.sitepages`
+
+- `check_page_outputs` _function_ — Every Series or Lens page the build projected has its rendered page (the guard's check,
+- `group_through_series` _function_ — A Lens with view.group_by "series" lists a member THROUGH its Series page (design 7657c4a5
+- `is_generated` _function_
+- `is_public` _function_ — A publish_state decides (public only when `published`); with none, a Note of an ARCHIVE
+- `member_updated` _function_ — `last-modified` is a file mtime (a checkout time, not an edit), so it never counts.
+- `page_plan` _function_ — Plan every projected page: a Series or Lens with an active site_path gets one; a broken
+- `page_source` _function_ — The source a page's output is rendered from: Quarto's output file with `.qmd`.
+- `parse_date` _function_
+- `project_pages` _function_ — Write the planned pages into the source tree (only those whose text changed), remove
+- `render_page` _function_
 
 ### `cjm_context_graph_projection.source_state`
 
+- `IdentityWalk` _class_ — The identity map's walk ONE RECORD AT A TIME — the step `symbol_identity_map` folds
 - `SymbolIdentity` _class_ — Container-independent CodeSymbol identity, DERIVED from the source journal (36f649d3).
 - `absorb_authored_text` _function_ — Absorb an `author` edit of a GRAPH-SOURCED module into the source journal.
 - `append_register` _function_ — Append a `register` event — repo inventory as JOURNAL DATA (DEC c47912f6).
@@ -472,11 +707,13 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `append_source` _function_ — Append a `source` op, skipping a write identical to the module's current latest state.
 - `canonical_emit` _function_ — Decompose source text and re-emit it canonically — the exact graph→`.py` Phase 2 yields.
 - `canonical_emit_notebook` _function_ — The notebook analogue of `canonical_emit`: parse to cells, re-render canonically.
+- `collect_appends` _function_ — Collect every source-journal record appended inside the block, as it landed on disk.
 - `cutover_module` _function_ — Phase 2: make the JOURNAL the module's source of truth (the persistence flip).
 - `emit_source_artifact` _function_ — (Re)generate a module's file artifact from its journaled source (the recovery /
 - `flip_module` _function_ — Capture a module's CANONICAL source into the shadow source journal (Phase 1).
 - `graph_sourced_modules` _function_ — The modules whose ingest source IS the journal (a `cutover` op exists for them).
 - `is_test_module_path` _function_ — Whether a module path denotes TEST source (`tests/` or `tests_manual/`).
+- `journal_repos` _function_ — The on-graph repos — DERIVED from the journal (finding 7a2d54ae): a repo is on-graph
 - `journaled_emit` _function_ — The ops seam (pillar 1 of DEC 6ee4b4f2): events BEFORE files — THE file-write path.
 - `latest_source_ops` _function_ — The LATEST source state per module (last write wins — the 'journal STATE, not diff'
 - `notebook_to_py_source` _function_ — Build a plain-`.py` module source from a notebook's EXPORT cells (the flip transform).
@@ -485,11 +722,37 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `symbol_identity_map` _function_ — Derive the container-independent symbol identity map from the source journal (36f649d3).
 - `uncaptured_modules` _function_ — The uncaptured-module audit (build a6453f70) — the ac3d52f4 recipe as a verb.
 
+### `cjm_context_graph_projection.sourcemoves`
+
+- `attribute_moved_sources` _function_ — Every source whose HEAD differs between the two records, with the element ids its moved
+- `moved_element_ids` _function_ — Decompose every kept path that changed between `a` and `b`, at both versions; a source
+- `source_lane` _function_ — The ingest's own view of one source: which paths it reads and what each version of a
+
+### `cjm_context_graph_projection.sources`
+
+- `apply_source_facts` _function_ — Land an observation's facts on its Reference -- live and replay alike. An unchanged value
+- `citation_text` _function_ — A citation's parts as one line, in the order a reader reads them.
+- `collection_members` _function_ — A Collection's member Sources in the sibling, read with the observation.
+- `draws_plan` _function_ — Each rendered post's draws-on block; every source a post derives from that the Library
+- `load_sources` _function_ — Every Note's sources -- its DERIVED_FROM References to a Source or a Collection, each
+- `observed_facts` _function_ — The facts a source states about itself, read at observation (722a8232 (1), (2)); its
+- `render_draws` _function_ — What the post draws on (design 37f82f72 (2)): each work or unit named from the Library's
+- `source_text` _function_
+
 ### `cjm_context_graph_projection.structure`
 
 - `add_section` _function_ — Add a section to an existing note (append, or insert after an anchor), born on-graph.
+- `born_post_path` _function_ — Where a born post's file lives — DERIVED from the config's emit root and the slug, never
 - `new_note` _function_ — Create a brand-new note, born on-graph (write the `.md` + ingest it this session).
 - `reconstruct_note` _function_ — Reconstruct a whole note (Note + ordered Section nodes) FROM JOURNALED text — the M3
+
+### `cjm_context_graph_projection.tutorialspage`
+
+- `anchor` _function_ — A section anchor from vocabulary keys (never a node id).
+- `hardware_marks` _function_ — The verification marks per deliverable: STATED evidence under every profile, the
+- `learning_paths` _function_ — The collection pages whose listed members are ALL tutorials; a collection mixing
+- `plan_matrix_page` _function_ — Plan the Tutorials page: the listed population under the profile, the matrix over it,
+- `render_body` _function_ — The grid, the learning-paths slot, the tutorials by task, the off-grid list, and (staging)
 
 ### `cjm_context_graph_projection.viz`
 
@@ -530,5 +793,5 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 
 ## Dependencies
 
-**Depends on:** `cjm-context-graph-layer`, `cjm-context-graph-primitives`, `cjm-dev-graph-schema`, `cjm-harness-transcripts`, `cjm-markdown-decompose-core`, `cjm-notebook-decompose-core`, `cjm-python-decompose-core`, `cjm-substrate`, `pyyaml`
+**Depends on:** `cjm-context-graph-layer`, `cjm-context-graph-primitives`, `cjm-design-system`, `cjm-dev-graph-schema`, `cjm-harness-transcripts`, `cjm-markdown-decompose-core`, `cjm-notebook-decompose-core`, `cjm-python-decompose-core`, `cjm-substrate`, `pyyaml`
 **Used by:** `cjm-graph-workbench-qt`, `cjm-notebook-decompose-core`, `cjm-session-scratchpad-qt`

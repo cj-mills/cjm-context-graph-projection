@@ -701,6 +701,13 @@ def touched_node_ids(
         out.extend(r for r in (a.get("note"), a.get("successor")) if r)
     elif verb == "transfer-path":
         out.extend(r for r in (a.get("from"), a.get("to")) if r)
+    elif verb == "artifact":   # an observed-source artifact's version (9a7224a7): the node it derives
+        from .artifacts import ARTIFACT_KINDS
+        kind = ARTIFACT_KINDS.get(a.get("artifact_kind"))
+        try:
+            out.append(kind.entity(a["text"], a.get("repo_key"), a.get("artifact_path")).id)
+        except Exception:   # an unknown kind or unreadable text touches nothing it can name
+            pass
     elif a.get("repo_key") and a.get("module_path"):
         out.append(code_module_node_id(a["repo_key"], a["module_path"]))
     return out

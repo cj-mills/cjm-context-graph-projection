@@ -1160,6 +1160,28 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             f"**{verb}** `{obj.get('import_name')}` ({obj.get('canonical_bytes')} bytes)",
             f"  {canon}",
             f"  _{obj.get('note', '')}_"])
+    if kind == "capture-artifact":   # design 9a7224a7: one version of an observed file, or its retirement
+        where = f"{obj.get('repo_key')}/{obj.get('artifact_path')}"
+        if obj.get("error"):
+            return f"⛔ capture-artifact {where}: {obj['error']}"
+        ent = obj.get("entity") or {}
+        what = f"{ent.get('kind')} `{ent.get('key')}` `{str(ent.get('id', ''))[:8]}`" if ent else ""
+        verdict = ("**retired**" if obj.get("retired") else "**captured**" if obj.get("captured")
+                   else "unchanged (identical to its latest capture)" if obj.get("unchanged")
+                   else f"_PREVIEW: {obj.get('preview')}_")
+        line = f"{verdict} {obj.get('kind')} {where}" + (f" -> {what}" if what else "")
+        live = obj.get("artifacts_live")
+        if live:
+            line += (f"\n🧬 artifacts live: {live['records']} record(s) · nodes +{live['nodes_added']} "
+                     f"~{live['nodes_updated']} −{live['nodes_removed']} · edges +{live['edges_added']} "
+                     f"−{live['edges_removed']}")
+            if live.get("edges_skipped"):
+                line += f" · {live['edges_skipped']} edge(s) skipped (absent endpoint)"
+            for c in live.get("conflicts") or []:
+                line += f"\n⚠ {', '.join(c['keys'])} derive one identity — the latest capture holds it"
+            for f in live.get("failures") or []:
+                line += f"\n⚠ {f['repo_key']}/{f['artifact_path']} could not be read ({f['error']})"
+        return line
     if kind == "source-check":
         n = obj.get("count", 0)
         gs = obj.get("graph_sourced_count", 0)
@@ -1169,6 +1191,14 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                 + ("  ✓ CLEAN" if obj.get("clean") else "")
                 + ("" if obj.get("regen_clean", True) else "  ✗ REGEN GATE FAILED"))
         lines = [head]
+        art = obj.get("artifacts")
+        if art is not None:   # the observed-source artifacts (9a7224a7): reported, never the gate
+            if art.get("clean"):
+                lines.append(f"**artifacts**: {art.get('count', 0)} captured · every file matches its capture")
+            else:
+                lines.append(f"**artifacts**: {art.get('count', 0)} captured · ⚠ drift {art.get('drift')} · "
+                             f"missing {art.get('missing')} · invalid "
+                             f"{[i['artifact'] for i in art.get('invalid') or []]} (capture-artifact)")
         for m in obj.get("modules", []):
             sourced = m.get("graph_sourced")
             flags = []
