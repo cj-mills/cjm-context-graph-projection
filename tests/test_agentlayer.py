@@ -137,7 +137,10 @@ def test_llms_index_structure():
                "members": ["l1", "l2"]}]
     idx = llms_index("Site", "https://x.org/", {"summary": "S.", "details": "D."},
                      [{"title": "About", "source": "about.qmd", "description": "Me."}],
-                     [{"title": "Topic", "source": "series/topic.qmd", "description": ""}], series, posts)
+                     [{"title": "Topic", "source": "series/topic.qmd", "description": ""},
+                      # a collection of logs alone leads Optional, never Collections (7657c4a5 (2))
+                      {"title": "Project Logs", "source": "logs/index.qmd", "description": "", "members": ["l1", "l2"]}],
+                     series, posts)
     txt = idx["text"]
     heads = [ln for ln in txt.splitlines() if ln.startswith("## ")]
     assert heads == ["## Site", "## Collections", "## Tutorials: New", "## Tutorials: Old", "## Notes", "## Work",
@@ -151,8 +154,10 @@ def test_llms_index_structure():
                    "- [T1](https://x.org/posts/t1/index.llms.md): T1 desc"]
     assert txt.count("posts/t1/index.llms.md") == 1 and "## Tutorials\n" not in txt
     optional = txt.split("## Optional\n\n")[1].strip().splitlines()
-    assert [ln.split("]")[0][3:] for ln in optional] == ["Logs", "L2", "L1"]   # series page, then newest first
-    assert len(idx["links"]) == 1 + 1 + 3 + 2 + 1 + 4
+    # the logs index, the series page, then newest first
+    assert [ln.split("]")[0][3:] for ln in optional] == ["Project Logs", "Logs", "L2", "L1"]
+    assert "## Collections\n\n- [Topic]" in txt and txt.count("logs/index.llms.md") == 1
+    assert len(idx["links"]) == 1 + 1 + 3 + 2 + 1 + 5
     # a tutorial in no series has its own section
     alone = llms_index("Site", "https://x.org", {"summary": "S."}, [], [], [], {"t1": posts["t1"]})
     assert "## Tutorials\n\n- [T1]" in alone["text"]

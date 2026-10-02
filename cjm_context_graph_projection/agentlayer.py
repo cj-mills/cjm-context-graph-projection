@@ -311,8 +311,14 @@ def llms_index(
     sections: List[tuple] = []
     if site_pages:
         sections.append(("Site", [entry(p) for p in sorted(site_pages, key=lambda p: p["title"])]))
-    if collections:
-        sections.append(("Collections", [entry(c) for c in sorted(collections, key=lambda c: c["title"])]))
+    # A collection whose members are all of the Optional kinds (the logs index, design 7657c4a5
+    # (2)) leads the Optional section instead
+    def optional_only(c: Dict[str, Any]) -> bool:
+        kinds = {posts[m]["kind"] for m in c.get("members") or [] if m in posts}
+        return bool(kinds) and kinds <= set(OPTIONAL_KINDS)
+    shelf = sorted((c for c in collections if not optional_only(c)), key=lambda c: c["title"])
+    if shelf:
+        sections.append(("Collections", [entry(c) for c in shelf]))
     placed: set = set()
     optional: List[str] = []
 
@@ -342,7 +348,8 @@ def llms_index(
         placed.update(n for n in by_date if posts[n]["kind"] == kind)
         if rows:
             sections.append((STANDALONE[kind], rows))
-    # The project logs: their series' pages first (in series order), then every log
+    # The project logs: their index first, their series' pages (in series order), then every log
+    optional += [entry(c) for c in sorted(collections, key=lambda c: c["title"]) if optional_only(c)]
     for s in ordered:
         if series_kind(s) is None and any(m in posts for m in s["members"]):
             optional.append(entry(s))

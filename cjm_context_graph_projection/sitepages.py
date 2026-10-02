@@ -9,7 +9,9 @@ node's data through one template per node kind:
 - a Series lists its members in their AUTHORED order (IN_SERIES + `after`, `series_order`)
   as an explicit `contents` list under `sort: false`, with no sort or filter UI;
 - a Lens lists the notes it selects, sorted by the Lens's own `view.sort` (handed to Quarto's
-  listing sorter, the one the hand pages used), with the sort and filter UI of a filter;
+  listing sorter, the one the hand pages used), with the sort and filter UI of a filter; a Lens
+  whose view groups by `series` lists a member THROUGH its Series page, one entry per project
+  (the logs index, design 7657c4a5);
 - a Lens whose view layout is `coverage-matrix` projects the Tutorials page instead
   (tutorialspage.py, design 7f200ecb): the grid, the learning paths, the tutorials by task;
 - a Lens whose view layout is `library` projects the Library index instead, with a work page
@@ -60,6 +62,7 @@ SERIES_LISTING = {"sort": False, "type": "default", "categories": False,
                   "sort-ui": False, "filter-ui": False, "fields": FIELDS}
 LENS_LISTING = {"type": "default", "categories": False,
                 "sort-ui": True, "filter-ui": True, "fields": FIELDS}
+GROUP_SERIES = "series"   # view.group_by: a member listed through its Series page (design 7657c4a5 (1))
 
 # Front-matter date forms the archive carries (ISO with or without padding, M/D/YYYY, M-D-YYYY)
 _DATE_FORMATS = ("%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y")
@@ -267,7 +270,7 @@ async def page_plan(
                 members = list((await F.load_nodes(gx, [m["id"] for m in order["members"]])).values())
                 by_id = {str(F.nid(n)): n for n in members}
                 members = [by_id[m["id"]] for m in order["members"] if m["id"] in by_id]
-                listing, cats = dict(SERIES_LISTING), topics.get(sid)
+                listing, cats, group = dict(SERIES_LISTING), topics.get(sid), None
             else:
                 applied = await apply_lens(gx, key)
                 if applied.get("error") or applied.get("truncated"):
@@ -288,9 +291,19 @@ async def page_plan(
                 sort = (applied.get("view") or {}).get("sort")
                 if sort:
                     listing = {"sort": list(sort), **listing}
+                group = (applied.get("view") or {}).get("group_by")
+                if group not in (None, GROUP_SERIES):
+                    errors.append({"kind": "lens-group", "subject": sid, "key": key, "group_by": group,
+                                   "why": "a site page groups only by series (7657c4a5 (1)); the build never guesses another grouping"})
+                    continue
             listed = _listed(members, src, root, profile, states, types, drafts, sid)
             errors += listed["errors"]
-            listing = {"contents": listed["contents"], **listing}
+            contents = listed["contents"]
+            if group == GROUP_SERIES:   # one entry per paged Series (design 7657c4a5 (1))
+                grouped = group_through_series(listed["ids"], contents, planned, src, sid)
+                errors += grouped["errors"]
+                contents = grouped["contents"]
+            listing = {"contents": contents, **listing}
             planned.append({"source": src, "kind": kind, "key": key, "subject": sid,
                             "members": len(listed["contents"]), "updated": listed["updated"],
                             "listed": listed["ids"], "href": page["active"],
@@ -396,3 +409,32 @@ def check_page_outputs(
     out = Path(output_dir)
     return [{"kind": "page-missing", "source": s, "why": "a projected page did not render"}
             for s in sources if not (out / (s[:-len(".qmd")] + ".html")).exists()]
+
+
+def group_through_series(
+    ids: List[str],                     # The Lens page's listed members, in listing order
+    contents: List[str],                # Their contents paths (relative to the page), same order
+    planned: List[Dict[str, Any]],      # The pages planned so far (every Series page among them)
+    page_src: str,                      # The Lens page's source, relative to the root
+    subject: str,                       # The Lens node's id (error rows name it)
+) -> Dict[str, Any]:  # {contents, errors}
+    """A Lens with view.group_by "series" lists a member THROUGH its Series page (design 7657c4a5
+    (1)): one entry per paged Series, in the place of its first member, a member in no paged Series
+    as itself. A member two paged Series list refuses -- the build never picks one."""
+    pages: Dict[str, List[str]] = {}
+    for p in planned:
+        if p.get("sequence") and p.get("kind") == DevNodeKinds.SERIES:
+            for m in p["listed"]:
+                pages.setdefault(m, []).append(p["source"])
+    out: List[str] = []
+    errors: List[Dict[str, Any]] = []
+    for nid, path in zip(ids, contents):
+        srcs = pages.get(nid) or []
+        if len(srcs) > 1:
+            errors.append({"kind": "lens-group", "subject": subject, "member": nid, "series_pages": srcs,
+                           "why": "a member two paged Series list; the build never picks one to group it under"})
+            continue
+        entry = posixpath.relpath(srcs[0], posixpath.dirname(page_src) or ".") if srcs else path
+        if entry not in out:
+            out.append(entry)
+    return {"contents": out, "errors": errors}
