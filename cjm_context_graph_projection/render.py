@@ -381,6 +381,45 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             return f"⚠ {obj['error']}"
         return (f"**transferred** {obj['value']} from `{str(obj['from_id'])[:8]}` to `{str(obj['to_id'])[:8]}` "
                 f"(assertion `{str(obj['assertion_id'])[:8]}` supersedes `{str(obj['superseded'])[:8]}`)")
+    if kind == "work-member":
+        if obj.get("error"):
+            return f"⚠ {obj['error']}"
+        if obj.get("retracted"):
+            return f"**retracted** work membership `{obj['edge_id']}`"
+        verb = "unchanged" if obj.get("unchanged") else "moved" if obj.get("replaced") else "placed"
+        return f"**{verb}** `{str(obj['reference_id'])[:8]}` PART_OF `{obj.get('target')}` `{obj['edge_id']}`"
+    if kind == "library":
+        if obj.get("error"):
+            return f"⚠ {obj['error']}"
+        works = obj.get("works") or []
+        n_units = sum(len(w["units"]) for w in works)
+        outs = {o["id"] for w in works for o in w["outputs"] + [x for u in w["units"] for x in u["outputs"]]}
+        lines = [f"## The Library — {len(works)} work(s) · {n_units} unit(s) · {len(outs)} output(s)",
+                 "_classes: " + " · ".join(f"{c['position']}. {c['name']} `{c['key']}`" for c in obj.get("classes") or [])
+                 + "_", ""]
+
+        def _outs(os_):
+            return "; ".join(f"{o['output_class']}: `{o['slug']}`" + ("" if o["public"] else " (not public)")
+                             for o in os_)
+        for w in works:
+            meta = " · ".join(str(w[f]) for f in ("form", "author", "published") if w.get(f))
+            lines.append(f"- **{w['name']}** `{w['key']}`" + (f" · {meta}" if meta else "")
+                         + (f" — {_outs(w['outputs'])}" if w["outputs"] else "")
+                         + (f" · {len(w['sources'])} source(s)" if w.get("sources") else ""))
+            for u in w["units"]:
+                lines.append(f"  - {u['position']}. {u['name']}" + (f" _({u['part']})_" if u.get("part") else "")
+                             + (f" · {len(u['sources'])} source(s)" if u["sources"] else "")
+                             + (f" — {_outs(u['outputs'])}" if u["outputs"] else ""))
+        for r in obj.get("refusals") or []:
+            lines.append(f"⚠ **{r['reason']}** `{r['deliverable']}` — {r['detail']}")
+        return "\n".join(lines)
+    if kind == "derived-from":
+        if obj.get("error"):
+            return f"⚠ {obj['error']}"
+        if obj.get("retracted"):
+            return f"**retracted** provenance `{obj['edge_id']}`"
+        verb = "unchanged" if obj.get("unchanged") else "restated" if obj.get("replaced") else "derived"
+        return f"**{verb}** `{str(obj['deliverable_id'])[:8]}` → `{obj.get('source')}` `{obj['edge_id']}`"
     if kind == "supports":
         if obj.get("error"):
             return f"⚠ {obj['error']}"

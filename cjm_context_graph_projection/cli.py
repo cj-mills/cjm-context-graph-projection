@@ -842,6 +842,9 @@ async def _dispatch(args) -> int:
                 fields["device_class"] = args.device_class
             if args.statement:
                 fields["statement"] = args.statement
+            for f in ("form", "author", "subtitle", "published", "isbn", "locator", "part"):   # the Library (4a4ef27e)
+                if getattr(args, f):
+                    fields[f] = getattr(args, f)
             for flag in ("cross_task", "off_grid", "retired"):
                 if getattr(args, flag):
                     fields[flag] = True
@@ -853,6 +856,83 @@ async def _dispatch(args) -> int:
                              {"kind": args.kind, "key": args.key, "name": args.name,
                               "fields": fields, "actor": args.actor})
             return 1 if res.get("error") else 0
+        elif args.command == "derived-from":
+            # An archive deliverable's provenance (design leg 4a4ef27e (2)): the op names the
+            # resolved deliverable id, so replay re-lands the same edge.
+            from .library import record_provenance
+            res = await record_provenance(gx, args.deliverable, args.source or "", retract=args.retract,
+                                          actor=args.actor)
+            print(render("derived-from", res, args.format))
+            if args.journal_path and res.get("written"):
+                append_write(args.journal_path, "derived-from",
+                             {"deliverable": res["deliverable_id"], "source": args.source or "",
+                              "retract": bool(args.retract), "actor": args.actor})
+            return 1 if res.get("error") else 0
+        elif args.command == "library-survey":
+            # The reviewed archive survey (design 5de7fae9 (5)): planned and checked WHOLE -- any
+            # error refuses the batch with nothing written -- then landed through the single
+            # verbs' write paths, one journaled `entity` / `derived-from` op each.
+            from .coverage import mint_entity
+            from .library import check_survey_targets, plan_survey, read_survey, record_provenance
+            from cjm_dev_graph_schema import predicates as P
+            plan = plan_survey(read_survey(args.table))
+            errors = plan["errors"] or await check_survey_targets(gx, plan)
+            if errors:
+                for e in errors:
+                    print(f"error: {e}", file=sys.stderr)
+                print(f"library-survey: REFUSED — {len(errors)} error(s), nothing written")
+                return 1
+            print(f"library-survey: {len(plan['works'])} work(s) · {len(plan['units'])} unit(s) · "
+                  f"{len(plan['edges'])} provenance edge(s)")
+            if not args.apply:
+                print("_(dry run — pass --apply to land it)_")
+                return 0
+            landed = {"entity": 0, "derived-from": 0, "unchanged": 0}
+            for kind, recs in ((P.ENTITY_WORK, plan["works"]), (P.ENTITY_UNIT, plan["units"])):
+                for rec in recs:
+                    res = await mint_entity(gx, kind, rec["key"], name=rec["name"], fields=rec["fields"],
+                                            actor=args.actor)
+                    if res.get("error"):
+                        print(f"error: {kind} `{rec['key']}`: {res['error']}", file=sys.stderr)
+                        return 1
+                    if args.journal_path:
+                        append_write(args.journal_path, "entity",
+                                     {"kind": kind, "key": rec["key"], "name": rec["name"],
+                                      "fields": rec["fields"], "actor": args.actor})
+                    landed["entity"] += 1
+            for e in plan["edges"]:
+                res = await record_provenance(gx, e["deliverable"], e["source"], actor=args.actor)
+                if res.get("error"):
+                    print(f"error: `{e['deliverable']}`: {res['error']}", file=sys.stderr)
+                    return 1
+                if res.get("unchanged"):
+                    landed["unchanged"] += 1
+                    continue
+                if args.journal_path:
+                    append_write(args.journal_path, "derived-from",
+                                 {"deliverable": res["deliverable_id"], "source": e["source"],
+                                  "retract": False, "actor": args.actor})
+                landed["derived-from"] += 1
+            print(f"landed: {landed['entity']} entity op(s) · {landed['derived-from']} provenance edge(s) · "
+                  f"{landed['unchanged']} unchanged")
+            return 0
+        elif args.command == "work-member":
+            # A metabolized source's place in its work (design leg 4a4ef27e (2)): the op names the
+            # Reference id and the unit / work key, so replay re-lands the same edge.
+            from .library import record_work_member
+            res = await record_work_member(gx, args.reference, args.target or "", retract=args.retract,
+                                           actor=args.actor)
+            print(render("work-member", res, args.format))
+            if args.journal_path and res.get("written"):
+                append_write(args.journal_path, "work-member",
+                             {"reference": args.reference, "target": args.target or "",
+                              "retract": bool(args.retract), "actor": args.actor})
+            return 1 if res.get("error") else 0
+        elif args.command == "library":
+            from .library import library_index
+            res = await library_index(gx)
+            print(render("library", res, args.format))
+            return 0 if res.get("ok") else 1
         elif args.command == "coverage":
             from .coverage import coverage_matrix
             res = await coverage_matrix(gx, hardware=args.hardware, in_set=args.in_set)
@@ -1863,7 +1943,8 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
             information_policy=overrides.get("information_policy"),
             presentation_policy=overrides.get("presentation_policy"),
             production_procedure=overrides.get("production_procedure"), actor=args.actor,
-            kind=overrides.get("kind") or args.kind, origin=overrides.get("origin") or args.origin)
+            kind=overrides.get("kind") or args.kind, origin=overrides.get("origin") or args.origin,
+            output_class=overrides.get("output_class") or args.output_class)
         if res.get("error"):
             print(f"error: {res['error']}", file=sys.stderr)
             return 1
@@ -2504,6 +2585,9 @@ def _add_notes_lane_parsers(sub) -> None:
                    help="JSON with any of title / description / information_policy / presentation_policy / production_procedure / kind / origin")
     p.add_argument("--kind", default=None, help="The navigation kind: tutorial | notes | log | work | site (design amendment c64e07e7)")
     p.add_argument("--origin", default=None, help="archive (authored before the graph, public as authored) | born (public once published)")
+    p.add_argument("--output-class", default=None,
+                   help="The Library's output class: an output_class Entity's key (design leg 4a4ef27e (3)); "
+                        "a field left off keeps the type's current value")
     p.add_argument("--actor", default=_DEFAULT_ACTOR)
 
     p = sub.add_parser("notes-pack", help="Read one source UNIT from a sibling graph per the type's stratum "
@@ -3024,10 +3108,10 @@ def main() -> int:
     p_ser.add_argument("--actor", default=_DEFAULT_ACTOR)
 
     p_ent = sub.add_parser("entity",
-                           help="Mint/update a typed Entity (task | stage | hardware | claim) from its WHOLE record "
-                                "(journaled upsert by kind + key; a field or flag left off clears; "
-                                "design 8cbdc883)")
-    p_ent.add_argument("kind", help="The Entity sub-kind (task | stage | hardware | claim)")
+                           help="Mint/update a typed Entity (task | stage | hardware | claim | work | unit | "
+                                "output_class) from its WHOLE record (journaled upsert by kind + key; a field or "
+                                "flag left off clears; designs 8cbdc883 / 4a4ef27e)")
+    p_ent.add_argument("kind", help="The Entity sub-kind (task | stage | hardware | claim | work | unit | output_class)")
     p_ent.add_argument("key", help="The durable key the teaches_* facts name (never renamed; --name is the display)")
     p_ent.add_argument("--name", required=True, help="The display name")
     p_ent.add_argument("--description", default="", help="One line on what the entry covers")
@@ -3042,7 +3126,47 @@ def main() -> int:
                        help="task: listed below the grid, needs no stage (e.g. other)")
     p_ent.add_argument("--retired", action="store_true",
                        help="Retired: off both axes, and no new fact may name it")
+    p_ent.add_argument("--form", default="",
+                       help="work: book | course | lecture-series | talk | video | documentation")
+    p_ent.add_argument("--author", default="", help="work: who made it (a course's instructors, a talk's speaker)")
+    p_ent.add_argument("--subtitle", default="", help="work: its subtitle")
+    p_ent.add_argument("--published", default="",
+                       help="work: when the edition read was published or the talk given (ISO: YYYY, YYYY-MM or YYYY-MM-DD)")
+    p_ent.add_argument("--isbn", default="", help="work / unit (a volume): the ISBN-13 of the edition read, digits only")
+    p_ent.add_argument("--locator", default="",
+                       help="work: a hand locator (URL) for a work no Source can observe")
+    p_ent.add_argument("--part", default="", help="unit: the part of the work it sits in (e.g. Workshops)")
     p_ent.add_argument("--actor", default=_DEFAULT_ACTOR)
+
+    p_df = sub.add_parser("derived-from",
+                          help="Record (or --retract) an ARCHIVE deliverable's one provenance edge to its work "
+                               "or unit (journaled; DERIVED_FROM; design leg 4a4ef27e)")
+    p_df.add_argument("deliverable", help="The deliverable Note's id, or a post slug")
+    p_df.add_argument("source", nargs="?", default="",
+                      help="The work key, or the unit key (<work key>/<unit slug>); omit with --retract")
+    p_df.add_argument("--retract", action="store_true", help="Remove the deliverable's provenance edge")
+    p_df.add_argument("--actor", default=_DEFAULT_ACTOR)
+    p_ls = sub.add_parser("library-survey",
+                          help="Land the reviewed archive survey (a TSV of note_id, work_key, work_name, form, "
+                               "author, subtitle, published, isbn, unit_key, unit_name, unit_position, unit_part, unit_isbn): checked "
+                               "whole, refused whole, then one journaled entity / derived-from op each "
+                               "(design 5de7fae9 (5)); a dry run without --apply")
+    p_wm = sub.add_parser("work-member",
+                          help="Place (or --retract) a metabolized Source / Collection Reference in its work: a "
+                               "Source PART_OF its unit (or its unitless work), a Collection PART_OF its work "
+                               "(journaled; design leg 4a4ef27e)")
+    p_wm.add_argument("reference", help="The Source or Collection Reference's node id")
+    p_wm.add_argument("target", nargs="?", default="",
+                      help="The unit key (<work key>/<unit slug>) or the work key; omit with --retract")
+    p_wm.add_argument("--retract", action="store_true", help="Remove the Reference's place in its work")
+    p_wm.add_argument("--actor", default=_DEFAULT_ACTOR)
+    sub.add_parser("library",
+                   help="The Library as data: each work, its units by position and each one's outputs (archive "
+                        "by the asserted edge, born by the rollup of their point sets), and the refusals "
+                        "(READ verb; design 5de7fae9)")
+    p_ls.add_argument("table", help="The survey TSV")
+    p_ls.add_argument("--apply", action="store_true", help="Write it (default: plan and check only)")
+    p_ls.add_argument("--actor", default=_DEFAULT_ACTOR)
 
     p_cov = sub.add_parser("coverage",
                            help="The Tutorials matrix (task x stage) derived from the teaches_* facts: cells, "

@@ -90,7 +90,9 @@ M3_BASELINE_ACTOR = "import:m3-baseline"
 # re-lands the run without asking the judge. `harvest-discussions` = one comment-thread harvest
 # (design 39c51c15 (1)): the observed threads, the authored maps and the plan (each Note's
 # standing thread and its earlier ones) -- replay re-lands the discussion facts without asking
-# GitHub.
+# GitHub. `derived-from` = an archive deliverable's one provenance edge to its work or unit
+# (design leg 4a4ef27e (2)), or its retraction. `work-member` = a metabolized Source /
+# Collection Reference's place in its work (PART_OF its unit or work), or its retraction.
 JOURNAL_VERBS = ("decide", "alias", "assert", "link", "unlink", "section", "new-note",
                  "add-section", "display-rule", "set-lens", "check", "session",
                  "retract-session", "pull-transcript", "mint-messages", "edit-message",
@@ -98,7 +100,8 @@ JOURNAL_VERBS = ("decide", "alias", "assert", "link", "unlink", "section", "new-
                  "deliverable-type", "accept-point", "retract-point", "edit-point", "render-notes",
                  "render-work-page", "rehome-points", "place-point",
                  "series", "series-members", "place-in-series", "entity", "verified-on",
-                 "supports", "retire-source", "transfer-path", "judge-related", "harvest-discussions")
+                 "supports", "retire-source", "transfer-path", "judge-related", "harvest-discussions",
+                 "derived-from", "work-member")
 
 
 def m3_baseline_import(
@@ -320,7 +323,8 @@ async def _apply_op(
                                     presentation_policy=a.get("presentation_policy"),
                                     production_procedure=a.get("production_procedure"),
                                     actor=a.get("actor", "agent:session"),
-                                    kind=a.get("kind"), origin=a.get("origin"))
+                                    kind=a.get("kind"), origin=a.get("origin"),
+                                    output_class=a.get("output_class"))
     elif verb == "accept-point":
         # Substance (a7262fe7): re-land the Point + its References from the journaled
         # observations — self-contained; the sibling graph is never opened on replay.
@@ -410,6 +414,18 @@ async def _apply_op(
                                   date=a.get("date", ""), basis=a.get("basis", "stated"),
                                   versions=dict(a.get("versions") or {}), note=a.get("note", ""),
                                   retract=bool(a.get("retract")), actor=a.get("actor", "agent:session"))
+    elif verb == "derived-from":
+        # An archive deliverable's provenance (design leg 4a4ef27e (2)): the op names the
+        # resolved deliverable id and the work / unit key; a retraction replays as the delete.
+        from .library import record_provenance
+        await record_provenance(gx, a["deliverable"], a.get("source", ""), retract=bool(a.get("retract")),
+                                actor=a.get("actor", "agent:session"))
+    elif verb == "work-member":
+        # A metabolized source's place in its work (design leg 4a4ef27e (2)); a retraction
+        # replays as the delete.
+        from .library import record_work_member
+        await record_work_member(gx, a["reference"], a.get("target", ""), retract=bool(a.get("retract")),
+                                 actor=a.get("actor", "agent:session"))
     elif verb == "supports":
         # One support (amendment 98e99fe5 (2)): the op names the resolved deliverable id, so
         # replay re-lands the same edge; a retraction replays as the compensating delete.
@@ -660,6 +676,18 @@ def touched_node_ids(
             out.append(a["deliverable"])
         if a.get("hardware"):
             out.append(entity_node_id("hardware", a["hardware"]))
+    elif verb == "work-member":
+        if a.get("reference"):
+            out.append(a["reference"])
+        if a.get("target"):
+            from .library import source_entity_id
+            out.append(source_entity_id(a["target"])[1])
+    elif verb == "derived-from":
+        if a.get("deliverable"):
+            out.append(a["deliverable"])
+        if a.get("source"):
+            from .library import source_entity_id
+            out.append(source_entity_id(a["source"])[1])
     elif verb == "supports":
         if a.get("deliverable"):
             out.append(a["deliverable"])

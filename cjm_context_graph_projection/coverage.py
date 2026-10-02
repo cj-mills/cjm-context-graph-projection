@@ -29,7 +29,7 @@ from cjm_context_graph_layer.ops import extend_graph, graph_task
 from cjm_context_graph_primitives.query import EdgeQuery
 from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.identity import entity_node_id
-from cjm_dev_graph_schema.nodes import EntityNode, verified_on_edge
+from cjm_dev_graph_schema.nodes import EntityNode, unit_part_of_edge, verified_on_edge
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 
 from . import factlayer as F
@@ -43,10 +43,18 @@ ENTITY_FIELDS: Dict[str, Dict[str, type]] = {
     P.ENTITY_STAGE: {"description": str, "position": int, "cross_task": bool, "retired": bool},
     P.ENTITY_HARDWARE: {"description": str, "device_class": str},
     P.ENTITY_CLAIM: {"statement": str, "position": int},   # amendment 98e99fe5 (1); see claims.py
+    # The Library (design leg 4a4ef27e); see library.py
+    P.ENTITY_WORK: {"form": str, "author": str, "subtitle": str, "published": str, "isbn": str,
+                    "locator": str},
+    P.ENTITY_UNIT: {"position": int, "part": str, "isbn": str},
+    P.ENTITY_OUTPUT_CLASS: {"description": str, "position": int},
 }
 _REQUIRED = {P.ENTITY_TASK: ("position",), P.ENTITY_STAGE: ("position",),
-             P.ENTITY_HARDWARE: ("device_class",), P.ENTITY_CLAIM: ("statement", "position")}
-_ALLOWED = {(P.ENTITY_HARDWARE, "device_class"): P.DEVICE_CLASSES}   # closed slates on a field
+             P.ENTITY_HARDWARE: ("device_class",), P.ENTITY_CLAIM: ("statement", "position"),
+             P.ENTITY_WORK: ("form",), P.ENTITY_UNIT: ("position",),
+             P.ENTITY_OUTPUT_CLASS: ("position",)}
+_ALLOWED = {(P.ENTITY_HARDWARE, "device_class"): P.DEVICE_CLASSES,   # closed slates on a field
+            (P.ENTITY_WORK, "form"): P.WORK_FORMS}
 TUTORIAL_KIND = "tutorial"   # the navigation kind (predicates.DELIVERABLE_KINDS) the matrix reads
 
 
@@ -64,6 +72,12 @@ def validate_entity(
         return f"an entity key is a non-empty slug without spaces (got {key!r})"
     if not name:
         return "an entity needs a name"
+    if kind == P.ENTITY_UNIT:   # the work is part of a unit's identity (4a4ef27e (2))
+        work, sep, unit = key.partition(P.UNIT_KEY_SEP)
+        if not (work and sep and unit) or P.UNIT_KEY_SEP in unit:
+            return f"a unit key is `<work key>{P.UNIT_KEY_SEP}<unit slug>` (got {key!r})"
+    elif kind == P.ENTITY_WORK and P.UNIT_KEY_SEP in key:
+        return f"a work key carries no `{P.UNIT_KEY_SEP}` -- only its units' keys do (got {key!r})"
     unknown = sorted(set(fields) - set(spec))
     if unknown:
         return f"`{kind}` carries no field(s) {', '.join(unknown)} (declared: {', '.join(spec)})"
@@ -76,9 +90,36 @@ def validate_entity(
         allowed = _ALLOWED.get((kind, f))
         if allowed and v not in allowed:
             return f"`{kind}` field `{f}` must be one of {', '.join(allowed)} (got {v!r})"
+        bad = field_format_error(f, v)
+        if bad:
+            return bad
     missing = [f for f in _REQUIRED.get(kind, ()) if f not in fields]
     if missing:
         return f"`{kind}` needs {', '.join(missing)}"
+    return None
+
+
+def field_format_error(
+    field: str,  # The Entity field
+    value: Any,  # Its value (already type-checked)
+) -> Optional[str]:  # What the value must look like, or None when it is well formed
+    """The formats some fields carry beyond their type (design leg 4a4ef27e): `published` is an
+    ISO date at the precision known (YYYY, YYYY-MM or YYYY-MM-DD, a real calendar date) and
+    `isbn` an ISBN-13, digits only, its check digit valid."""
+    import datetime
+    if field == "published":
+        for fmt, n in (("%Y", 4), ("%Y-%m", 7), ("%Y-%m-%d", 10)):
+            if len(value) == n:
+                try:
+                    datetime.datetime.strptime(value, fmt)
+                    return None
+                except ValueError:
+                    break
+        return f"`published` is an ISO date: YYYY, YYYY-MM or YYYY-MM-DD (got {value!r})"
+    if field == "isbn":
+        digits = [int(c) for c in value] if value.isdigit() and len(value) == 13 else None
+        if digits is None or sum(d * (3 if i % 2 else 1) for i, d in enumerate(digits)) % 10:
+            return f"`isbn` is an ISBN-13, digits only, with a valid check digit (got {value!r})"
     return None
 
 
@@ -98,6 +139,14 @@ async def mint_entity(
     err = validate_entity(kind, key, name, fields)
     if err:
         return {"error": err, "written": False}
+    work_id = None
+    if kind == P.ENTITY_UNIT:   # a unit lands under a minted work (4a4ef27e (2))
+        work_key = key.partition(P.UNIT_KEY_SEP)[0]
+        work_id = entity_node_id(P.ENTITY_WORK, work_key)
+        work = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=work_id)
+        if work is None or F.prop(work, "entity_kind") != P.ENTITY_WORK:
+            return {"error": f"no work `{work_key}` -- mint it first (`entity work {work_key} ...`)",
+                    "written": False}
     props = {f: fields[f] for f in ENTITY_FIELDS[kind] if f in fields}
     node = EntityNode(kind=kind, key=key, name=name, properties=props).to_graph_node()
     eid = node["id"]
@@ -109,6 +158,8 @@ async def mint_entity(
         await graph_task(gx.queue, gx.graph_id, "update_node", node_id=eid, properties=whole)
     else:
         await extend_graph(gx.queue, gx.graph_id, [node], [])
+    if work_id is not None:   # the unit's PART_OF, from its key (one per unit, so a re-mint re-lands it)
+        await extend_graph(gx.queue, gx.graph_id, [], [unit_part_of_edge(eid, work_id)])
     return {"entity_id": eid, "kind": kind, "key": key, "name": name, "fields": props,
             "updated": existing is not None, "written": True}
 
