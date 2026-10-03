@@ -1566,7 +1566,8 @@ async def _dispatch(args) -> int:
                                            manifests_dir=args.manifests_dir, write=True)
             res = await site_build(gx, args.website_root, args.profile, render=not args.no_render,
                                    drafts_dir=drafts_dir or "drafts",
-                                   staging_index_fn=_staging_index if staging_root else None)
+                                   staging_index_fn=_staging_index if staging_root else None,
+                                   siblings=(sibling_graphs(cfg) or None), manifests_dir=args.manifests_dir)
             print(render("site-build", res, args.format))
             return 0 if res.get("ok") else 1
         elif args.command == "move":

@@ -6,7 +6,8 @@ plus the review affordances. The build owns the pipeline and Quarto is one stage
 
 1. generated inputs — the PROJECTED PAGES, every series page from its Series and every topic
    page from its Lens, under either profile (`sitepages`, design e240183f); under `staging`,
-   the drafts listings (`staging_index`);
+   the drafts listings (`staging_index`); and the THEME, from the design system the profile is
+   STYLED_BY (`sitetheme`, design 0858bbd0);
 2. `quarto render --profile <p>`, then every projected page checked for its rendered page;
 3. the REDIRECT PROJECTION — a page's public path is a fact with history (ruling 96aff70e):
    every superseded `site_path` gets a redirect page to its page's active path, written into
@@ -256,15 +257,19 @@ async def publish_guard(
 def quarto_inspect(
     website_root: str,  # The site project root
     profile: str,       # The Quarto profile
-) -> Dict[str, Any]:  # {output_dir, inputs, website} — the profile's own config, never re-typed here
+) -> Dict[str, Any]:  # {output_dir, inputs, website, theme} — the profile's own config, never re-typed here
     """The profile's output dir and input documents, read from Quarto itself."""
     r = subprocess.run(["quarto", "inspect", "--profile", profile], cwd=website_root,
                        capture_output=True, text=True, check=True)
     info = json.loads(r.stdout)
     root = Path(info.get("dir") or website_root)
     out = info["config"]["project"].get("output-dir") or "_site"
+    # `format` may be a bare name ("html") and its html entry a bare string: a theme only where both are maps
+    fmt = info["config"].get("format")
+    html = fmt.get("html") if isinstance(fmt, dict) else None
     return {"output_dir": str(root / out), "inputs": list(info["files"]["input"]),
-            "website": info["config"].get("website") or {}}
+            "website": info["config"].get("website") or {},
+            "theme": html.get("theme") if isinstance(html, dict) else None}
 
 
 def page_outputs(
@@ -283,14 +288,18 @@ async def site_build(
     render: bool = True,            # Run `quarto render` (False = project onto the existing output)
     drafts_dir: str = "drafts",     # The drafts tree relative to the project root
     staging_index_fn: Optional[Any] = None,  # Awaitable () -> report: regenerate the drafts listings (staging)
-) -> Dict[str, Any]:  # {profile, output_dir, render, staging_index, aliases, redirects, guard, errors, ok}
+    siblings: Optional[Dict[str, str]] = None,  # This graph's sibling_graphs (the theme's design system lives in one)
+    manifests_dir: Optional[str] = None,        # The graph-storage capability manifests (default: the runtime's)
+) -> Dict[str, Any]:  # {profile, output_dir, theme, render, staging_index, aliases, redirects, guard, errors, ok}
     """Build the site under one profile: generated inputs, render, the redirect projection,
     and (public) the publish guard. `ok` is False on any error row — the output is then not
     fit to publish, and the report names why."""
     from .agentlayer import (check_jsonld, check_llms_fragments, restore_llms_anchors, rewrite_llms_links,
                              write_llms_txt)
     from .derivedblocks import check_derived, check_end_placement, derived_plan, write_derived
+    from .runtime import DEFAULT_MANIFESTS
     from .sitepages import check_page_outputs, project_pages
+    from .sitetheme import project_theme
     rep: Dict[str, Any] = {"profile": profile, "errors": []}
     plan = await redirect_plan(gx)
     rep["errors"] += plan["errors"]
@@ -329,6 +338,15 @@ async def site_build(
                               "why": f"{len(stale)} public post(s) have missing or stale related judgments "
                                      "-- run judge-related",
                               "detail": [s["title"] for s in stale[:10]]})
+    if rep["errors"]:
+        rep["ok"] = False
+        return rep
+    # The theme from the profile's bound design system (leg C of 0858bbd0; amendment 4b58c9db),
+    # written before the render like the derived blocks; a config naming another theme keeps it
+    theme = await project_theme(gx, website_root, profile, info.get("theme"), siblings,
+                                manifests_dir or DEFAULT_MANIFESTS)
+    rep["theme"] = {k: v for k, v in theme.items() if k != "errors"}
+    rep["errors"] += theme["errors"]
     if rep["errors"]:
         rep["ok"] = False
         return rep

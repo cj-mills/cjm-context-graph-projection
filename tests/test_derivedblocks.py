@@ -184,7 +184,7 @@ def test_derived_blocks_leave_the_render_and_the_navigation_replaces_them(tmp_pa
     assert foot["right"][0]["text"] == "Code samples licensed under the MIT License"
     assert "licenses vary" in foot["left"][0]["text"]            # c's override differs from the class
     assert derived == {"posts": 3, "series_nav": 2, "collections": 3, "related_stale": 0, "strips": 3,
-                       "pitch": 0, "headers": 3, "comments_unrendered": 0, "comments_thread": 1,
+                       "pitch": 0, "headers": 3, "category_links": 0, "comments_unrendered": 0, "comments_thread": 1,
                        "comments_term": 2, "comments_earlier": 1,
                        "draws_on": 0, "draws_lines": 0, "draws_located": 0, "draws_unplaced": 0,
                        "sources_missing": 0,

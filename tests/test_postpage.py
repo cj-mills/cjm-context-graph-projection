@@ -79,6 +79,29 @@ def test_header_meta_kind_dates_and_drafts():
     assert display_date("2026-01-05") == "January 5, 2026"
 
 
+def test_categories_link_into_the_listing_the_site_config_names(tmp_path):
+    """A post's categories become links to the category listing filtered to each (amendment of
+    0858bbd0): named once in the site config, URI-encoded so a space or an `&` survives the hash;
+    no listing named = the categories stay labels; a listing the project does not hold refuses."""
+    from cjm_context_graph_projection.postpage import CATEGORY_META, category_links, load_category_listing
+    (tmp_path / "_quarto.yml").write_text("project:\n  type: website\n")
+    assert load_category_listing(str(tmp_path)) == {"href": "", "errors": []}
+    (tmp_path / "_quarto.yml").write_text("category-listing: blog.qmd\n")
+    assert load_category_listing(str(tmp_path))["errors"][0]["kind"] == "category-listing"
+    (tmp_path / "blog.qmd").write_text("---\ntitle: Blog\n---\n")
+    href = load_category_listing(str(tmp_path))["href"]
+    assert href == "/blog.html"
+    assert category_links(["pytorch", "image classification", "a&b"], href) == [
+        {"name": "pytorch", "href": "/blog.html#category=pytorch"},
+        {"name": "image classification", "href": "/blog.html#category=image%20classification"},
+        {"name": "a&b", "href": "/blog.html#category=a%26b"}]
+    assert category_links("solo", href) == [{"name": "solo", "href": "/blog.html#category=solo"}]
+    assert category_links(["x"], "") == [] and category_links(None, href) == []
+    meta = header_meta("tutorial", "archive", {"categories": ["pytorch"]}, {}, href)
+    assert meta["set"][CATEGORY_META] == [{"name": "pytorch", "href": "/blog.html#category=pytorch"}]
+    assert CATEGORY_META not in header_meta("tutorial", "archive", {"categories": ["pytorch"]}, {})["set"]
+
+
 def test_related_posts_tiers_reasons_and_exclusions():
     cands = {k: {"title": k.upper(), "href": f"/posts/{k}/", "kind": kind, "date": day}
              for k, kind, day in (("me", "tutorial", "2024-01-01"), ("out", "notes", "2020-01-01"),

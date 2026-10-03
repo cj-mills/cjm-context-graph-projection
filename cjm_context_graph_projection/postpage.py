@@ -31,6 +31,10 @@ TUTORIAL_KIND = "tutorial"
 # title-metadata partial renders the KIND_META value
 KIND_LABELS = {"tutorial": "Tutorial", "notes": "Notes", "log": "Log", "work": "Work"}
 KIND_META = "post-kind"
+# A post's categories as links into the site's category listing (amendment of 0858bbd0): the
+# listing is named once in the site config; the site's title-block partial renders CATEGORY_META
+CATEGORY_LISTING_KEY = "category-listing"
+CATEGORY_META = "category-links"
 RELATED_MAX = 4   # Related posts shown at most (39c51c15 (4))
 RELATED_FLOOR = 1.5   # The judged score a related post needs (amendment e09e262b; tuned on the review)
 # The license vocabulary a page renders (SPDX ids, case-folded as the facts store them)
@@ -116,6 +120,40 @@ def load_holder(
         return {"holder": "", "errors": [{"kind": "copyright-holder", "path": str(path),
                                           "why": "the site config names no copyright-holder for the footer"}]}
     return {"holder": holder, "errors": []}
+
+
+def load_category_listing(
+    website_root: str,  # The site project root
+) -> Dict[str, Any]:  # {href, errors} -- href "" when the site config names no category listing
+    """The listing a post's categories link into (`category-listing` in the site config: a listing
+    page's source path, amendment of 0858bbd0), as the page path the listing opens filtered at by
+    `#category=<name>`. Absent = the categories stay labels (a site with no category listing has
+    nowhere to link them); a named page the project does not hold refuses."""
+    path = Path(website_root) / "_quarto.yml"
+    try:
+        named = str((yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get(CATEGORY_LISTING_KEY) or "").strip()
+    except (OSError, yaml.YAMLError) as e:
+        return {"href": "", "errors": [{"kind": CATEGORY_LISTING_KEY, "path": str(path), "why": f"unreadable: {e}"}]}
+    if not named:
+        return {"href": "", "errors": []}
+    if not (Path(website_root) / named).is_file():
+        return {"href": "", "errors": [{"kind": CATEGORY_LISTING_KEY, "path": named,
+                                        "why": "the site config's category listing names no page in the project"}]}
+    return {"href": "/" + named.rsplit(".", 1)[0] + ".html", "errors": []}
+
+
+def category_links(
+    categories: Any,    # The post's front-matter `categories` (a list, or one string)
+    listing_href: str,  # load_category_listing's href ("" = none)
+) -> List[Dict[str, str]]:  # [{name, href}] in the post's own order ([] without a listing)
+    """Each category as a link to the category listing filtered to it: Quarto's listing script
+    reads `#category=<URI-encoded name>` and decodes it, so a name with a space or an `&` survives."""
+    from urllib.parse import quote
+    if not listing_href or not categories:
+        return []
+    cats = categories if isinstance(categories, list) else [categories]
+    return [{"name": str(c), "href": f"{listing_href}#category={quote(str(c), safe='')}"}
+            for c in cats if str(c).strip()]
 
 
 def render_end(
@@ -247,10 +285,12 @@ def header_meta(
     origin: str,                    # The type's origin (archive | born)
     metadata: Dict[str, Any],       # The source's front matter (the Note's metadata)
     facts: Dict[str, str],          # header_facts' entry for this Note
+    listing_href: str = "",         # The category listing's page path (load_category_listing; "" = none)
 ) -> Dict[str, Any]:  # {set: {meta key: value}, unset: [meta keys]} for the render filter
     """The header's projected metadata (39c51c15 (2)): the kind label; a born post's date is its
     publication's (a draft shows none and says so); Updated is the latest revision when it is
-    newer than the source's own date-modified (an archive post keeps its front matter)."""
+    newer than the source's own date-modified (an archive post keeps its front matter); and the
+    categories as links into the category listing (amendment of 0858bbd0)."""
     from .sitepages import parse_date
     label = KIND_LABELS.get(kind, "")
     out: Dict[str, Any] = {"set": {}, "unset": []}
@@ -265,6 +305,9 @@ def header_meta(
     own = parse_date(metadata.get("date-modified"))
     if facts.get("revised") and (own is None or facts["revised"] > own.isoformat()):
         out["set"]["date-modified"] = display_date(facts["revised"])
+    links = category_links(metadata.get("categories"), listing_href)
+    if links:
+        out["set"][CATEGORY_META] = links
     return out
 
 

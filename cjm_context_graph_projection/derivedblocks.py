@@ -170,6 +170,20 @@ local function drop_marked(blocks)
   return nil
 end
 
+-- A planned metadata value: a string as a MetaString, a list as a MetaList, a map as a MetaMap
+-- (the category links are a list of {name, href} maps)
+local function to_meta(v)
+  if type(v) ~= "table" then return pandoc.MetaString(tostring(v)) end
+  if #v > 0 then
+    local l = {}
+    for i, x in ipairs(v) do l[i] = to_meta(x) end
+    return pandoc.MetaList(l)
+  end
+  local m = {}
+  for k, x in pairs(v) do m[k] = to_meta(x) end
+  return pandoc.MetaMap(m)
+end
+
 -- Pass 3: drop the named top-level blocks, insert the navigation and the end matter, report
 local function apply(doc)
   local key, entry = doc_entry()
@@ -178,7 +192,7 @@ local function apply(doc)
   if entry.head and entry.head ~= "" then quarto.doc.include_text("in-header", entry.head) end
   -- The header's projected metadata: the kind label, the dated facts (design 39c51c15 (2))
   if entry.meta then
-    for k, v in pairs(entry.meta.set or {}) do doc.meta[k] = pandoc.MetaString(v) end
+    for k, v in pairs(entry.meta.set or {}) do doc.meta[k] = to_meta(v) end
     for _, k in ipairs(entry.meta.unset or {}) do doc.meta[k] = nil end
   end
   local drops = entry.drop or {}
@@ -481,19 +495,23 @@ async def derived_plan(
     for nid, md in ends["ends"].items():
         posts.setdefault(src_of[nid], {"drop": [], "nav": "", "end": ""})["end"] = md
     # The header (39c51c15 (2)): the kind label and the dated facts, as metadata the filter sets
-    from .postpage import header_facts, header_meta
+    from .postpage import CATEGORY_META, header_facts, header_meta, load_category_listing
     facts = await header_facts(gx)
-    heads = 0
+    listing = load_category_listing(website_root)   # where a post's categories link (amendment of 0858bbd0)
+    errors += listing["errors"]
+    heads = linked = 0
     for nid, src in src_of.items():
         t = types.get(nid) or {}
         if t.get("kind") not in POST_KINDS:
             continue
         meta = header_meta(t["kind"], t.get("origin", ""), F.prop(notes[nid], "metadata") or {},
-                           facts.get(nid, {}))
+                           facts.get(nid, {}), listing["href"])
         if meta["set"] or meta["unset"]:
             posts.setdefault(src, {"drop": [], "nav": "", "end": ""})["meta"] = meta
             heads += 1
+        linked += 1 if CATEGORY_META in meta["set"] else 0
     ends["counts"]["headers"] = heads
+    ends["counts"]["category_links"] = linked
     # The footer, derived from the PUBLIC posts this profile renders (39c51c15 (6)): an archive
     # post's own dates, a born post's publication, every revision
     footer: Optional[Dict[str, Any]] = None

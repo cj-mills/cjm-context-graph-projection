@@ -481,6 +481,22 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                          f"({pg.get('written', 0)} written, {pg.get('unchanged', 0)} unchanged, "
                          f"{len(pg.get('removed') or [])} removed)"
                          + (f" · no site_path: {', '.join(pg['unpaged'])}" if pg.get("unpaged") else ""))
+        th = obj.get("theme") or {}
+        if th.get("used"):   # the theme from the bound design system (leg C of 0858bbd0)
+            sy, fn, md = th.get("system") or {}, th.get("fonts") or {}, th.get("modes") or {}
+            lines.append(f"- theme: {sy.get('name', '?')} (`{str(sy.get('id', ''))[:8]}`, capture "
+                         f"{str(sy.get('content_hash', ''))[:12]}) · light `{md.get('light')}` / dark "
+                         f"`{md.get('dark')}` · {fn.get('subsets', 0)} woff2 subset(s), {fn.get('bytes', 0) // 1024} KB "
+                         f"({fn.get('converted', 0)} converted, {fn.get('reused', 0)} reused) from "
+                         f"{len(fn.get('sources') or [])} font file(s)"
+                         + (f" · {len(th['written'])} theme file(s) written" if th.get("written") else " · theme unchanged"))
+            if th.get("stale"):
+                lines.append(f"  ⚠ the profile's observation of {sy.get('name')} is stale (re-captured since the link) "
+                             f"-- rendered from the latest capture; re-observe: `{th.get('relink')}`")
+            for u in (fn.get("unmatched") or []) + [f"no font file for family {f!r}" for f in fn.get("unfound") or []]:
+                lines.append(f"  ⚠ font: {u}")
+        elif "used" in th:
+            lines.append("- theme: the profile's config names its own theme (no derived theme written)")
         if obj.get("derived"):
             dv = obj["derived"]
             lines.append(f"- derived blocks out of the render (253ac996): {dv.get('series_callout', 0)} series callout(s), "
@@ -492,7 +508,8 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                 lines.append(f"- end matter: {dv.get('chrome_include', 0)} chrome include(s) out · author strip on "
                              f"{dv['strips']} post(s) ({dv.get('pitch', 0)} pitching, {dv.get('pitch_pending', 0)} "
                              f"awaiting the Work-with-me page) · questions line on {dv.get('questions', 0)} · "
-                             f"header metadata on {dv.get('headers', 0)} · related posts on {dv.get('related', 0)}"
+                             f"header metadata on {dv.get('headers', 0)} (category links on "
+                             f"{dv.get('category_links', 0)}) · related posts on {dv.get('related', 0)}"
                              + (f" (⚠ {dv['related_stale']} post(s) with stale judgments -- run judge-related)"
                                 if dv.get('related_stale') else "")
                              + (f" · footer: {dv['footer_years']}" if dv.get("footer_years") else "")
