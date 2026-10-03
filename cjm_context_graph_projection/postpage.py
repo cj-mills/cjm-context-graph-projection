@@ -156,6 +156,24 @@ def category_links(
             for c in cats if str(c).strip()]
 
 
+def is_category_link(
+    target: str,        # A link target as a page states it (relative or site-absolute, its fragment kept)
+    page_dir: str,      # The linking page's dir, relative to the site root ("" = the root)
+    listing_href: str,  # load_category_listing's href ("" = none)
+) -> bool:  # True = a link into the category listing's filtered view
+    """A link to the category listing opened filtered to a category (category_links' form,
+    `#category=<name>`), resolved as a browser resolves it against the linking page; the listing
+    is named by its page or its markdown layer's file (design 42f30a8b). A bare `#category=` names
+    the linking page itself, which only the listing's own in-place filter writes."""
+    from urllib.parse import unquote, urljoin, urlsplit
+    path, sep, frag = target.partition("#")
+    if not listing_href or not sep or not frag.startswith("category=") or not path:
+        return False
+    resolved = unquote(urlsplit(urljoin("http://site/" + (page_dir + "/" if page_dir else ""), path)).path).lstrip("/")
+    listing = listing_href.lstrip("/")[:-len(".html")]
+    return any(resolved == listing + suffix for suffix in (".html", ".llms.md"))
+
+
 def render_end(
     copy: Dict[str, str],                   # load_strip_copy's copy
     *,

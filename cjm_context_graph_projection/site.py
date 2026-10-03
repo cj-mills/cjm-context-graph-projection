@@ -381,11 +381,12 @@ async def site_build(
     # ids carried into it and every fragment checked (design b82d2a98), then the projected
     # llms.txt over Quarto's flat list
     if derived.get("llms"):
-        rew = rewrite_llms_links(info["output_dir"])
+        rew = rewrite_llms_links(info["output_dir"], pages.get("category_listing") or "")
         anc = restore_llms_anchors(info["output_dir"])
         frag = check_llms_fragments(info["output_dir"])
         wr = write_llms_txt(info["output_dir"], derived["llms"])
-        rep["agent"] = {"llms_md": rew["files"], "links_rewritten": rew["rewritten"], "anchors": anc["anchors"],
+        rep["agent"] = {"llms_md": rew["files"], "links_rewritten": rew["rewritten"],
+                        "categories_stated": rew["stated"], "anchors": anc["anchors"],
                         "fragments_checked": frag["checked"], "fragments_dead": len(frag["dead"]),
                         "llms_txt_written": wr["written"], **derived["llms"]["counts"]}
         if frag["dead"]:   # a source defect the page shares, reported (b82d2a98 (2))

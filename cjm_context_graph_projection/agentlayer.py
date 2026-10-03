@@ -68,6 +68,8 @@ _HTML_ID_RE = re.compile(r'\sid="([^"]*)"')
 _CODE_SPAN_RE = re.compile(r"(`+)(?:.+?)\1")
 _SCHEME_RE = re.compile(r"^[A-Za-z][\w+.-]*:|^//")
 _MD_LINK_RE = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")   # a markdown link or image, its text kept
+# A markdown link (never an image): its text, its target, an optional title
+_TEXT_LINK_RE = re.compile(r'(?<!!)\[([^\]]*)\]\((<[^>]*>|[^)\s]+)(?:\s+"[^"]*")?\)')
 
 
 def load_index_copy(
@@ -517,13 +519,38 @@ def rewrite_markdown_links(
     return new, count
 
 
+def state_category_links(
+    text: str,          # A .llms.md file's text
+    md_dir: str,        # Its dir, relative to the output dir ("" = the root)
+    listing_href: str,  # The category listing's page path ("" = none: nothing changes)
+) -> tuple:  # (text, links stated as text)
+    """The markdown layer STATES a category, never links the category listing's filtered view
+    (design 42f30a8b): the listing's markdown is the whole unfiltered list (the filter lives in the
+    page's script), so each link into it filtered is replaced by its text, outside code."""
+    from .postpage import is_category_link
+    if not listing_href:
+        return text, 0
+    count = 0
+
+    def link(m: "re.Match") -> str:
+        nonlocal count
+        raw = m.group(2)
+        if not is_category_link(raw[1:-1] if raw.startswith("<") else raw, md_dir, listing_href):
+            return m.group(0)
+        count += 1
+        return m.group(1)
+    return map_outside_code(text, lambda seg: _TEXT_LINK_RE.sub(link, seg)), count
+
+
 def rewrite_llms_links(
-    output_dir: str,  # The profile's output dir
-) -> Dict[str, Any]:  # {files, rewritten, changed}
+    output_dir: str,         # The profile's output dir
+    category_listing: str = "",  # The category listing's page path ("" = none)
+) -> Dict[str, Any]:  # {files, rewritten, stated, changed}
     """Keep an agent in the markdown layer (amendment 23a49667 (3)): every internal link in a
-    `.llms.md` that resolves to a rendered page with a `.llms.md` is rewritten to it. Idempotent."""
+    `.llms.md` that resolves to a rendered page with a `.llms.md` is rewritten to it, and a link
+    into the category listing's filtered view is stated as its text (design 42f30a8b). Idempotent."""
     out = Path(output_dir)
-    files = rewritten = changed = 0
+    files = rewritten = stated = changed = 0
     for p in sorted(out.rglob("*" + LLMS_SUFFIX)):
         if "site_libs" in p.parts:
             continue
@@ -531,12 +558,14 @@ def rewrite_llms_links(
         md_dir = p.parent.relative_to(out).as_posix()
         md_dir = "" if md_dir == "." else md_dir
         text = p.read_text(encoding="utf-8")
-        new, n = rewrite_markdown_links(text, lambda t: _page_target(out, md_dir, t))
+        new, s = state_category_links(text, md_dir, category_listing)
+        new, n = rewrite_markdown_links(new, lambda t: _page_target(out, md_dir, t))
         rewritten += n
+        stated += s
         if new != text:
             p.write_text(new, encoding="utf-8")
             changed += 1
-    return {"files": files, "rewritten": rewritten, "changed": changed}
+    return {"files": files, "rewritten": rewritten, "stated": stated, "changed": changed}
 
 
 def map_outside_code(

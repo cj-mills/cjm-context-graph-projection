@@ -196,8 +196,31 @@ def test_links_kept_in_the_markdown_layer(tmp_path):
     assert got[2] == "[gone](../zzz/) [out](../../../up/) `[code](../b/)`"
     assert got[3:6] == ["```md", "[fenced](../b/)", "```"]
     assert got[6] == "<a>[after](../b/index.llms.md)</a>"
-    assert res == {"files": 4, "rewritten": 5, "changed": 1}
+    assert res == {"files": 4, "rewritten": 5, "stated": 0, "changed": 1}
     assert rewrite_llms_links(str(tmp_path))["rewritten"] == 0     # idempotent
+
+
+def test_a_category_link_is_stated_as_text(tmp_path):
+    # Design 42f30a8b: the category listing's markdown is the whole unfiltered list, so a link into
+    # its filtered view -- by its page or its .llms.md, relative or site-absolute -- becomes its text;
+    # another fragment on the listing, another page's category= and code stay as they are
+    for p in ("blog.llms.md", "posts/a/index.llms.md", "about.llms.md"):
+        (tmp_path / p).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / p).write_text("")
+    text = "\n".join([
+        "[git](../../blog.html#category=git) [notes](../../blog.llms.md#category=notes) [a b](/blog.html#category=a%20b)",
+        "[top](../../blog.html#top) [x](../../about.html#category=x) `[c](../../blog.html#category=c)`",
+    ])
+    (tmp_path / "posts/a/index.llms.md").write_text(text)
+    res = rewrite_llms_links(str(tmp_path), "/blog.html")
+    got = (tmp_path / "posts/a/index.llms.md").read_text().splitlines()
+    assert got[0] == "git notes a b"
+    assert got[1] == ("[top](../../blog.llms.md#top) [x](../../about.llms.md#category=x) "
+                      "`[c](../../blog.html#category=c)`")
+    assert res["stated"] == 3 and rewrite_llms_links(str(tmp_path), "/blog.html")["stated"] == 0
+    # No category listing named: nothing is stated
+    (tmp_path / "posts/a/index.llms.md").write_text("[git](../../blog.html#category=git)")
+    assert rewrite_llms_links(str(tmp_path))["stated"] == 0
 
 
 def test_a_link_resolves_as_a_browser_resolves_it(tmp_path):
