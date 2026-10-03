@@ -111,6 +111,7 @@ def test_the_library_lens_projects_the_index_and_the_work_pages(tmp_path):
     for s, (t, d) in posts.items():
         (root / "posts" / s).mkdir(parents=True)
         (root / "posts" / s / "index.md").write_text(_post(t, d))
+    (root / "_quarto.yml").write_text("project:\n  type: website\n")   # the page plan reads the site config (a7224060)
 
     async def go():
         async with open_graph(str(tmp_path / "g.db")) as gx:

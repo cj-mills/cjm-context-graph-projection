@@ -83,12 +83,15 @@ def _site(root: Path) -> None:
         'author-strip:\n  byline: "B"\n  links: "L"\n  pitch: "P {claims} {href}"\n  questions: "Q"\n'
         'site-author:\n  name: "N"\n  role: "R"\n'
         'copyright-holder: "The Holder"\n'
+        # where every category chip links (amendment of 0858bbd0; design a7224060)
+        'category-listing: blog.qmd\n'
         'post-comments:\n  repo: o/r\n  repo-id: R_1\n  category: Comments\n  category-id: C_1\n')
     (root / "_quarto-public.yml").write_text(
         'project:\n  render:\n    - "**/*.qmd"\n    - "**/*.md"\n    - "!drafts/"\n')
     (root / "_quarto-staging.yml").write_text(
         'project:\n  output-dir: _site-staging\n  render:\n    - "**/*.qmd"\n    - "**/*.md"\n')
     (root / "index.md").write_text("---\ntitle: Home\n---\n\nHome.\n")
+    (root / "blog.qmd").write_text("---\ntitle: Blog\nlisting:\n  contents: posts\n  categories: true\n---\n")
     posts = {"a": ("Post A", "2020-01-01"), "b": ("Post B", "2022-01-01"), "c": ("Post C", "2021-06-01")}
     for s, (t, d) in posts.items():
         (root / "posts" / s / "index.md").write_text(_post(t, d))
@@ -165,6 +168,14 @@ def test_series_and_topic_pages_are_projected_and_rendered(tmp_path):
             out = site / "_site"
             series_items = _items((out / "series" / "tutorials" / "cv.html").read_text())
             topic_items = _items((out / "series" / "notes" / "topic.html").read_text())
+            # Every projected listing's chips link into the category listing (design a7224060): the
+            # site listing template, every href planned by the build; the category listing keeps
+            # Quarto's in-place filter
+            for page in (out / "series" / "tutorials" / "cv.html", out / "series" / "notes" / "topic.html"):
+                html = page.read_text()
+                assert 'class="listing-category" href="' in html and 'blog.html#category=notes"' in html
+                assert '<div class="listing-category"' not in html and "quartoListingCategory('" not in html
+            assert "quartoListingCategory('" in (out / "blog.html").read_text()
             stg = await site_build(gx, str(site), "staging")
             assert stg["ok"], stg
             staged = _items((site / "_site-staging" / "series" / "notes" / "topic.html").read_text())
@@ -192,12 +203,15 @@ def test_series_and_topic_pages_are_projected_and_rendered(tmp_path):
     assert "title: CV series\n" in cv and "date: 2020-1-1\n" in cv and "date-modified: '2022-01-01'\n" in cv
     assert "categories:\n- pytorch\n- tutorial\n" in cv and "image: ./p.png\n" in cv
     assert "  - ../../posts/b/index.md\n  - ../../posts/a/index.md\n  - ../../posts/c/index.md\n  sort: false\n" in cv
+    assert "  template: ../../_derived/listing-default.ejs.md\n" in cv
+    assert "  template-params:\n" in cv and "    category-links:\n      notes: /blog.html#category=notes\n" in cv
     assert series_items == ["Post B", "Post A", "Post C"]
     # The page file's mtime IS its derived date-modified (Quarto's sitemap lastmod reads it)
     from datetime import datetime, timezone
     assert datetime.fromtimestamp(cv_mtime, timezone.utc).strftime("%Y-%m-%dT%H:%M") == "2022-01-01T00:00"
     # The Lens page carries its own date and the Lens's own sort (date desc); the draft only under staging
-    assert "date: 2021-12-9\n" in topic and "  sort:\n  - date desc\n" in topic and "sort-ui: true" in topic
+    assert "date: 2021-12-9\n" in topic and "  sort:\n  - date desc\n" in topic
+    assert "  sort-ui:\n  - title\n  - date\n  filter-ui:\n  - date\n  - title\n  - description\n" in topic
     assert topic_items == ["Post B", "Post C", "Post A"]
     assert staged == ["Draft D", "Post B", "Post C", "Post A"]
     assert again["ok"] and again["pages"]["written"] == 1 and again["pages"]["unchanged"] == 1
@@ -208,6 +222,17 @@ def test_series_and_topic_pages_are_projected_and_rendered(tmp_path):
     assert {(e["kind"], e.get("slug")) for e in undecided["errors"]} == {("member-undecidable", "a"),
                                                                          ("series-order", None)}
     assert [(e["kind"], e["slug"]) for e in guard["errors"]] == [("unstanding", "a")]
+
+
+def test_an_unlinked_listing_chip_fails_the_build(tmp_path):
+    # Design a7224060: with a category listing named, a chip the template rendered as a label (a
+    # category the build planned no link for) fails closed
+    from cjm_context_graph_projection.sitepages import check_listing_chips
+    (tmp_path / "s").mkdir()
+    (tmp_path / "s" / "a.html").write_text('<a class="listing-category" href="../blog.html#category=x">x</a>')
+    (tmp_path / "s" / "b.html").write_text('<div class="listing-category">y</div>')
+    got = check_listing_chips(str(tmp_path), ["s/a.qmd", "s/b.qmd", "s/gone.qmd"])
+    assert [(e["kind"], e["source"], e["chips"]) for e in got] == [("chip-unlinked", "s/b.qmd", 1)]
 
 
 def test_a_lens_grouped_by_series_lists_each_series_page_once():

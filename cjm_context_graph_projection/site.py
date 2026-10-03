@@ -298,7 +298,7 @@ async def site_build(
                              write_llms_txt)
     from .derivedblocks import check_derived, check_end_placement, derived_plan, write_derived
     from .runtime import DEFAULT_MANIFESTS
-    from .sitepages import check_page_outputs, project_pages
+    from .sitepages import check_listing_chips, check_page_outputs, project_pages
     from .sitetheme import project_theme
     rep: Dict[str, Any] = {"profile": profile, "errors": []}
     plan = await redirect_plan(gx)
@@ -365,6 +365,8 @@ async def site_build(
             rep["ok"] = False
             return rep
     rep["errors"] += check_page_outputs(info["output_dir"], pages["sources"])
+    if render and pages.get("category_listing"):   # every projected chip a link (design a7224060)
+        rep["errors"] += check_listing_chips(info["output_dir"], pages["sources"])
     if render:   # the filter reports only when it ran: a projection onto old output has nothing to check
         chk = check_derived(website_root, derived)
         rep["derived"]["reported"] = chk["reported"]

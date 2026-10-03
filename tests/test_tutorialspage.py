@@ -96,6 +96,8 @@ def test_the_matrix_lens_projects_the_tutorials_page(tmp_path):
     for s, (t, d) in posts.items():
         (root / "posts" / s).mkdir(parents=True)
         (root / "posts" / s / "index.md").write_text(_post(t, d))
+    (root / "_quarto.yml").write_text("project:\n  type: website\ncategory-listing: blog.qmd\n")
+    (root / "blog.qmd").write_text("---\ntitle: Blog\n---\n")
 
     async def go():
         async with open_graph(str(tmp_path / "g.db")) as gx:
@@ -121,7 +123,7 @@ def test_the_matrix_lens_projects_the_tutorials_page(tmp_path):
             await mint_entity(gx, "hardware", "rtx-4090", name="RTX 4090", fields={"device_class": "gpu"})
             await record_verification(gx, "yolo", "rtx-4090", os="Ubuntu", date="2023-08-21")
             await record_verification(gx, "env", "rtx-4090", os="Ubuntu", date="2024-01-01", basis="timeline")
-            await mint_series(gx, "det", title="Detection series", date="2023-8-21")
+            await mint_series(gx, "det", title="Detection series", date="2023-8-21", categories=["Object Detection"])
             await set_series_members(gx, "det", ["yolo"])
             await _assert(gx, series_node_id("det"), "site_path", "/series/tutorials/det.html", raw=True)
             spec = {"selection": [{"verb": "list", "args": {"label": "Note", "deliverable_kind": "tutorial"}}],
@@ -150,6 +152,9 @@ def test_the_matrix_lens_projects_the_tutorials_page(tmp_path):
     assert "date-modified: '2024-01-01'" in text and "page-layout: full" in text
     assert "listing:\n  id: learning-paths\n" in text and "  contents:\n  - det.qmd\n" in text
     assert "  categories: false\n" in text   # no sidebar: it read as the grid's filter (15e7b315)
+    # its chips link into the category listing, through the site listing template (design a7224060)
+    assert "  template: ../../_derived/listing-default.ejs.md\n" in text
+    assert "    category-links:\n      object-detection: /blog.html#category=object-detection\n" in text
     assert "[1](#object-detection-training)" in text and "(#general-setup){.covered-mark}" in text
     assert "_(Tested on RTX 4090, Ubuntu)_" in text and "[timeline]" not in text
     assert "About Train YOLOX." in text and "A Note" not in text

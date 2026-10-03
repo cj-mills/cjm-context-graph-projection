@@ -178,11 +178,12 @@ async def plan_matrix_page(
     types: Dict[str, Dict[str, Any]],
     drafts: Optional[Path],
     planned: List[Dict[str, Any]],           # The other planned pages (the learning-path candidates)
+    listing_href: str = "",                  # The category listing's page path ("" = none: chips are labels)
 ) -> Dict[str, Any]:  # {page: planned entry} | {errors}
     """Plan the Tutorials page: the listed population under the profile, the matrix over it,
     the learning paths, the page text."""
     from .coverage import load_coverage_facts, load_vocab, project_matrix
-    from .sitepages import GENERATED, _listed, member_updated
+    from .sitepages import GENERATED, _listed, listing_categories, member_updated, with_category_links
     import yaml
     sid, key, src = str(F.nid(node)), str(F.prop(node, "key") or ""), page["source"]
     listed = _listed(members, src, root, profile, states, types, drafts, sid)
@@ -225,7 +226,10 @@ async def plan_matrix_page(
         front["date-modified"] = listed["updated"]
     front["page-layout"] = "full"
     front["title-block-banner"] = False
-    front["listing"] = {**PATHS_LISTING, "contents": paths["contents"]}
+    # The learning paths' chips link into the category listing like every projected listing's (design a7224060)
+    known = {p["source"]: p.get("categories") or [] for p in planned}
+    front["listing"] = with_category_links({**PATHS_LISTING, "contents": paths["contents"]}, src,
+                                           listing_categories(paths["contents"], src, known), listing_href)
     head = yaml.safe_dump(front, sort_keys=False, allow_unicode=True, width=10_000)
     text = f"---\n{GENERATED}\n{head}---\n\n" + render_body(matrix, items, profile)
     return {"page": {"source": src, "kind": "Lens", "key": key, "subject": sid,
