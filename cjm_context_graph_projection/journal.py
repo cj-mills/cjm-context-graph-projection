@@ -100,7 +100,8 @@ JOURNAL_VERBS = ("decide", "alias", "assert", "link", "unlink", "section", "new-
                  "deliverable-type", "accept-point", "retract-point", "edit-point", "render-notes",
                  "render-work-page", "rehome-points", "place-point",
                  "series", "series-members", "place-in-series", "entity", "verified-on",
-                 "supports", "retire-source", "transfer-path", "judge-related", "harvest-discussions",
+                 "supports", "retire-source", "transfer-path", "judge-related", "judge-facets", "review-facets",
+                 "harvest-discussions",
                  "derived-from", "work-member")
 
 
@@ -438,6 +439,16 @@ async def _apply_op(
         # so replay never calls the judge; the journaled content hashes bind the records the same.
         from .judging import apply_judgments
         await apply_judgments(gx, a["run"], actor=a.get("actor", "agent:session"))
+    elif verb == "judge-facets":
+        # One facet run (design eefda2dd (3)): the Noul probabilities are observations the op
+        # carries whole, so replay never calls the judge; the content hashes bind the records.
+        from .facetjudge import apply_facet_run
+        await apply_facet_run(gx, a["run"], actor=a.get("actor", "agent:session"))
+    elif verb == "review-facets":
+        # One facet review (design eefda2dd (5)): the confirmations and the review marks; the
+        # journaled content hashes bind the facts the same.
+        from .facetreview import apply_review
+        await apply_review(gx, a["run"], actor=a.get("actor", "agent:session"))
     elif verb == "harvest-discussions":
         # One comment-thread harvest (design 39c51c15 (1)): the threads are observations the op
         # carries whole, so replay never asks GitHub; the journaled content hashes bind the facts.
@@ -693,8 +704,11 @@ def touched_node_ids(
             out.append(a["deliverable"])
         if a.get("claim"):
             out.append(entity_node_id("claim", a["claim"]))
-    elif verb == "judge-related":
+    elif verb in ("judge-related", "judge-facets"):
         out.extend(sorted((a.get("run") or {}).get("posts") or {}))
+    elif verb == "review-facets":
+        run = a.get("run") or {}
+        out.extend(sorted({r[0] for r in (run.get("confirm") or []) + (run.get("mark") or [])}))
     elif verb == "harvest-discussions":
         out.extend(sorted((a.get("run") or {}).get("plan") or {}))
     elif verb == "retire-source":

@@ -1031,13 +1031,46 @@ async def _dispatch(args) -> int:
         elif args.command == "judge-related":
             # Judged related posts (design e09e262b): the judge is asked here and only here; the op
             # carries the whole run, so replay re-lands it without calling the service.
-            from .judging import JUDGE_MODEL, JUDGE_URL, JUDGE_WORKERS, judge_related
+            from .judgeengine import JUDGE_MODEL, JUDGE_URL, JUDGE_WORKERS
+            from .judging import judge_related
             res = await judge_related(gx, all_posts=args.all, dry_run=args.dry_run,
                                       model=args.model or JUDGE_MODEL, url=args.url or JUDGE_URL,
                                       workers=args.workers or JUDGE_WORKERS, actor=args.actor)
             print(render("judge-related", res, args.format))
             if args.journal_path and res.get("written"):
                 append_write(args.journal_path, "judge-related", {"run": res["run"], "actor": args.actor})
+            return 1 if res.get("error") else 0
+        elif args.command == "judge-facets":
+            # The facet judge (design eefda2dd): asked here and only here; the op carries the whole
+            # run, so replay re-lands it without calling the service. --measure reads the stored
+            # judgments and asks nothing (the measuring pass's report, eefda2dd (6)).
+            from .facetjudge import THRESHOLD, judge_facets, measure
+            from .judgeengine import JUDGE_MODEL, JUDGE_URL, JUDGE_WORKERS
+            if args.measure:
+                res = await measure(gx, threshold=THRESHOLD if args.threshold is None else args.threshold,
+                                    sample=args.sample)
+                print(render("judge-facets", {**res, "measure": True}, args.format))
+                return 0
+            res = await judge_facets(gx, all_posts=args.all, dry_run=args.dry_run,
+                                     model=args.model or JUDGE_MODEL, url=args.url or JUDGE_URL,
+                                     workers=args.workers or JUDGE_WORKERS, actor=args.actor)
+            print(render("judge-facets", res, args.format))
+            if args.journal_path and res.get("written"):
+                append_write(args.journal_path, "judge-facets", {"run": res["run"], "actor": args.actor})
+            return 1 if res.get("error") else 0
+        elif args.command == "review-facets":
+            # The facet review (design eefda2dd (5)): --out writes the review document; --apply lands
+            # the edited document as ONE journaled batch (confirmations + review marks), or nothing.
+            from .facetreview import review_facets
+            text = Path(args.apply).read_text() if args.apply else None
+            res = await review_facets(gx, apply_text=text, dry_run=args.dry_run, actor=args.actor)
+            if text is None and args.out:
+                Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.out).write_text(res["document"])
+                res["out"] = args.out
+            print(render("review-facets", res, args.format))
+            if args.journal_path and res.get("written"):
+                append_write(args.journal_path, "review-facets", {"run": res["run"], "actor": args.actor})
             return 1 if res.get("error") else 0
         elif args.command == "harvest-discussions":
             # The comment threads as facts (design 39c51c15 (1)): GitHub is asked here and only
@@ -3314,6 +3347,31 @@ def main() -> int:
     p_jr.add_argument("--url", default=None, help="The judge endpoint (default TypeSafe's System One API)")
     p_jr.add_argument("--workers", type=int, default=None, help="Concurrent requests (default 16)")
     p_jr.add_argument("--actor", default=_DEFAULT_ACTOR)
+    p_jf = sub.add_parser("judge-facets",
+                          help="Judge the category facets (journaled; design eefda2dd): one request per public "
+                               "post with a Noul per stale vocabulary entry; the judgments at or above the store "
+                               "floor land as JUDGED_FACET edges and each post records what it was judged against")
+    p_jf.add_argument("--all", action="store_true", help="Re-judge every pair, not only the stale ones")
+    p_jf.add_argument("--dry-run", action="store_true",
+                      help="Report the stale pairs, the request count and a token estimate; ask nothing")
+    p_jf.add_argument("--measure", action="store_true",
+                      help="The measuring pass's report from the stored judgments: per-entry counts, dead and "
+                           "too-broad entries, a sample for the spot check; asks nothing, writes nothing")
+    p_jf.add_argument("--threshold", type=float, default=None, help="With --measure: the proposal threshold (default 0.5)")
+    p_jf.add_argument("--sample", type=int, default=20, help="With --measure: posts in the spot-check sample")
+    p_jf.add_argument("--model", default=None, help="The judge model (default jev-latest)")
+    p_jf.add_argument("--url", default=None, help="The judge endpoint (default TypeSafe's System One API)")
+    p_jf.add_argument("--workers", type=int, default=None, help="Concurrent requests (default 16)")
+    p_jf.add_argument("--actor", default=_DEFAULT_ACTOR)
+    p_rf = sub.add_parser("review-facets",
+                          help="Review the facet judge's proposals (journaled with --apply; design eefda2dd (5)): "
+                               "write the review document grouped by entry, or land an edited one -- the "
+                               "confirmations assert the facts, every reviewed row is marked on its judged edge")
+    p_rf.add_argument("--out", default=None, help="Write the review document here (else only the counts print)")
+    p_rf.add_argument("--apply", default=None, metavar="DOCUMENT",
+                      help="Land an edited review document as one batch (refused whole if any row went stale)")
+    p_rf.add_argument("--dry-run", action="store_true", help="With --apply: check and plan only")
+    p_rf.add_argument("--actor", default=_DEFAULT_ACTOR)
     p_hd = sub.add_parser("harvest-discussions",
                           help="Harvest the posts' comment threads as discussion facts (journaled; design "
                                "39c51c15 (1)): every utterances issue and comments-category discussion is "

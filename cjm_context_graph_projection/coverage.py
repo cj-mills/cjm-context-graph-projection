@@ -243,7 +243,9 @@ async def check_coverage_value(
     """A coverage value must name a live vocabulary entry of the predicate's kind, so a
     typo'd or retired key never lands (the projection refuses one that goes stale later);
     a verification standing belongs to a hardware Entity and a claim state to a claim Entity
-    (98e99fe5 (1)), each from its closed slate."""
+    (98e99fe5 (1)), each from its closed slate. A confirmed category facet (eefda2dd (4)) is
+    checked as coverage is, and about_task / about_stage are refused on a tutorial, whose
+    task and stage are its teaches_* facts."""
     owned = {P.VERIFICATION_STANDING: ("verification standing", P.VERIFICATION_STANDINGS, P.ENTITY_HARDWARE),
              P.CLAIM_STATE: ("claim state", P.CLAIM_STATES, P.ENTITY_CLAIM)}
     if predicate in owned:
@@ -254,15 +256,23 @@ async def check_coverage_value(
         if node is None or F.prop(node, "entity_kind") != owner:
             return f"a {what} belongs to a {owner} Entity (`entity {owner} <key> ...`)"
         return None
-    kind = P.COVERAGE_KINDS.get(predicate)
+    kind = P.COVERAGE_KINDS.get(predicate) or P.FACET_PREDICATES.get(predicate)
     if kind is None:
         return None
+    if predicate in P.NON_TUTORIAL_FACETS:
+        from .purenotes import note_types
+        if ((await note_types(gx)).get(subject_id) or {}).get("kind") == TUTORIAL_KIND:
+            return (f"`{predicate}` belongs to a non-tutorial post -- a tutorial states it as "
+                    f"`{predicate.replace('about_', 'teaches_')}`")
     node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=entity_node_id(kind, value))
     if node is None or F.prop(node, "entity_kind") != kind:
         return (f"`{value}` is no {kind} in the vocabulary — mint it first "
                 f"(`entity {kind} {value} --name ...`), or check the key")
     if F.prop(node, "retired"):
         return f"{kind} `{value}` is retired — assert its successor instead"
+    if predicate in P.FACET_PREDICATES and kind == P.ENTITY_TASK and (
+            F.prop(node, "cross_task") or F.prop(node, "off_grid")):
+        return f"task `{value}` is a matrix row (cross-task or off-grid), never a post's facet"
     return None
 
 

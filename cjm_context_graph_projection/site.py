@@ -338,6 +338,20 @@ async def site_build(
                               "why": f"{len(stale)} public post(s) have missing or stale related judgments "
                                      "-- run judge-related",
                               "detail": [s["title"] for s in stale[:10]]})
+    # The category facets (design eefda2dd (7)): a public build refuses a public post with stale
+    # facet judgments or unreviewed proposals (staging counts them); a public post with no
+    # confirmed facet of any kind is reported, never left bare silently (6752db0a (9))
+    from .facetreview import facet_gate
+    gate = await facet_gate(gx)
+    rep["facets"] = {k: len(v) for k, v in gate.items()}
+    if gate["bare"]:
+        rep["facets_report"] = {"bare": gate["bare"]}
+    if profile == "public" and (gate["stale"] or gate["unreviewed"]):
+        rep["errors"].append({"kind": "facets-unreviewed",
+                              "why": f"{len(gate['stale'])} public post(s) have stale facet judgments and "
+                                     f"{len(gate['unreviewed'])} have unreviewed facet rows -- run judge-facets, "
+                                     "then review-facets",
+                              "detail": [s["title"] for s in (gate["stale"] + gate["unreviewed"])[:10]]})
     if rep["errors"]:
         rep["ok"] = False
         return rep

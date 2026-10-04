@@ -50,8 +50,10 @@ def _ask(body):
 
 
 def test_the_judged_state_staleness_and_pairs():
-    v = post_view("T", "D", "tutorial", ["pytorch", "Tutorial", "notes", "onnx"], [f"h{i}" for i in range(40)])
-    assert v["tags"] == ["onnx", "pytorch"] and len(v["section_outline"]) == 30   # kind tags are no tag
+    v = post_view("T", "D", "tutorial", {"tools": ["PyTorch", "ONNX", "PyTorch"], "subjects": [], "stages": ["Export"]},
+                  [f"h{i}" for i in range(40)])
+    # the confirmed categories replace the hand tags (eefda2dd (2)): sorted, unique, the empty left out
+    assert v["categories"] == {"stages": ["Export"], "tools": ["ONNX", "PyTorch"]} and len(v["section_outline"]) == 30
     assert state_hash(v) == state_hash(dict(v)) and state_hash(v) != state_hash({**v, "title": "T2"})
     q = question_hash()
     views = {"a": v, "b": {**v, "title": "B"}, "c": {**v, "title": "C"}}
@@ -64,15 +66,43 @@ def test_the_judged_state_staleness_and_pairs():
     assert set(QUESTIONS) == {"relatedness", "relation"}
 
 
-def test_a_failed_pair_is_reported():
-    views = {k: post_view(k, "", "notes", [], []) for k in ("x-1", "x-2", "y-1")}
+def test_a_failed_pair_is_reported(monkeypatch):
+    import cjm_context_graph_projection.judgeengine as E
+    monkeypatch.setattr(E, "RETRY_PAUSE", 0.0)
+    views = {k: post_view(k, "", "notes", {}, []) for k in ("x-1", "x-2", "y-1")}
+    seen = []
 
     def flaky(body):
+        seen.append(body["state"]["post_b"]["title"])
         if body["state"]["post_b"]["title"] == "y-1":
             raise RuntimeError("judge unreachable after retries: HTTP 529")
         return _ask(body)
     res = run_judge(judge_pairs(sorted(views), views), views, flaky, workers=2)
     assert len(res["errors"]) == 2 and len(res["judgments"]) == 4 and res["input_tokens"] == 40
+    assert seen.count("y-1") == 2 * (1 + E.RETRY_ROUNDS)                    # each round asked again
+
+    def refused(body):
+        raise RuntimeError("judge refused: 401 b'bad key'")
+    calls = []
+    out = E.run_requests([1, 2], lambda b: calls.append(b) or refused(b), body_of=lambda i: {"i": i},
+                         read=lambda i, r: {}, label=lambda i: {"i": i})
+    assert len(out["errors"]) == 2 and len(calls) == 2 and out["retried"] == 0   # a refusal is never re-asked
+
+
+def test_a_transient_failure_recovers_on_a_later_round(monkeypatch):
+    import cjm_context_graph_projection.judgeengine as E
+    monkeypatch.setattr(E, "RETRY_PAUSE", 0.0)
+    views = {k: post_view(k, "", "notes", {}, []) for k in ("x-1", "x-2", "y-1")}
+    failed = set()
+
+    def once(body):   # every pair to y-1 drops once, then answers
+        pair = (body["state"]["post_a"]["title"], body["state"]["post_b"]["title"])
+        if pair[1] == "y-1" and pair not in failed:
+            failed.add(pair)
+            raise RuntimeError("IncompleteRead(0 bytes read)")
+        return _ask(body)
+    res = run_judge(judge_pairs(sorted(views), views), views, once, workers=2)
+    assert res["errors"] == [] and len(res["judgments"]) == 6
 
 
 def _post(slug: str) -> str:

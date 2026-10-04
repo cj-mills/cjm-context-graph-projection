@@ -10,21 +10,17 @@ question hash on the edge -- and a rebuild replays it from the journal without c
 
 Each judged post carries a `related_judged` fact, '<question hash>:<judged-state hash>': what
 its judgments were made against. The judged STATE is what the judge saw (title, description,
-kind, tags, the section outline); a post whose current state or question differs is STALE, as
+kind, the post's confirmed categories -- its facets, which replaced the hand tags (design
+eefda2dd (2)) -- and the section outline as the page states it); a post whose current state or
+question differs is STALE, as
 is a public post with no record. A judge run re-judges the stale posts in both directions
 (A -> every post, every post -> A) and replaces every stored judgment touching them; ranking
 reads only stored judgments (postpage.related_posts), and the build reports stale posts
 rather than ranking around the gap. Only public posts are sent (e1fd4d64); the key lives in
-KEY_FILE (or KEY_ENV), never in a repo or a journal."""
+KEY_FILE (or KEY_ENV), never in a repo or a journal. The machinery every judge shares -- the
+key, the ask, the pool, the hashing, the public posts -- is judgeengine.py's (design eefda2dd (8));
+this module is the related family's state, questions, pairing and apply."""
 
-import hashlib
-import json
-import os
-import time
-import urllib.error
-import urllib.request
-from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from cjm_context_graph_layer.ops import extend_graph, graph_task
@@ -33,17 +29,13 @@ from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.nodes import judged_related_edge
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 
-from . import factlayer as F
+from . import factlayer as F, judgeengine as E
 from .runtime import GraphHandle
 
-JUDGE_URL = "https://api.typesafe.ai/v1/systemone"   # The System One endpoint
-JUDGE_MODEL = "jev-latest"                           # The model asked for (the edge records the version answered)
-KEY_FILE = "~/.config/typesafe/api_key"              # The key, outside every repo
-KEY_ENV = "TYPESAFE_API_KEY"                         # ... or from the environment
-JUDGE_WORKERS = 16                                   # Concurrent requests
 OUTLINE_MAX = 30                                     # Section headings in a post's judged state
 STORE_FLOOR = 1.0   # Judgments below it are not stored: the post's record says it was judged
-KIND_TAGS = ("notes", "tutorial", "tutorials", "log", "work")   # Tags that only restate a kind
+CATEGORY_LABELS = {P.ENTITY_TOOL: "tools", P.ENTITY_SUBJECT: "subjects", P.ENTITY_MODEL: "models",
+                   P.ENTITY_TASK: "tasks", P.ENTITY_STAGE: "stages"}   # facet kind -> its key in a judged state
 
 # The questions (the spike's, 245fb5b3): their hash keys staleness, so editing them re-judges
 QUESTIONS: Dict[str, Any] = {
@@ -51,8 +43,9 @@ QUESTIONS: Dict[str, Any] = {
         "type": "score",
         "instructions": ("A reader has just finished reading `post_a` on a technical blog. How useful would "
                          "`post_b` be as a 'Related' suggestion shown at the end of `post_a`? Judge by the "
-                         "subject matter both posts actually cover (titles, descriptions, section outlines), "
-                         "not by broad shared tags."),
+                         "subject matter both posts actually cover (titles, descriptions, section outlines). "
+                         "Each post's `categories` are its confirmed tools, subjects, models, tasks and stages; "
+                         "a shared broad category alone (one framework, one field) is no relation."),
         "criteria": [
             {"what": "Unrelated, or related only through a broad framework or field both happen to use",
              "examples": ["both use PyTorch but one profiles CUDA kernels and the other quantizes an object detector",
@@ -84,25 +77,26 @@ RELATION_REASONS = {"same_technique": "Same technique", "prerequisite": "Backgro
 
 def question_hash() -> str:  # The hash of what the judge is asked (12 hex)
     """The questions' identity: a changed question makes every judgment stale."""
-    return hashlib.sha256(json.dumps([QUESTIONS, OUTLINE_MAX], sort_keys=True).encode()).hexdigest()[:12]
+    return E.digest([QUESTIONS, OUTLINE_MAX], 12)
 
 
 def post_view(
     title: str,
     description: str,
     kind: str,
-    tags: List[str],      # The post's topic names
+    categories: Dict[str, List[str]],   # {tools | subjects | models | tasks | stages: display names}
     outline: List[str],   # Its section headings in order (derived blocks already removed)
 ) -> Dict[str, Any]:  # The judged state of one post
-    """What the judge sees of a post -- and what its staleness is measured against."""
+    """What the judge sees of a post -- and what its staleness is measured against. An empty
+    category is left out; names are sorted and unique, so the state is order-free."""
     return {"title": title, "kind": kind, "description": description,
-            "tags": sorted(t for t in tags if t.lower() not in KIND_TAGS),
+            "categories": {k: sorted(set(v)) for k, v in sorted(categories.items()) if v},
             "section_outline": list(outline[:OUTLINE_MAX])}
 
 
 def state_hash(view: Dict[str, Any]) -> str:  # The judged state's hash (16 hex)
     """A post's judged-state identity."""
-    return hashlib.sha256(json.dumps(view, sort_keys=True).encode()).hexdigest()[:16]
+    return E.digest(view)
 
 
 def stale_posts(
@@ -123,41 +117,6 @@ def judge_pairs(
     return [(a, b) for a in sorted(views) for b in sorted(views) if a != b and (a in s or b in s)]
 
 
-def read_key() -> Optional[str]:  # The judge's API key, or None
-    """The key from KEY_ENV, else KEY_FILE -- never printed, never journaled."""
-    k = os.environ.get(KEY_ENV, "").strip()
-    p = Path(os.path.expanduser(KEY_FILE))
-    if not k and p.exists():
-        k = p.read_text().strip()
-    return k or None
-
-
-def http_ask(
-    key: str,
-    url: str = JUDGE_URL,
-    timeout: float = 60.0,
-) -> Callable[[Dict[str, Any]], Dict[str, Any]]:  # body -> response ({model, answers, usage})
-    """The HTTP judge: one POST per pair, retried with backoff on overload and network faults."""
-    def ask(body: Dict[str, Any]) -> Dict[str, Any]:
-        data = json.dumps(body).encode()
-        last = ""
-        for attempt in range(6):
-            req = urllib.request.Request(url, data, {"Authorization": f"Bearer {key}",
-                                                     "Content-Type": "application/json"})
-            try:
-                with urllib.request.urlopen(req, timeout=timeout) as r:
-                    return json.load(r)
-            except urllib.error.HTTPError as e:
-                if e.code not in (429, 500, 502, 503, 529):
-                    raise RuntimeError(f"judge refused: {e.code} {e.read()[:300]!r}") from None
-                last = f"HTTP {e.code}"
-            except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
-                last = repr(e)
-            time.sleep(2 ** attempt)
-        raise RuntimeError(f"judge unreachable after retries: {last}")
-    return ask
-
-
 def judgment_of(answers: Dict[str, Any]) -> Dict[str, Any]:  # The stored judgment
     """The judgment as the edge stores it, from the service's typed answers."""
     s, r = answers["relatedness"], answers["relation"]
@@ -172,53 +131,44 @@ def run_judge(
     views: Dict[str, Dict[str, Any]],
     ask: Callable[[Dict[str, Any]], Dict[str, Any]],   # body -> response (http_ask, or a test double)
     *,
-    model: str = JUDGE_MODEL,
-    workers: int = JUDGE_WORKERS,
+    model: str = E.JUDGE_MODEL,
+    workers: int = E.JUDGE_WORKERS,
 ) -> Dict[str, Any]:  # {judgments: [{a, b, model, ...judgment}], input_tokens, errors}
     """Ask the judge about every pair; every answer is kept (the caller applies the floor)."""
-    def one(pair):
-        a, b = pair
-        body = {"state": {"post_a": views[a], "post_b": views[b]}, "model": model, "questions": QUESTIONS}
-        try:
-            r = ask(body)
-            return {"a": a, "b": b, "model": str(r.get("model") or model), **judgment_of(r["answers"]),
-                    "_tokens": (r.get("usage") or {}).get("input_tokens", 0)}
-        except Exception as e:   # reported per pair; the caller writes nothing if any failed
-            return {"a": a, "b": b, "error": str(e)[:300]}
-    with ThreadPoolExecutor(max(1, workers)) as ex:
-        rows = list(ex.map(one, pairs))
-    errors = [r for r in rows if "error" in r]
-    ok = [r for r in rows if "error" not in r]
-    return {"judgments": [{k: v for k, v in r.items() if k != "_tokens"} for r in ok],
-            "input_tokens": sum(r["_tokens"] for r in ok), "errors": errors}
+    res = E.run_requests(
+        pairs, ask, workers=workers,
+        body_of=lambda p: {"state": {"post_a": views[p[0]], "post_b": views[p[1]]}, "model": model,
+                           "questions": QUESTIONS},
+        read=lambda p, r: {"a": p[0], "b": p[1], "model": str(r.get("model") or model), **judgment_of(r["answers"])},
+        label=lambda p: {"a": p[0], "b": p[1]})
+    return {"judgments": res["results"], "input_tokens": res["input_tokens"], "errors": res["errors"]}
 
 
 async def load_post_views(
     gx: GraphHandle,
 ) -> Dict[str, Dict[str, Any]]:  # {post id: judged state} for every PUBLIC post
     """The judged state of every public post (the audience rule: only public posts are sent)."""
-    from .postpage import POST_KINDS
-    from .purenotes import note_types, public_deliverables
-    public, types = await public_deliverables(gx), await note_types(gx)
-    notes = {str(F.nid(n)): n for n in await F.load_label(gx, DevNodeKinds.NOTE)}
-    posts = [n for n in notes if n in public and (types.get(n) or {}).get("kind") in POST_KINDS]
-    names = {str(F.nid(t)): str(F.prop(t, "name") or "") for t in await F.load_label(gx, DevNodeKinds.TOPIC)}
-    tags: Dict[str, List[str]] = {}
-    for s, t in await F.load_edge_pairs(gx, DevRelations.TAGGED):
-        if str(t) in names:
-            tags.setdefault(str(s), []).append(names[str(t)])
-    sections = {str(F.nid(s)): s for s in await F.load_label(gx, DevNodeKinds.SECTION)}
-    heads: Dict[str, List[Tuple[int, str]]] = {}
-    for s, t in await F.load_edge_pairs(gx, DevRelations.HAS_SECTION):
-        sec = sections.get(str(t))
-        name = str(F.prop(sec, "name") or "") if sec is not None else ""
-        if name and not name.startswith("_"):   # `_preamble` and the derived blocks are no heading
-            heads.setdefault(str(s), []).append((int(F.prop(sec, "order") or 0), name))
+    from .coverage import TUTORIAL_KIND, load_coverage_facts
+    from .facetjudge import post_outline
+    from .facetreview import load_confirmed
     from .site import stated   # the judge sees what the page states (finding 12d98020)
-    return {n: post_view(stated(notes[n], "title"), stated(notes[n], "description"),
-                         str((types.get(n) or {}).get("kind") or ""), tags.get(n, []),
-                         [h for _, h in sorted(heads.get(n, []))])
-            for n in posts}
+    posts, sections = await E.public_posts(gx), await E.post_sections(gx)
+    names = {(F.prop(e, "entity_kind"), F.prop(e, "key")): str(F.prop(e, "name") or F.prop(e, "key"))
+             for e in await F.load_label(gx, DevNodeKinds.ENTITY)}
+    confirmed, teaches = await load_confirmed(gx), await load_coverage_facts(gx)
+    out = {}
+    for n, p in posts.items():
+        # the confirmed facets; a tutorial's task and stage are its teaches_* facts (eefda2dd (4))
+        facts = dict(confirmed.get(n) or {})
+        if p["kind"] == TUTORIAL_KIND:
+            facts.update(teaches.get(n) or {})
+        cats: Dict[str, List[str]] = {}
+        for pred, vals in facts.items():
+            kind = P.FACET_PREDICATES.get(pred) or P.COVERAGE_KINDS.get(pred)
+            cats.setdefault(CATEGORY_LABELS[kind], []).extend(names.get((kind, v), v) for v in vals)
+        out[n] = post_view(stated(p["node"], "title"), stated(p["node"], "description"), p["kind"],
+                           cats, post_outline(sections.get(n, [])))
+    return out
 
 
 async def load_judged(
@@ -270,7 +220,7 @@ async def apply_judgments(
         await graph_task(gx.queue, gx.graph_id, "delete_edges", edge_ids=drop)
     # Sorted keys at every depth: the journal stores the run key-sorted, so live and replay must
     # land the same property text
-    norm = [json.loads(json.dumps(j, sort_keys=True)) for j in run["judgments"]]
+    norm = [E.normalized(j) for j in run["judgments"]]
     edges = [judged_related_edge(j["a"], j["b"], model=j["model"], question=run["question"],
                                  judgment={k: v for k, v in j.items() if k not in ("a", "b", "model")})
              for j in norm]
@@ -298,9 +248,9 @@ async def judge_related(
     all_posts: bool = False,   # Re-judge every public post, not only the stale ones
     dry_run: bool = False,     # Report the stale posts and the pair count; ask nothing
     ask: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,   # The judge (default: HTTP with the key)
-    model: str = JUDGE_MODEL,
-    url: str = JUDGE_URL,      # The judge endpoint (a local double in tests)
-    workers: int = JUDGE_WORKERS,
+    model: str = E.JUDGE_MODEL,
+    url: str = E.JUDGE_URL,    # The judge endpoint (a local double in tests)
+    workers: int = E.JUDGE_WORKERS,
     actor: str = "agent:session",
 ) -> Dict[str, Any]:  # {stale, pairs, written, run?, applied?, input_tokens?, error?}
     """The judge verb: find the stale posts, judge every pair touching them, land the run.
@@ -313,11 +263,9 @@ async def judge_related(
                            "pairs": len(pairs), "question": q, "written": False}
     if dry_run or not stale:
         return out
+    ask, why = E.resolve_ask(ask, url)
     if ask is None:
-        key = read_key()
-        if not key:
-            return {**out, "error": f"no judge key: {KEY_FILE} or ${KEY_ENV}"}
-        ask = http_ask(key, url)
+        return {**out, "error": why}
     res = run_judge(pairs, views, ask, model=model, workers=workers)
     out["input_tokens"] = res["input_tokens"]
     if res["errors"]:

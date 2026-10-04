@@ -447,6 +447,10 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         return "\n".join(lines)
     if kind == "harvest-discussions":
         return _render_harvest(obj)
+    if kind == "judge-facets":
+        return _render_facets(obj)
+    if kind == "review-facets":
+        return _render_facet_review(obj)
     if kind == "claims":
         return _render_claims(obj)
     if kind == "series-order":
@@ -527,6 +531,13 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                              + (f" · ⚠ {dv['sources_missing']} born post(s) derive from a source they do not name: "
                                 + ", ".join(m["title"] for m in sr.get("missing") or [])
                                 if dv.get("sources_missing") else ""))
+        if obj.get("facets"):   # the facet gate (design eefda2dd (7))
+            fc, fr = obj["facets"], obj.get("facets_report") or {}
+            lines.append(f"- facets: {fc.get('stale', 0)} public post(s) with stale judgments · "
+                         f"{fc.get('unreviewed', 0)} with unreviewed proposals or challenged facts · "
+                         f"{fc.get('bare', 0)} with no confirmed facet"
+                         + (": " + ", ".join(b["title"] for b in (fr.get("bare") or [])[:10])
+                            + (" …" if len(fr.get("bare") or []) > 10 else "") if fc.get("bare") else ""))
         if obj.get("agent"):   # the agent layer (39c51c15 (7), amendment 23a49667)
             ag, dv = obj["agent"], obj.get("derived") or {}
             lines.append(f"- agent layer: JSON-LD on {dv.get('jsonld', 0)} post(s)"
@@ -1561,6 +1572,74 @@ def _render_harvest(obj: Dict[str, Any]) -> str:
                      + ", ".join(f"`{n[:8]}`" for n in a["notes"]))
     for n in obj.get("unmapped") or []:
         lines.append(f"  · unmapped {row(n)} {by_num.get(n, {}).get('title', '')!r}")
+    return "\n".join(lines)
+
+
+def _render_facets(obj: Dict[str, Any]) -> str:
+    """A facet judge run, its dry run, or the measuring pass's report (design eefda2dd (6))."""
+    lines = []
+    if obj.get("measure"):
+        lines.append(f"**measure** {obj['posts']} public post(s) · threshold {obj['threshold']} · "
+                     f"dead {len(obj['dead'])} · too broad {len(obj['broad'])} · no proposal {len(obj['bare'])}"
+                     + (f" · ⚠ {obj['stale_pairs']} stale pair(s) on {obj['stale_posts']} post(s) -- run "
+                        "judge-facets" if obj.get("stale_pairs") else ""))
+        kind = None
+        for r in obj["entries"]:
+            k = r["entry"].split(":", 1)[0]
+            if k != kind:
+                kind = k
+                lines += ["", f"### {k}", "", "| entry | posts | of | verdict | top |", "|---|---|---|---|---|"]
+            top = "; ".join(f"{t['title'][:40]} ({t['p']})" for t in r["top"][:3])
+            lines.append(f"| `{r['entry'].split(':', 1)[1]}` | {r['count']} | {r['applicable']} | "
+                         f"{r['verdict']} | {top} |")
+        if obj["bare"]:
+            lines += ["", f"### no proposal ({len(obj['bare'])})", ""]
+            lines += [f"- {b['title']} `{str(b['id'])[:8]}`" for b in obj["bare"]]
+        lines += ["", f"### sample ({len(obj['sample'])})", ""]
+        for s in obj["sample"]:
+            lines.append(f"- **{s['title']}** _{s['kind']}_ `{str(s['id'])[:8]}`")
+            lines.append("  - proposals: " + (", ".join(f"{p['entry']} {p['p']}" for p in s["proposals"]) or "none"))
+            if s["near"]:
+                lines.append("  - near: " + ", ".join(f"{p['entry']} {p['p']}" for p in s["near"][:8]))
+        return "\n".join(lines)
+    if obj.get("error"):
+        lines.append(f"⚠ {obj['error']}")
+        lines += [f"  - `{str(f['post'])[:8]}`: {f['error']}" for f in obj.get("failures") or []]
+    head = (f"**judged** {obj['pairs']} pair(s) in {obj['requests']} request(s)" if obj.get("written") else
+            f"**stale** {obj['pairs']} pair(s) on {obj['requests']} post(s)")
+    lines.append(head + f" · {obj['entries']} entries · {obj['posts']} public post(s) · "
+                 f"≈{obj.get('token_estimate', 0):,} input tokens (chars / 4)")
+    if obj.get("written"):
+        run, ap = obj["run"], obj.get("applied") or {}
+        lines.append(f"  stored {ap.get('landed', 0)} judgment(s) at or above the floor · replaced "
+                     f"{ap.get('deleted', 0)} · records {ap.get('recorded', 0)} · models "
+                     f"{', '.join(run.get('models') or [])} · input tokens {obj.get('input_tokens', 0):,}")
+    stale = obj.get("stale") or []
+    lines += [f"  - {s['title']} `{str(s['id'])[:8]}` · {s['entries']} entr(ies)" for s in stale[:20]]
+    if len(stale) > 20:
+        lines.append(f"  - … {len(stale) - 20} more")
+    return "\n".join(lines)
+
+
+def _render_facet_review(obj: Dict[str, Any]) -> str:
+    """The facet review: the document's counts, or one landed (or refused) review (design eefda2dd (5))."""
+    if "document" in obj:
+        c = obj.get("counts") or {}
+        return (f"**review** {c.get('proposal', 0)} proposal(s) · {c.get('challenged', 0)} challenged · "
+                f"{c.get('near', 0)} near miss(es) over {obj.get('entries', 0)} entr(ies)"
+                + (f" · ⚠ {obj['stale_pairs']} stale pair(s) left out -- run judge-facets" if obj.get("stale_pairs") else "")
+                + (f"\n  document → `{obj['out']}`" if obj.get("out") else "\n  (pass --out PATH to write the document)"))
+    lines = []
+    if obj.get("error"):
+        lines.append(f"⚠ {obj['error']}")
+        lines += [f"  - {e}" for e in (obj.get("errors") or [])[:20]]
+    c = obj.get("counts") or {}
+    lines.append(f"**{'reviewed' if obj.get('written') else 'review plan'}** {obj.get('rows', 0)} row(s) · "
+                 f"confirmed {c.get('confirmed', 0)} · rejected {c.get('rejected', 0)} · kept {c.get('kept', 0)} · "
+                 f"near misses left {c.get('near_unchecked', 0)}")
+    if obj.get("written"):
+        ap = obj.get("applied") or {}
+        lines.append(f"  asserted {ap.get('asserted', 0)} fact(s) · marked {ap.get('marked', 0)} judgment(s) reviewed")
     return "\n".join(lines)
 
 
