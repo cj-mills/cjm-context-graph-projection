@@ -11,7 +11,10 @@ rebuild stays id-identical. Projections filter retired nodes (`is_retired`).
 
 A page's path moves between holders through `transfer_site_path`: the new holder asserts the
 old holder's active site_path, and the new assertion SUPERSEDES the old one ACROSS slots
-(`resolve_active` treats any superseded assertion as inactive). Nothing is copied:
+(`resolve_active` treats any superseded assertion as inactive). A page MERGED into another (a
+retired page whose reader belongs on a page that exists, design ce17606b (6)) moves the same way,
+except that the target keeps its own active path and that assertion supersedes the old one, so
+the merged page's URL redirects to the target's. Nothing is copied:
 `path_owners` derives, for every site_path assertion, the page whose ACTIVE path its
 supersession chain ends at -- so the redirect projection and the link resolver count the old
 holder's earlier paths as the new holder's history."""
@@ -219,11 +222,14 @@ async def transfer_site_path(
     target: str,    # The node taking it (id or unique prefix)
     *,
     actor: str = "agent:session",
-) -> Dict[str, Any]:  # {from_id, to_id, value, assertion_id, superseded, written} | {error, written: False}
+    merge: bool = False,   # The target keeps its own active path: the source's page merges into it
+) -> Dict[str, Any]:  # {from_id, to_id, value, assertion_id, superseded, merged?, written} | {error, written: False}
     """Move a page's ACTIVE site_path to another node (journaled `transfer-path`): the target
     asserts the value, and that assertion SUPERSEDES the source's across slots, so the source
     holds no active path and its whole history reads as the target's (`path_owners`). The
-    target must hold no active path of its own -- a page has exactly one."""
+    target must hold no active path of its own -- a page has exactly one -- unless the source's
+    page MERGES into the target's (design ce17606b (6)): then the target's one active path
+    supersedes the source's, and the source's URL redirects to the target's page."""
     from .projection import resolve_node_ref
     from .write import assert_value
     ids = []
@@ -244,11 +250,20 @@ async def transfer_site_path(
     if len(have[src]) != 1:
         return {"error": f"the source holds {len(have[src])} active site_path value(s) — a transfer "
                          "moves exactly one", "written": False}
-    if have[dst]:
+    if merge and len(have[dst]) != 1:
+        return {"error": f"a merge needs the target's one active path; it holds {len(have[dst])}",
+                "written": False}
+    if have[dst] and not merge:
         return {"error": f"the target already holds {F.prop(have[dst][0], 'value')} — a page has one "
                          "active path", "written": False}
     old = have[src][0]
     value = str(F.prop(old, "value"))
+    if merge:
+        keep = have[dst][0]
+        await extend_graph(gx.queue, gx.graph_id, [],
+                           [make_edge(str(F.nid(keep)), str(F.nid(old)), DevRelations.SUPERSEDES)])
+        return {"from_id": src, "to_id": dst, "value": value, "assertion_id": str(F.nid(keep)),
+                "superseded": str(F.nid(old)), "merged": True, "written": True}
     # The site-link step resolves the moved path once, at the write window's close (9ee4e346).
     res = await assert_value(gx, dst, P.SITE_PATH, value, actor=actor)
     if res.get("error"):

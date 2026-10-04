@@ -1,8 +1,8 @@
 """Retiring an archive source and moving a page's path (design amendment e916a4b9 under the
 Tutorials page design 7f200ecb): the retirement is a journaled fact that records where the
 source lived, the ingest restores the retired node from git before replay once its file has
-left the tree, and a transferred path reads as the new holder's history -- a rebuild
-reproduces the live graph id-for-id."""
+left the tree, and a transferred path reads as the new holder's history, as does the path of a
+page merged into another (design ce17606b (6)) -- a rebuild reproduces the live graph id-for-id."""
 
 import asyncio
 import json
@@ -94,7 +94,9 @@ def test_retire_restore_and_transfer_survive_a_rebuild(tmp_path):
                 ["assert", note_node_id("a"), "site_path", "/posts/a/"],
                 ["assert", page, "site_path", "/series/tutorials/"],
                 ["assert", page, "site_path", "/tutorials.html", "--superseded-by", "/series/tutorials/"],
-                ["set-lens", "tutorials", "--spec", spec, "--title", "Tutorials"]):
+                ["set-lens", "tutorials", "--spec", spec, "--title", "Tutorials"],
+                ["set-lens", "books", "--spec", spec, "--title", "Books"],
+                ["assert", lens_node_id("books"), "site_path", "/series/notes/books.html"]):
         r = _run(*base, *cmd)
         assert r.returncode == 0, (cmd, r.stdout, r.stderr)
     # Only a Note retires this way; a source that differs from HEAD is refused
@@ -116,12 +118,20 @@ def test_retire_restore_and_transfer_survive_a_rebuild(tmp_path):
     assert again.returncode == 1 and "holds 0 active" in again.stdout
     taken = _run(*base, "transfer-path", lens, note_node_id("a"))
     assert taken.returncode == 1 and "already holds /posts/a/" in taken.stdout
+    # A page MERGED into another (design ce17606b (6)): the target keeps its active path and the
+    # merged page's path becomes its history; a target with no active path is refused
+    books = lens_node_id("books")
+    merged = _run(*base, "transfer-path", "--merge", books[:8], lens[:8])
+    assert merged.returncode == 0 and "**merged** /series/notes/books.html" in merged.stdout, merged.stdout
+    nowhere = _run(*base, "transfer-path", "--merge", note_node_id("a"), page)
+    assert nowhere.returncode == 1 and "a merge needs the target's one active path" in nowhere.stdout
     ops = [json.loads(line) for line in Path(journal).read_text().splitlines()]
     rop = next(o["args"] for o in ops if o["verb"] == "retire-source")
     assert rop["note"] == page and rop["path"] == "series/tutorials/index.md" and rop["successor"] == lens
     assert rop["commit"] == _git(site, "rev-parse", "HEAD")
-    assert next(o["args"] for o in ops if o["verb"] == "transfer-path") == {"from": page, "to": lens,
-                                                                             "actor": "agent:session"}
+    assert [o["args"] for o in ops if o["verb"] == "transfer-path"] == [
+        {"from": page, "to": lens, "actor": "agent:session"},
+        {"from": books, "to": lens, "actor": "agent:session", "merge": True}]
     # The file leaves the tree (its site_pages entry may linger: the restore owns the identity)
     (site / "series" / "tutorials" / "index.md").unlink()
     _git(site, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "retire the hand page")
@@ -133,9 +143,11 @@ def test_retire_restore_and_transfer_survive_a_rebuild(tmp_path):
             return plan, holders, active
     plan, holders, active = asyncio.run(reads(live))
     assert plan["errors"] == []
-    assert plan["pages"][lens] == {"active": "/series/tutorials/", "superseded": ["/tutorials.html"]}
-    assert page not in plan["pages"]
-    assert [(s["alias"], s["subject"]) for s in plan["stubs"]] == [("/tutorials.html", lens)]
+    assert plan["pages"][lens] == {"active": "/series/tutorials/",
+                                   "superseded": ["/series/notes/books.html", "/tutorials.html"]}
+    assert page not in plan["pages"] and books not in plan["pages"]
+    assert sorted((s["alias"], s["subject"]) for s in plan["stubs"]) == [("/series/notes/books.html", lens),
+                                                                        ("/tutorials.html", lens)]
     assert holders[site_path_key("/series/tutorials/")] == {lens} and active[lens] == "/series/tutorials/"
     assert page not in active and holders[site_path_key("/tutorials.html")] == {lens}
 

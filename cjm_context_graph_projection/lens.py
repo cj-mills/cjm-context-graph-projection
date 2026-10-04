@@ -275,7 +275,8 @@ async def _clause_refs(
         res = await list_graph(gx, label=args.get("label"), predicate=args.get("predicate"),
                                relation=args.get("relation"), limit=args.get("limit", 500),
                                contains=args.get("contains"), where=args.get("where"),
-                               value=args.get("value"), deliverable_kind=args.get("deliverable_kind"))
+                               value=args.get("value"), deliverable_kind=args.get("deliverable_kind"),
+                               subject_has=args.get("subject_has"))
         if res.get("error"):
             return [], res["error"]
         if res.get("truncated"):

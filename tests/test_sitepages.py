@@ -1,6 +1,8 @@
 """The projected series and topic pages (design e240183f): a Series page lists its members in
 their AUTHORED order, a Lens page the notes it selects under the Lens's own sort; the page file
-is build output at the location its site_path derives, marked, never written over source."""
+is build output at the location its site_path derives, marked, never written over source. Every
+chip is the graph's (design ce17606b): a post's confirmed facets, a Series page's what most of
+its members carry, and the category listing itself a projected Lens page."""
 
 import asyncio
 import re
@@ -9,8 +11,10 @@ from datetime import date
 from pathlib import Path
 
 import pytest
+import yaml
 
 from cjm_context_graph_layer.ops import extend_graph
+from cjm_context_graph_projection.archive import retire_source
 from cjm_dev_graph_schema.identity import (deliverable_type_node_id, note_node_id, series_node_id,
                                           topic_node_id)
 from cjm_dev_graph_schema.nodes import series_member_edge
@@ -21,11 +25,14 @@ from cjm_markdown_decompose_core.ingest import corpus_graph_elements
 from cjm_context_graph_projection.lens import lens_node_id, set_lens, validate_lens_spec
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
 from cjm_context_graph_projection.series import mint_series, set_series_members
+from cjm_context_graph_projection.coverage import mint_entity
+from cjm_context_graph_projection.facetjudge import judge_facets
+from cjm_context_graph_projection.facetreview import review_facets
 from cjm_context_graph_projection.judging import judge_related
 from cjm_context_graph_projection.site import publish_guard, redirect_plan, site_build
-from cjm_context_graph_projection.sitepages import (GENERATED, group_through_series, is_generated, is_public,
-                                                    member_updated, page_plan, page_source, parse_date,
-                                                    project_pages, render_page)
+from cjm_context_graph_projection.sitepages import (GENERATED, check_category_listing, group_through_series,
+                                                    is_generated, is_public, member_updated, page_plan,
+                                                    page_source, parse_date, project_pages, render_page)
 from cjm_context_graph_projection.purenotes import mint_deliverable_type, note_types
 from cjm_context_graph_projection.write import assert_value
 
@@ -91,7 +98,6 @@ def _site(root: Path) -> None:
     (root / "_quarto-staging.yml").write_text(
         'project:\n  output-dir: _site-staging\n  render:\n    - "**/*.qmd"\n    - "**/*.md"\n')
     (root / "index.md").write_text("---\ntitle: Home\n---\n\nHome.\n")
-    (root / "blog.qmd").write_text("---\ntitle: Blog\nlisting:\n  contents: posts\n  categories: true\n---\n")
     posts = {"a": ("Post A", "2020-01-01"), "b": ("Post B", "2022-01-01"), "c": ("Post C", "2021-06-01")}
     for s, (t, d) in posts.items():
         (root / "posts" / s / "index.md").write_text(_post(t, d))
@@ -130,6 +136,23 @@ async def _graph(gx, root: Path) -> None:
             "expand": {"hops": 1, "relations": ["TAGGED"]}, "view": {"sort": ["date desc"]}}
     await set_lens(gx, "topic", spec, title="Topic", description="Every note.", date="2021-12-9")
     await assert_value(gx, lens_node_id("topic"), "site_path", "/series/notes/topic.html")
+    # The category facets (design ce17606b (1)): a tool and a subject, confirmed through the judge + review
+    for kind, key, name in (("tool", "pytorch", "PyTorch"), ("subject", "vision", "Vision")):
+        await mint_entity(gx, kind, key, name=name, fields={"description": name, "not_for": "a mention"})
+    # The site's category listing is a projected Lens (design ce17606b (3))
+    blog = {"selection": [{"verb": "list", "args": {"label": "Note", "deliverable_kind": "notes"}}],
+            "view": {"layout": "category-listing", "sort": ["date desc", "title desc"]}}
+    await set_lens(gx, "blog", blog, title="Blog", description="Every post.")
+    await assert_value(gx, lens_node_id("blog"), "site_path", "/blog.html")
+    # ... replacing a hand blog page, retired (the replay form: no git here); the projected page
+    # renders at its old path, and the retired Note must not read as rendered there
+    hand = note_from_text(str(root / "blog.qmd"), "---\ntitle: Blog\n---\n", corpus_root=str(root), lossless=True)
+    nodes, edges = corpus_graph_elements([hand])
+    await extend_graph(gx.queue, gx.graph_id, nodes, edges)
+    await mint_deliverable_type(gx, "site-page", title="Site page", kind="site", origin="archive")
+    await assert_value(gx, note_node_id("blog"), "deliverable_type", "site-page")
+    assert (await retire_source(gx, note_node_id("blog"), reason="projected", successor=lens_node_id("blog"),
+                                commit="0" * 40, rel_path="blog.qmd"))["written"]
 
 
 def _unrelated(body):
@@ -137,6 +160,16 @@ def _unrelated(body):
     return {"model": "test", "answers": {
         "relatedness": {"score": 0.1, "confidence": 0.9, "probabilities": {"0": 0.9, "1": 0.1}},
         "relation": {"choice": "unrelated", "confidence": 0.9, "probabilities": {"unrelated": 1.0}}}}
+
+
+_FACETS = {("Post A", "tool:pytorch"), ("Post B", "tool:pytorch"), ("Post B", "subject:vision")}
+
+
+def _facets(body):
+    """A facet judge that proposes _FACETS (design eefda2dd's verb, without the service)."""
+    t = body["state"]["post"]["title"]
+    return {"model": "test", "usage": {"input_tokens": 1},
+            "answers": {e: {"type": "noul", "noul": 0.9 if (t, e) in _FACETS else 0.1} for e in body["questions"]}}
 
 
 @pytest.mark.skipif(not (_HAVE_GRAPH and _HAVE_QUARTO), reason="needs the graph capability and quarto")
@@ -147,6 +180,10 @@ def test_series_and_topic_pages_are_projected_and_rendered(tmp_path):
     async def go():
         async with open_graph(str(tmp_path / "g.db")) as gx:
             await _graph(gx, site)
+            # The facets land through the judge and the user's review (design eefda2dd), the
+            # document confirmed as proposed
+            await judge_facets(gx, ask=_facets)
+            await review_facets(gx, apply_text=(await review_facets(gx))["document"])
             # A public build needs every public post judged (amendment e09e262b): a judge that
             # relates nothing, so the pages under test are unchanged
             await judge_related(gx, ask=_unrelated)
@@ -160,11 +197,12 @@ def test_series_and_topic_pages_are_projected_and_rendered(tmp_path):
             (site / "series" / "notes" / "old.qmd").write_text(render_page({"title": "Old"}))
             pub = await site_build(gx, str(site), "public")
             assert pub["ok"], pub
-            assert pub["pages"]["planned"] == 2 and pub["pages"]["removed"] == ["series/notes/old.qmd"]
+            assert pub["pages"]["planned"] == 3 and pub["pages"]["removed"] == ["series/notes/old.qmd"]
             assert pub["pages"]["unpaged"] == ["Series:unpaged"]
             cv = (site / "series" / "tutorials" / "cv.qmd").read_text()
             cv_mtime = (site / "series" / "tutorials" / "cv.qmd").stat().st_mtime
             topic = (site / "series" / "notes" / "topic.qmd").read_text()
+            blog = (site / "blog.qmd").read_text()
             out = site / "_site"
             series_items = _items((out / "series" / "tutorials" / "cv.html").read_text())
             topic_items = _items((out / "series" / "notes" / "topic.html").read_text())
@@ -173,9 +211,23 @@ def test_series_and_topic_pages_are_projected_and_rendered(tmp_path):
             # Quarto's in-place filter
             for page in (out / "series" / "tutorials" / "cv.html", out / "series" / "notes" / "topic.html"):
                 html = page.read_text()
-                assert 'class="listing-category" href="' in html and 'blog.html#category=notes"' in html
+                # the chips are the graph's facets (design ce17606b), never the front matter's `notes`
+                assert 'class="listing-category" href="' in html and 'blog.html#category=PyTorch"' in html
+                assert 'blog.html#category=Vision"' in html and "#category=notes" not in html
                 assert '<div class="listing-category"' not in html and "quartoListingCategory('" not in html
-            assert "quartoListingCategory('" in (out / "blog.html").read_text()
+            # the projected category listing keeps Quarto's sidebar and in-place filter, and the feed
+            blog_html = (out / "blog.html").read_text()
+            assert "quartoListingCategory('" in blog_html and _items(blog_html) == ["Post B", "Post C", "Post A"]
+            feed = (out / "blog.xml").read_text()
+            # a post's header shows its chips; a post with none shows none, whatever its front matter lists
+            head_a = (out / "posts" / "a" / "index.html").read_text()
+            head_c = (out / "posts" / "c" / "index.html").read_text()
+            # every post is on the category listing, so it is no collection a post belongs to, and
+            # llms.txt lists it as a site page (design ce17606b (3))
+            assert ">Topic</a>" in head_a and ">Blog</a>" not in head_a
+            llms_site = (out / "llms.txt").read_text().split("## Site\n")[1].split("\n## ")[0]
+            assert llms_site.count("](https://example.org/blog.llms.md)") == 1
+            assert "- [Blog](https://example.org/blog.llms.md)\n" in llms_site
             stg = await site_build(gx, str(site), "staging")
             assert stg["ok"], stg
             staged = _items((site / "_site-staging" / "series" / "notes" / "topic.html").read_text())
@@ -195,16 +247,34 @@ def test_series_and_topic_pages_are_projected_and_rendered(tmp_path):
                                supersede=["archive-notes"])
             undecided = await page_plan(gx, str(site), "public", (await redirect_plan(gx))["pages"])
             guard = await publish_guard(gx, str(out), "drafts")
-            return cv, cv_mtime, topic, series_items, topic_items, staged, again, broken, bad, typed, undecided, guard
+            return (cv, cv_mtime, topic, series_items, topic_items, staged, again, broken, bad, typed, undecided,
+                    guard, blog, feed, head_a, head_c)
 
     (cv, cv_mtime, topic, series_items, topic_items, staged, again, broken, bad, typed, undecided,
-     guard) = asyncio.run(go())
+     guard, blog, feed, head_a, head_c) = asyncio.run(go())
     # The page's data is the node's; date-modified is the newest member date; order is authored
     assert "title: CV series\n" in cv and "date: 2020-1-1\n" in cv and "date-modified: '2022-01-01'\n" in cv
-    assert "categories:\n- pytorch\n- tutorial\n" in cv and "image: ./p.png\n" in cv
-    assert "  - ../../posts/b/index.md\n  - ../../posts/a/index.md\n  - ../../posts/c/index.md\n  sort: false\n" in cv
-    assert "  template: ../../_derived/listing-default.ejs.md\n" in cv
-    assert "  template-params:\n" in cv and "    category-links:\n      notes: /blog.html#category=notes\n" in cv
+    assert "image: ./p.png\n" in cv
+    front = yaml.safe_load(cv.split("---\n")[1])
+    # the Series page's chips: what MORE THAN HALF its members carry (PyTorch 2 of 3, Vision 1 of 3)
+    assert front["categories"] == ["PyTorch"]
+    # every item states its chips, an item with none an empty list (design ce17606b (3))
+    assert front["listing"]["contents"] == [
+        {"path": "../../posts/b/index.md", "categories": ["PyTorch", "Vision"]},
+        {"path": "../../posts/a/index.md", "categories": ["PyTorch"]},
+        {"path": "../../posts/c/index.md", "categories": []}]
+    assert front["listing"]["sort"] is False
+    assert front["listing"]["template"] == "../../_derived/listing-default.ejs.md"
+    assert front["listing"]["template-params"]["category-links"] == {
+        "PyTorch": "/blog.html#category=PyTorch", "Vision": "/blog.html#category=Vision"}
+    # The category listing: no title block, the numbered sidebar, the feed, its description the lead
+    assert blog.startswith(f"---\n{GENERATED}\npagetitle: Blog\npage-layout: full\ntitle-block-banner: false\n")
+    assert "  categories: numbered\n  feed: true\n" in blog and blog.endswith("---\n\nEvery post.\n")
+    assert "    in-place: true\n" in blog and "category-links" not in blog
+    assert "<category>PyTorch</category>" in feed and "<category>notes</category>" not in feed
+    # (the fixture has Quarto's own title block, which renders the chips the filter set as labels)
+    assert '<div class="quarto-category">PyTorch</div>' in head_a and ">notes</div>" not in head_a
+    assert 'class="quarto-category"' not in head_c
     assert series_items == ["Post B", "Post A", "Post C"]
     # The page file's mtime IS its derived date-modified (Quarto's sitemap lastmod reads it)
     from datetime import datetime, timezone
@@ -214,7 +284,7 @@ def test_series_and_topic_pages_are_projected_and_rendered(tmp_path):
     assert "  sort-ui:\n  - title\n  - date\n  filter-ui:\n  - date\n  - title\n  - description\n" in topic
     assert topic_items == ["Post B", "Post C", "Post A"]
     assert staged == ["Draft D", "Post B", "Post C", "Post A"]
-    assert again["ok"] and again["pages"]["written"] == 1 and again["pages"]["unchanged"] == 1
+    assert again["ok"] and again["pages"]["written"] == 1 and again["pages"]["unchanged"] == 2
     assert [e["kind"] for e in broken["errors"]] == ["series-order"]
     assert bad.get("error") and not bad["written"]
     assert typed == {"type": "archive-notes", "kind": "notes", "origin": "archive"}
@@ -233,6 +303,22 @@ def test_an_unlinked_listing_chip_fails_the_build(tmp_path):
     (tmp_path / "s" / "b.html").write_text('<div class="listing-category">y</div>')
     got = check_listing_chips(str(tmp_path), ["s/a.qmd", "s/b.qmd", "s/gone.qmd"])
     assert [(e["kind"], e["source"], e["chips"]) for e in got] == [("chip-unlinked", "s/b.qmd", 1)]
+
+
+def test_the_category_listing_lists_every_public_post():
+    # Design ce17606b (3): one category-listing page, at the page the site config names, listing
+    # every public post under the public profile -- a post it left out is reachable from no chip
+    types = {"a": {"kind": "notes", "origin": "archive"}, "t": {"kind": "tutorial", "origin": "archive"},
+             "s": {"kind": "site", "origin": "archive"}, "r": {"kind": "notes", "origin": "archive"},
+             "d": {"kind": "notes", "origin": "born"}}
+    states = {"r": ["retired"], "d": ["draft"]}
+    page = {"layout": "category-listing", "subject": "blog", "href": "/blog.html", "listed": ["a"]}
+    got = check_category_listing([page], "/blog.html", "public", states, types)
+    assert [(e["kind"], e.get("missing")) for e in got] == [("category-listing-incomplete", ["t"])]
+    assert check_category_listing([page], "/blog.html", "staging", states, types) == []
+    off = check_category_listing([page, {**page, "subject": "b2", "href": "/b2.html"}],
+                                 "/blog.html", "staging", states, types)
+    assert [e["kind"] for e in off] == ["category-listing", "category-listing"]
 
 
 def test_a_lens_grouped_by_series_lists_each_series_page_once():

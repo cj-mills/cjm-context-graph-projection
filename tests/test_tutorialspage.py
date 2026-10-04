@@ -83,6 +83,10 @@ def test_learning_paths_are_all_tutorial_collections_and_a_mix_refuses():
     mixed = learning_paths(planned + [{"source": "series/x.qmd", "subject": "X", "listed": ["t1", "n1"]}],
                            types, "series/tutorials/index.qmd")
     assert [(e["kind"], e["subject"]) for e in mixed["errors"]] == [("learning-path-mixed", "X")]
+    # the category listing lists every kind, and is no collection (design ce17606b (3))
+    every = learning_paths(planned + [{"source": "blog.qmd", "subject": "L", "listed": ["t1", "n1"],
+                                       "layout": "category-listing"}], types, "series/tutorials/index.qmd")
+    assert every == ok
 
 
 def _post(title: str, day: str) -> str:
@@ -132,6 +136,16 @@ def test_the_matrix_lens_projects_the_tutorials_page(tmp_path):
             await _assert(gx, lens_node_id("tutorials"), "site_path", "/series/tutorials/", raw=True)
             kinds = await list_graph(gx, label="Note", deliverable_kind="tutorial")
             wrong = await list_graph(gx, label="Series", deliverable_kind="tutorial")
+            # predicate mode keeps the facts about deliverables of the kind (a facet Lens, design ce17606b (5))
+            about = await list_graph(gx, predicate=P.TEACHES_STAGE, value="training", deliverable_kind="tutorial")
+            none = await list_graph(gx, predicate=P.TEACHES_STAGE, value="training", deliverable_kind="notes")
+            # one matrix cell: a second fact on the same subject narrows the first (design ce17606b (5))
+            cell = await list_graph(gx, predicate=P.TEACHES_STAGE, value="setup", deliverable_kind="tutorial",
+                                    subject_has=[f"{P.TEACHES_TASK}=general"])
+            off = await list_graph(gx, predicate=P.TEACHES_STAGE, value="training",
+                                   subject_has=[f"{P.TEACHES_TASK}=general"])
+            bad_term = await list_graph(gx, predicate=P.TEACHES_STAGE, subject_has=["general"])
+            in_label = await list_graph(gx, label="Note", subject_has=[f"{P.TEACHES_TASK}=general"])
             await set_lens(gx, "cut", {"selection": [{"verb": "list", "args": {"label": "Note", "limit": 1}}]})
             cut = await apply_lens(gx, "cut")
             pages = (await redirect_plan(gx))["pages"]
@@ -140,21 +154,28 @@ def test_the_matrix_lens_projects_the_tutorials_page(tmp_path):
             # A tutorial with no task fact refuses the page, never drops from it
             await _assert(gx, "n", "deliverable_type", "archive-tutorial", supersede=["archive-notes"])
             refused = await page_plan(gx, str(root), "public", pages, drafts_dir=None)
-            return kinds, wrong, cut, pub, stg, refused
-    kinds, wrong, cut, pub, stg, refused = asyncio.run(go())
+            return kinds, wrong, about, none, cell, off, bad_term, in_label, cut, pub, stg, refused
+    kinds, wrong, about, none, cell, off, bad_term, in_label, cut, pub, stg, refused = asyncio.run(go())
     assert sorted(r["id"] for r in kinds["rows"]) == sorted([note_node_id("yolo"), note_node_id("env")])
-    assert "label mode with --label Note only" in wrong["error"]
+    assert "label mode with --label Note, or predicate mode" in wrong["error"]
+    assert [r["subject_id"] for r in about["rows"]] == [note_node_id("yolo")] and none["rows"] == []
+    assert [r["subject_id"] for r in cell["rows"]] == [note_node_id("env")] and off["rows"] == []
+    assert "PRED=VALUE" in bad_term["error"] and "predicate mode only" in in_label["error"]
     assert "a truncated selection never lands" in cut["error"]
     assert pub["errors"] == []
     page = next(p for p in pub["pages"] if p["source"] == "series/tutorials/index.qmd")
     text = page["text"]
     assert text.startswith(f"---\n{GENERATED}\ntitle: Tutorials\ndescription: By task and stage.\n")
     assert "date-modified: '2024-01-01'" in text and "page-layout: full" in text
-    assert "listing:\n  id: learning-paths\n" in text and "  contents:\n  - det.qmd\n" in text
+    # a path's chips are its Series page's: what most of its members carry -- a tutorial's teaches_*
+    # facts, the matrix's structural rows never (design ce17606b (1), (4))
+    assert "listing:\n  id: learning-paths\n" in text
+    assert "  contents:\n  - path: det.qmd\n    categories:\n    - Object detection\n    - Training\n" in text
     assert "  categories: false\n" in text   # no sidebar: it read as the grid's filter (15e7b315)
     # its chips link into the category listing, through the site listing template (design a7224060)
     assert "  template: ../../_derived/listing-default.ejs.md\n" in text
-    assert "    category-links:\n      object-detection: /blog.html#category=object-detection\n" in text
+    assert ("    category-links:\n      Object detection: /blog.html#category=Object%20detection\n"
+            "      Training: /blog.html#category=Training\n") in text
     assert "[1](#object-detection-training)" in text and "(#general-setup){.covered-mark}" in text
     assert "_(Tested on RTX 4090, Ubuntu)_" in text and "[timeline]" not in text
     assert "About Train YOLOX." in text and "A Note" not in text

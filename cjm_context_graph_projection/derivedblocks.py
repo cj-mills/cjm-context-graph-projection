@@ -364,11 +364,17 @@ async def derived_plan(
     root = Path(website_root).resolve()
     rendered = {Path(d).resolve().relative_to(root).as_posix() for d in inputs}
     notes = {str(F.nid(n)): n for n in await F.load_label(gx, DevNodeKinds.NOTE)}
+    # A retired source is never rendered (e916a4b9 (3)), though a projected page may now render at
+    # its old path (the hand blog page's blog.qmd, design ce17606b (3))
+    from .archive import is_retired
+    from .purenotes import note_publish_states
+    states = await note_publish_states(gx)
     src_of: Dict[str, str] = {}
     for nid, n in notes.items():
         raw = F.prop(n, "path")
         p = Path(str(raw)).resolve() if raw else None
-        if p is not None and p.is_relative_to(root) and p.relative_to(root).as_posix() in rendered:
+        if (p is not None and p.is_relative_to(root) and p.relative_to(root).as_posix() in rendered
+                and not is_retired(nid, states)):
             src_of[nid] = p.relative_to(root).as_posix()
     posts: Dict[str, Dict[str, Any]] = {}
     errors: List[Dict[str, Any]] = []
@@ -401,7 +407,10 @@ async def derived_plan(
         posts.setdefault(src_of[nid], {"drop": [], "nav": "", "end": ""})["drop"].append(drop)
     series_nav: Dict[str, Dict[str, Any]] = {}
     collections: Dict[str, List[Dict[str, str]]] = {}
+    from .sitepages import CATEGORY_LAYOUT
     for page in planned_pages:
+        if page.get("layout") == CATEGORY_LAYOUT:
+            continue   # every post is on the category listing: no collection one belongs to (ce17606b (3))
         members = [m for m in page["listed"] if m in src_of]
         if page.get("sequence"):
             # A Series page walks its members in order; a work page walks the outputs of one
@@ -499,13 +508,16 @@ async def derived_plan(
     facts = await header_facts(gx)
     listing = load_category_listing(website_root)   # where a post's categories link (amendment of 0858bbd0)
     errors += listing["errors"]
+    from .categories import load_post_categories
+    chips = await load_post_categories(gx)   # a post's categories are the graph's (design ce17606b (1))
+    errors += chips["errors"]
     heads = linked = 0
     for nid, src in src_of.items():
         t = types.get(nid) or {}
         if t.get("kind") not in POST_KINDS:
             continue
         meta = header_meta(t["kind"], t.get("origin", ""), F.prop(notes[nid], "metadata") or {},
-                           facts.get(nid, {}), listing["href"])
+                           facts.get(nid, {}), listing["href"], categories=chips["posts"].get(nid, []))
         if meta["set"] or meta["unset"]:
             posts.setdefault(src, {"drop": [], "nav": "", "end": ""})["meta"] = meta
             heads += 1

@@ -123,12 +123,14 @@ def load_holder(
 
 
 def load_category_listing(
-    website_root: str,  # The site project root
+    website_root: str,              # The site project root
+    projected: Iterable[str] = (),  # Page sources this build projects (relative to the root)
 ) -> Dict[str, Any]:  # {href, errors} -- href "" when the site config names no category listing
     """The listing a post's categories link into (`category-listing` in the site config: a listing
     page's source path, amendment of 0858bbd0), as the page path the listing opens filtered at by
     `#category=<name>`. Absent = the categories stay labels (a site with no category listing has
-    nowhere to link them); a named page the project does not hold refuses."""
+    nowhere to link them); a named page the project neither holds nor projects (the category
+    listing is a projected page, design ce17606b (3)) refuses."""
     path = Path(website_root) / "_quarto.yml"
     try:
         named = str((yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get(CATEGORY_LISTING_KEY) or "").strip()
@@ -136,14 +138,14 @@ def load_category_listing(
         return {"href": "", "errors": [{"kind": CATEGORY_LISTING_KEY, "path": str(path), "why": f"unreadable: {e}"}]}
     if not named:
         return {"href": "", "errors": []}
-    if not (Path(website_root) / named).is_file():
+    if not (Path(website_root) / named).is_file() and named not in set(projected):
         return {"href": "", "errors": [{"kind": CATEGORY_LISTING_KEY, "path": named,
                                         "why": "the site config's category listing names no page in the project"}]}
     return {"href": "/" + named.rsplit(".", 1)[0] + ".html", "errors": []}
 
 
 def category_links(
-    categories: Any,    # The post's front-matter `categories` (a list, or one string)
+    categories: Any,    # The post's categories (its chips, categories.load_post_categories; a list, or one string)
     listing_href: str,  # load_category_listing's href ("" = none)
 ) -> List[Dict[str, str]]:  # [{name, href}] in the post's own order ([] without a listing)
     """Each category as a link to the category listing filtered to it: Quarto's listing script
@@ -304,11 +306,14 @@ def header_meta(
     metadata: Dict[str, Any],       # The source's front matter (the Note's metadata)
     facts: Dict[str, str],          # header_facts' entry for this Note
     listing_href: str = "",         # The category listing's page path (load_category_listing; "" = none)
+    categories: Optional[List[str]] = None,  # The post's chips (categories.load_post_categories; None = none)
 ) -> Dict[str, Any]:  # {set: {meta key: value}, unset: [meta keys]} for the render filter
     """The header's projected metadata (39c51c15 (2)): the kind label; a born post's date is its
     publication's (a draft shows none and says so); Updated is the latest revision when it is
     newer than the source's own date-modified (an archive post keeps its front matter); and the
-    categories as links into the category listing (amendment of 0858bbd0)."""
+    categories -- the graph's, never the front matter's (design ce17606b (2)) -- as links into the
+    category listing (amendment of 0858bbd0). A post with no chip shows none, whatever its front
+    matter lists."""
     from .sitepages import parse_date
     label = KIND_LABELS.get(kind, "")
     out: Dict[str, Any] = {"set": {}, "unset": []}
@@ -323,7 +328,11 @@ def header_meta(
     own = parse_date(metadata.get("date-modified"))
     if facts.get("revised") and (own is None or facts["revised"] > own.isoformat()):
         out["set"]["date-modified"] = display_date(facts["revised"])
-    links = category_links(metadata.get("categories"), listing_href)
+    if categories:
+        out["set"]["categories"] = list(categories)
+    elif metadata.get("categories"):
+        out["unset"].append("categories")
+    links = category_links(categories or [], listing_href)
     if links:
         out["set"][CATEGORY_META] = links
     return out

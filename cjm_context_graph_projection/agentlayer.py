@@ -438,9 +438,14 @@ async def agent_plan(
                   for n, s in sorted(src_of.items(), key=lambda x: x[1])
                   if (types.get(n) or {}).get("kind") == "site"
                   and posixpath.splitext(s)[0] + ".html" not in EXCLUDED_PAGES]
+    # The category listing is a site page, not a collection (design ce17606b (3)): it lists every
+    # post, and its Lens's description is the page's lead paragraph, no summary of it
+    from .sitepages import CATEGORY_LAYOUT
+    site_pages += [{"title": p["title"], "source": p["source"], "description": ""}
+                   for p in planned_pages if p.get("layout") == CATEGORY_LAYOUT]
     index = llms_index(
         str(site.get("title") or ""), site_url, copy["copy"], site_pages,
-        [page_item(p) for p in planned_pages if not p.get("sequence")],
+        [page_item(p) for p in planned_pages if not p.get("sequence") and p.get("layout") != CATEGORY_LAYOUT],
         [page_item(p) for p in planned_pages if p.get("sequence")],
         {n: {"title": stated(n, "title"), "source": src_of[n], "description": stated(n, "description"),
              "kind": posts[n]["kind"], "date": (dates.get(n) or {}).get("published") or ""}

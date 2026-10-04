@@ -88,6 +88,8 @@ def test_categories_link_into_the_listing_the_site_config_names(tmp_path):
     assert load_category_listing(str(tmp_path)) == {"href": "", "errors": []}
     (tmp_path / "_quarto.yml").write_text("category-listing: blog.qmd\n")
     assert load_category_listing(str(tmp_path))["errors"][0]["kind"] == "category-listing"
+    # a page this build projects holds it too (the category listing is a Lens page, design ce17606b (3))
+    assert load_category_listing(str(tmp_path), projected=["blog.qmd"]) == {"href": "/blog.html", "errors": []}
     (tmp_path / "blog.qmd").write_text("---\ntitle: Blog\n---\n")
     href = load_category_listing(str(tmp_path))["href"]
     assert href == "/blog.html"
@@ -97,9 +99,13 @@ def test_categories_link_into_the_listing_the_site_config_names(tmp_path):
         {"name": "a&b", "href": "/blog.html#category=a%26b"}]
     assert category_links("solo", href) == [{"name": "solo", "href": "/blog.html#category=solo"}]
     assert category_links(["x"], "") == [] and category_links(None, href) == []
-    meta = header_meta("tutorial", "archive", {"categories": ["pytorch"]}, {}, href)
-    assert meta["set"][CATEGORY_META] == [{"name": "pytorch", "href": "/blog.html#category=pytorch"}]
-    assert CATEGORY_META not in header_meta("tutorial", "archive", {"categories": ["pytorch"]}, {})["set"]
+    # The header's categories are the graph's chips, never the front matter's (design ce17606b (2))
+    meta = header_meta("tutorial", "archive", {"categories": ["old"]}, {}, href, categories=["PyTorch"])
+    assert meta["set"]["categories"] == ["PyTorch"]
+    assert meta["set"][CATEGORY_META] == [{"name": "PyTorch", "href": "/blog.html#category=PyTorch"}]
+    assert CATEGORY_META not in header_meta("tutorial", "archive", {}, {}, categories=["PyTorch"])["set"]
+    bare = header_meta("tutorial", "archive", {"categories": ["old"]}, {}, href)
+    assert bare["unset"] == ["categories"] and "categories" not in bare["set"] and CATEGORY_META not in bare["set"]
 
 
 def test_related_posts_tiers_reasons_and_exclusions():

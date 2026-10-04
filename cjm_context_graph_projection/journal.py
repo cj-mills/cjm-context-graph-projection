@@ -465,7 +465,8 @@ async def _apply_op(
         # A page's active path moved to another holder (e916a4b9 (4)): the same cross-slot
         # supersession, re-landed in append order.
         from .archive import transfer_site_path
-        await transfer_site_path(gx, a["from"], a["to"], actor=a.get("actor", "agent:session"))
+        await transfer_site_path(gx, a["from"], a["to"], actor=a.get("actor", "agent:session"),
+                                 merge=bool(a.get("merge")))
     else:
         return ""
     return verb

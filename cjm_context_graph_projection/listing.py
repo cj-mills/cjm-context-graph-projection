@@ -105,13 +105,16 @@ async def _list_label(gx: GraphHandle, label: str, limit: int, offset: int = 0,
 
 async def _list_predicate(gx: GraphHandle, predicate: str, limit: int, offset: int = 0,
                           value: Optional[str] = None,
-                          contains: Optional[str] = None) -> Dict[str, Any]:
+                          contains: Optional[str] = None,
+                          only: Optional[set] = None) -> Dict[str, Any]:
     """Every ACTIVE assertion of `predicate` (subject + value + actor), across all slots.
 
     The readiness-ground-truth read: `list --predicate task_state` shows each work-item's
     current state. Only non-superseded assertions are reported (the slot's live value).
     `value` narrows to assertions carrying that value — the register read
-    (`list --predicate role --value north-star` = the cohort's subjects). Axis-D
+    (`list --predicate role --value north-star` = the cohort's subjects); `only` keeps
+    the assertions about those subjects (the deliverable-kind filter: a Lens selecting
+    the notes that carry a facet, design ce17606b (5)). Axis-D
     parity (dc47dfb5): rows are labelled + sorted BEFORE the window, so `--offset`
     pages deterministically and `--contains` (subject/value substring) filters the
     class — every mode is fully enumerable, never capped at one silent page."""
@@ -123,6 +126,8 @@ async def _list_predicate(gx: GraphHandle, predicate: str, limit: int, offset: i
         if active and F.prop(active[0], "predicate") == predicate:
             for a in active:
                 if value is not None and str(F.prop(a, "value")) != value:
+                    continue
+                if only is not None and str(F.prop(a, "subject_id")) not in only:
                     continue
                 hits.append({"subject_id": F.prop(a, "subject_id"),
                              "value": F.prop(a, "value"), "actor": F.prop(a, "actor")})
@@ -174,7 +179,8 @@ async def list_graph(
     where: Optional[List[str]] = None,  # Label mode: `PROP=VALUE` property filters (repeatable, ANDed, server-side)
     value: Optional[str] = None,      # Predicate mode: keep only assertions with this value (the register read)
     full: bool = False,               # Label mode: carry each node's body text (the batch body read, 1d8d4486)
-    deliverable_kind: Optional[str] = None,  # Label mode (Note): only deliverables whose type's kind is this (design 7f200ecb)
+    deliverable_kind: Optional[str] = None,  # Label mode (Note), or predicate mode (the subjects): only deliverables whose type's kind is this (designs 7f200ecb, ce17606b (5))
+    subject_has: Optional[List[str]] = None,  # Predicate mode: keep an assertion only when its subject also holds each active PRED=VALUE fact (ANDed; design ce17606b (5))
 ) -> Dict[str, Any]:  # {mode, key, rows, count, total, truncated} or {error}
     """Enumerate one CLASS of the graph: nodes by label / assertions by predicate / edges
     by relation. Exactly one of `label`/`predicate`/`relation` selects the mode; `total`
@@ -195,14 +201,26 @@ async def list_graph(
     only = None
     if deliverable_kind is not None:
         from cjm_dev_graph_schema.vocab import DevNodeKinds
-        if mode != "label" or key != DevNodeKinds.NOTE:
-            return {"error": "--deliverable-kind filters Notes — label mode with --label Note only"}
+        if mode == "relation" or (mode == "label" and key != DevNodeKinds.NOTE):
+            return {"error": "--deliverable-kind filters Notes — label mode with --label Note, or "
+                             "predicate mode (the assertions' subjects)"}
         from .purenotes import note_types
         only = {nid for nid, t in (await note_types(gx)).items() if t.get("kind") == deliverable_kind}
+    if subject_has:
+        # A Lens selecting a matrix CELL (two facts on one subject): clauses union, so the second
+        # fact narrows the first through the verb's own argument (design ce17606b (5))
+        if mode != "predicate":
+            return {"error": "--subject-has filters the assertions' subjects — predicate mode only"}
+        for term in subject_has:
+            pred, sep, val = str(term).partition("=")
+            if not (sep and pred and val):
+                return {"error": f"--subject-has takes PRED=VALUE (got {term!r})"}
+            held = {str(r["subject_id"]) for r in (await _list_predicate(gx, pred, 1 << 30, value=val))["rows"]}
+            only = held if only is None else only & held
     if mode == "label":
         return await _list_label(gx, key, limit, offset=offset, contains=contains,
                                  where=preds, full=full, only=only)
     if mode == "predicate":
         return await _list_predicate(gx, key, limit, offset=offset, value=value,
-                                     contains=contains)
+                                     contains=contains, only=only)
     return await _list_relation(gx, key, limit, offset=offset, contains=contains)

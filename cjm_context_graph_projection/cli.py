@@ -591,7 +591,7 @@ async def _dispatch(args) -> int:
                                    relation=args.relation, limit=args.limit,
                                    offset=args.offset, contains=args.contains,
                                    where=args.where, value=args.value, full=args.full,
-                                   deliverable_kind=args.deliverable_kind)
+                                   deliverable_kind=args.deliverable_kind, subject_has=args.subject_has)
             print(render("list", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "conventions":
@@ -1112,11 +1112,12 @@ async def _dispatch(args) -> int:
             # A page's active path moves to another holder (e916a4b9 (4)): the op carries the
             # resolved ids, so replay never depends on prefix resolution.
             from .archive import transfer_site_path
-            res = await transfer_site_path(gx, args.source, args.target, actor=args.actor)
+            res = await transfer_site_path(gx, args.source, args.target, actor=args.actor, merge=args.merge)
             print(render("transfer-path", res, args.format))
             if args.journal_path and res.get("written"):
                 append_write(args.journal_path, "transfer-path",
-                             {"from": res["from_id"], "to": res["to_id"], "actor": args.actor})
+                             {"from": res["from_id"], "to": res["to_id"], "actor": args.actor,
+                              **({"merge": True} if args.merge else {})})
             return 1 if res.get("error") else 0
         elif args.command == "claims":
             from .claims import claims_report
@@ -3400,6 +3401,9 @@ def main() -> int:
                                "target asserts it and supersedes the source's across slots")
     p_tp.add_argument("source", help="The node losing the path (id or prefix)")
     p_tp.add_argument("target", help="The node taking it (id or prefix)")
+    p_tp.add_argument("--merge", action="store_true",
+                      help="The source's page merges into the target's: the target keeps its own active "
+                           "path, and the source's URL redirects to it (design ce17606b (6))")
     p_tp.add_argument("--actor", default=_DEFAULT_ACTOR)
     p_clm = sub.add_parser("claims",
                            help="Every claim with its state and its backing by kind, refusing a claim with no "
@@ -3457,8 +3461,13 @@ def main() -> int:
                       help="Label mode: untruncated title/gloss + each node's body text "
                            "(statement/description) — the batch body read (1d8d4486)")
     p_ls.add_argument("--deliverable-kind", default=None,
-                      help="Label mode, --label Note: only deliverables whose type's kind is this "
-                           "(tutorial, notes, ...; design 7f200ecb)")
+                      help="Label mode with --label Note, or predicate mode (the assertions' subjects): "
+                           "only deliverables whose type's kind is this (tutorial, notes, ...; designs "
+                           "7f200ecb, ce17606b)")
+    p_ls.add_argument("--subject-has", action="append", metavar="PRED=VALUE",
+                      help="Predicate mode: keep an assertion only when its subject also holds this "
+                           "active fact (repeatable, ANDed — e.g. --predicate teaches_stage --value setup "
+                           "--subject-has teaches_task=general: one matrix cell; design ce17606b)")
 
     p_wl = sub.add_parser("worklist", help="Propose/confirm queue (dangling refs, soft conflicts)")
     p_wl.add_argument("--memory-dir", default=DEFAULT_MEMORY,

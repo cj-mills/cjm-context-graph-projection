@@ -15,7 +15,11 @@ node's data through one template per node kind:
 - a Lens whose view layout is `coverage-matrix` projects the Tutorials page instead
   (tutorialspage.py, design 7f200ecb): the grid, the learning paths, the tutorials by task;
 - a Lens whose view layout is `library` projects the Library index instead, with a work page
-  for every work with units (librarypage.py, design 638b7b85).
+  for every work with units (librarypage.py, design 638b7b85);
+- a Lens whose view layout is `category-listing` projects the site's CATEGORY LISTING (design
+  ce17606b (3)), the page every chip links into: every public post, the numbered category
+  sidebar and the feed, no title block; under the public profile a public post it leaves out
+  refuses the page.
 
 A Series page and a work page are ORDERED collections (`sequence` on the planned entry): the
 post navigation, JSON-LD isPartOf and llms.txt walk them in order (638b7b85 (5)).
@@ -23,12 +27,17 @@ post navigation, JSON-LD isPartOf and llms.txt walk them in order (638b7b85 (5))
 A RETIRED source (publish_state retired, design amendment e916a4b9) is never listed, under
 any profile.
 
-Nothing per-page lives in a template: title, description, image, categories (the Series' TAGGED
-topics) and dates come from the graph, and `date-modified` is DERIVED as the newest updated date
+Nothing per-page lives in a template: title, description, image, categories (a Series page's are
+the ones MORE THAN HALF of its listed members carry, design ce17606b (4)) and dates come from the
+graph, and `date-modified` is DERIVED as the newest updated date
 (a literal `date-modified`, else `date`) among the members the page lists. The public profile
 lists only public members (a publish_state of `published`, or none on a Note of an archive
 type, design amendment c64e07e7); staging lists the drafts too, and a member neither rule
 decides refuses the page.
+
+Every listed item carries its categories as listing metadata, which Quarto merges over the
+file's own (design ce17606b (3)): a post's chips are the graph's (categories.py), never its front
+matter's -- an item with none states an empty list.
 
 Every generated page opens its front matter with the GENERATED marker. A projection removes a
 marked page it no longer plans (a moved or retired page) and REFUSES to write over an unmarked
@@ -41,10 +50,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
-from cjm_context_graph_layer.ops import graph_task
-from cjm_context_graph_primitives.query import EdgeQuery
 from cjm_dev_graph_schema import predicates as P
-from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
+from cjm_dev_graph_schema.vocab import DevNodeKinds
 
 from . import factlayer as F
 from .archive import is_retired
@@ -66,6 +73,12 @@ SERIES_LISTING = {"sort": False, "type": "default", "categories": False,
 LENS_LISTING = {"type": "default", "categories": False,
                 "sort-ui": ["title", "date"], "filter-ui": ["date", "title", "description"], "fields": FIELDS}
 GROUP_SERIES = "series"   # view.group_by: a member listed through its Series page (design 7657c4a5 (1))
+# The site's category listing (design ce17606b (3)): the hand blog page's listing options, named as
+# a Lens page names them (the site listing template is a custom listing to Quarto, a7224060)
+CATEGORY_LAYOUT = "category-listing"
+CATEGORY_LISTING = {"type": "default", "categories": "numbered", "feed": True,
+                    "sort-ui": ["title", "date"], "filter-ui": ["date", "title", "description"],
+                    "fields": ["date", "title", "categories", "description"]}
 # Every projected listing renders through the SITE LISTING TEMPLATE (design a7224060): Quarto's
 # default listing with each category chip a link into the category listing, every href planned by
 # the build. Written into the git-ignored _derived/ beside the derived-blocks filter; each page
@@ -76,10 +89,14 @@ LISTING_TEMPLATE = r'''<%
 // Quarto 1.10's default listing and item templates (listing-default.ejs.md + item-default.ejs.md)
 // with ONE change: a category chip is a link into the category listing, filtered to it -- the
 // build plans every href (templateParams['category-links']); a category it planned none for is a
-// label. A custom template gets no `listing`, so the fields come in templateParams too, and the
+// label. On the category listing itself (templateParams['in-place'], design ce17606b (3)) a chip
+// keeps Quarto's in-place filter: its script reads the hash on load only, so a link to the same
+// page would change the URL and filter nothing. A custom template gets no `listing`, so the
+// fields come in templateParams too, and the
 // image block is left out (no projected listing shows images).
 const fields = templateParams.fields || [];
 const links = templateParams['category-links'] || {};
+const inPlace = templateParams['in-place'] || false;
 const otherFields = fields.filter(field => {
 return !["title", "image", "image-alt", "date", "author", "subtitle", "description", "reading-time", "categories"].includes(field);
 });
@@ -100,12 +117,12 @@ return !["title", "image", "image-alt", "date", "author", "subtitle", "descripti
 <% } %>
 <% } %>
 
-<% if (fields.includes('categories') && item.categories) { %>
+<% if (fields.includes('categories') && item.categories && item.categories.length) { %>
 
 ```{=html}
 <div class="listing-categories">
 <% for (const category of item.categories) { %>
-<% if (links[category]) { %><a class="listing-category" href="<%= links[category] %>"><%= category %></a><% } else { %><div class="listing-category"><%= category %></div><% } %>
+<% if (inPlace) { %><div class="listing-category" onclick="window.quartoListingCategory('<%= utils.b64encode(category) %>'); return false;"><%= category %></div><% } else if (links[category]) { %><a class="listing-category" href="<%= links[category] %>"><%= category %></a><% } else { %><div class="listing-category"><%= category %></div><% } %>
 <% } %>
 </div>
 ```
@@ -229,9 +246,10 @@ def is_public(
 
 def render_page(
     front: Dict[str, Any],  # The page's front matter, in order
-) -> str:  # The page file: the GENERATED marker, the front matter, no body
-    body = yaml.safe_dump(front, sort_keys=False, allow_unicode=True, width=10_000)
-    return f"---\n{GENERATED}\n{body}---\n"
+    body: str = "",         # The page's body, markdown ("" = none)
+) -> str:  # The page file: the GENERATED marker, the front matter, the body
+    head = yaml.safe_dump(front, sort_keys=False, allow_unicode=True, width=10_000)
+    return f"---\n{GENERATED}\n{head}---\n" + (f"\n{body.strip()}\n" if body.strip() else "")
 
 
 def is_generated(
@@ -244,25 +262,6 @@ def is_generated(
         return False
 
 
-async def _tagged_topics(
-    gx: GraphHandle,
-    ids: List[str],  # Series ids
-) -> Dict[str, List[str]]:  # Series id -> its topic keys, sorted
-    if not ids:
-        return {}
-    res = await graph_task(gx.queue, gx.graph_id, "query_edges",
-                           query=EdgeQuery(source_ids=ids, relation_type=DevRelations.TAGGED).to_dict())
-    raw = getattr(res, "edges", None) or getattr(res, "rows", None) or []
-    rows = [e.to_dict() if hasattr(e, "to_dict") else dict(e) for e in raw]
-    topics = await F.load_nodes(gx, sorted({str(r["target_id"]) for r in rows}))
-    out: Dict[str, List[str]] = {}
-    for r in rows:
-        key = F.prop(topics.get(str(r["target_id"])), "key")
-        if key:
-            out.setdefault(str(r["source_id"]), []).append(str(key))
-    return {k: sorted(set(v)) for k, v in out.items()}
-
-
 def _listed(
     members: List[Any],        # Member Note nodes, in listing order
     page_src: str,             # The page's source, relative to the root
@@ -272,10 +271,12 @@ def _listed(
     types: Dict[str, Dict[str, Any]],
     drafts: Optional[Path],    # The drafts tree (resolved), never listed on the public profile
     subject: str,              # The page's node id (error rows name it)
+    post_cats: Optional[Dict[str, List[str]]] = None,  # categories.load_post_categories' posts (None = none read)
 ) -> Dict[str, Any]:  # {contents, ids, updated, cats, errors}
     """The members a page lists under the profile, as contents paths relative to the page (and
     their note ids, in the same order: the post navigation's members, 253ac996 (3)), and the
-    categories each listed source carries (its chips' links, design a7224060)."""
+    categories each listed source carries -- the graph's, never its front matter's (design
+    ce17606b (1))."""
     contents: List[str] = []
     ids: List[str] = []
     cats: Dict[str, List[str]] = {}
@@ -306,7 +307,7 @@ def _listed(
         contents.append(posixpath.relpath(src.relative_to(root).as_posix(),
                                           posixpath.dirname(page_src) or "."))
         ids.append(nid)
-        cats[src.relative_to(root).as_posix()] = categories_of((F.prop(n, "metadata") or {}).get("categories"))
+        cats[src.relative_to(root).as_posix()] = list((post_cats or {}).get(nid) or [])
         d = member_updated(n)
         if d is not None:
             dates.append(d)
@@ -334,6 +335,49 @@ def _front(
     return front
 
 
+def _category_front(
+    node: Any,                # The category-listing Lens node
+    listing: Dict[str, Any],  # CATEGORY_LISTING + this page's contents
+) -> Dict[str, Any]:
+    """The category listing's front matter (design ce17606b (3)): no title block -- the Lens's
+    title names the browser tab -- and the full page layout its category sidebar needs."""
+    return {"pagetitle": F.prop(node, "title") or F.prop(node, "key"), "page-layout": "full",
+            "title-block-banner": False, "listing": listing}
+
+
+def check_category_listing(
+    planned: List[Dict[str, Any]],      # Every planned page
+    listing_href: str,                  # The category listing the site config names ("" = none)
+    profile: str,                       # public | staging
+    states: Dict[str, List[str]],
+    types: Dict[str, Dict[str, Any]],
+) -> List[Dict[str, Any]]:  # Error rows
+    """The category listing a Lens projects (design ce17606b (3)) is the page every chip links
+    into: one such page, at the path the site config names, and under the public profile it lists
+    EVERY public post -- a post it left out would be reachable from no chip (a wrong exclusion
+    hides content, 6752db0a (9))."""
+    from .postpage import POST_KINDS
+    pages = [p for p in planned if p.get("layout") == CATEGORY_LAYOUT]
+    errors: List[Dict[str, Any]] = []
+    if len(pages) > 1:
+        errors.append({"kind": "category-listing", "subjects": [p["subject"] for p in pages],
+                       "why": "two Lenses project the category listing"})
+    for p in pages:
+        if listing_href and p["href"] != listing_href:
+            errors.append({"kind": "category-listing", "subject": p["subject"], "href": p["href"],
+                           "named": listing_href,
+                           "why": "a category-listing Lens lands off the page the site config names"})
+        if profile != "public":
+            continue
+        listed = set(p["listed"])
+        missing = sorted(n for n, t in types.items() if t.get("kind") in POST_KINDS and n not in listed
+                         and not is_retired(n, states) and is_public(n, states, types))
+        if missing:
+            errors.append({"kind": "category-listing-incomplete", "subject": p["subject"], "missing": missing,
+                           "why": "the category listing leaves out public posts; its selection must cover every post kind"})
+    return errors
+
+
 async def page_plan(
     gx: GraphHandle,
     website_root: str,                  # The site project root
@@ -350,12 +394,15 @@ async def page_plan(
     types = await note_types(gx)
     series = await F.load_label(gx, DevNodeKinds.SERIES)
     lenses = await F.load_label(gx, LENS_LABEL)
-    topics = await _tagged_topics(gx, [str(F.nid(s)) for s in series])
+    from .categories import load_post_categories, majority
+    chips = await load_post_categories(gx)   # every post's categories, the graph's (design ce17606b (1))
     planned: List[Dict[str, Any]] = []
     unpaged: List[str] = []
     from .postpage import load_category_listing
-    category = load_category_listing(website_root)   # where every chip links (design a7224060)
-    errors: List[Dict[str, Any]] = list(category["errors"])
+    # where every chip links (design a7224060); the listing may be a page this build projects (ce17606b (3))
+    category = load_category_listing(website_root, projected={page_source(p["active"]) for p in pages.values()
+                                                              if p.get("active")})
+    errors: List[Dict[str, Any]] = list(category["errors"]) + list(chips["errors"])
     matrix_pages: List[Any] = []   # coverage-matrix Lenses, planned after every collection page
     library_pages: List[Any] = []  # the library Lens, planned after them all (its topic line reads them)
     for kind, nodes in ((DevNodeKinds.SERIES, series), (LENS_LABEL, lenses)):
@@ -380,7 +427,7 @@ async def page_plan(
                 members = list((await F.load_nodes(gx, [m["id"] for m in order["members"]])).values())
                 by_id = {str(F.nid(n)): n for n in members}
                 members = [by_id[m["id"]] for m in order["members"] if m["id"] in by_id]
-                listing, cats, group = dict(SERIES_LISTING), topics.get(sid), None
+                listing, cats, group, layout = dict(SERIES_LISTING), None, None, None
             else:
                 applied = await apply_lens(gx, key)
                 if applied.get("error") or applied.get("truncated"):
@@ -397,7 +444,8 @@ async def page_plan(
                     # The Library index (design 638b7b85): its work pages are planned with it
                     library_pages.append((node, {"source": src, "href": page["active"]}))
                     continue
-                listing, cats = dict(LENS_LISTING), None
+                layout = (applied.get("view") or {}).get("layout")
+                listing, cats = dict(CATEGORY_LISTING if layout == CATEGORY_LAYOUT else LENS_LISTING), None
                 sort = (applied.get("view") or {}).get("sort")
                 if sort:
                     listing = {"sort": list(sort), **listing}
@@ -406,22 +454,30 @@ async def page_plan(
                     errors.append({"kind": "lens-group", "subject": sid, "key": key, "group_by": group,
                                    "why": "a site page groups only by series (7657c4a5 (1)); the build never guesses another grouping"})
                     continue
-            listed = _listed(members, src, root, profile, states, types, drafts, sid)
+            listed = _listed(members, src, root, profile, states, types, drafts, sid, post_cats=chips["posts"])
             errors += listed["errors"]
             contents = listed["contents"]
+            if kind == DevNodeKinds.SERIES:   # what most of the series is about (design ce17606b (4))
+                cats = majority([chips["posts"].get(i, []) for i in listed["ids"]], chips["rank"])
             if group == GROUP_SERIES:   # one entry per paged Series (design 7657c4a5 (1))
                 grouped = group_through_series(listed["ids"], contents, planned, src, sid)
                 errors += grouped["errors"]
                 contents = grouped["contents"]
             known = {**listed["cats"], **{p["source"]: p.get("categories") or [] for p in planned}}
-            listing = with_category_links({"contents": contents, **listing}, src,
-                                          listing_categories(contents, src, known), category["href"])
+            listing = with_category_links({"contents": listing_items(contents, src, known), **listing}, src,
+                                          listing_categories(contents, src, known), category["href"],
+                                          in_place=layout == CATEGORY_LAYOUT)
+            if layout == CATEGORY_LAYOUT:   # the site's category listing (design ce17606b (3))
+                text = render_page(_category_front(node, listing), body=str(F.prop(node, "description") or ""))
+            else:
+                text = render_page(_front(node, listing, listed["updated"], cats))
             planned.append({"source": src, "kind": kind, "key": key, "subject": sid, "categories": cats or [],
                             "members": len(listed["contents"]), "updated": listed["updated"],
                             "listed": listed["ids"], "href": page["active"],
                             "sequence": kind == DevNodeKinds.SERIES,
                             "title": str(F.prop(node, "title") or key),
-                            "text": render_page(_front(node, listing, listed["updated"], cats))})
+                            **({"layout": layout} if layout == CATEGORY_LAYOUT else {}),
+                            "text": text})
     for node, members, page in matrix_pages:
         got = await plan_matrix_page(gx, node, members, page, root, profile, states, types, drafts,
                                      list(planned), category["href"])
@@ -433,6 +489,7 @@ async def page_plan(
                                        list(planned))
         errors += got.get("errors", [])
         planned += got.get("pages", [])
+    errors += check_category_listing(planned, category["href"], profile, states, types)
     seen: Dict[str, str] = {}
     for p in planned:
         if p["source"] in seen:
@@ -527,14 +584,6 @@ def check_page_outputs(
             for s in sources if not (out / (s[:-len(".qmd")] + ".html")).exists()]
 
 
-def categories_of(
-    value: Any,  # A front-matter `categories` (a list, one string, or none)
-) -> List[str]:  # The categories as Quarto reads them, in order
-    if not value:
-        return []
-    return [str(c) for c in (value if isinstance(value, list) else [value]) if str(c).strip()]
-
-
 def listing_categories(
     contents: List[str],              # A listing's contents paths, relative to its page
     page_src: str,                    # The page's source, relative to the root
@@ -548,18 +597,38 @@ def listing_categories(
     return sorted(out)
 
 
+def listing_items(
+    contents: List[str],          # A listing's contents paths, relative to its page
+    page_src: str,                # The page's source, relative to the root
+    known: Dict[str, List[str]],  # Source (relative to the root) -> the categories it carries
+) -> List[Any]:  # Each item as {path, categories} when the build knows its source, else the path
+    """A listed item carries the categories the build planned for it (design ce17606b (3)): Quarto
+    merges an item's listing metadata over the file's own, so a post's chips are the graph's, never
+    its front matter's; an item with none states an empty list."""
+    out: List[Any] = []
+    for c in contents:
+        src = posixpath.normpath(posixpath.join(posixpath.dirname(page_src), c))
+        out.append({"path": c, "categories": list(known[src])} if src in known else c)
+    return out
+
+
 def with_category_links(
     listing: Dict[str, Any],  # A projected listing's options (its fields among them)
     page_src: str,            # The page's source, relative to the root
     categories: List[str],    # Every category its items carry (listing_categories)
     listing_href: str,        # The category listing's page path (load_category_listing; "" = none)
+    in_place: bool = False,   # The page IS the category listing: chips filter it in place (ce17606b (3))
 ) -> Dict[str, Any]:  # The options rendering through the site listing template
     """A projected listing renders through the site listing template (design a7224060): each chip
     links into the category listing filtered to it, every href planned here by the one encoder
-    (postpage.category_links). No category listing = no links: the chips are labels."""
+    (postpage.category_links). No category listing = no links: the chips are labels. On the
+    category listing itself a chip filters the page in place, as Quarto's own chip does."""
     from .postpage import category_links
-    params = {"fields": list(listing.get("fields") or []),
-              "category-links": {c["name"]: c["href"] for c in category_links(categories, listing_href)}}
+    params: Dict[str, Any] = {"fields": list(listing.get("fields") or [])}
+    if in_place:
+        params["in-place"] = True
+    else:
+        params["category-links"] = {c["name"]: c["href"] for c in category_links(categories, listing_href)}
     return {**{k: v for k, v in listing.items() if k != "type"},
             "template": posixpath.relpath(LISTING_TEMPLATE_FILE, posixpath.dirname(page_src) or "."),
             "template-params": params}

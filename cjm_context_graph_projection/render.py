@@ -379,6 +379,10 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
     if kind == "transfer-path":
         if obj.get("error"):
             return f"⚠ {obj['error']}"
+        if obj.get("merged"):
+            return (f"**merged** {obj['value']} from `{str(obj['from_id'])[:8]}` into `{str(obj['to_id'])[:8]}`'s "
+                    f"page (its active path `{str(obj['assertion_id'])[:8]}` supersedes "
+                    f"`{str(obj['superseded'])[:8]}`)")
         return (f"**transferred** {obj['value']} from `{str(obj['from_id'])[:8]}` to `{str(obj['to_id'])[:8]}` "
                 f"(assertion `{str(obj['assertion_id'])[:8]}` supersedes `{str(obj['superseded'])[:8]}`)")
     if kind == "work-member":

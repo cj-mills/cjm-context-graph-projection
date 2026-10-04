@@ -127,9 +127,12 @@ def learning_paths(
     page_src: str,                           # The Tutorials page's source (relative to the root)
 ) -> Dict[str, Any]:  # {contents, errors}
     """The collection pages whose listed members are ALL tutorials; a collection mixing
-    tutorials with other kinds refuses (a wrong exclusion hides content, 6752db0a (9))."""
+    tutorials with other kinds refuses (a wrong exclusion hides content, 6752db0a (9)). A page
+    with its own layout (the category listing, design ce17606b (3)) is no collection."""
     contents, errors = [], []
     for p in sorted(planned, key=lambda p: p["source"]):
+        if p.get("layout"):
+            continue
         kinds = {(types.get(i) or {}).get("kind") for i in p["listed"]}
         if TUTORIAL_KIND not in kinds:
             continue
@@ -183,7 +186,8 @@ async def plan_matrix_page(
     """Plan the Tutorials page: the listed population under the profile, the matrix over it,
     the learning paths, the page text."""
     from .coverage import load_coverage_facts, load_vocab, project_matrix
-    from .sitepages import GENERATED, _listed, listing_categories, member_updated, with_category_links
+    from .sitepages import (GENERATED, _listed, listing_categories, listing_items, member_updated,
+                            with_category_links)
     import yaml
     sid, key, src = str(F.nid(node)), str(F.prop(node, "key") or ""), page["source"]
     listed = _listed(members, src, root, profile, states, types, drafts, sid)
@@ -228,7 +232,7 @@ async def plan_matrix_page(
     front["title-block-banner"] = False
     # The learning paths' chips link into the category listing like every projected listing's (design a7224060)
     known = {p["source"]: p.get("categories") or [] for p in planned}
-    front["listing"] = with_category_links({**PATHS_LISTING, "contents": paths["contents"]}, src,
+    front["listing"] = with_category_links({**PATHS_LISTING, "contents": listing_items(paths["contents"], src, known)}, src,
                                            listing_categories(paths["contents"], src, known), listing_href)
     head = yaml.safe_dump(front, sort_keys=False, allow_unicode=True, width=10_000)
     text = f"---\n{GENERATED}\n{head}---\n\n" + render_body(matrix, items, profile)
