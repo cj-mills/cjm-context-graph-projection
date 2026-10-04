@@ -16,6 +16,10 @@ hardware filter narrows the cells to what was verified there, and refusals stay 
 The CLAIMS (amendment 98e99fe5) declare their Entity kind here too; their state, the SUPPORTS
 edges and the backing floor live in claims.py.
 
+The CATEGORY FACETS' vocabularies (design 0f7fcdcb, amendment 3c5cff97) -- tool, subject and
+model -- declare their kinds here as well: each entry needs a description and a not-for line,
+the facet judge's criteria. `mint_entities` lands a vocabulary as one batch, checked whole.
+
 `coverage_matrix` derives everything the page and the gap list read, and stores nothing: the
 rows (tasks by position, the off-grid ones listed apart), the columns (stages by position),
 each cell's tutorials, the cells a CROSS-TASK stage leaves covered by the cross-task row, the
@@ -52,11 +56,14 @@ ENTITY_FIELDS: Dict[str, Dict[str, type]] = {
     # its light / dark override two facts. The design_system kind is NOT here: the artifact
     # fold derives it, so the entity verb refuses it.
     P.ENTITY_SITE_PROFILE: {"description": str},
+    # The category facets' vocabularies (amendment 3c5cff97): the facet judge's criteria
+    **{k: {"description": str, "not_for": str, "retired": bool} for k in P.FACET_KINDS},
 }
 _REQUIRED = {P.ENTITY_TASK: ("position",), P.ENTITY_STAGE: ("position",),
              P.ENTITY_HARDWARE: ("device_class",), P.ENTITY_CLAIM: ("statement", "position"),
              P.ENTITY_WORK: ("form",), P.ENTITY_UNIT: ("position",),
-             P.ENTITY_OUTPUT_CLASS: ("position",)}
+             P.ENTITY_OUTPUT_CLASS: ("position",),
+             **{k: ("description", "not_for") for k in P.FACET_KINDS}}
 _ALLOWED = {(P.ENTITY_HARDWARE, "device_class"): P.DEVICE_CLASSES,   # closed slates on a field
             (P.ENTITY_WORK, "form"): P.WORK_FORMS}
 TUTORIAL_KIND = "tutorial"   # the navigation kind (predicates.DELIVERABLE_KINDS) the matrix reads
@@ -170,6 +177,61 @@ async def mint_entity(
         await extend_graph(gx.queue, gx.graph_id, [], [unit_part_of_edge(eid, work_id)])
     return {"entity_id": eid, "kind": kind, "key": key, "name": name, "fields": props,
             "updated": existing is not None, "written": True}
+
+
+async def mint_entities(
+    gx: GraphHandle,
+    records: List[Dict[str, Any]],   # Whole entity records: [{kind, key, name, fields}]
+    *,
+    apply: bool = False,             # Land the batch; else check and plan only
+    actor: str = "agent:session",
+) -> Dict[str, Any]:  # {errors, plan: [{kind, key, action}], landed: [records], written}
+    """A vocabulary batch (amendment 3c5cff97), checked WHOLE before anything lands, as the
+    library survey is: an invalid record, a repeated (kind, key) or a unit whose work is
+    neither live nor earlier in the batch refuses the batch with nothing written. A record
+    equal to its live Entity is `unchanged` and lands no op; every other one goes through
+    mint_entity, so the journal carries one `entity` op per landed record."""
+    errors: List[str] = []
+    plan: List[Dict[str, Any]] = []
+    todo: List[Dict[str, Any]] = []
+    seen = set()
+    for i, r in enumerate(records):
+        kind, key, name = str(r.get("kind") or ""), str(r.get("key") or ""), str(r.get("name") or "")
+        fields = dict(r.get("fields") or {})
+        err = validate_entity(kind, key, name, fields)
+        if not err and (kind, key) in seen:
+            err = "repeats an earlier record"
+        if not err and kind == P.ENTITY_UNIT:
+            work_key = key.partition(P.UNIT_KEY_SEP)[0]
+            work = await graph_task(gx.queue, gx.graph_id, "get_node",
+                                    node_id=entity_node_id(P.ENTITY_WORK, work_key))
+            if (P.ENTITY_WORK, work_key) not in seen and (
+                    work is None or F.prop(work, "entity_kind") != P.ENTITY_WORK):
+                err = f"no work `{work_key}` live or earlier in the batch"
+        if err:
+            errors.append(f"record {i + 1} ({kind} `{key}`): {err}")
+            continue
+        seen.add((kind, key))
+        node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=entity_node_id(kind, key))
+        if node is None:
+            action = "new"
+        elif F.prop(node, "name") == name and all(F.prop(node, f) == fields.get(f) for f in ENTITY_FIELDS[kind]):
+            action = "unchanged"
+        else:
+            action = "updated"
+        plan.append({"kind": kind, "key": key, "action": action})
+        if action != "unchanged":
+            todo.append({"kind": kind, "key": key, "name": name, "fields": fields})
+    out: Dict[str, Any] = {"errors": errors, "plan": plan, "landed": [], "written": False}
+    if errors or not apply:
+        return out
+    for r in todo:
+        res = await mint_entity(gx, r["kind"], r["key"], name=r["name"], fields=r["fields"], actor=actor)
+        if res.get("error"):   # checked above, so a refusal here is a defect, never data
+            raise RuntimeError(f"{r['kind']} `{r['key']}`: {res['error']}")
+        out["landed"].append(r)
+    out["written"] = bool(out["landed"])
+    return out
 
 
 async def check_coverage_value(

@@ -857,6 +857,8 @@ async def _dispatch(args) -> int:
             fields: Dict[str, Any] = {}
             if args.description:
                 fields["description"] = args.description
+            if args.not_for:
+                fields["not_for"] = args.not_for
             if args.position is not None:
                 fields["position"] = args.position
             if args.device_class:
@@ -877,6 +879,31 @@ async def _dispatch(args) -> int:
                              {"kind": args.kind, "key": args.key, "name": args.name,
                               "fields": fields, "actor": args.actor})
             return 1 if res.get("error") else 0
+        elif args.command == "entity-batch":
+            # A vocabulary batch (amendment 3c5cff97): a JSON list of whole entity records,
+            # checked WHOLE -- any error refuses the batch with nothing written -- then one
+            # journaled `entity` op per landed record, so replay needs nothing new.
+            from .coverage import mint_entities
+            res = await mint_entities(gx, json.loads(Path(args.table).read_text()), apply=args.apply,
+                                      actor=args.actor)
+            if res["errors"]:
+                for e in res["errors"]:
+                    print(f"error: {e}", file=sys.stderr)
+                print(f"entity-batch: REFUSED — {len(res['errors'])} error(s), nothing written")
+                return 1
+            counts = {a: sum(1 for p in res["plan"] if p["action"] == a) for a in ("new", "updated", "unchanged")}
+            print(f"entity-batch: {len(res['plan'])} record(s) · {counts['new']} new · "
+                  f"{counts['updated']} updated · {counts['unchanged']} unchanged")
+            if not args.apply:
+                print("_(dry run — pass --apply to land it)_")
+                return 0
+            if args.journal_path:
+                for r in res["landed"]:
+                    append_write(args.journal_path, "entity",
+                                 {"kind": r["kind"], "key": r["key"], "name": r["name"],
+                                  "fields": r["fields"], "actor": args.actor})
+            print(f"landed: {len(res['landed'])} entity op(s)")
+            return 0
         elif args.command == "derived-from":
             # An archive deliverable's provenance (design leg 4a4ef27e (2)): the op names the
             # resolved deliverable id, so replay re-lands the same edge.
@@ -3174,12 +3201,15 @@ def main() -> int:
 
     p_ent = sub.add_parser("entity",
                            help="Mint/update a typed Entity (task | stage | hardware | claim | work | unit | "
-                                "output_class) from its WHOLE record (journaled upsert by kind + key; a field or "
-                                "flag left off clears; designs 8cbdc883 / 4a4ef27e)")
-    p_ent.add_argument("kind", help="The Entity sub-kind (task | stage | hardware | claim | work | unit | output_class)")
+                                "output_class | tool | subject | model) from its WHOLE record (journaled upsert by "
+                                "kind + key; a field or flag left off clears; designs 8cbdc883 / 4a4ef27e / 3c5cff97)")
+    p_ent.add_argument("kind", help="The Entity sub-kind (task | stage | hardware | claim | work | unit | output_class "
+                                    "| tool | subject | model)")
     p_ent.add_argument("key", help="The durable key the teaches_* facts name (never renamed; --name is the display)")
     p_ent.add_argument("--name", required=True, help="The display name")
     p_ent.add_argument("--description", default="", help="One line on what the entry covers")
+    p_ent.add_argument("--not-for", default="",
+                       help="tool / subject / model: what the entry does NOT cover (the facet judge's criteria)")
     p_ent.add_argument("--position", type=int, default=None, help="Its place on the axis (ascending)")
     p_ent.add_argument("--device-class", default="",
                        help="hardware: gpu | cpu | board | phone | sensor | cloud")
@@ -3202,6 +3232,14 @@ def main() -> int:
                        help="work: a hand locator (URL) for a work no Source can observe")
     p_ent.add_argument("--part", default="", help="unit: the part of the work it sits in (e.g. Workshops)")
     p_ent.add_argument("--actor", default=_DEFAULT_ACTOR)
+
+    p_eb = sub.add_parser("entity-batch",
+                          help="Land a vocabulary batch: a JSON list of whole entity records ({kind, key, name, "
+                               "fields}), checked whole and refused whole, then one journaled entity op per new or "
+                               "changed record (amendment 3c5cff97); a dry run without --apply")
+    p_eb.add_argument("table", help="The JSON list of entity records")
+    p_eb.add_argument("--apply", action="store_true", help="Write it (default: plan and check only)")
+    p_eb.add_argument("--actor", default=_DEFAULT_ACTOR)
 
     p_df = sub.add_parser("derived-from",
                           help="Record (or --retract) an ARCHIVE deliverable's one provenance edge to its work "

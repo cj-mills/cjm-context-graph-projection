@@ -95,6 +95,11 @@ def test_entity_records_are_validated_per_declared_kind():
     assert validate_entity("hardware", "rtx-4090", "RTX 4090", {"device_class": "gpu"}) is None
     assert "one of" in validate_entity("hardware", "x", "X", {"device_class": "laptop"})
     assert "needs device_class" in validate_entity("hardware", "x", "X", {})
+    # The category facets' vocabularies (amendment 3c5cff97): the judge's criteria are required
+    for kind in P.FACET_KINDS:
+        assert validate_entity(kind, "k", "K", {"description": "d", "not_for": "n"}) is None
+        assert "needs description, not_for" in validate_entity(kind, "k", "K", {})
+    assert "no field" in validate_entity("tool", "k", "K", {"description": "d", "not_for": "n", "position": 1})
 
 
 def test_a_filter_narrows_cells_but_never_hides_a_refusal():
@@ -287,3 +292,55 @@ def test_hardware_standing_and_verifications(tmp_path):
     assert gone["retracted"] and len(edges) == 2
     ub = next(e for e in edges if e["id"] == linux["edge_id"])
     assert ub["properties"]["date"] == "2025-01-02" and ub["properties"]["versions"] == {}
+
+
+@pytestmark_graph
+def test_a_vocabulary_batch_is_checked_whole_and_replays(tmp_path):
+    corpus = tmp_path / "posts"
+    (corpus / "a").mkdir(parents=True)
+    (corpus / "a" / "index.md").write_text(_post("a"))
+    commit_all(corpus)
+    journal = str(tmp_path / "writes.jsonl")
+    for sub in ("live", "fresh"):
+        (tmp_path / sub).mkdir()
+        (tmp_path / sub / "graph.config.json").write_text(json.dumps(
+            {"notes_corpus": str(corpus), "notes_profile": "quarto_post"}))
+    live = str(tmp_path / "live" / "g.db")
+    base = ["--graph-db-path", live, "--journal-path", journal]
+    assert _run(*base, "ingest-notes").returncode == 0
+
+    def vocab_record(kind, key, name):
+        return {"kind": kind, "key": key, "name": name, "fields": {"description": "d", "not_for": "n"}}
+
+    good = [vocab_record("tool", "pytorch", "PyTorch"), vocab_record("subject", "gpu-programming", "GPU programming"),
+            vocab_record("model", "yolox", "YOLOX")]
+    table = tmp_path / "vocab.json"
+    # One bad record (no not-for line) and one repeat refuse the WHOLE batch: nothing lands
+    table.write_text(json.dumps(good + [{"kind": "tool", "key": "onnx", "name": "ONNX",
+                                         "fields": {"description": "d"}}, vocab_record("tool", "pytorch", "PyTorch")]))
+    refused = _run(*base, "entity-batch", str(table), "--apply")
+    assert refused.returncode == 1 and "REFUSED — 2 error(s)" in refused.stdout
+    assert "needs not_for" in refused.stderr and "repeats an earlier record" in refused.stderr
+    table.write_text(json.dumps(good))
+    dry = _run(*base, "entity-batch", str(table))
+    assert dry.returncode == 0 and "3 new" in dry.stdout and "dry run" in dry.stdout
+    assert not Path(journal).exists() or '"entity"' not in Path(journal).read_text()   # neither wrote anything
+    assert _run(*base, "entity-batch", str(table), "--apply").returncode == 0
+    # A re-run lands only what changed: one rename, two unchanged
+    table.write_text(json.dumps(good[:1] + [vocab_record("subject", "gpu-programming", "GPU Programming")] + good[2:]))
+    again = _run(*base, "entity-batch", str(table), "--apply")
+    assert again.returncode == 0 and "1 updated · 2 unchanged" in again.stdout and "landed: 1" in again.stdout
+    verbs = [json.loads(line)["verb"] for line in Path(journal).read_text().splitlines()]
+    assert verbs.count("entity") == 4
+
+    fresh = str(tmp_path / "fresh" / "g.db")
+    r = _run("--graph-db-path", fresh, "--journal-path", journal, "ingest-notes")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert _ids(fresh) == _ids(live)
+    con = sqlite3.connect(fresh)
+    try:
+        props = json.loads(con.execute("select properties from nodes where id = ?",
+                                       (entity_node_id("subject", "gpu-programming"),)).fetchone()[0])
+    finally:
+        con.close()
+    assert props["name"] == "GPU Programming" and props["not_for"] == "n"
