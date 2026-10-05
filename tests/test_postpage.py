@@ -1,33 +1,75 @@
 """The post page's projected parts (design 39c51c15): the author strip and the end matter."""
 
-from cjm_context_graph_projection.postpage import (display_date, end_plan, header_meta, load_holder,
-                                                   load_strip_copy, post_licenses, related_posts,
-                                                   render_end, render_related, render_reuse, site_footer)
+from cjm_context_graph_projection.postpage import (display_date, end_plan, header_meta, links_line, load_holder,
+                                                   load_reading_guide, load_site_links, load_strip_copy,
+                                                   post_licenses, related_posts, render_end, render_related,
+                                                   render_reuse, site_footer, site_nav)
 
 COPY = {"byline": "**A** — a byline.", "links": "[About](/about.html)",
         "pitch": "Hire me for {claims}: [how]({href}).", "questions": "Ask below."}
 TYPES = {"t": {"kind": "tutorial"}, "n": {"kind": "notes"}, "p": {"kind": "site"}, "w": {"kind": "work"}}
 
+LINKS = ('site-links:\n  - icon: envelope-fill\n    text: Email\n    href: mailto:e@x.org\n'
+         '  - icon: github\n    text: GitHub\n    href: https://github.com/x\n')
+
 
 def test_the_copy_comes_from_the_site_config_and_refuses_when_missing(tmp_path):
     who = 'site-author:\n  name: "N"\n  role: "R"\n'
     (tmp_path / "_quarto.yml").write_text(
-        'author-strip:\n  byline: "**{name}** — {role}."\n  links: "L"\n  pitch: "P {claims} {href}"\n  questions: "Q"\n'
-        + who)
-    # The byline names the author through the site's one statement of them (amendment fe6f0fb7);
-    # the pitch keeps its own placeholders for the render
-    assert load_strip_copy(str(tmp_path)) == {"copy": {"byline": "**N** — R.", "links": "L", "pitch": "P {claims} {href}",
-                                                       "questions": "Q"}, "errors": []}
-    (tmp_path / "_quarto.yml").write_text('author-strip:\n  byline: "B"\n  links: ""\n' + who)
+        'author-strip:\n  byline: "**{name}** — {role}."\n  links: "L · {links}"\n  pitch: "P {claims} {href}"\n  questions: "Q"\n'
+        + who + LINKS)
+    # The byline names the author through the site's one statement of them (amendment fe6f0fb7),
+    # the links line the site's contact links (design ff0c6338 (6)); the pitch keeps its own
+    # placeholders for the render
+    assert load_strip_copy(str(tmp_path)) == {"copy": {"byline": "**N** — R.",
+                                                       "links": "L · [Email](mailto:e@x.org) · [GitHub](https://github.com/x)",
+                                                       "pitch": "P {claims} {href}", "questions": "Q"}, "errors": []}
+    (tmp_path / "_quarto.yml").write_text('author-strip:\n  byline: "B"\n  links: ""\n' + who + LINKS)
     err = load_strip_copy(str(tmp_path))["errors"]
     assert err and err[0]["missing"] == ["links", "pitch", "questions"]   # never a fallback text
     # No site author, or a placeholder it does not name, refuses
-    (tmp_path / "_quarto.yml").write_text('author-strip:\n  byline: "B"\n  links: "L"\n  pitch: "P"\n  questions: "Q"\n'
-                                          'site-author:\n  name: "N"\n')
+    (tmp_path / "_quarto.yml").write_text('author-strip:\n  byline: "B"\n  links: "{links}"\n  pitch: "P"\n  questions: "Q"\n'
+                                          'site-author:\n  name: "N"\n' + LINKS)
     assert load_strip_copy(str(tmp_path))["errors"][0] == {**load_strip_copy(str(tmp_path))["errors"][0],
                                                            "kind": "site-author", "missing": ["role"]}
-    (tmp_path / "_quarto.yml").write_text('author-strip:\n  byline: "{who}"\n  links: "L"\n  pitch: "P"\n  questions: "Q"\n' + who)
+    (tmp_path / "_quarto.yml").write_text('author-strip:\n  byline: "{who}"\n  links: "{links}"\n  pitch: "P"\n  questions: "Q"\n'
+                                          + who + LINKS)
     assert load_strip_copy(str(tmp_path))["errors"][0]["field"] == "byline"
+    # A links line typing its own links (no {links}) is a second copy; another placeholder refuses;
+    # no site links refuses
+    for line in ('"[Email](mailto:e@x.org)"', '"{links} {who}"'):
+        (tmp_path / "_quarto.yml").write_text(f'author-strip:\n  byline: "B"\n  links: {line}\n  pitch: "P"\n  questions: "Q"\n'
+                                              + who + LINKS)
+        assert load_strip_copy(str(tmp_path))["errors"][0]["field"] == "links"
+    (tmp_path / "_quarto.yml").write_text('author-strip:\n  byline: "B"\n  links: "{links}"\n  pitch: "P"\n  questions: "Q"\n' + who)
+    assert load_strip_copy(str(tmp_path))["errors"][0]["kind"] == "site-links"
+
+
+def test_the_site_links_are_stated_once(tmp_path):
+    # Design ff0c6338 (6): each link needs its icon, text and href, never a default
+    (tmp_path / "_quarto.yml").write_text(LINKS)
+    got = load_site_links(str(tmp_path))
+    assert got["errors"] == [] and [l["text"] for l in got["links"]] == ["Email", "GitHub"]
+    assert links_line(got["links"]) == "[Email](mailto:e@x.org) · [GitHub](https://github.com/x)"
+    # the navbar's icons follow the hand-kept pages, each labelled by its text
+    assert site_nav(got["links"]) == {"website": {"navbar": {"right": [
+        {"icon": "envelope-fill", "href": "mailto:e@x.org", "aria-label": "Email"},
+        {"icon": "github", "href": "https://github.com/x", "aria-label": "GitHub"}]}}}
+    (tmp_path / "_quarto.yml").write_text("site-links:\n  - icon: github\n    text: GitHub\n")
+    assert load_site_links(str(tmp_path))["errors"][0]["missing"] == ["href"]
+    (tmp_path / "_quarto.yml").write_text("site-links: []\n")
+    assert load_site_links(str(tmp_path))["errors"][0]["kind"] == "site-links"
+
+
+def test_the_reading_guide_is_stated_once(tmp_path):
+    # Design ff0c6338 (4): llms.txt and About read one key; absent is "" (the reader decides)
+    who = 'site-author:\n  name: "N"\n  role: "R"\n'
+    (tmp_path / "_quarto.yml").write_text(who)
+    assert load_reading_guide(str(tmp_path)) == {"text": "", "errors": []}
+    (tmp_path / "_quarto.yml").write_text("reading-guide: |\n  Ask  {name}.\n" + who)
+    assert load_reading_guide(str(tmp_path)) == {"text": "Ask N.", "errors": []}
+    (tmp_path / "_quarto.yml").write_text("reading-guide: '{who}'\n" + who)
+    assert load_reading_guide(str(tmp_path))["errors"][0]["kind"] == "reading-guide"
 
 
 def test_render_end_variants():

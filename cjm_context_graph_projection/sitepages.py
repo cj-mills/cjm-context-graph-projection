@@ -62,6 +62,7 @@ from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.vocab import DevNodeKinds
 
 from . import factlayer as F
+from .aboutpage import LAYOUT as ABOUT_LAYOUT, plan_about_page
 from .archive import is_retired
 from .homepage import LAYOUT as HOME_LAYOUT, plan_home_page
 from .lens import apply_lens, LENS_LABEL
@@ -432,6 +433,7 @@ async def page_plan(
     matrix_pages: List[Any] = []   # coverage-matrix Lenses, planned after every collection page
     library_pages: List[Any] = []  # the library Lens, planned after them all (its topic line reads them)
     home_pages: List[Any] = []     # the home Lens, planned last (its map reads every index page)
+    about_pages: List[Any] = []    # the About Lens, planned after them (its hand-off reads the planned pages)
     for kind, nodes in ((DevNodeKinds.SERIES, series), (LENS_LABEL, lenses)):
         for node in sorted(nodes, key=lambda n: str(F.prop(n, "key") or "")):
             sid, key = str(F.nid(node)), str(F.prop(node, "key") or "")
@@ -476,6 +478,10 @@ async def page_plan(
                 if (applied.get("view") or {}).get("layout") == HOME_LAYOUT:
                     # The home page (design e55201e2): a map of the other index pages, planned last
                     home_pages.append((node, {"source": src, "href": page["active"]}))
+                    continue
+                if (applied.get("view") or {}).get("layout") == ABOUT_LAYOUT:
+                    # The About page (design amendment 2364f215): the author's identity and background
+                    about_pages.append((node, {"source": src, "href": page["active"]}))
                     continue
                 layout = (applied.get("view") or {}).get("layout")
                 listing, cats = dict(CATEGORY_LISTING if layout == CATEGORY_LAYOUT else LENS_LISTING), None
@@ -532,6 +538,11 @@ async def page_plan(
     for node, page in home_pages:
         got = await plan_home_page(gx, node, page, website_root, root, profile, states, types, drafts,
                                    list(planned), category["href"])
+        errors += got.get("errors", [])
+        if got.get("page"):
+            planned.append(got["page"])
+    for node, page in about_pages:
+        got = await plan_about_page(gx, node, page, website_root, profile, list(planned))
         errors += got.get("errors", [])
         if got.get("page"):
             planned.append(got["page"])

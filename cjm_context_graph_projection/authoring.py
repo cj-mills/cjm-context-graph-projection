@@ -1443,6 +1443,31 @@ async def _route_container_edit(
     return {"error": err, "node_id": nid, "written": False}
 
 
+async def note_approval(
+    gx: GraphHandle,
+    node: Any,   # The born Note node
+) -> Dict[str, Any]:  # {states, text, live_hash, bound, approved}
+    """A born Note's approval, the one reading every public consumer of a born Note shares
+    (emit_post, and the About page's background, design amendment 2364f215): its active
+    publish_state values, its lossless reconstruction and that text's hash, and the hash its
+    published assertion bound. APPROVAL BINDS TO CONTENT (design 40622922): the published
+    assertion carries the reconstruction hash it approved; an edit after publication demotes BY
+    DERIVATION -- nothing is written, the hashes simply no longer match -- and re-publishing is a
+    fresh human assertion. APPROVED = a single active `published` whose bound hash is the live
+    text's; an approval with no bound hash never approves."""
+    nid = F.nid(node)
+    slot = [a for a in await F.load_assertions(gx)
+            if F.prop(a, "subject_id") == nid and F.prop(a, "predicate") == "publish_state"]
+    active = F.active_assertions(slot, await F.load_supersedes(gx))
+    states = sorted({str(F.prop(a, "value") or "") for a in active})
+    secs = await _note_section_wires(gx, nid)
+    text = note_text_from_graph_nodes(_as_wire(node, DevNodeKinds.NOTE), secs)
+    live_hash = SourceRef.compute_hash(text.encode("utf-8"))
+    bound = str(F.prop(active[0], "subject_content_hash") or "") if states == ["published"] else ""
+    return {"states": states, "text": text, "live_hash": live_hash, "bound": bound,
+            "approved": states == ["published"] and bound == live_hash}
+
+
 async def emit_post(
     gx: GraphHandle,
     note_id: str,          # The born post's Note id (or unique prefix)
@@ -1470,14 +1495,20 @@ async def emit_post(
         return {"error": f"no Note `{note_id}`", "node_id": note_id}
     nid = F.nid(node) or note_id
     slug = str(F.prop(node, "slug") or "")
-    slot = [a for a in await F.load_assertions(gx)
-            if F.prop(a, "subject_id") == nid and F.prop(a, "predicate") == "publish_state"]
-    active = F.active_assertions(slot, await F.load_supersedes(gx))
-    states = sorted({str(F.prop(a, "value") or "") for a in active})
+    approval = await note_approval(gx, node)
+    states = approval["states"]
     target = str(Path(website_root) / "posts" / slug / "index.md")
     # The draft lifecycle (item 140981e9): a FIXTURE never publishes (a page kept for the graph
     # mechanics it exercises — no promotion recipe is offered) and a RETIRED page never
     # publishes again (reopening is an explicit human --supersede, not an emit).
+    # PAGE CONTENT (amendment 2364f215) is prose a projected page renders in place -- the About
+    # page's background: it reaches the site only through that page, never as a post of its own
+    from .aboutpage import PAGE_CONTENT_KEY
+    from .purenotes import note_deliverable_type as _type_of
+    if await _type_of(gx, nid) == PAGE_CONTENT_KEY:
+        return {"error": f"`{slug}` is page content ({PAGE_CONTENT_KEY}): the page that renders it is its "
+                         "only route to the site, so it is never emitted as a post (2364f215)",
+                "node_id": nid, "slug": slug, "publish_state": states, "path": target, "written": False}
     if "fixture" in states:
         return {"error": f"post `{slug}` is a FIXTURE (publish_state=fixture) — fixtures stay in "
                          "staging and are never emitted to the public site (ruling a7ca900d (4))",
@@ -1539,15 +1570,8 @@ async def emit_post(
                                  f"publishes first; unpublished: {names}",
                         "node_id": nid, "slug": slug, "publish_state": "published", "path": target,
                         "work": work, "promotion": w, "written": False}
-    secs = await _note_section_wires(gx, nid)
-    text = note_text_from_graph_nodes(_as_wire(node, DevNodeKinds.NOTE), secs)
-    # APPROVAL BINDS TO CONTENT (design 40622922): the published assertion carries the
-    # reconstruction hash it approved; an edit after publication demotes BY DERIVATION —
-    # nothing is written, the hashes simply no longer match — and re-publishing is a fresh
-    # human assertion. An approval with no bound hash never gates an emit.
-    live_hash = SourceRef.compute_hash(text.encode("utf-8"))
-    bound = str(F.prop(active[0], "subject_content_hash") or "")
-    if bound != live_hash:
+    text, live_hash, bound = approval["text"], approval["live_hash"], approval["bound"]
+    if not approval["approved"]:
         why = ("carries no bound content hash" if not bound
                else f"approved content {bound[:12]} but the post now reads {live_hash[:12]}")
         return {"error": f"post `{slug}` is published but its approval {why} — the content "

@@ -73,8 +73,9 @@ TOC = "* [Overview](#overview)\n* [Details](#details)\n\n-----\n\n"
 ABOUT = "\n{{< include /_about-author-cta.qmd >}}\n"
 QUESTIONS = "\n{{< include /_tutorial-cta.qmd >}}\n"
 STRIP = ('site-author:\n  name: "The Author"\n  role: "a byline"\n'
-         'author-strip:\n  byline: "**{name}**, {role}."\n  links: "[About](/about.html)"\n'
+         'author-strip:\n  byline: "**{name}**, {role}."\n  links: "[About](/about.html) · {links}"\n'
          '  pitch: "Hire me for {claims}: [how]({href})."\n  questions: "Ask in the comments."\n'
+         'site-links:\n  - icon: envelope-fill\n    text: Email\n    href: mailto:e@x.org\n'
          'copyright-holder: "The Author"\n'
          'post-comments:\n  repo: o/r\n  repo-id: R_1\n  category: Comments\n  category-id: C_1\n')
 

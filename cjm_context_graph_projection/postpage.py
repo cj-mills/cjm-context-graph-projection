@@ -26,6 +26,10 @@ STRIP_FIELDS = ("byline", "links", "pitch", "questions")  # Every field the copy
 SITE_AUTHOR_KEY = "site-author"            # The site config's one statement of the author (amendment fe6f0fb7)
 SITE_AUTHOR_FIELDS = ("name", "role")
 SITE_SUMMARY_KEY = "site-summary"          # The site's one sentence of who and what (amendment 5c3c2662 (1))
+SITE_LINKS_KEY = "site-links"              # The site's one statement of its contact links (design ff0c6338 (6))
+SITE_LINK_FIELDS = ("icon", "text", "href")
+READING_GUIDE_KEY = "reading-guide"        # The site's one statement of how to read it (design ff0c6338 (4))
+NAV_FILE = "site-nav.yml"                  # The generated navbar links under _derived/ (a metadata-files entry)
 POST_KINDS = ("tutorial", "notes", "log", "work")        # Deliverable kinds a post page carries (not site pages)
 TUTORIAL_KIND = "tutorial"
 # The header's kind label (39c51c15 (2)): the navigation kind, as a reader reads it; the site's
@@ -75,7 +79,85 @@ def load_strip_copy(
         return {"copy": {}, "errors": [{"kind": "strip-copy", "path": str(path), "field": "byline",
                                         "why": f"the byline carries {filled['error']}"}]}
     out["byline"] = filled["text"]
+    # The links line names the contact links through the site's one statement of them (design
+    # ff0c6338 (6)): a line without {links} would be a second, hand-kept copy
+    links = load_site_links(website_root)
+    if links["errors"]:
+        return {"copy": {}, "errors": links["errors"]}
+    if "{links}" not in out["links"]:
+        return {"copy": {}, "errors": [{"kind": "strip-copy", "path": str(path), "field": "links",
+                                        "why": f"the links line names no {{links}} (the site config's `{SITE_LINKS_KEY}`)"}]}
+    try:
+        out["links"] = out["links"].format_map({"links": links_line(links["links"])})
+    except (KeyError, ValueError, IndexError) as e:
+        return {"copy": {}, "errors": [{"kind": "strip-copy", "path": str(path), "field": "links",
+                                        "why": f"the links line carries a placeholder other than {{links}} ({e})"}]}
     return {"copy": out, "errors": []}
+
+
+def load_site_links(
+    website_root: str,  # The site project root
+) -> Dict[str, Any]:  # {links: [{icon, text, href}], errors}
+    """The site's one statement of its contact links (`site-links` in the site config, design
+    ff0c6338 (6)): the author strip's links line, the navbar's icons and the About page all render
+    it. No links, or a link lacking its icon, text or href, refuses -- never a default."""
+    path = Path(website_root) / "_quarto.yml"
+    try:
+        got = (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get(SITE_LINKS_KEY) or []
+    except (OSError, yaml.YAMLError) as e:
+        return {"links": [], "errors": [{"kind": SITE_LINKS_KEY, "path": str(path), "why": f"unreadable: {e}"}]}
+    if not isinstance(got, list) or not got:
+        return {"links": [], "errors": [{"kind": SITE_LINKS_KEY, "path": str(path),
+                                         "why": f"the site config states no `{SITE_LINKS_KEY}` list"}]}
+    out = []
+    for i, link in enumerate(got):
+        link = link if isinstance(link, dict) else {}
+        missing = [f for f in SITE_LINK_FIELDS if not str(link.get(f) or "").strip()]
+        if missing:
+            return {"links": [], "errors": [{"kind": SITE_LINKS_KEY, "path": str(path), "index": i, "missing": missing,
+                                             "why": f"`{SITE_LINKS_KEY}` entry {i + 1} lacks its {', '.join(missing)}"}]}
+        out.append({f: str(link[f]).strip() for f in SITE_LINK_FIELDS})
+    return {"links": out, "errors": []}
+
+
+def links_line(
+    links: List[Dict[str, str]],  # load_site_links' links
+) -> str:  # The links as one markdown line, in their stated order
+    return " · ".join(f"[{l['text']}]({l['href']})" for l in links)
+
+
+def site_nav(
+    links: List[Dict[str, str]],  # load_site_links' links
+) -> Dict[str, Any]:  # The navbar metadata site-build writes under _derived/ (NAV_FILE)
+    """The navbar's contact icons from the site's links (design ff0c6338 (6)). Quarto appends a
+    metadata file's `navbar.right` items after the site config's own, so the hand-kept pages lead
+    and the icons follow, each labelled by its link's text."""
+    return {"website": {"navbar": {"right": [{"icon": l["icon"], "href": l["href"], "aria-label": l["text"]}
+                                             for l in links]}}}
+
+
+def load_reading_guide(
+    website_root: str,  # The site project root
+) -> Dict[str, Any]:  # {text, errors} -- text "" when the site config states none
+    """The site's one statement of how to read it (`reading-guide` in the site config, design
+    ff0c6338 (4)): llms.txt's intro and the About page both render it, the author named through
+    {name} / {role}. Absent = "" (a reader decides whether it may be missing); a placeholder the
+    author statement cannot fill refuses."""
+    path = Path(website_root) / "_quarto.yml"
+    try:
+        text = str((yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get(READING_GUIDE_KEY) or "")
+    except (OSError, yaml.YAMLError) as e:
+        return {"text": "", "errors": [{"kind": READING_GUIDE_KEY, "path": str(path), "why": f"unreadable: {e}"}]}
+    if not text.strip():
+        return {"text": "", "errors": []}
+    author = load_site_author(website_root)
+    if author["errors"]:
+        return {"text": "", "errors": author["errors"]}
+    filled = fill_copy(" ".join(text.split()), author["author"])
+    if "error" in filled:
+        return {"text": "", "errors": [{"kind": READING_GUIDE_KEY, "path": str(path),
+                                        "why": f"`{READING_GUIDE_KEY}` carries {filled['error']}"}]}
+    return {"text": filled["text"], "errors": []}
 
 
 def load_site_author(

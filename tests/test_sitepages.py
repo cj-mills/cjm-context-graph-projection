@@ -87,7 +87,9 @@ def _site(root: Path) -> None:
         # the agent layer's switch and intro (design 39c51c15 (7), amendment 23a49667)
         "  llms-txt: true\nsite-summary: S.\n"
         # the author strip's copy (design 39c51c15 (5)): typed posts carry the strip
-        'author-strip:\n  byline: "B"\n  links: "L"\n  pitch: "P {claims} {href}"\n  questions: "Q"\n'
+        'author-strip:\n  byline: "B"\n  links: "L {links}"\n  pitch: "P {claims} {href}"\n  questions: "Q"\n'
+        # the site's contact links the strip names (design ff0c6338 (6))
+        'site-links:\n  - icon: envelope-fill\n    text: Email\n    href: mailto:e@x.org\n'
         'site-author:\n  name: "N"\n  role: "R"\n'
         'copyright-holder: "The Holder"\n'
         # where every category chip links (amendment of 0858bbd0; design a7224060)

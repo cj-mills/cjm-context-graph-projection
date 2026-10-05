@@ -22,12 +22,12 @@ WHO = 'site-author:\n  name: "N"\n  role: "R"\n'
 def test_the_summary_is_the_sites_one_sentence(tmp_path):
     # Amendment 5c3c2662 (1): `site-summary`, filled from site-author, read by llms.txt and the home
     # page alike; a summary still kept under llms-index is a second copy and refuses
-    (tmp_path / "_quarto.yml").write_text("site-summary: |\n  {name},   {role}: the site.\nllms-index:\n  details: d\n" + WHO)
+    (tmp_path / "_quarto.yml").write_text("site-summary: |\n  {name},   {role}: the site.\nreading-guide: d\n" + WHO)
     assert load_site_summary(str(tmp_path)) == {"text": "N, R: the site.", "errors": []}
     assert load_index_copy(str(tmp_path)) == {"copy": {"summary": "N, R: the site.", "details": "d"}, "errors": []}
     (tmp_path / "_quarto.yml").write_text("site-summary: S\nllms-index:\n  summary: S\n" + WHO)
     assert "second copy" in load_index_copy(str(tmp_path))["errors"][0]["why"]
-    (tmp_path / "_quarto.yml").write_text("llms-index:\n  details: d\n" + WHO)
+    (tmp_path / "_quarto.yml").write_text("reading-guide: d\n" + WHO)
     assert load_site_summary(str(tmp_path))["errors"][0]["kind"] == "site-summary"
     assert load_index_copy(str(tmp_path))["errors"][0]["kind"] == "site-summary"
     (tmp_path / "_quarto.yml").write_text("site-summary: '{nope}'\n" + WHO)   # an unknown placeholder refuses
@@ -162,7 +162,7 @@ def test_the_home_page_is_projected_and_rendered(tmp_path):
     assert '<meta name="description" content="The site in one sentence.">' in html
     # the identity line, the contact line, the map in the Lens's order (the empty logs index renders
     # nothing), each hub in its index's order, then the recent posts
-    assert body.split("\n")[1:4] == ["The site in one sentence.", "", "L"]
+    assert body.split("\n")[1:4] == ["The site in one sentence.", "", "L [Email](mailto:e@x.org)"]
     assert "## [Shelf](shelf/index.qmd)\n\nEvery series.\n\n- [CV series](series/tutorials/cv.qmd)\n" in body
     assert "## [Topic](series/notes/topic.qmd)\n\nEvery note.\n\n\n:::" in body and "Logs" not in body
     assert body.index("[Shelf]") < body.index("[Topic]") < body.index("Recent posts")
@@ -170,5 +170,5 @@ def test_the_home_page_is_projected_and_rendered(tmp_path):
            "- [Post C](posts/c/index.md) · June 1, 2021\n" in body
     assert 'href="./series/tutorials/cv.html"' in html or 'href="series/tutorials/cv.html"' in html
     # the agent layer: the home page's own markdown states the map; llms.txt never lists it
-    assert md.startswith("The site in one sentence.\n\nL\n\n## ") and "Modified" not in md
+    assert md.startswith("The site in one sentence.\n\nL [Email](mailto:e@x.org)\n\n## ") and "Modified" not in md
     assert "CV series" in md and "https://example.org/index.llms.md" not in llms

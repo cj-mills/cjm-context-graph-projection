@@ -13,8 +13,9 @@ Three surfaces an agent reads, each a projection, nothing stored:
    members in their authored order), the tutorials, the notes and the paid work in no series, and
    the project logs under `## Optional` (ruling ff12a19a). Every post is listed once, each link a page's `.llms.md` with
    its description; the intro is the author's copy -- the site's one sentence `site-summary`, which
-   the home page reads too (amendment 5c3c2662 (1)), then the details under `llms-index` (a missing
-   summary refuses -- never words the author did not write), and every link must name a `.llms.md`
+   the home page reads too (amendment 5c3c2662 (1)), then the site's reading guide `reading-guide`,
+   which the About page reads too (design ff0c6338 (4)) (a missing summary refuses -- never words
+   the author did not write), and every link must name a `.llms.md`
    the render produced. The home page is never listed: llms.txt stands in for the site root.
 3. JSON-LD per post -- TechArticle for a tutorial, BlogPosting for the other post kinds -- carried
    by the derived-blocks filter into the page head and read back after the render against the plan.
@@ -36,8 +37,7 @@ import yaml
 
 from .runtime import GraphHandle
 
-INDEX_KEY = "llms-index"            # The site-config key holding llms.txt's own intro copy
-INDEX_OPTIONAL = ("details",)       # Copy rendered when given (the summary is site-summary's, 5c3c2662 (1))
+INDEX_KEY = "llms-index"            # The RETIRED site-config key of llms.txt's own copy: a second copy, refused (ff0c6338 (4))
 LLMS_SUFFIX = ".llms.md"            # Quarto's per-page markdown, beside the page's .html
 LLMS_TXT = "llms.txt"
 OPTIONAL_KINDS = ("log",)           # Post kinds listed under `## Optional` (amendment 23a49667 (2), ruling ff12a19a)
@@ -76,33 +76,28 @@ def load_index_copy(
     website_root: str,  # The site project root
 ) -> Dict[str, Any]:  # {copy: {field: text}, errors}
     """llms.txt's intro copy: the summary is the site's one sentence (`site-summary`, amendment
-    5c3c2662 (1)), the details the site config's `llms-index` copy. A missing summary refuses (the
-    build never falls back to words the author did not write), and so does a summary still kept
-    under `llms-index` -- a second copy beside the one the home page reads."""
+    5c3c2662 (1)), the details its reading guide (`reading-guide`, design ff0c6338 (4)), rendered
+    when given. A missing summary refuses (the build never falls back to words the author did not
+    write), and so does any `llms-index` copy still kept -- a second copy beside the one the home
+    page and the About page read."""
     path = Path(website_root) / "_quarto.yml"
     try:
         cfg = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except (OSError, yaml.YAMLError) as e:
         return {"copy": {}, "errors": [{"kind": "llms-index-copy", "path": str(path), "why": f"unreadable: {e}"}]}
-    copy = cfg.get(INDEX_KEY) or {}
-    from .postpage import SITE_SUMMARY_KEY, fill_copy, load_site_author, load_site_summary
-    if "summary" in copy:
+    from .postpage import READING_GUIDE_KEY, SITE_SUMMARY_KEY, load_reading_guide, load_site_summary
+    if INDEX_KEY in cfg:
         return {"copy": {}, "errors": [{"kind": "llms-index-copy", "path": str(path),
-                                        "why": f"`{INDEX_KEY}.summary` is a second copy of `{SITE_SUMMARY_KEY}`, "
-                                               "the site's one sentence llms.txt and the home page read"}]}
+                                        "why": f"`{INDEX_KEY}` is a second copy: the summary is `{SITE_SUMMARY_KEY}` "
+                                               f"(the home page reads it too) and the details `{READING_GUIDE_KEY}` "
+                                               "(the About page reads it too)"}]}
     summary = load_site_summary(website_root)
     if summary["errors"]:
         return {"copy": {}, "errors": summary["errors"]}
-    # The copy names the author through the site's one statement of them (amendment fe6f0fb7)
-    author = load_site_author(website_root)
-    out: Dict[str, str] = {"summary": summary["text"]}
-    for f in INDEX_OPTIONAL:
-        filled = fill_copy(" ".join(str(copy.get(f) or "").split()), author["author"])
-        if "error" in filled:
-            return {"copy": {}, "errors": [{"kind": "llms-index-copy", "path": str(path), "field": f,
-                                            "why": f"`{INDEX_KEY}.{f}` carries {filled['error']}"}]}
-        out[f] = filled["text"]
-    return {"copy": out, "errors": []}
+    guide = load_reading_guide(website_root)
+    if guide["errors"]:
+        return {"copy": {}, "errors": guide["errors"]}
+    return {"copy": {"summary": summary["text"], "details": guide["text"]}, "errors": []}
 
 
 def llms_path(
@@ -203,6 +198,30 @@ def based_on(
             obj = {**work, "url": site_url + d["href"]}
         out.append({k: v for k, v in obj.items() if v})
     return out
+
+
+PROFILE_KEYS = ("@context", "@type", "url", "mainEntity")   # Every key the About page's ProfilePage may carry
+PERSON_KEYS = ("@type", "name", "jobTitle", "url", "image", "sameAs", "alumniOf")   # ...and its Person
+
+
+def profile_jsonld(
+    author: Dict[str, str],       # postpage.load_site_author's author {name, role}
+    url: str,                     # The About page's URL
+    links: List[Dict[str, str]],  # postpage.load_site_links' links (sameAs = the web ones)
+    image: str = "",              # The portrait's URL ("" = none)
+    alumni_of: str = "",          # The author's school ("" = none)
+) -> Dict[str, Any]:  # The About page's JSON-LD (keys in PROFILE_KEYS / PERSON_KEYS order, empties dropped)
+    """The About page's ProfilePage, its Person the site author (design ff0c6338 (8)): the name and
+    jobTitle the site's one statement of them, sameAs the contact links a browser opens (never a
+    mailto), alumniOf the author's stated school. No claim reaches it (49c0f3c7): an identity, never
+    an offer."""
+    person = {"@type": "Person", "name": author.get("name", ""), "jobTitle": author.get("role", ""), "url": url,
+              "image": image,
+              "sameAs": [l["href"] for l in links if l["href"].startswith(("https://", "http://"))],
+              "alumniOf": {"@type": "CollegeOrUniversity", "name": alumni_of} if alumni_of else ""}
+    obj = {"@context": "https://schema.org", "@type": "ProfilePage", "url": url,
+           "mainEntity": {k: person[k] for k in PERSON_KEYS if person.get(k) not in ("", [], None)}}
+    return {k: obj[k] for k in PROFILE_KEYS if obj.get(k) not in ("", [], None)}
 
 
 def jsonld_script(
@@ -449,12 +468,16 @@ async def agent_plan(
     from .sitepages import CATEGORY_LAYOUT
     site_pages += [{"title": p["title"], "source": p["source"], "description": ""}
                    for p in planned_pages if p.get("layout") == CATEGORY_LAYOUT]
+    # The About page is a site page with its Lens's description (design amendment 2364f215)
+    from .aboutpage import LAYOUT as ABOUT_LAYOUT
+    site_pages += [{"title": p["title"], "source": p["source"], "description": p.get("description") or ""}
+                   for p in planned_pages if p.get("layout") == ABOUT_LAYOUT]
     # The home page is the site root llms.txt stands in for (EXCLUDED_PAGES): never a collection
     from .homepage import LAYOUT as HOME_LAYOUT
     index = llms_index(
         str(site.get("title") or ""), site_url, copy["copy"], site_pages,
         [page_item(p) for p in planned_pages
-         if not p.get("sequence") and p.get("layout") not in (CATEGORY_LAYOUT, HOME_LAYOUT)],
+         if not p.get("sequence") and p.get("layout") not in (CATEGORY_LAYOUT, HOME_LAYOUT, ABOUT_LAYOUT)],
         [page_item(p) for p in planned_pages if p.get("sequence")],
         {n: {"title": stated(n, "title"), "source": src_of[n], "description": stated(n, "description"),
              "kind": posts[n]["kind"], "date": (dates.get(n) or {}).get("published") or ""}
