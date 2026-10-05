@@ -16,7 +16,7 @@ import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from cjm_context_graph_layer.ops import extend_graph, graph_task
 from cjm_context_graph_primitives.journal import append_write, op_clock, op_now, read_journal
@@ -168,6 +168,30 @@ async def _assert_journaled(
             op["superseded_by"] = superseded_by
         append_write(journal_path, "assert", op)
     return res
+
+
+def _drafts_dir(
+    args: Any,   # Parsed args with graph_db_path and website_root
+) -> Optional[str]:  # The drafts tree relative to the site root, from the sibling config's emit_root; None = none named
+    """The drafts listings live beside the emit root (its parent), inside the site."""
+    cfg = load_graph_config(args.graph_db_path) or {}
+    if not (cfg.get("emit_root") and getattr(args, "website_root", None)):
+        return None
+    staging_root = Path(cfg["emit_root"]).expanduser().resolve().parent
+    return staging_root.relative_to(Path(args.website_root).resolve()).as_posix()
+
+
+def _journal_entities(
+    journal_path: Optional[str],     # The write journal (None = unjournaled)
+    landed: List[Dict[str, Any]],    # mint_entities' landed whole records
+    actor: str,
+) -> None:
+    """One journaled `entity` op per landed record: the whole record, so replay converges."""
+    if not journal_path:
+        return
+    for r in landed:
+        append_write(journal_path, "entity", {"kind": r["kind"], "key": r["key"], "name": r["name"],
+                                              "fields": r["fields"], "actor": actor})
 
 
 async def _category_paths_journaled(
@@ -892,6 +916,8 @@ async def _dispatch(args) -> int:
                 fields["description"] = args.description
             if args.not_for:
                 fields["not_for"] = args.not_for
+            if args.page_description:
+                fields["page_description"] = args.page_description
             if args.position is not None:
                 fields["position"] = args.position
             if args.device_class:
@@ -904,6 +930,10 @@ async def _dispatch(args) -> int:
             for flag in ("cross_task", "off_grid", "retired"):
                 if getattr(args, flag):
                     fields[flag] = True
+            if args.page_description:   # written now, against the record's own criteria (e38d403c)
+                from .categorypages import description_criteria
+                fields["page_description_basis"] = description_criteria(
+                    {"entity_kind": args.kind, "key": args.key, "name": args.name, **fields})
             res = await mint_entity(gx, args.kind, args.key, name=args.name, fields=fields,
                                     actor=args.actor)
             print(render("entity", res, args.format))
@@ -937,11 +967,7 @@ async def _dispatch(args) -> int:
             if not args.apply:
                 print("_(dry run — pass --apply to land it)_")
                 return 0
-            if args.journal_path:
-                for r in res["landed"]:
-                    append_write(args.journal_path, "entity",
-                                 {"kind": r["kind"], "key": r["key"], "name": r["name"],
-                                  "fields": r["fields"], "actor": args.actor})
+            _journal_entities(args.journal_path, res["landed"], args.actor)
             print(f"landed: {len(res['landed'])} entity op(s)")
             # the landed facet entries' URLs (design a62f2499 (1))
             paths = await _category_paths_journaled(gx, args.journal_path, args.actor, apply=True,
@@ -949,6 +975,38 @@ async def _dispatch(args) -> int:
             if paths["landed"]:
                 print(f"category paths: {paths['landed']} assert op(s)")
             return 1 if paths["errors"] else 0
+        elif args.command == "describe-categories":
+            # The category pages' reader-facing descriptions (amendment e38d403c (5)): --out writes
+            # the document they are drafted and reviewed in; --apply lands the edited one as one
+            # batch of whole entity records -- one journaled `entity` op each, so replay needs
+            # nothing new -- or nothing.
+            from .categorypages import describe_categories
+            text = Path(args.apply).read_text() if args.apply else None
+            res = await describe_categories(gx, website_root=args.website_root, drafts_dir=_drafts_dir(args),
+                                            apply_text=text, dry_run=args.dry_run, actor=args.actor)
+            for e in res.get("errors") or []:
+                print(f"error: {e.get('why', e) if isinstance(e, dict) else e}", file=sys.stderr)
+            if res.get("error"):
+                print(f"describe-categories: REFUSED — {res['error']}")
+                return 1
+            if text is None:
+                c = res["counts"]
+                print(f"describe-categories: {c['pages']} earned page(s) · {c['described']} described · "
+                      f"{c['pages'] - c['described']} to write")
+                if args.out:
+                    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+                    Path(args.out).write_text(res["document"])
+                    print(f"document: {args.out}")
+                return 0
+            c = res["counts"]
+            print(f"describe-categories: {res['rows']} section(s) · {c['changed']} changed · "
+                  f"{c['reconfirmed']} re-confirmed · {c['unchanged']} unchanged · {c['blank']} blank")
+            if args.dry_run:
+                print("_(dry run — nothing written)_")
+                return 0
+            _journal_entities(args.journal_path, res["landed"], args.actor)
+            print(f"landed: {len(res['landed'])} entity op(s)")
+            return 0
         elif args.command == "derived-from":
             # An archive deliverable's provenance (design leg 4a4ef27e (2)): the op names the
             # resolved deliverable id, so replay re-lands the same edge.
@@ -1668,11 +1726,8 @@ async def _dispatch(args) -> int:
                       "graph-sibling graph.config.json)", file=sys.stderr)
                 return 1
             cfg = load_graph_config(args.graph_db_path) or {}
-            staging_root = drafts_dir = None
-            if cfg.get("emit_root"):
-                # The drafts listings live beside the emit root (its parent), inside the site
-                staging_root = Path(cfg["emit_root"]).expanduser().resolve().parent
-                drafts_dir = staging_root.relative_to(Path(args.website_root).resolve()).as_posix()
+            drafts_dir = _drafts_dir(args)
+            staging_root = (Path(args.website_root).resolve() / drafts_dir) if drafts_dir else None
 
             async def _staging_index():
                 from .purenotes import staging_index
@@ -3298,6 +3353,9 @@ def main() -> int:
     p_ent.add_argument("--description", default="", help="One line on what the entry covers")
     p_ent.add_argument("--not-for", default="",
                        help="tool / subject / model: what the entry does NOT cover (the facet judge's criteria)")
+    p_ent.add_argument("--page-description", default="",
+                       help="A facet entry: the reader-facing text of its category page (never the judge's "
+                            "criteria; amendment e38d403c)")
     p_ent.add_argument("--position", type=int, default=None, help="Its place on the axis (ascending)")
     p_ent.add_argument("--device-class", default="",
                        help="hardware: gpu | cpu | board | phone | sensor | cloud")
@@ -3328,6 +3386,18 @@ def main() -> int:
     p_eb.add_argument("table", help="The JSON list of entity records")
     p_eb.add_argument("--apply", action="store_true", help="Write it (default: plan and check only)")
     p_eb.add_argument("--actor", default=_DEFAULT_ACTOR)
+
+    p_dc = sub.add_parser("describe-categories",
+                          help="Write the category pages' description document, or land an edited one (journaled "
+                               "with --apply; amendment e38d403c): each earned page's reader-facing page_description, "
+                               "drafted from the posts it lists, reviewed whole, landed as one batch of entity ops")
+    p_dc.add_argument("--out", default=None, help="Write the document here (else only the counts print)")
+    p_dc.add_argument("--apply", default=None, metavar="DOCUMENT",
+                      help="Land an edited document as one batch (refused whole if any entry changed)")
+    p_dc.add_argument("--dry-run", action="store_true", help="With --apply: check and plan only")
+    p_dc.add_argument("--website-root", default=None,
+                      help="The site project root (default: the sibling config's website_root)")
+    p_dc.add_argument("--actor", default=_DEFAULT_ACTOR)
 
     p_df = sub.add_parser("derived-from",
                           help="Record (or --retract) an ARCHIVE deliverable's one provenance edge to its work "

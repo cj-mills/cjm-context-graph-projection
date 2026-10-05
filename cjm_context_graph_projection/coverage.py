@@ -42,9 +42,11 @@ from .runtime import GraphHandle
 # The fields each declared Entity sub-kind carries beyond its name (the journaled record):
 # field -> its type. A kind absent here is refused, so a new kind is declared before use.
 ENTITY_FIELDS: Dict[str, Dict[str, type]] = {
+    # a task / stage is a facet too (its category page's page_description, amendment e38d403c (1))
     P.ENTITY_TASK: {"description": str, "position": int, "cross_task": bool, "off_grid": bool,
-                    "retired": bool},
-    P.ENTITY_STAGE: {"description": str, "position": int, "cross_task": bool, "retired": bool},
+                    "retired": bool, "page_description": str, "page_description_basis": str},
+    P.ENTITY_STAGE: {"description": str, "position": int, "cross_task": bool, "retired": bool,
+                     "page_description": str, "page_description_basis": str},
     P.ENTITY_HARDWARE: {"description": str, "device_class": str},
     P.ENTITY_CLAIM: {"statement": str, "position": int},   # amendment 98e99fe5 (1); see claims.py
     # The Library (design leg 4a4ef27e); see library.py
@@ -56,8 +58,11 @@ ENTITY_FIELDS: Dict[str, Dict[str, type]] = {
     # its light / dark override two facts. The design_system kind is NOT here: the artifact
     # fold derives it, so the entity verb refuses it.
     P.ENTITY_SITE_PROFILE: {"description": str},
-    # The category facets' vocabularies (amendment 3c5cff97): the facet judge's criteria
-    **{k: {"description": str, "not_for": str, "retired": bool} for k in P.FACET_KINDS},
+    # The category facets' vocabularies (amendment 3c5cff97): the facet judge's criteria, and
+    # page_description, the reader-facing text of the entry's category page (amendment e38d403c (1)),
+    # never part of the criteria, and page_description_basis, the criteria hash it was written
+    # against (a criteria change re-surfaces it for review)
+    **{k: {"description": str, "not_for": str, "retired": bool, "page_description": str, "page_description_basis": str} for k in P.FACET_KINDS},
 }
 _REQUIRED = {P.ENTITY_TASK: ("position",), P.ENTITY_STAGE: ("position",),
              P.ENTITY_HARDWARE: ("device_class",), P.ENTITY_CLAIM: ("statement", "position"),

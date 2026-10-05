@@ -521,7 +521,9 @@ async def page_plan(
                            "why": "two nodes' site_paths land on one page file"})
         seen[p["source"]] = p["subject"]
     return {"pages": planned, "unpaged": unpaged, "category_listing": category["href"],
-            "stubs": cats_plan["stubs"], "category_pages": links, "errors": errors}
+            "stubs": cats_plan["stubs"], "category_pages": links, "undescribed": cats_plan["undescribed"],
+            "stale_descriptions": cats_plan["stale_descriptions"],
+            "errors": errors}
 
 
 def _generated_files(
@@ -561,7 +563,8 @@ async def project_pages(
     rep: Dict[str, Any] = {"planned": len(plan["pages"]), "written": 0, "unchanged": 0, "removed": [],
                            "unpaged": plan["unpaged"], "sources": [p["source"] for p in plan["pages"]],
                            "category_listing": plan.get("category_listing") or "", "plan": plan["pages"],
-                           "stubs": plan.get("stubs") or []}
+                           "stubs": plan.get("stubs") or [], "undescribed": plan.get("undescribed") or [],
+                           "stale_descriptions": plan.get("stale_descriptions") or []}
     if errors or not write:
         return {**rep, "errors": errors}
     wanted = {p["source"] for p in plan["pages"]}

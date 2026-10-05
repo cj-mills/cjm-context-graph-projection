@@ -489,6 +489,12 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                          f"({pg.get('written', 0)} written, {pg.get('unchanged', 0)} unchanged, "
                          f"{len(pg.get('removed') or [])} removed)"
                          + (f" · no site_path: {', '.join(pg['unpaged'])}" if pg.get("unpaged") else ""))
+            if pg.get("undescribed"):   # staging renders the gap marked; public refuses (e38d403c (3))
+                lines.append(f"- ⚠ {len(pg['undescribed'])} category page(s) without a page_description "
+                             "(describe-categories)")
+            if pg.get("stale_descriptions"):   # written against criteria that have since changed
+                lines.append(f"- ⚠ {len(pg['stale_descriptions'])} category description(s) to re-read: their criteria "
+                             f"changed since ({', '.join(pg['stale_descriptions'])}; describe-categories)")
         th = obj.get("theme") or {}
         if th.get("used"):   # the theme from the bound design system (leg C of 0858bbd0)
             sy, fn, md = th.get("system") or {}, th.get("fonts") or {}, th.get("modes") or {}

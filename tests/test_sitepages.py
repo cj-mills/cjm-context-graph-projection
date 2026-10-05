@@ -342,7 +342,10 @@ def test_category_pages_earn_a_page_or_redirect(tmp_path):
     # every chip links the category's page where one exists; a topic Lens merges into a page
     from cjm_dev_graph_schema.identity import entity_node_id
     from cjm_context_graph_projection.archive import transfer_site_path
-    from cjm_context_graph_projection.categorypages import plan_category_paths
+    from cjm_context_graph_projection.categorypages import (UNDESCRIBED, describe_categories, description_criteria,
+                                                           entry_record, plan_category_paths)
+    from cjm_context_graph_projection.facetjudge import load_facet_vocab
+    from cjm_context_graph_projection.facetreview import review_state
     site = tmp_path / "site"
     _site(site)
 
@@ -363,6 +366,17 @@ def test_category_pages_earn_a_page_or_redirect(tmp_path):
             for r in plan["assert"]:
                 await assert_value(gx, r["subject"], "site_path", r["value"])
             merged = await transfer_site_path(gx, lens_node_id("topic"), entity_node_id("tool", "pytorch"), merge=True)
+            # Amendment e38d403c: an earned page with no page_description refuses a public build (its
+            # criteria never reach readers); staging renders the gap marked
+            gap = await page_plan(gx, str(site), "public", (await redirect_plan(gx))["pages"])
+            marked = await page_plan(gx, str(site), "staging", (await redirect_plan(gx))["pages"])
+            # ... described through the review document: drafted, edited, landed whole
+            doc = (await describe_categories(gx, website_root=str(site)))["document"]
+            edited = doc.replace("\nPage description:\n", "\nPage description: Posts that build\nwith PyTorch.\n")
+            dry = await describe_categories(gx, apply_text=edited, dry_run=True)
+            described = await describe_categories(gx, apply_text=edited)
+            stale = (await review_state(gx))["stale"]   # a description re-judges nothing
+            again = await describe_categories(gx, apply_text=edited)   # its basis moved: refused
             pub = await site_build(gx, str(site), "public")
             out = site / "_site"
             got = {k: (out / k).read_text() for k in ("categories/vision/index.html", "series/notes/topic.html",
@@ -371,27 +385,60 @@ def test_category_pages_earn_a_page_or_redirect(tmp_path):
             index = (site / "categories" / "index.qmd").read_text()
             items = _items((out / "categories" / "pytorch" / "index.html").read_text())
             llms = (out / "categories" / "pytorch" / "index.llms.md").exists()
+            llms_txt = (out / "llms.txt").read_text()
+            # a criteria change since the description was written re-surfaces it: reported, never
+            # refused (the facet gate re-judges the entry apart), the document flags it, and the review re-confirms it unchanged
+            live = (await load_facet_vocab(gx))["tool:pytorch"]
+            rec = entry_record(live)
+            await mint_entity(gx, "tool", "pytorch", name="PyTorch",
+                              fields={**rec["fields"], "description": "PyTorch as the framework"})
+            moved = await page_plan(gx, str(site), "public", (await redirect_plan(gx))["pages"])
+            flagged = (await describe_categories(gx, website_root=str(site)))["document"]
+            reconfirmed = await describe_categories(gx, apply_text=flagged)
+            settled = await page_plan(gx, str(site), "public", (await redirect_plan(gx))["pages"])
             # a rename re-draws the entry's path, superseding the old one
             await mint_entity(gx, "subject", "vision", name="Computer vision",
                               fields={"description": "Vision", "not_for": "a mention"})
             renamed = await plan_category_paths(gx, (await redirect_plan(gx))["pages"])
-            return plan, unpathed, no_min, merged, pub, got, page, index, items, llms, renamed
+            return (plan, unpathed, no_min, merged, pub, got, page, index, items, llms, renamed, gap, marked, doc,
+                    dry, described, stale, again, llms_txt, moved, flagged, reconfirmed, settled)
 
-    plan, unpathed, no_min, merged, pub, got, page, index, items, llms, renamed = asyncio.run(go())
+    (plan, unpathed, no_min, merged, pub, got, page, index, items, llms, renamed, gap, marked, doc,
+     dry, described, stale, again, llms_txt, moved, flagged, reconfirmed, settled) = asyncio.run(go())
     assert [r["value"] for r in plan["assert"]] == ["/categories/pytorch/", "/categories/vision/"]
     assert {e["kind"] for e in unpathed["errors"]} == {"category-path"}
     assert [e["kind"] for e in no_min["errors"]] == ["category-index"]
     assert "category_page_min" in no_min["errors"][0]["why"]
     assert merged["written"]
+    assert [(e["kind"], e.get("entries")) for e in gap["errors"]] == [("category-undescribed", ["tool:pytorch"])]
+    assert not marked["errors"] and marked["undescribed"] == ["tool:pytorch"]
+    lede = [p for p in marked["pages"] if p.get("layout") == "category"][0]
+    assert lede["description"] == UNDESCRIBED and "PyTorch as" not in lede["text"]
+    assert "## PyTorch · tool `pytorch` · 2 posts <!-- category tool:pytorch " in doc
+    assert "\nPage description:\n" in doc and "- Post A\n- Post B\n" in doc and "Vision ·" not in doc
+    assert dry["counts"] == {"changed": 1, "reconfirmed": 0, "unchanged": 0, "blank": 0} and not dry["written"]
+    fields = described["landed"][0]["fields"]
+    assert described["written"] and fields == {
+        "description": "PyTorch", "not_for": "a mention", "page_description": "Posts that build with PyTorch.",
+        "page_description_basis": description_criteria({"entity_kind": "tool", "key": "pytorch", "name": "PyTorch",
+                                                         "description": "PyTorch", "not_for": "a mention"})}
+    assert stale == {}
+    assert again.get("error") and "changed since" in again["errors"][0] and not again["written"]
+    assert not moved["errors"] and moved["stale_descriptions"] == ["tool:pytorch"]
+    assert "⚠ The criteria changed since this description was written" in flagged and "1 to re-read" in flagged
+    assert reconfirmed["counts"] == {"changed": 0, "reconfirmed": 1, "unchanged": 0, "blank": 0}
+    assert reconfirmed["written"] and settled["stale_descriptions"] == []
     assert pub["ok"], pub
     assert pub["redirects"]["category_stubs"] == 1
     # PyTorch (2 posts) earns its page; Vision (1) redirects into the filtered category listing
     assert '"":"../../blog.html#category=Vision"' in got["categories/vision/index.html"]
     # the merged topic Lens's URL redirects to the category page it merged into
     assert '"":"../../categories/pytorch/index.html"' in got["series/notes/topic.html"]
-    assert page.startswith(f"---\n{GENERATED}\ntitle: PyTorch\ndescription: PyTorch\n")
+    # the page's lede, its index line and the agent layer all read the page_description (e38d403c (4))
+    assert page.startswith(f"---\n{GENERATED}\ntitle: PyTorch\ndescription: Posts that build with PyTorch.\n")
     assert "  feed: true\n" in page and items == ["Post B", "Post A"]
-    assert "[PyTorch](pytorch/index.qmd) · 2 posts · PyTorch" in index and "Vision" not in index
+    assert "[PyTorch](pytorch/index.qmd) · 2 posts · Posts that build with PyTorch." in index and "Vision" not in index
+    assert "Posts that build with PyTorch." in llms_txt
     # every chip links its page where one exists, else the filtered listing
     cv = got["series/tutorials/cv.html"]
     assert 'href="../../categories/pytorch/"' in cv and 'href="../../blog.html#category=Vision"' in cv

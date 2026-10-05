@@ -429,10 +429,13 @@ async def agent_plan(
     if copy["errors"]:
         return {"heads": heads, "llms": None, "errors": errors}
     page_nodes = await F.load_nodes(gx, sorted({p["subject"] for p in planned_pages}))
+    from .categorypages import PAGE_LAYOUT as CATEGORY_PAGE_LAYOUT
 
     def page_item(p: Dict[str, Any]) -> Dict[str, Any]:
         return {"title": p["title"], "source": p["source"], "updated": p.get("updated") or "",
-                "description": p.get("description") or str(F.prop(page_nodes.get(p["subject"]), "description") or ""),
+                # a category page states its own (e38d403c (4)): its Entity's description is the judge's criteria
+                "description": p.get("description") or ("" if p.get("layout") == CATEGORY_PAGE_LAYOUT else
+                                                        str(F.prop(page_nodes.get(p["subject"]), "description") or "")),
                 "members": list(p["listed"])}
     site_pages = [{"title": stated(n, "title"), "source": s, "description": stated(n, "description")}
                   for n, s in sorted(src_of.items(), key=lambda x: x[1])
