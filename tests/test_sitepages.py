@@ -85,7 +85,7 @@ def _site(root: Path) -> None:
         "project:\n  type: website\nprofile:\n  default: public\n  group:\n    - [public, staging]\n"
         "filters:\n  - _derived/derived-blocks.lua\nwebsite:\n  title: t\n  site-url: https://example.org\n"
         # the agent layer's switch and intro (design 39c51c15 (7), amendment 23a49667)
-        "  llms-txt: true\nllms-index:\n  summary: S.\n"
+        "  llms-txt: true\nsite-summary: S.\n"
         # the author strip's copy (design 39c51c15 (5)): typed posts carry the strip
         'author-strip:\n  byline: "B"\n  links: "L"\n  pitch: "P {claims} {href}"\n  questions: "Q"\n'
         'site-author:\n  name: "N"\n  role: "R"\n'
@@ -329,7 +329,9 @@ def test_a_lens_grouped_by_series_lists_each_series_page_once():
     got = group_through_series(["s1", "a2", "a1", "s2"], ["../posts/s1/index.md", "../posts/a2/index.md",
                                                           "../posts/a1/index.md", "../posts/s2/index.md"],
                                planned, "logs/index.qmd", "lens")
-    assert got == {"contents": ["../posts/s1/index.md", "arc/index.qmd", "../posts/s2/index.md"], "errors": []}
+    # ... and names the Series pages it listed, in listing order (the index's hubs, 5c3c2662 (5))
+    assert got == {"contents": ["../posts/s1/index.md", "arc/index.qmd", "../posts/s2/index.md"],
+                   "series": [planned[0]], "errors": []}
     planned.append({"kind": DevNodeKinds.SERIES, "sequence": True, "source": "logs/other/index.qmd", "listed": ["a1"]})
     got = group_through_series(["a1"], ["../posts/a1/index.md"], planned, "logs/index.qmd", "lens")
     assert got["contents"] == [] and [e["kind"] for e in got["errors"]] == ["lens-group"]

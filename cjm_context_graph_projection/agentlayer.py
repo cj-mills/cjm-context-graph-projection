@@ -12,9 +12,10 @@ Three surfaces an agent reads, each a projection, nothing stored:
    structure: the site pages, the collection pages, one section per series (its page, then its
    members in their authored order), the tutorials, the notes and the paid work in no series, and
    the project logs under `## Optional` (ruling ff12a19a). Every post is listed once, each link a page's `.llms.md` with
-   its description; the intro is the author's copy under the site config's `llms-index` (a missing
+   its description; the intro is the author's copy -- the site's one sentence `site-summary`, which
+   the home page reads too (amendment 5c3c2662 (1)), then the details under `llms-index` (a missing
    summary refuses -- never words the author did not write), and every link must name a `.llms.md`
-   the render produced.
+   the render produced. The home page is never listed: llms.txt stands in for the site root.
 3. JSON-LD per post -- TechArticle for a tutorial, BlogPosting for the other post kinds -- carried
    by the derived-blocks filter into the page head and read back after the render against the plan.
    Its isBasedOn names what the post draws on, from the Library index's plan (design 37f82f72 (5)).
@@ -35,9 +36,8 @@ import yaml
 
 from .runtime import GraphHandle
 
-INDEX_KEY = "llms-index"            # The site-config key holding llms.txt's intro copy
-INDEX_REQUIRED = ("summary",)       # The copy llms.txt cannot be written without
-INDEX_OPTIONAL = ("details",)       # Copy rendered when given
+INDEX_KEY = "llms-index"            # The site-config key holding llms.txt's own intro copy
+INDEX_OPTIONAL = ("details",)       # Copy rendered when given (the summary is site-summary's, 5c3c2662 (1))
 LLMS_SUFFIX = ".llms.md"            # Quarto's per-page markdown, beside the page's .html
 LLMS_TXT = "llms.txt"
 OPTIONAL_KINDS = ("log",)           # Post kinds listed under `## Optional` (amendment 23a49667 (2), ruling ff12a19a)
@@ -75,25 +75,28 @@ _TEXT_LINK_RE = re.compile(r'(?<!!)\[([^\]]*)\]\((<[^>]*>|[^)\s]+)(?:\s+"[^"]*")
 def load_index_copy(
     website_root: str,  # The site project root
 ) -> Dict[str, Any]:  # {copy: {field: text}, errors}
-    """llms.txt's intro copy from the site config: a missing key or summary refuses (the build
-    never falls back to words the author did not write)."""
+    """llms.txt's intro copy: the summary is the site's one sentence (`site-summary`, amendment
+    5c3c2662 (1)), the details the site config's `llms-index` copy. A missing summary refuses (the
+    build never falls back to words the author did not write), and so does a summary still kept
+    under `llms-index` -- a second copy beside the one the home page reads."""
     path = Path(website_root) / "_quarto.yml"
     try:
         cfg = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except (OSError, yaml.YAMLError) as e:
         return {"copy": {}, "errors": [{"kind": "llms-index-copy", "path": str(path), "why": f"unreadable: {e}"}]}
     copy = cfg.get(INDEX_KEY) or {}
-    missing = [f for f in INDEX_REQUIRED if not str(copy.get(f) or "").strip()]
-    if missing:
-        return {"copy": {}, "errors": [{"kind": "llms-index-copy", "path": str(path), "missing": missing,
-                                        "why": f"the site config's `{INDEX_KEY}` lacks copy llms.txt renders"}]}
+    from .postpage import SITE_SUMMARY_KEY, fill_copy, load_site_author, load_site_summary
+    if "summary" in copy:
+        return {"copy": {}, "errors": [{"kind": "llms-index-copy", "path": str(path),
+                                        "why": f"`{INDEX_KEY}.summary` is a second copy of `{SITE_SUMMARY_KEY}`, "
+                                               "the site's one sentence llms.txt and the home page read"}]}
+    summary = load_site_summary(website_root)
+    if summary["errors"]:
+        return {"copy": {}, "errors": summary["errors"]}
     # The copy names the author through the site's one statement of them (amendment fe6f0fb7)
-    from .postpage import fill_copy, load_site_author
     author = load_site_author(website_root)
-    if author["errors"]:
-        return {"copy": {}, "errors": author["errors"]}
-    out: Dict[str, str] = {}
-    for f in INDEX_REQUIRED + INDEX_OPTIONAL:
+    out: Dict[str, str] = {"summary": summary["text"]}
+    for f in INDEX_OPTIONAL:
         filled = fill_copy(" ".join(str(copy.get(f) or "").split()), author["author"])
         if "error" in filled:
             return {"copy": {}, "errors": [{"kind": "llms-index-copy", "path": str(path), "field": f,
@@ -446,9 +449,12 @@ async def agent_plan(
     from .sitepages import CATEGORY_LAYOUT
     site_pages += [{"title": p["title"], "source": p["source"], "description": ""}
                    for p in planned_pages if p.get("layout") == CATEGORY_LAYOUT]
+    # The home page is the site root llms.txt stands in for (EXCLUDED_PAGES): never a collection
+    from .homepage import LAYOUT as HOME_LAYOUT
     index = llms_index(
         str(site.get("title") or ""), site_url, copy["copy"], site_pages,
-        [page_item(p) for p in planned_pages if not p.get("sequence") and p.get("layout") != CATEGORY_LAYOUT],
+        [page_item(p) for p in planned_pages
+         if not p.get("sequence") and p.get("layout") not in (CATEGORY_LAYOUT, HOME_LAYOUT)],
         [page_item(p) for p in planned_pages if p.get("sequence")],
         {n: {"title": stated(n, "title"), "source": src_of[n], "description": stated(n, "description"),
              "kind": posts[n]["kind"], "date": (dates.get(n) or {}).get("published") or ""}

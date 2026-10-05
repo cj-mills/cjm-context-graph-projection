@@ -101,14 +101,9 @@ async def category_page_min(
     lens_id: str,  # The category index's Lens id
 ) -> Dict[str, Any]:  # {min} | {error}
     """The index Lens's active `category_page_min` (a62f2499 (3)): one positive integer."""
-    slot = [a for a in await F.load_assertions(gx)
-            if F.prop(a, "predicate") == P.CATEGORY_PAGE_MIN and str(F.prop(a, "subject_id")) == lens_id]
-    vals = [str(F.prop(a, "value") or "") for a in F.active_assertions(slot, await F.load_supersedes(gx))]
-    if len(vals) != 1:
-        return {"error": f"the category index needs exactly one active {P.CATEGORY_PAGE_MIN} (has {len(vals)})"}
-    if not vals[0].strip().isdigit() or int(vals[0]) < 1:
-        return {"error": f"{P.CATEGORY_PAGE_MIN} must be a positive integer (is {vals[0]!r})"}
-    return {"min": int(vals[0])}
+    from .lens import lens_count
+    got = await lens_count(gx, lens_id, P.CATEGORY_PAGE_MIN, "the category index")
+    return {"min": got["value"]} if "value" in got else got
 
 
 def _stub(
@@ -257,12 +252,21 @@ async def plan_category_pages(
                          "key": key, "subject": sid, "categories": [], "members": len(earned),
                          "updated": max(dates) if dates else None, "listed": [], "href": page["active"],
                          "sequence": False, "title": str(F.prop(node, "title") or key), "layout": INDEX_LAYOUT,
-                         "links": dict(links), "text": render_page(front, body=index_body(earned, src))})
+                         "links": dict(links), "hubs": index_hubs(earned),
+                         "text": render_page(front, body=index_body(earned, src))})
     if profile == "public" and out["undescribed"]:   # the criteria never reach readers silently
         out["errors"].append({"kind": "category-undescribed", "entries": list(out["undescribed"]),
                               "why": f"{len(out['undescribed'])} earned category page(s) have no page_description "
                                      "-- run describe-categories"})
     return out
+
+
+def index_hubs(
+    earned: List[Dict[str, Any]],  # The earned categories: {entry, name, source, ...}, in vocabulary order
+) -> List[Dict[str, str]]:  # [{title, source}] in the index's own order: by kind in the chip order
+    """The category pages the index links, in its order (the home page's map entry, 5c3c2662 (5))."""
+    return [{"title": e["name"], "source": e["source"]}
+            for kind in KIND_HEADINGS for e in earned if e["entry"]["entity_kind"] == kind]
 
 
 def index_body(

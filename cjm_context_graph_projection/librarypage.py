@@ -388,7 +388,8 @@ async def plan_library_pages(
         for c in classes:
             c["outputs"] = [{**o, "href": idx[o["id"]]["href"]} for o in c["outputs"] if o["id"] in idx]
         newest = max((o["date"] for o in shown if o["date"]), default="")
-        entries[rec["form"]].append({**rec, "key": w["key"], "page": href, "classes": classes, "newest": newest})
+        entries[rec["form"]].append({**rec, "key": w["key"], "page": href, "page_source": wsrc if has_page else None,
+                                     "classes": classes, "newest": newest})
         all_listed += [o["id"] for o in shown if o["id"] not in all_listed]
         dates += [o["updated"].isoformat() for o in shown if o["updated"]]
     if errors:
@@ -408,6 +409,9 @@ async def plan_library_pages(
              "updated": updated, "listed": all_listed, "href": page["href"],
              "title": str(F.prop(node, "title") or key), "layout": LAYOUT,
              "works": sum(len(g["works"]) for g in groups), "text": text,
+             # the work pages the index links, in its order (the home page's map entry, 5c3c2662 (5))
+             "hubs": [{"title": w["name"], "source": w["page_source"]}
+                      for g in groups for w in g["works"] if w.get("page_source")],
              "draws": {k: sorted(v, key=lambda d: (d["work"].casefold(), d.get("unit") or ""))
                        for k, v in sorted(draws.items())},
              "placed": placed}

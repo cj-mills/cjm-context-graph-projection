@@ -109,13 +109,14 @@ def test_descriptions_are_plain_text():
 
 def test_index_copy_refuses_without_a_summary(tmp_path):
     who = 'site-author:\n  name: "N"\n  role: "R"\n'
+    # the summary is the site's one sentence, site-summary (amendment 5c3c2662 (1))
     (tmp_path / "_quarto.yml").write_text("llms-index:\n  details: d\n" + who)
-    assert load_index_copy(str(tmp_path))["errors"][0]["missing"] == ["summary"]
-    (tmp_path / "_quarto.yml").write_text("llms-index:\n  summary: |\n    {name},   {role}: the site.\n" + who)
+    assert load_index_copy(str(tmp_path))["errors"][0]["kind"] == "site-summary"
+    (tmp_path / "_quarto.yml").write_text("site-summary: |\n  {name},   {role}: the site.\n" + who)
     assert load_index_copy(str(tmp_path)) == {"copy": {"summary": "N, R: the site.", "details": ""}, "errors": []}
-    (tmp_path / "_quarto.yml").write_text("llms-index:\n  summary: S\n  details: '{nope}'\n" + who)
+    (tmp_path / "_quarto.yml").write_text("site-summary: S\nllms-index:\n  details: '{nope}'\n" + who)
     assert load_index_copy(str(tmp_path))["errors"][0]["field"] == "details"   # an unknown placeholder refuses
-    (tmp_path / "_quarto.yml").write_text("llms-index:\n  summary: S\n")
+    (tmp_path / "_quarto.yml").write_text("site-summary: S\n")
     assert load_index_copy(str(tmp_path))["errors"][0]["kind"] == "site-author"
 
 

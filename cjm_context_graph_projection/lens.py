@@ -181,6 +181,24 @@ async def set_lens(
     return {"lens_id": node_id, "slug": slug, "updated": False, "written": True}
 
 
+async def lens_count(
+    gx: GraphHandle,
+    lens_id: str,    # The Lens the number is stated on
+    predicate: str,  # Its predicate (category_page_min, home_hubs, ...)
+    holder: str,     # What needs it, as an error names it ("the category index")
+) -> Dict[str, Any]:  # {value} | {error}
+    """A number a page projected from a Lens reads off its Lens (a62f2499 (3), 5c3c2662 (5)):
+    exactly one active value, a positive integer -- never a template constant."""
+    slot = [a for a in await F.load_assertions(gx)
+            if F.prop(a, "predicate") == predicate and str(F.prop(a, "subject_id")) == lens_id]
+    vals = [str(F.prop(a, "value") or "") for a in F.active_assertions(slot, await F.load_supersedes(gx))]
+    if len(vals) != 1:
+        return {"error": f"{holder} needs exactly one active {predicate} (has {len(vals)})"}
+    if not vals[0].strip().isdigit() or int(vals[0]) < 1:
+        return {"error": f"{predicate} must be a positive integer (is {vals[0]!r})"}
+    return {"value": int(vals[0])}
+
+
 def _lens_row(n: Any) -> Optional[Dict[str, Any]]:
     """A stored Lens node -> its parsed shelf row (a malformed stored lens is skipped)."""
     slug = F.prop(n, "key")

@@ -25,6 +25,7 @@ STRIP_KEY = "author-strip"                               # The site-config key h
 STRIP_FIELDS = ("byline", "links", "pitch", "questions")  # Every field the copy must carry
 SITE_AUTHOR_KEY = "site-author"            # The site config's one statement of the author (amendment fe6f0fb7)
 SITE_AUTHOR_FIELDS = ("name", "role")
+SITE_SUMMARY_KEY = "site-summary"          # The site's one sentence of who and what (amendment 5c3c2662 (1))
 POST_KINDS = ("tutorial", "notes", "log", "work")        # Deliverable kinds a post page carries (not site pages)
 TUTORIAL_KIND = "tutorial"
 # The header's kind label (39c51c15 (2)): the navigation kind, as a reader reads it; the site's
@@ -93,6 +94,31 @@ def load_site_author(
         return {"author": {}, "errors": [{"kind": "site-author", "path": str(path), "missing": missing,
                                           "why": f"the site config's `{SITE_AUTHOR_KEY}` lacks the author's {', '.join(missing)}"}]}
     return {"author": {f: " ".join(str(got[f]).split()) for f in SITE_AUTHOR_FIELDS}, "errors": []}
+
+
+def load_site_summary(
+    website_root: str,  # The site project root
+) -> Dict[str, Any]:  # {text, errors}
+    """The site's one sentence of who and what (`site-summary` in the site config, amendment
+    5c3c2662 (1)): llms.txt's intro and the home page's identity line both render it, the author
+    named through {name} / {role} (fe6f0fb7). A missing summary, or a placeholder the author
+    statement cannot fill, refuses -- never words the author did not write."""
+    path = Path(website_root) / "_quarto.yml"
+    try:
+        text = str((yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get(SITE_SUMMARY_KEY) or "")
+    except (OSError, yaml.YAMLError) as e:
+        return {"text": "", "errors": [{"kind": "site-summary", "path": str(path), "why": f"unreadable: {e}"}]}
+    if not text.strip():
+        return {"text": "", "errors": [{"kind": "site-summary", "path": str(path),
+                                        "why": f"the site config states no `{SITE_SUMMARY_KEY}`"}]}
+    author = load_site_author(website_root)
+    if author["errors"]:
+        return {"text": "", "errors": author["errors"]}
+    filled = fill_copy(" ".join(text.split()), author["author"])
+    if "error" in filled:
+        return {"text": "", "errors": [{"kind": "site-summary", "path": str(path),
+                                        "why": f"`{SITE_SUMMARY_KEY}` carries {filled['error']}"}]}
+    return {"text": filled["text"], "errors": []}
 
 
 def fill_copy(

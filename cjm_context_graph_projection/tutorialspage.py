@@ -125,11 +125,11 @@ def learning_paths(
     planned: List[Dict[str, Any]],           # page_plan's other planned pages (Series + Lens)
     types: Dict[str, Dict[str, Any]],        # note_types' map
     page_src: str,                           # The Tutorials page's source (relative to the root)
-) -> Dict[str, Any]:  # {contents, errors}
+) -> Dict[str, Any]:  # {contents, pages: the planned pages, same order, errors}
     """The collection pages whose listed members are ALL tutorials; a collection mixing
     tutorials with other kinds refuses (a wrong exclusion hides content, 6752db0a (9)). A page
     with its own layout (the category listing, design ce17606b (3)) is no collection."""
-    contents, errors = [], []
+    contents, pages, errors = [], [], []
     for p in sorted(planned, key=lambda p: p["source"]):
         if p.get("layout"):
             continue
@@ -143,7 +143,8 @@ def learning_paths(
                                   "whether it is a learning path"})
             continue
         contents.append(posixpath.relpath(p["source"], posixpath.dirname(page_src) or "."))
-    return {"contents": contents, "errors": errors}
+        pages.append(p)
+    return {"contents": contents, "pages": pages, "errors": errors}
 
 
 async def hardware_marks(
@@ -210,6 +211,11 @@ async def plan_matrix_page(
                        "why": f"the matrix refuses a tutorial ({r['reason']}: {r['detail']})"})
     paths = learning_paths(planned, types, src)
     errors += paths["errors"]
+    # the learning paths in the order the page's listing shows them (the home page's map, 5c3c2662 (5))
+    from .sitepages import hub_order
+    hubs = hub_order(paths["pages"], list(PATHS_LISTING["sort"]))
+    if hubs.get("error"):
+        errors.append({"kind": "lens-hubs", "subject": sid, "key": key, "why": hubs["error"]})
     if errors:
         return {"errors": errors}
     marks = await hardware_marks(gx, profile)
@@ -241,4 +247,4 @@ async def plan_matrix_page(
     return {"page": {"source": src, "kind": "Lens", "key": key, "subject": sid,
                      "members": len(listed["contents"]), "updated": listed["updated"],
                      "listed": listed["ids"], "href": page["href"], "title": front["title"],
-                     "layout": LAYOUT, "paths": len(paths["contents"]), "text": text}}
+                     "layout": LAYOUT, "paths": len(paths["contents"]), "hubs": hubs["hubs"], "text": text}}

@@ -89,7 +89,7 @@ def _site(root: Path) -> None:
     (root / "_quarto.yml").write_text(
         "project:\n  type: website\nprofile:\n  default: public\n  group:\n    - [public, staging]\n"
         "filters:\n  - _derived/derived-blocks.lua\nwebsite:\n  title: t\n  site-url: https://example.org\n"
-        "  llms-txt: true\nllms-index:\n  summary: The test site.\n" + STRIP)
+        "  llms-txt: true\nsite-summary: The test site.\n" + STRIP)
     # The posts' author, as Quarto merges it from the directory (the JSON-LD's, 23a49667 (4))
     (root / "posts" / "_metadata.yml").write_text("author: The Author\n")
     (root / "_about-author-cta.qmd").write_text(

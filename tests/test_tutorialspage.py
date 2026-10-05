@@ -79,7 +79,8 @@ def test_learning_paths_are_all_tutorial_collections_and_a_mix_refuses():
                {"source": "series/notes/n.qmd", "subject": "N", "listed": ["n1"]},
                {"source": "series/tutorials/a.qmd", "subject": "A", "listed": ["t2"]}]
     ok = learning_paths(planned, types, "series/tutorials/index.qmd")
-    assert ok == {"contents": ["a.qmd", "b.qmd"], "errors": []}
+    # ... each with its planned page, the home page's hubs (amendment 5c3c2662 (5))
+    assert ok == {"contents": ["a.qmd", "b.qmd"], "pages": [planned[2], planned[0]], "errors": []}
     mixed = learning_paths(planned + [{"source": "series/x.qmd", "subject": "X", "listed": ["t1", "n1"]}],
                            types, "series/tutorials/index.qmd")
     assert [(e["kind"], e["subject"]) for e in mixed["errors"]] == [("learning-path-mixed", "X")]

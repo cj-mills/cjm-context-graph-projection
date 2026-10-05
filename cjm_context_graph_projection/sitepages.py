@@ -23,7 +23,11 @@ node's data through one template per node kind:
 - a Lens whose view layout is `category-index` projects the CATEGORY INDEX and every CATEGORY
   PAGE (categorypages.py, design a62f2499): a page per facet entry that earns one, a redirect stub
   for every entry below the threshold. Planned FIRST, since every chip on every other page links
-  the category's page where one exists.
+  the category's page where one exists;
+- a Lens whose view layout is `home` projects the HOME PAGE (homepage.py, design e55201e2 and
+  amendment 5c3c2662): a map of the index pages its selection names, planned LAST, since it reads
+  every other planned page. Each index page states its HUBS -- the projected pages it links, in
+  the order it shows them -- for the map to read.
 
 A Series page and a work page are ORDERED collections (`sequence` on the planned entry): the
 post navigation, JSON-LD isPartOf and llms.txt walk them in order (638b7b85 (5)).
@@ -59,6 +63,7 @@ from cjm_dev_graph_schema.vocab import DevNodeKinds
 
 from . import factlayer as F
 from .archive import is_retired
+from .homepage import LAYOUT as HOME_LAYOUT, plan_home_page
 from .lens import apply_lens, LENS_LABEL
 from .librarypage import LAYOUT as LIBRARY_LAYOUT, plan_library_pages
 from .runtime import GraphHandle
@@ -426,6 +431,7 @@ async def page_plan(
     links = cats_plan["links"]   # chip -> its category page's path
     matrix_pages: List[Any] = []   # coverage-matrix Lenses, planned after every collection page
     library_pages: List[Any] = []  # the library Lens, planned after them all (its topic line reads them)
+    home_pages: List[Any] = []     # the home Lens, planned last (its map reads every index page)
     for kind, nodes in ((DevNodeKinds.SERIES, series), (LENS_LABEL, lenses)):
         for node in sorted(nodes, key=lambda n: str(F.prop(n, "key") or "")):
             sid, key = str(F.nid(node)), str(F.prop(node, "key") or "")
@@ -467,6 +473,10 @@ async def page_plan(
                     # The Library index (design 638b7b85): its work pages are planned with it
                     library_pages.append((node, {"source": src, "href": page["active"]}))
                     continue
+                if (applied.get("view") or {}).get("layout") == HOME_LAYOUT:
+                    # The home page (design e55201e2): a map of the other index pages, planned last
+                    home_pages.append((node, {"source": src, "href": page["active"]}))
+                    continue
                 layout = (applied.get("view") or {}).get("layout")
                 listing, cats = dict(CATEGORY_LISTING if layout == CATEGORY_LAYOUT else LENS_LISTING), None
                 sort = (applied.get("view") or {}).get("sort")
@@ -482,10 +492,15 @@ async def page_plan(
             contents = listed["contents"]
             if kind == DevNodeKinds.SERIES:   # what most of the series is about (design ce17606b (4))
                 cats = majority([chips["posts"].get(i, []) for i in listed["ids"]], chips["rank"])
+            hubs: List[Dict[str, str]] = []   # the projected pages a Lens page links (5c3c2662 (5))
             if group == GROUP_SERIES:   # one entry per paged Series (design 7657c4a5 (1))
                 grouped = group_through_series(listed["ids"], contents, planned, src, sid)
                 errors += grouped["errors"]
                 contents = grouped["contents"]
+                ordered = hub_order(grouped["series"], list(listing.get("sort") or []))
+                if ordered.get("error"):
+                    errors.append({"kind": "lens-hubs", "subject": sid, "key": key, "why": ordered["error"]})
+                hubs = ordered.get("hubs") or []
             known = {**listed["cats"], **{p["source"]: p.get("categories") or [] for p in planned}}
             listing = with_category_links({"contents": listing_items(contents, src, known), **listing}, src,
                                           listing_categories(contents, src, known), category["href"],
@@ -499,7 +514,9 @@ async def page_plan(
                             "listed": listed["ids"], "href": page["active"],
                             "sequence": kind == DevNodeKinds.SERIES,
                             "title": str(F.prop(node, "title") or key),
+                            "date": F.prop(node, "date"),
                             **({"layout": layout} if layout == CATEGORY_LAYOUT else {}),
+                            **({} if kind == DevNodeKinds.SERIES or layout == CATEGORY_LAYOUT else {"hubs": hubs}),
                             "text": text})
     for node, members, page in matrix_pages:
         got = await plan_matrix_page(gx, node, members, page, root, profile, states, types, drafts,
@@ -512,6 +529,12 @@ async def page_plan(
                                        list(planned))
         errors += got.get("errors", [])
         planned += got.get("pages", [])
+    for node, page in home_pages:
+        got = await plan_home_page(gx, node, page, website_root, root, profile, states, types, drafts,
+                                   list(planned), category["href"])
+        errors += got.get("errors", [])
+        if got.get("page"):
+            planned.append(got["page"])
     errors += check_category_listing(planned, category["href"], profile, states, types)
     seen: Dict[str, str] = {}
     for p in planned:
@@ -688,16 +711,19 @@ def group_through_series(
     planned: List[Dict[str, Any]],      # The pages planned so far (every Series page among them)
     page_src: str,                      # The Lens page's source, relative to the root
     subject: str,                       # The Lens node's id (error rows name it)
-) -> Dict[str, Any]:  # {contents, errors}
+) -> Dict[str, Any]:  # {contents, series: [the Series pages listed, as planned], errors}
     """A Lens with view.group_by "series" lists a member THROUGH its Series page (design 7657c4a5
     (1)): one entry per paged Series, in the place of its first member, a member in no paged Series
     as itself. A member two paged Series list refuses -- the build never picks one."""
     pages: Dict[str, List[str]] = {}
+    by_source: Dict[str, Dict[str, Any]] = {}
     for p in planned:
         if p.get("sequence") and p.get("kind") == DevNodeKinds.SERIES:
+            by_source[p["source"]] = p
             for m in p["listed"]:
                 pages.setdefault(m, []).append(p["source"])
     out: List[str] = []
+    series: List[Dict[str, Any]] = []
     errors: List[Dict[str, Any]] = []
     for nid, path in zip(ids, contents):
         srcs = pages.get(nid) or []
@@ -708,4 +734,35 @@ def group_through_series(
         entry = posixpath.relpath(srcs[0], posixpath.dirname(page_src) or ".") if srcs else path
         if entry not in out:
             out.append(entry)
-    return {"contents": out, "errors": errors}
+            if srcs:
+                series.append(by_source[srcs[0]])
+    return {"contents": out, "series": series, "errors": errors}
+
+
+# A planned page's value for each listing sort key Quarto reads off the page (its front matter)
+HUB_SORT_KEYS = {"title": "title", "date": "date", "date-modified": "updated"}
+
+
+def hub_order(
+    pages: List[Dict[str, Any]],  # Planned pages a listing links ({title, source, date?, updated?})
+    terms: List[str],             # The listing's sort terms ("date-modified desc", "title")
+) -> Dict[str, Any]:  # {hubs: [{title, source}]} | {error}
+    """The pages a listing links in the order the listing SHOWS them: its sort applied to what the
+    build planned for each page, as Quarto sorts the rendered items. The home page reads an index's
+    hubs in this order and never re-ranks them (amendment 5c3c2662 (5)). A page with no value for a
+    key follows the pages that have one; a sort key the build plans no value for refuses."""
+    rows = list(pages)
+    for term in reversed(terms):
+        field, _, direction = term.partition(" ")
+        key = HUB_SORT_KEYS.get(field)
+        if key is None:
+            return {"error": f"a listing sorts by {field!r}, which the build plans no value for"}
+
+        def value(p: Dict[str, Any]) -> Any:
+            v = p.get(key)
+            if key == "title":
+                return str(v).casefold() if v else None
+            return parse_date(v) if v else None
+        present = [p for p in rows if value(p) is not None]
+        rows = sorted(present, key=value, reverse=direction == "desc") + [p for p in rows if value(p) is None]
+    return {"hubs": [{"title": str(p.get("title") or ""), "source": p["source"]} for p in rows]}
