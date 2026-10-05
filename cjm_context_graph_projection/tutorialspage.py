@@ -182,6 +182,7 @@ async def plan_matrix_page(
     drafts: Optional[Path],
     planned: List[Dict[str, Any]],           # The other planned pages (the learning-path candidates)
     listing_href: str = "",                  # The category listing's page path ("" = none: chips are labels)
+    category_pages: Optional[Dict[str, str]] = None,  # chip -> its category page's path (design a62f2499 (7))
 ) -> Dict[str, Any]:  # {page: planned entry} | {errors}
     """Plan the Tutorials page: the listed population under the profile, the matrix over it,
     the learning paths, the page text."""
@@ -233,7 +234,8 @@ async def plan_matrix_page(
     # The learning paths' chips link into the category listing like every projected listing's (design a7224060)
     known = {p["source"]: p.get("categories") or [] for p in planned}
     front["listing"] = with_category_links({**PATHS_LISTING, "contents": listing_items(paths["contents"], src, known)}, src,
-                                           listing_categories(paths["contents"], src, known), listing_href)
+                                           listing_categories(paths["contents"], src, known), listing_href,
+                                           pages=category_pages)
     head = yaml.safe_dump(front, sort_keys=False, allow_unicode=True, width=10_000)
     text = f"---\n{GENERATED}\n{head}---\n\n" + render_body(matrix, items, profile)
     return {"page": {"source": src, "kind": "Lens", "key": key, "subject": sid,

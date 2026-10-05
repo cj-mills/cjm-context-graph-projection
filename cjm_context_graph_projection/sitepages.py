@@ -19,7 +19,11 @@ node's data through one template per node kind:
 - a Lens whose view layout is `category-listing` projects the site's CATEGORY LISTING (design
   ce17606b (3)), the page every chip links into: every public post, the numbered category
   sidebar and the feed, no title block; under the public profile a public post it leaves out
-  refuses the page.
+  refuses the page;
+- a Lens whose view layout is `category-index` projects the CATEGORY INDEX and every CATEGORY
+  PAGE (categorypages.py, design a62f2499): a page per facet entry that earns one, a redirect stub
+  for every entry below the threshold. Planned FIRST, since every chip on every other page links
+  the category's page where one exists.
 
 A Series page and a work page are ORDERED collections (`sequence` on the planned entry): the
 post navigation, JSON-LD isPartOf and llms.txt walk them in order (638b7b85 (5)).
@@ -356,7 +360,6 @@ def check_category_listing(
     into: one such page, at the path the site config names, and under the public profile it lists
     EVERY public post -- a post it left out would be reachable from no chip (a wrong exclusion
     hides content, 6752db0a (9))."""
-    from .postpage import POST_KINDS
     pages = [p for p in planned if p.get("layout") == CATEGORY_LAYOUT]
     errors: List[Dict[str, Any]] = []
     if len(pages) > 1:
@@ -369,13 +372,23 @@ def check_category_listing(
                            "why": "a category-listing Lens lands off the page the site config names"})
         if profile != "public":
             continue
-        listed = set(p["listed"])
-        missing = sorted(n for n, t in types.items() if t.get("kind") in POST_KINDS and n not in listed
-                         and not is_retired(n, states) and is_public(n, states, types))
+        missing = unlisted_posts(set(p["listed"]), states, types)
         if missing:
             errors.append({"kind": "category-listing-incomplete", "subject": p["subject"], "missing": missing,
                            "why": "the category listing leaves out public posts; its selection must cover every post kind"})
     return errors
+
+
+def unlisted_posts(
+    listed: set,                        # The note ids a page lists
+    states: Dict[str, List[str]],
+    types: Dict[str, Dict[str, Any]],
+) -> List[str]:  # The public, unretired posts it leaves out, sorted
+    """The posts a page meant to cover every post leaves out (the category listing, ce17606b (3);
+    the category index, whose counts would read short, a62f2499 (5))."""
+    from .postpage import POST_KINDS
+    return sorted(n for n, t in types.items() if t.get("kind") in POST_KINDS and n not in listed
+                  and not is_retired(n, states) and is_public(n, states, types))
 
 
 async def page_plan(
@@ -403,11 +416,21 @@ async def page_plan(
     category = load_category_listing(website_root, projected={page_source(p["active"]) for p in pages.values()
                                                               if p.get("active")})
     errors: List[Dict[str, Any]] = list(category["errors"]) + list(chips["errors"])
+    # The category pages first (design a62f2499): every other page's chips link them
+    from .categorypages import INDEX_LAYOUT, plan_category_pages
+    index_lenses = [n for n in lenses if (F.prop(n, "view") or {}).get("layout") == INDEX_LAYOUT]
+    cats_plan = await plan_category_pages(gx, index_lenses, pages, root, profile, states, types, drafts,
+                                          chips, category["href"])
+    errors += cats_plan["errors"]
+    planned += cats_plan["pages"]
+    links = cats_plan["links"]   # chip -> its category page's path
     matrix_pages: List[Any] = []   # coverage-matrix Lenses, planned after every collection page
     library_pages: List[Any] = []  # the library Lens, planned after them all (its topic line reads them)
     for kind, nodes in ((DevNodeKinds.SERIES, series), (LENS_LABEL, lenses)):
         for node in sorted(nodes, key=lambda n: str(F.prop(n, "key") or "")):
             sid, key = str(F.nid(node)), str(F.prop(node, "key") or "")
+            if any(node is n for n in index_lenses):
+                continue   # planned above with the category pages
             page = pages.get(sid)
             if page is None:
                 unpaged.append(f"{kind}:{key}")
@@ -466,7 +489,7 @@ async def page_plan(
             known = {**listed["cats"], **{p["source"]: p.get("categories") or [] for p in planned}}
             listing = with_category_links({"contents": listing_items(contents, src, known), **listing}, src,
                                           listing_categories(contents, src, known), category["href"],
-                                          in_place=layout == CATEGORY_LAYOUT)
+                                          in_place=layout == CATEGORY_LAYOUT, pages=links)
             if layout == CATEGORY_LAYOUT:   # the site's category listing (design ce17606b (3))
                 text = render_page(_category_front(node, listing), body=str(F.prop(node, "description") or ""))
             else:
@@ -480,7 +503,7 @@ async def page_plan(
                             "text": text})
     for node, members, page in matrix_pages:
         got = await plan_matrix_page(gx, node, members, page, root, profile, states, types, drafts,
-                                     list(planned), category["href"])
+                                     list(planned), category["href"], category_pages=links)
         errors += got.get("errors", [])
         if got.get("page"):
             planned.append(got["page"])
@@ -497,7 +520,8 @@ async def page_plan(
                            "subjects": [seen[p["source"]], p["subject"]],
                            "why": "two nodes' site_paths land on one page file"})
         seen[p["source"]] = p["subject"]
-    return {"pages": planned, "unpaged": unpaged, "category_listing": category["href"], "errors": errors}
+    return {"pages": planned, "unpaged": unpaged, "category_listing": category["href"],
+            "stubs": cats_plan["stubs"], "category_pages": links, "errors": errors}
 
 
 def _generated_files(
@@ -524,7 +548,8 @@ async def project_pages(
 ) -> Dict[str, Any]:  # {planned, written, unchanged, removed, unpaged, sources, plan, errors}
     """Write the planned pages into the source tree (only those whose text changed), remove
     the marked pages no longer planned, and refuse the whole write when a planned page would
-    land on an unmarked file."""
+    land on an unmarked file. The category stubs (a62f2499 (3)) ride the report for the
+    redirect projection."""
     root = Path(website_root).resolve()
     plan = await page_plan(gx, website_root, profile, pages, drafts_dir)
     errors = list(plan["errors"])
@@ -535,7 +560,8 @@ async def project_pages(
                            "why": "a file not generated by the build sits where a projected page lands"})
     rep: Dict[str, Any] = {"planned": len(plan["pages"]), "written": 0, "unchanged": 0, "removed": [],
                            "unpaged": plan["unpaged"], "sources": [p["source"] for p in plan["pages"]],
-                           "category_listing": plan.get("category_listing") or "", "plan": plan["pages"]}
+                           "category_listing": plan.get("category_listing") or "", "plan": plan["pages"],
+                           "stubs": plan.get("stubs") or []}
     if errors or not write:
         return {**rep, "errors": errors}
     wanted = {p["source"] for p in plan["pages"]}
@@ -618,17 +644,19 @@ def with_category_links(
     categories: List[str],    # Every category its items carry (listing_categories)
     listing_href: str,        # The category listing's page path (load_category_listing; "" = none)
     in_place: bool = False,   # The page IS the category listing: chips filter it in place (ce17606b (3))
+    pages: Optional[Dict[str, str]] = None,  # chip -> its category page's path (categorypages; None = none)
 ) -> Dict[str, Any]:  # The options rendering through the site listing template
     """A projected listing renders through the site listing template (design a7224060): each chip
-    links into the category listing filtered to it, every href planned here by the one encoder
-    (postpage.category_links). No category listing = no links: the chips are labels. On the
-    category listing itself a chip filters the page in place, as Quarto's own chip does."""
+    links its category's page where one exists (design a62f2499 (7)), else into the category
+    listing filtered to it, every href planned here by the one encoder (postpage.category_links).
+    No category listing and no page = a label. On the category listing itself a chip filters the
+    page in place, as Quarto's own chip does."""
     from .postpage import category_links
     params: Dict[str, Any] = {"fields": list(listing.get("fields") or [])}
     if in_place:
         params["in-place"] = True
     else:
-        params["category-links"] = {c["name"]: c["href"] for c in category_links(categories, listing_href)}
+        params["category-links"] = {c["name"]: c["href"] for c in category_links(categories, listing_href, pages)}
     return {**{k: v for k, v in listing.items() if k != "type"},
             "template": posixpath.relpath(LISTING_TEMPLATE_FILE, posixpath.dirname(page_src) or "."),
             "template-params": params}

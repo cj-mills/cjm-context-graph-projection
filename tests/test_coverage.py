@@ -217,7 +217,10 @@ def test_a_rebuild_reproduces_the_vocabulary_and_the_matrix(tmp_path):
     refused = _run(*base, "entity", "stage", "x", "--name", "X")          # no position: refused
     assert refused.returncode == 1 and "needs position" in refused.stdout
     verbs = [json.loads(line)["verb"] for line in Path(journal).read_text().splitlines()]
-    assert verbs.count("entity") == 7 and verbs.count("assert") == 8      # the refusal journaled nothing
+    # the refusal journaled nothing; each facet entry minted lands its category path as an assert
+    # (design a62f2499 (1)): det, setup, train, deploy (general is a matrix row), and the rename
+    # Deploy -> Deployment re-draws deploy's path, superseding the old one
+    assert verbs.count("entity") == 7 and verbs.count("assert") == 8 + 5
     assert verbs.count("verified-on") == 3
     matrix = _run("--graph-db-path", live, "coverage")
     assert matrix.returncode == 0, matrix.stdout + matrix.stderr

@@ -6,7 +6,8 @@ The Lens owns the index (its site_path, title, description, date); a work Entity
 page (its site_path fact, its record). Everything else is derived at build from
 `library.library_index` and nothing is stored: the form groups, each entry's outputs by output
 class in value order, the units by part and position, a pure-notes output's synopsis rolled up
-under its unit (ruling a7ca900d (2)), the topic line from the topical Lens pages.
+under its unit (ruling a7ca900d (2)), the topic line from the topical pages: a subject's category
+page that lists notes (design a62f2499 (6)), and any all-notes Lens page.
 
 Under the public profile only public outputs count: a unit shows only with a public output, a
 work page exists only when one of its units does, and a work with no visible output is left off
@@ -175,10 +176,19 @@ def topic_pages(
     types: Dict[str, Dict[str, Any]],        # note_types' map
     page_src: str,                           # The index's source (relative to the root)
 ) -> Dict[str, Any]:  # {topics: [{title, href}], errors}
-    """The topical Lens pages: a Lens page whose listed members are all notes; one mixing notes
-    with other kinds refuses (the build never guesses whether it is a topic of the Library)."""
+    """The topical pages: a SUBJECT's category page listing at least one notes post (the topic
+    Lens pages merged into them, design a62f2499 (6)), and a Lens page whose listed members are
+    all notes; a Lens page mixing notes with other kinds refuses (the build never guesses whether
+    it is a topic of the Library)."""
+    from cjm_dev_graph_schema import predicates as P
+    from .categorypages import PAGE_LAYOUT
     topics, errors = [], []
     for p in sorted(planned, key=lambda p: str(p.get("title") or "")):
+        if p.get("layout") == PAGE_LAYOUT and p.get("entity_kind") == P.ENTITY_SUBJECT:
+            if any((types.get(i) or {}).get("kind") == NOTES_KIND for i in p["listed"]):
+                topics.append({"title": p["title"],
+                               "href": posixpath.relpath(p["source"], posixpath.dirname(page_src) or ".")})
+            continue
         if p.get("kind") != "Lens" or p.get("sequence") or p.get("layout"):
             continue
         # Typed members decide: an untyped Note (a staging fixture) is no deliverable of any kind

@@ -407,10 +407,13 @@ async def derived_plan(
         posts.setdefault(src_of[nid], {"drop": [], "nav": "", "end": ""})["drop"].append(drop)
     series_nav: Dict[str, Dict[str, Any]] = {}
     collections: Dict[str, List[Dict[str, str]]] = {}
+    from .categorypages import INDEX_LAYOUT, PAGE_LAYOUT
     from .sitepages import CATEGORY_LAYOUT
     for page in planned_pages:
-        if page.get("layout") == CATEGORY_LAYOUT:
-            continue   # every post is on the category listing: no collection one belongs to (ce17606b (3))
+        if page.get("layout") in (CATEGORY_LAYOUT, PAGE_LAYOUT, INDEX_LAYOUT):
+            # every post is on the category listing: no collection one belongs to (ce17606b (3));
+            # a post's category pages are its chips, never a second navigation line (a62f2499)
+            continue
         members = [m for m in page["listed"] if m in src_of]
         if page.get("sequence"):
             # A Series page walks its members in order; a work page walks the outputs of one
@@ -511,13 +514,16 @@ async def derived_plan(
     from .categories import load_post_categories
     chips = await load_post_categories(gx)   # a post's categories are the graph's (design ce17606b (1))
     errors += chips["errors"]
+    # each chip's category page, as the index planned it (design a62f2499 (7))
+    cat_pages = next((p.get("links") or {} for p in planned_pages if p.get("layout") == INDEX_LAYOUT), {})
     heads = linked = 0
     for nid, src in src_of.items():
         t = types.get(nid) or {}
         if t.get("kind") not in POST_KINDS:
             continue
         meta = header_meta(t["kind"], t.get("origin", ""), F.prop(notes[nid], "metadata") or {},
-                           facts.get(nid, {}), listing["href"], categories=chips["posts"].get(nid, []))
+                           facts.get(nid, {}), listing["href"], categories=chips["posts"].get(nid, []),
+                           pages=cat_pages)
         if meta["set"] or meta["unset"]:
             posts.setdefault(src, {"drop": [], "nav": "", "end": ""})["meta"] = meta
             heads += 1

@@ -147,15 +147,22 @@ def load_category_listing(
 def category_links(
     categories: Any,    # The post's categories (its chips, categories.load_post_categories; a list, or one string)
     listing_href: str,  # load_category_listing's href ("" = none)
-) -> List[Dict[str, str]]:  # [{name, href}] in the post's own order ([] without a listing)
-    """Each category as a link to the category listing filtered to it: Quarto's listing script
-    reads `#category=<URI-encoded name>` and decodes it, so a name with a space or an `&` survives."""
+    pages: Optional[Dict[str, str]] = None,  # chip -> its category page's path (categorypages; None = none)
+) -> List[Dict[str, str]]:  # [{name, href}] in the post's own order (a category with nowhere to link left out)
+    """Each category as a link to its category page where one exists (design a62f2499 (7)), else
+    to the category listing filtered to it: Quarto's listing script reads `#category=<URI-encoded
+    name>` and decodes it, so a name with a space or an `&` survives."""
     from urllib.parse import quote
-    if not listing_href or not categories:
+    if not categories or not (listing_href or pages):
         return []
     cats = categories if isinstance(categories, list) else [categories]
-    return [{"name": str(c), "href": f"{listing_href}#category={quote(str(c), safe='')}"}
-            for c in cats if str(c).strip()]
+    out = []
+    for c in (str(c) for c in cats if str(c).strip()):
+        if pages and c in pages:
+            out.append({"name": c, "href": pages[c]})
+        elif listing_href:
+            out.append({"name": c, "href": f"{listing_href}#category={quote(c, safe='')}"})
+    return out
 
 
 def is_category_link(
@@ -307,13 +314,14 @@ def header_meta(
     facts: Dict[str, str],          # header_facts' entry for this Note
     listing_href: str = "",         # The category listing's page path (load_category_listing; "" = none)
     categories: Optional[List[str]] = None,  # The post's chips (categories.load_post_categories; None = none)
+    pages: Optional[Dict[str, str]] = None,  # chip -> its category page's path (categorypages; None = none)
 ) -> Dict[str, Any]:  # {set: {meta key: value}, unset: [meta keys]} for the render filter
     """The header's projected metadata (39c51c15 (2)): the kind label; a born post's date is its
     publication's (a draft shows none and says so); Updated is the latest revision when it is
     newer than the source's own date-modified (an archive post keeps its front matter); and the
-    categories -- the graph's, never the front matter's (design ce17606b (2)) -- as links into the
-    category listing (amendment of 0858bbd0). A post with no chip shows none, whatever its front
-    matter lists."""
+    categories -- the graph's, never the front matter's (design ce17606b (2)) -- as links to each
+    category's page, else into the category listing (amendment of 0858bbd0, design a62f2499 (7)).
+    A post with no chip shows none, whatever its front matter lists."""
     from .sitepages import parse_date
     label = KIND_LABELS.get(kind, "")
     out: Dict[str, Any] = {"set": {}, "unset": []}
@@ -332,7 +340,7 @@ def header_meta(
         out["set"]["categories"] = list(categories)
     elif metadata.get("categories"):
         out["unset"].append("categories")
-    links = category_links(categories or [], listing_href)
+    links = category_links(categories or [], listing_href, pages)
     if links:
         out["set"][CATEGORY_META] = links
     return out

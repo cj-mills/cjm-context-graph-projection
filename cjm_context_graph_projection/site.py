@@ -308,7 +308,7 @@ async def site_build(
         return rep
     # The projected pages are inputs: written before Quarto is asked what the inputs are
     pages = await project_pages(gx, website_root, profile, plan["pages"], drafts_dir=drafts_dir)
-    rep["pages"] = {k: v for k, v in pages.items() if k not in ("errors", "sources", "plan")}
+    rep["pages"] = {k: v for k, v in pages.items() if k not in ("errors", "sources", "plan", "stubs")}
     rep["errors"] += pages["errors"]
     if rep["errors"]:
         rep["ok"] = False
@@ -406,8 +406,16 @@ async def site_build(
         if frag["dead"]:   # a source defect the page shares, reported (b82d2a98 (2))
             rep["agent"]["dead_fragments"] = frag["dead"]
         rep["errors"] += frag["errors"] + wr["errors"]
-    red = write_redirects(info["output_dir"], plan["stubs"], page_outputs(website_root, info["inputs"]))
-    rep["redirects"] = {"stubs": len(plan["stubs"]), "written": red["written"], "unchanged": red["unchanged"]}
+    # The category stubs (design a62f2499 (3)): an entry below the threshold, or retired, serves a
+    # redirect from its own path; one landing on another page's stub refuses, never overwrites
+    stubs = plan["stubs"] + pages["stubs"]
+    held = {s["stub"]: s["subject"] for s in plan["stubs"]}
+    rep["errors"] += [{"kind": "collision", "stub": s["stub"], "subjects": [held[s["stub"]], s["subject"]],
+                       "why": "a category stub lands on another page's redirect"}
+                      for s in pages["stubs"] if s["stub"] in held]
+    red = write_redirects(info["output_dir"], stubs, page_outputs(website_root, info["inputs"]))
+    rep["redirects"] = {"stubs": len(stubs), "category_stubs": len(pages["stubs"]),
+                        "written": red["written"], "unchanged": red["unchanged"]}
     rep["errors"] += red["errors"]
     if profile == "public":
         guard = await publish_guard(gx, info["output_dir"], drafts_dir)

@@ -170,6 +170,39 @@ async def _assert_journaled(
     return res
 
 
+async def _category_paths_journaled(
+    gx: Any,
+    journal_path: Optional[str],  # The write journal (None = unjournaled writes)
+    actor: str,
+    *,
+    apply: bool,                  # Land the plan; else print it
+    only: Optional[set] = None,   # Land only these entries' rows ("kind:key"; None = every row)
+) -> Dict[str, Any]:  # plan_category_paths' result + {landed}
+    """Every category's URL (design a62f2499 (1)): each planned path lands as an ORDINARY journaled
+    assert (the one write path `assert` shares), so replay needs nothing new. `category-paths`
+    lands the whole plan; the entity verbs land the rows of the entries they minted."""
+    from cjm_dev_graph_schema import predicates as P
+    from .categorypages import plan_category_paths
+    from .site import redirect_plan
+    res = await plan_category_paths(gx, (await redirect_plan(gx))["pages"])
+    res["landed"] = 0
+    for e in res["errors"]:
+        print(f"error: {e['entry']}: {e['why']}" + (f" ({e['path']})" if e.get("path") else ""), file=sys.stderr)
+    rows = [r for r in res["assert"] if only is None or r["entry"] in only]
+    for r in rows:
+        if not apply:
+            print(f"- {r['entry']} -> {r['value']}" + (f" (renamed from {r['supersede'][0]})" if r.get("supersede") else ""))
+            continue
+        got = await _assert_journaled(gx, journal_path, r["subject"], P.SITE_PATH, r["value"], actor=actor,
+                                      supersede=r.get("supersede"))
+        if got.get("error"):
+            print(f"error: {r['entry']}: {got['error']}", file=sys.stderr)
+            res["errors"].append({"entry": r["entry"], "why": got["error"]})
+            break
+        res["landed"] += 1
+    return res
+
+
 async def _resolve_capture(
     gx,                 # The open graph handle
     spec: str,          # The `--capture` spec: seed | deferred | riding:<item-id-or-prefix>
@@ -878,6 +911,13 @@ async def _dispatch(args) -> int:
                 append_write(args.journal_path, "entity",
                              {"kind": args.kind, "key": args.key, "name": args.name,
                               "fields": fields, "actor": args.actor})
+            if res.get("written"):   # a facet entry's URL lands with it (design a62f2499 (1))
+                paths = await _category_paths_journaled(gx, args.journal_path, args.actor, apply=True,
+                                                        only={f"{args.kind}:{args.key}"})
+                if paths["landed"]:
+                    print(f"category path: {paths['landed']} assert op(s)")
+                if paths["errors"]:
+                    return 1
             return 1 if res.get("error") else 0
         elif args.command == "entity-batch":
             # A vocabulary batch (amendment 3c5cff97): a JSON list of whole entity records,
@@ -903,7 +943,12 @@ async def _dispatch(args) -> int:
                                  {"kind": r["kind"], "key": r["key"], "name": r["name"],
                                   "fields": r["fields"], "actor": args.actor})
             print(f"landed: {len(res['landed'])} entity op(s)")
-            return 0
+            # the landed facet entries' URLs (design a62f2499 (1))
+            paths = await _category_paths_journaled(gx, args.journal_path, args.actor, apply=True,
+                                                    only={f"{r['kind']}:{r['key']}" for r in res["landed"]})
+            if paths["landed"]:
+                print(f"category paths: {paths['landed']} assert op(s)")
+            return 1 if paths["errors"] else 0
         elif args.command == "derived-from":
             # An archive deliverable's provenance (design leg 4a4ef27e (2)): the op names the
             # resolved deliverable id, so replay re-lands the same edge.
@@ -1119,6 +1164,15 @@ async def _dispatch(args) -> int:
                              {"from": res["from_id"], "to": res["to_id"], "actor": args.actor,
                               **({"merge": True} if args.merge else {})})
             return 1 if res.get("error") else 0
+        elif args.command == "category-paths":
+            # Every category's URL (design a62f2499 (1)): a live facet entry without one takes
+            # /categories/<slug>/, a renamed one its new slug (the old path superseded); each lands
+            # as an ordinary journaled assert. Without --apply the plan is printed.
+            res = await _category_paths_journaled(gx, args.journal_path, args.actor, apply=args.apply)
+            print(f"category-paths: {len(res['assert'])} to assert · {res['held']} held"
+                  + ("" if args.apply else " _(dry run -- pass --apply to land it)_")
+                  + (f" · landed {res['landed']}" if args.apply else ""))
+            return 1 if res["errors"] else 0
         elif args.command == "claims":
             from .claims import claims_report
             res = await claims_report(gx, public=args.public)
@@ -3405,6 +3459,11 @@ def main() -> int:
                       help="The source's page merges into the target's: the target keeps its own active "
                            "path, and the source's URL redirects to it (design ce17606b (6))")
     p_tp.add_argument("--actor", default=_DEFAULT_ACTOR)
+    p_cpa = sub.add_parser("category-paths",
+                           help="Every category's URL (design a62f2499 (1)): assert /categories/<slug>/ on each "
+                                "live facet entry without one, and re-draw a renamed entry's (journaled)")
+    p_cpa.add_argument("--apply", action="store_true", help="Land the plan; else print it")
+    p_cpa.add_argument("--actor", default=_DEFAULT_ACTOR)
     p_clm = sub.add_parser("claims",
                            help="Every claim with its state and its backing by kind, refusing a claim with no "
                                 "or two states and an offered claim below the backing floor (READ verb)")

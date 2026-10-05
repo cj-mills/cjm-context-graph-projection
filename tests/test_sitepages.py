@@ -333,3 +333,69 @@ def test_a_lens_grouped_by_series_lists_each_series_page_once():
     planned.append({"kind": DevNodeKinds.SERIES, "sequence": True, "source": "logs/other/index.qmd", "listed": ["a1"]})
     got = group_through_series(["a1"], ["../posts/a1/index.md"], planned, "logs/index.qmd", "lens")
     assert got["contents"] == [] and [e["kind"] for e in got["errors"]] == ["lens-group"]
+
+
+@pytest.mark.skipif(not (_HAVE_GRAPH and _HAVE_QUARTO), reason="needs the graph capability and quarto")
+def test_category_pages_earn_a_page_or_redirect(tmp_path):
+    # Design a62f2499: every facet entry's URL is a path fact; at or above the index Lens's
+    # category_page_min it serves a page, below it a redirect into the filtered category listing;
+    # every chip links the category's page where one exists; a topic Lens merges into a page
+    from cjm_dev_graph_schema.identity import entity_node_id
+    from cjm_context_graph_projection.archive import transfer_site_path
+    from cjm_context_graph_projection.categorypages import plan_category_paths
+    site = tmp_path / "site"
+    _site(site)
+
+    async def go():
+        async with open_graph(str(tmp_path / "g.db")) as gx:
+            await _graph(gx, site)
+            await judge_facets(gx, ask=_facets)
+            await review_facets(gx, apply_text=(await review_facets(gx))["document"])
+            await judge_related(gx, ask=_unrelated)
+            idx = {"selection": [{"verb": "list", "args": {"label": "Note", "deliverable_kind": "notes"}}],
+                   "view": {"layout": "category-index", "sort": ["date desc", "title desc"]}}
+            await set_lens(gx, "categories", idx, title="Categories", description="Every category with a page.")
+            await assert_value(gx, lens_node_id("categories"), "site_path", "/categories/")
+            no_min = await page_plan(gx, str(site), "public", (await redirect_plan(gx))["pages"])
+            await assert_value(gx, lens_node_id("categories"), "category_page_min", "2")
+            unpathed = await page_plan(gx, str(site), "public", (await redirect_plan(gx))["pages"])
+            plan = await plan_category_paths(gx, (await redirect_plan(gx))["pages"])
+            for r in plan["assert"]:
+                await assert_value(gx, r["subject"], "site_path", r["value"])
+            merged = await transfer_site_path(gx, lens_node_id("topic"), entity_node_id("tool", "pytorch"), merge=True)
+            pub = await site_build(gx, str(site), "public")
+            out = site / "_site"
+            got = {k: (out / k).read_text() for k in ("categories/vision/index.html", "series/notes/topic.html",
+                                                       "series/tutorials/cv.html")}
+            page = (site / "categories" / "pytorch" / "index.qmd").read_text()
+            index = (site / "categories" / "index.qmd").read_text()
+            items = _items((out / "categories" / "pytorch" / "index.html").read_text())
+            llms = (out / "categories" / "pytorch" / "index.llms.md").exists()
+            # a rename re-draws the entry's path, superseding the old one
+            await mint_entity(gx, "subject", "vision", name="Computer vision",
+                              fields={"description": "Vision", "not_for": "a mention"})
+            renamed = await plan_category_paths(gx, (await redirect_plan(gx))["pages"])
+            return plan, unpathed, no_min, merged, pub, got, page, index, items, llms, renamed
+
+    plan, unpathed, no_min, merged, pub, got, page, index, items, llms, renamed = asyncio.run(go())
+    assert [r["value"] for r in plan["assert"]] == ["/categories/pytorch/", "/categories/vision/"]
+    assert {e["kind"] for e in unpathed["errors"]} == {"category-path"}
+    assert [e["kind"] for e in no_min["errors"]] == ["category-index"]
+    assert "category_page_min" in no_min["errors"][0]["why"]
+    assert merged["written"]
+    assert pub["ok"], pub
+    assert pub["redirects"]["category_stubs"] == 1
+    # PyTorch (2 posts) earns its page; Vision (1) redirects into the filtered category listing
+    assert '"":"../../blog.html#category=Vision"' in got["categories/vision/index.html"]
+    # the merged topic Lens's URL redirects to the category page it merged into
+    assert '"":"../../categories/pytorch/index.html"' in got["series/notes/topic.html"]
+    assert page.startswith(f"---\n{GENERATED}\ntitle: PyTorch\ndescription: PyTorch\n")
+    assert "  feed: true\n" in page and items == ["Post B", "Post A"]
+    assert "[PyTorch](pytorch/index.qmd) · 2 posts · PyTorch" in index and "Vision" not in index
+    # every chip links its page where one exists, else the filtered listing
+    cv = got["series/tutorials/cv.html"]
+    assert 'href="../../categories/pytorch/"' in cv and 'href="../../blog.html#category=Vision"' in cv
+    assert llms
+    assert renamed["assert"] == [{"subject": entity_node_id("subject", "vision"), "entry": "subject:vision",
+                                  "name": "Computer vision", "value": "/categories/computer-vision/",
+                                  "supersede": ["/categories/vision/"]}]
