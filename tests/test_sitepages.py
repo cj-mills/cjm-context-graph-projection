@@ -85,7 +85,7 @@ def _site(root: Path) -> None:
         "project:\n  type: website\nprofile:\n  default: public\n  group:\n    - [public, staging]\n"
         "filters:\n  - _derived/derived-blocks.lua\nwebsite:\n  title: t\n  site-url: https://example.org\n"
         # the agent layer's switch and intro (design 39c51c15 (7), amendment 23a49667)
-        "  llms-txt: true\nsite-summary: S.\n"
+        "  llms-txt: true\nsite-summary: '{holds}'\nsite-holds: S.\n"
         # the author strip's copy (design 39c51c15 (5)): typed posts carry the strip
         'author-strip:\n  byline: "B"\n  links: "L {links}"\n  pitch: "P {claims} {href}"\n  questions: "Q"\n'
         # the site's contact links the strip names (design ff0c6338 (6))

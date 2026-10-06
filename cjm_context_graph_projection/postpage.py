@@ -26,6 +26,7 @@ STRIP_FIELDS = ("byline", "links", "pitch", "questions")  # Every field the copy
 SITE_AUTHOR_KEY = "site-author"            # The site config's one statement of the author (amendment fe6f0fb7)
 SITE_AUTHOR_FIELDS = ("name", "role")
 SITE_SUMMARY_KEY = "site-summary"          # The site's one sentence of who and what (amendment 5c3c2662 (1))
+SITE_HOLDS_KEY = "site-holds"              # What the site holds, the summary's second part (design 8b4f15d0 (3))
 SITE_LINKS_KEY = "site-links"              # The site's one statement of its contact links (design ff0c6338 (6))
 SITE_LINK_FIELDS = ("icon", "text", "href")
 READING_GUIDE_KEY = "reading-guide"        # The site's one statement of how to read it (design ff0c6338 (4))
@@ -240,13 +241,51 @@ def load_site_author(
     return {"author": {f: " ".join(str(got[f]).split()) for f in SITE_AUTHOR_FIELDS}, "errors": []}
 
 
+def load_site_holds(
+    website_root: str,  # The site project root
+) -> Dict[str, Any]:  # {text, errors} -- the clause as the summary sentence carries it
+    """What the site holds (`site-holds` in the site config, design 8b4f15d0 (3)): the second part
+    of the site's one sentence, kept as its own key so the home page and About read the parts
+    while llms.txt reads the composed sentence. It is written as the sentence carries it (a clause,
+    no closing stop); `holds_line` states it on its own. A missing clause, or a placeholder the
+    author statement cannot fill, refuses."""
+    path = Path(website_root) / "_quarto.yml"
+    try:
+        text = str((yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get(SITE_HOLDS_KEY) or "")
+    except (OSError, yaml.YAMLError) as e:
+        return {"text": "", "errors": [{"kind": SITE_HOLDS_KEY, "path": str(path), "why": f"unreadable: {e}"}]}
+    if not text.strip():
+        return {"text": "", "errors": [{"kind": SITE_HOLDS_KEY, "path": str(path),
+                                        "why": f"the site config states no `{SITE_HOLDS_KEY}`"}]}
+    author = load_site_author(website_root)
+    if author["errors"]:
+        return {"text": "", "errors": author["errors"]}
+    filled = fill_copy(" ".join(text.split()), author["author"])
+    if "error" in filled:
+        return {"text": "", "errors": [{"kind": SITE_HOLDS_KEY, "path": str(path),
+                                        "why": f"`{SITE_HOLDS_KEY}` carries {filled['error']}"}]}
+    return {"text": filled["text"], "errors": []}
+
+
+def holds_line(
+    clause: str,  # load_site_holds' text
+) -> str:  # The clause standing as its own sentence: its first letter capitalized, a closing stop
+    clause = clause.strip()
+    if not clause:
+        return ""
+    line = clause[0].upper() + clause[1:]
+    return line if line[-1] in ".!?" else line + "."
+
+
 def load_site_summary(
     website_root: str,  # The site project root
 ) -> Dict[str, Any]:  # {text, errors}
     """The site's one sentence of who and what (`site-summary` in the site config, amendment
-    5c3c2662 (1)): llms.txt's intro and the home page's identity line both render it, the author
-    named through {name} / {role} (fe6f0fb7). A missing summary, or a placeholder the author
-    statement cannot fill, refuses -- never words the author did not write."""
+    5c3c2662 (1)): llms.txt's intro and the meta descriptions render it, the author named through
+    {name} / {role} (fe6f0fb7) and what the site holds through {holds} (`site-holds`, 8b4f15d0
+    (3)) -- composed from the parts the home page and About read, never a second copy of them. A
+    missing summary, a summary naming no {holds}, or a placeholder neither can fill, refuses --
+    never words the author did not write."""
     path = Path(website_root) / "_quarto.yml"
     try:
         text = str((yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get(SITE_SUMMARY_KEY) or "")
@@ -255,10 +294,15 @@ def load_site_summary(
     if not text.strip():
         return {"text": "", "errors": [{"kind": "site-summary", "path": str(path),
                                         "why": f"the site config states no `{SITE_SUMMARY_KEY}`"}]}
+    if "{holds}" not in text:
+        return {"text": "", "errors": [{"kind": "site-summary", "path": str(path),
+                                        "why": f"`{SITE_SUMMARY_KEY}` names no {{holds}} (`{SITE_HOLDS_KEY}`): "
+                                               "what the site holds would be a second copy"}]}
     author = load_site_author(website_root)
-    if author["errors"]:
-        return {"text": "", "errors": author["errors"]}
-    filled = fill_copy(" ".join(text.split()), author["author"])
+    holds = load_site_holds(website_root)
+    if author["errors"] or holds["errors"]:
+        return {"text": "", "errors": author["errors"] or holds["errors"]}
+    filled = fill_copy(" ".join(text.split()), {**author["author"], "holds": holds["text"]})
     if "error" in filled:
         return {"text": "", "errors": [{"kind": "site-summary", "path": str(path),
                                         "why": f"`{SITE_SUMMARY_KEY}` carries {filled['error']}"}]}
@@ -269,7 +313,8 @@ def fill_copy(
     text: str,                # Copy from the site config
     author: Dict[str, str],   # load_site_author's author
 ) -> Dict[str, Any]:  # {text} | {error}
-    """Copy names the site author through {name} / {role}; any other placeholder refuses."""
+    """Copy names the site author through {name} / {role} (the summary its holds clause through
+    {holds}); any other placeholder refuses."""
     try:
         return {"text": text.format_map(author)}
     except (KeyError, ValueError, IndexError) as e:

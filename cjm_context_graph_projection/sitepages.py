@@ -25,9 +25,10 @@ node's data through one template per node kind:
   for every entry below the threshold. Planned FIRST, since every chip on every other page links
   the category's page where one exists;
 - a Lens whose view layout is `home` projects the HOME PAGE (homepage.py, design e55201e2 and
-  amendment 5c3c2662): a map of the index pages its selection names, planned LAST, since it reads
-  every other planned page. Each index page states its HUBS -- the projected pages it links, in
-  the order it shows them -- for the map to read.
+  amendments 5c3c2662 / 8b4f15d0): a map of the index pages and the category listing its
+  selection names, planned LAST, since it reads every other planned page. Each index page states
+  its HUBS -- the projected pages it links, in the order it shows them -- for the map to read;
+  the category listing's entry reads the posts it lists.
 
 A Series page and a work page are ORDERED collections (`sequence` on the planned entry): the
 post navigation, JSON-LD isPartOf and llms.txt walk them in order (638b7b85 (5)).
@@ -537,7 +538,7 @@ async def page_plan(
         planned += got.get("pages", [])
     for node, page in home_pages:
         got = await plan_home_page(gx, node, page, website_root, root, profile, states, types, drafts,
-                                   list(planned), category["href"])
+                                   list(planned))
         errors += got.get("errors", [])
         if got.get("page"):
             planned.append(got["page"])
