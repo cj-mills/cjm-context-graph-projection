@@ -22,7 +22,7 @@ from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIF
 from cjm_context_graph_projection.series import mint_series, set_series_members
 from cjm_context_graph_projection.site import redirect_plan
 from cjm_context_graph_projection.sitepages import GENERATED, page_plan
-from cjm_context_graph_projection.tutorialspage import anchor, learning_paths, render_body
+from cjm_context_graph_projection.tutorialspage import _md_inline, anchor, learning_paths, render_body
 
 _HAVE_GRAPH = (Path(DEFAULT_MANIFESTS) / f"{DEFAULT_GRAPH_ID}.json").exists()
 
@@ -190,3 +190,15 @@ async def _assert(gx, subject, predicate, value, raw=False, supersede=None):
     res = await assert_value(gx, subject if raw else note_node_id(subject), predicate, value, supersede=supersede)
     assert not res.get("error"), res
     return res
+
+
+def test_a_description_keeps_its_links_rebased_onto_the_page():
+    # A description is the author's markdown: its links render as links (the user's report on the
+    # Tutorials page, 2026-10-06), each relative target rebased from the post onto this page
+    href = "../../posts/a/part-1/index.md"
+    got = _md_inline("Use  [fastai](https://docs.fast.ai/) from the [first part](../part-0/) "
+                     "and [this step](#setup), as [the site](/blog.html) and ![x](images/x.png) show.", href)
+    assert got == ("Use [fastai](https://docs.fast.ai/) from the [first part](../../posts/a/part-0/) "
+                   "and [this step](../../posts/a/part-1/index.md#setup), as [the site](/blog.html) "
+                   "and ![x](../../posts/a/part-1/images/x.png) show.")
+    assert _md_inline("[mail](mailto:a@b.c) [s](//x.org/y)", href) == "[mail](mailto:a@b.c) [s](//x.org/y)"

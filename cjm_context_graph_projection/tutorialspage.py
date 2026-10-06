@@ -54,6 +54,30 @@ def _md_text(s: Any) -> str:
     return re.sub(r"\s+", " ", str(s or "")).strip().replace("[", r"\[").replace("]", r"\]")
 
 
+_LINK = re.compile(r"(!?\[[^\]]*\]\()([^)\s]+)(\))")   # an inline link or image: its target the second group
+
+
+def _md_inline(
+    s: Any,     # Authored inline markdown (a post's description)
+    base: str,  # The authoring post's href from the page that renders the line
+) -> str:  # One line of it, its links live: whitespace collapsed, every relative target rebased
+    """A description is the author's markdown, never plain text: its links stay links. A relative
+    target is relative to the POST, so it is rebased through the post's href onto the page the
+    line renders on (a bare fragment names the post's own anchor); a site-absolute path, a URL
+    with a scheme and a protocol-relative URL stand as written."""
+    def rebase(m: "re.Match") -> str:
+        target = m.group(2)
+        if target.startswith(("/", "//")) or re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", target):
+            return m.group(0)
+        path, frag = (target.split("#", 1) + [""])[:2]
+        if not path:   # the post's own anchor
+            return f"{m.group(1)}{base.split('#')[0]}#{frag}{m.group(3)}"
+        new = posixpath.normpath(posixpath.join(posixpath.dirname(base), path))
+        new += "/" if path.endswith("/") and not new.endswith("/") else ""
+        return f"{m.group(1)}{new}{'#' + frag if frag else ''}{m.group(3)}"
+    return _LINK.sub(rebase, re.sub(r"\s+", " ", str(s or "")).strip())
+
+
 def render_body(
     matrix: Dict[str, Any],                  # coverage.project_matrix's result over the listed population
     items: Dict[str, Dict[str, Any]],        # {note id: {title, href, date, description, marks}}
@@ -98,7 +122,7 @@ def render_body(
             if it.get("date"):
                 line += f" · {it['date']}"
             if it.get("description"):
-                line += f" — {_md_text(it['description'])}"
+                line += f" — {_md_inline(it['description'], it['href'])}"
             if it.get("marks"):
                 line += f" _({'; '.join(it['marks'])})_"
             res.append(line)
