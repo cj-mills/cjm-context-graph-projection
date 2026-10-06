@@ -157,7 +157,7 @@ def test_the_home_page_is_projected_and_rendered(tmp_path):
     assert pub["ok"], pub
     body = text.split("---\n", 2)[2]
     assert text.startswith(f"---\n{GENERATED}\ndescription-meta: The site in one sentence.\n"
-                           "page-layout: full\ntitle-block-banner: false\n---\n")
+                           "page-layout: full\n---\n")
     assert "<title>t</title>" in html   # the site root's tab is the site's own title
     assert '<meta name="description" content="The site in one sentence.">' in html
     # the identity line, the contact line, the map in the Lens's order (the empty logs index renders

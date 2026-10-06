@@ -30,6 +30,8 @@ SITE_LINKS_KEY = "site-links"              # The site's one statement of its con
 SITE_LINK_FIELDS = ("icon", "text", "href")
 READING_GUIDE_KEY = "reading-guide"        # The site's one statement of how to read it (design ff0c6338 (4))
 NAV_FILE = "site-nav.yml"                  # The generated navbar links under _derived/ (a metadata-files entry)
+SITE_NAV_KEY = "site-nav"                  # The navbar's own entries, each by its site path (finding c6befeb6)
+SITE_NAV_FIELDS = ("text", "path")         # Every field an entry must carry (an icon is optional)
 POST_KINDS = ("tutorial", "notes", "log", "work")        # Deliverable kinds a post page carries (not site pages)
 TUTORIAL_KIND = "tutorial"
 # The header's kind label (39c51c15 (2)): the navigation kind, as a reader reads it; the site's
@@ -127,13 +129,73 @@ def links_line(
 
 
 def site_nav(
-    links: List[Dict[str, str]],  # load_site_links' links
+    links: List[Dict[str, str]],                   # load_site_links' links
+    pages: Optional[List[Dict[str, str]]] = None,  # nav_entries' items: the navbar's own entries, resolved
 ) -> Dict[str, Any]:  # The navbar metadata site-build writes under _derived/ (NAV_FILE)
-    """The navbar's contact icons from the site's links (design ff0c6338 (6)). Quarto appends a
-    metadata file's `navbar.right` items after the site config's own, so the hand-kept pages lead
-    and the icons follow, each labelled by its link's text."""
-    return {"website": {"navbar": {"right": [{"icon": l["icon"], "href": l["href"], "aria-label": l["text"]}
-                                             for l in links]}}}
+    """The navbar's right side: its own entries in their stated order (finding c6befeb6), then the
+    contact icons from the site's links (design ff0c6338 (6)), each labelled by its link's text.
+    Quarto appends a metadata file's `navbar.right` after the site config's own, so the site
+    config keeps none and this one list holds the order."""
+    return {"website": {"navbar": {"right": list(pages or []) + [
+        {"icon": l["icon"], "href": l["href"], "aria-label": l["text"]} for l in links]}}}
+
+
+def load_site_nav(
+    website_root: str,  # The site project root
+) -> Dict[str, Any]:  # {entries: [{text, path, icon?}], errors} -- [] when the site config states none
+    """The navbar's own entries (`site-nav` in the site config, finding c6befeb6): each names its
+    target by SITE PATH -- the URL a reader follows -- never by source file, so a path transfer
+    moves the link with it. An entry lacking its text or path refuses; an icon is optional."""
+    path = Path(website_root) / "_quarto.yml"
+    try:
+        got = (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get(SITE_NAV_KEY) or []
+    except (OSError, yaml.YAMLError) as e:
+        return {"entries": [], "errors": [{"kind": SITE_NAV_KEY, "path": str(path), "why": f"unreadable: {e}"}]}
+    if not isinstance(got, list):
+        return {"entries": [], "errors": [{"kind": SITE_NAV_KEY, "path": str(path),
+                                           "why": f"the site config's `{SITE_NAV_KEY}` is not a list"}]}
+    out = []
+    for i, entry in enumerate(got):
+        entry = entry if isinstance(entry, dict) else {}
+        missing = [f for f in SITE_NAV_FIELDS if not str(entry.get(f) or "").strip()]
+        if missing:
+            return {"entries": [], "errors": [{"kind": SITE_NAV_KEY, "path": str(path), "index": i, "missing": missing,
+                                               "why": f"`{SITE_NAV_KEY}` entry {i + 1} lacks its {', '.join(missing)}"}]}
+        out.append({f: str(entry[f]).strip() for f in SITE_NAV_FIELDS + ("icon",) if str(entry.get(f) or "").strip()})
+    return {"entries": out, "errors": []}
+
+
+def nav_entries(
+    entries: List[Dict[str, str]],  # load_site_nav's entries
+    rendered: Iterable[str],        # The profile's input sources, relative to the site root
+) -> Dict[str, Any]:  # {items: [navbar items], errors}
+    """Resolve each navbar entry to what Quarto links (finding c6befeb6): a page path to the ONE
+    rendered source whose output it names -- a retired source is no input, so it never resolves --
+    and any other path (a feed) to itself from the root. A page path no rendered source renders
+    refuses, never a dead link; an entry with an icon renders as the icon, labelled by its text."""
+    import posixpath
+    from .site import output_href
+    by_output: Dict[str, List[str]] = {}
+    for src in sorted(rendered):
+        stem, ext = posixpath.splitext(src)
+        if ext in (".qmd", ".md", ".ipynb"):
+            by_output.setdefault(stem + ".html", []).append(src)
+    items: List[Dict[str, str]] = []
+    errors: List[Dict[str, Any]] = []
+    for e in entries:
+        out = output_href(e["path"])
+        href = out
+        if out.endswith(".html"):
+            srcs = by_output.get(out) or []
+            if len(srcs) != 1:
+                errors.append({"kind": SITE_NAV_KEY, "path": e["path"], "sources": srcs,
+                               "why": "no rendered source renders this navbar path" if not srcs
+                                      else "more than one rendered source renders this navbar path"})
+                continue
+            href = srcs[0]
+        items.append({"icon": e["icon"], "href": href, "aria-label": e["text"]} if e.get("icon")
+                     else {"text": e["text"], "href": href})
+    return {"items": items, "errors": errors}
 
 
 def load_reading_guide(

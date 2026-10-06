@@ -193,8 +193,7 @@ async def plan_home_page(
     # site's own title), the summary only as the meta description, and no dates (the title block
     # would show them; the sitemap's lastmod reads the file time, stamped from `updated`). The
     # site's title partials refuse `title-block-style: none`, so the block is left empty instead.
-    front: Dict[str, Any] = {"description-meta": summary["text"], "page-layout": "full",
-                             "title-block-banner": False}
+    front: Dict[str, Any] = {"description-meta": summary["text"], "page-layout": "full"}
     return {"page": {"source": src, "kind": "Lens", "key": key, "subject": sid, "categories": [],
                      "members": len(mapped["entries"]), "updated": updated, "listed": [],
                      "href": page["href"], "title": str(F.prop(node, "title") or key), "layout": LAYOUT,

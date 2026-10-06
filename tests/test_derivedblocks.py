@@ -100,6 +100,8 @@ def _site(root: Path) -> None:
     (root / "_quarto-staging.yml").write_text(
         'project:\n  output-dir: _site-staging\n  render:\n    - "**/*.qmd"\n    - "**/*.md"\n')
     (root / "index.md").write_text("---\ntitle: Home\n---\n\nHome.\n")
+    # The page the strip's and the include's About links name (the rendered-link gate, c6befeb6)
+    (root / "about.md").write_text("---\ntitle: About\n---\n\nAbout.\n")
     body_a = (CALLOUT + TOC + "## Overview\n\nPart one.\n\n## Details\n\nMore.\n\n### Next: [Part B](../b/)\n\n"
               "Thanks.\n" + ABOUT)
     body_b = CALLOUT + "## Overview\n\nPart two, and a [real link](/series/tutorials/cv.html).\n" + QUESTIONS + ABOUT

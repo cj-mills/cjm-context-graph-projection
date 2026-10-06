@@ -270,7 +270,7 @@ def test_series_and_topic_pages_are_projected_and_rendered(tmp_path):
     assert front["listing"]["template-params"]["category-links"] == {
         "PyTorch": "/blog.html#category=PyTorch", "Vision": "/blog.html#category=Vision"}
     # The category listing: no title block, the numbered sidebar, the feed, its description the lead
-    assert blog.startswith(f"---\n{GENERATED}\npagetitle: Blog\npage-layout: full\ntitle-block-banner: false\n")
+    assert blog.startswith(f"---\n{GENERATED}\npagetitle: Blog\npage-layout: full\nlisting:\n")
     assert "  categories: numbered\n  feed: true\n" in blog and blog.endswith("---\n\nEvery post.\n")
     assert "    in-place: true\n" in blog and "category-links" not in blog
     assert "<category>PyTorch</category>" in feed and "<category>notes</category>" not in feed

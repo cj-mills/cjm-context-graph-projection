@@ -352,7 +352,7 @@ def _category_front(
     """The category listing's front matter (design ce17606b (3)): no title block -- the Lens's
     title names the browser tab -- and the full page layout its category sidebar needs."""
     return {"pagetitle": F.prop(node, "title") or F.prop(node, "key"), "page-layout": "full",
-            "title-block-banner": False, "listing": listing}
+            "listing": listing}
 
 
 def check_category_listing(

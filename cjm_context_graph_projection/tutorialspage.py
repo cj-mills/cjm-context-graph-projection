@@ -236,7 +236,6 @@ async def plan_matrix_page(
     if listed["updated"]:
         front["date-modified"] = listed["updated"]
     front["page-layout"] = "full"
-    front["title-block-banner"] = False
     # The learning paths' chips link into the category listing like every projected listing's (design a7224060)
     known = {p["source"]: p.get("categories") or [] for p in planned}
     front["listing"] = with_category_links({**PATHS_LISTING, "contents": listing_items(paths["contents"], src, known)}, src,

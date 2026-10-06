@@ -572,11 +572,19 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             rd = obj["redirects"]
             lines.append(f"- redirects from superseded site_path facts: {rd.get('stubs', 0)} "
                          f"({rd.get('written', 0)} written, {rd.get('unchanged', 0)} already identical)")
+        if obj.get("rendered"):   # every rendered page read whole (findings c6befeb6 + d807a18f)
+            rn, rr = obj["rendered"], obj.get("rendered_report") or {}
+            lines.append(f"- rendered pages: {rn.get('checked', 0)} read · {rn.get('dead', 0)} dead internal link "
+                         f"target(s) · {rn.get('outside', 0)} title block(s) outside the content grid")
+            if obj.get("profile") != "public":   # the public build lists them as errors below
+                lines += [f"  ⚠ dead: `{d['target']}` ({d['url']}) on {d['pages']} page(s), first {d['first']}"
+                          for d in rr.get("dead") or []]
+                lines += [f"  ⚠ title block outside the grid: `{p}`" for p in rr.get("outside") or []]
         if obj.get("guard"):
             lines.append(f"- publish guard: {obj['guard'].get('scanned', 0)} output file(s) scanned")
         for e in obj.get("errors") or []:
             where = (e.get("doc") or e.get("stub") or e.get("source") or e.get("path") or e.get("slug")
-                     or e.get("key") or e.get("subject") or "")
+                     or e.get("key") or e.get("subject") or e.get("target") or e.get("page") or "")
             extra = e.get("alias") or e.get("match") or e.get("active") or e.get("detail") or ""
             lines.append(f"  ⚠ [{e.get('kind')}] `{where}` {extra} — {e.get('why')}")
         return "\n".join(lines)

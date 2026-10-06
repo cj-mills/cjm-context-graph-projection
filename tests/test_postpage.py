@@ -1,9 +1,9 @@
 """The post page's projected parts (design 39c51c15): the author strip and the end matter."""
 
 from cjm_context_graph_projection.postpage import (display_date, end_plan, header_meta, links_line, load_holder,
-                                                   load_reading_guide, load_site_links, load_strip_copy,
-                                                   post_licenses, related_posts, render_end, render_related,
-                                                   render_reuse, site_footer, site_nav)
+                                                   load_reading_guide, load_site_links, load_site_nav,
+                                                   load_strip_copy, nav_entries, post_licenses, related_posts,
+                                                   render_end, render_related, render_reuse, site_footer, site_nav)
 
 COPY = {"byline": "**A** — a byline.", "links": "[About](/about.html)",
         "pitch": "Hire me for {claims}: [how]({href}).", "questions": "Ask below."}
@@ -59,6 +59,32 @@ def test_the_site_links_are_stated_once(tmp_path):
     assert load_site_links(str(tmp_path))["errors"][0]["missing"] == ["href"]
     (tmp_path / "_quarto.yml").write_text("site-links: []\n")
     assert load_site_links(str(tmp_path))["errors"][0]["kind"] == "site-links"
+
+
+def test_the_navbar_names_its_pages_by_site_path(tmp_path):
+    # Finding c6befeb6: an entry names its target by site path; the build resolves it to the ONE
+    # rendered source whose output it names, so a transferred path moves the link with it
+    (tmp_path / "_quarto.yml").write_text(
+        "site-nav:\n  - text: Blog\n    path: /blog.html\n  - text: Tutorials\n    path: /series/tutorials/\n"
+        "  - text: RSS\n    icon: rss\n    path: /blog.xml\n")
+    got = load_site_nav(str(tmp_path))
+    assert got["errors"] == [] and [e["text"] for e in got["entries"]] == ["Blog", "Tutorials", "RSS"]
+    rendered = ["blog.qmd", "series/tutorials/index.qmd", "posts/a/index.md"]
+    nav = nav_entries(got["entries"], rendered)
+    assert nav == {"errors": [], "items": [{"text": "Blog", "href": "blog.qmd"},
+                                           {"text": "Tutorials", "href": "series/tutorials/index.qmd"},
+                                           {"icon": "rss", "href": "blog.xml", "aria-label": "RSS"}]}
+    # the pages lead, the contact icons follow, in one list
+    links = [{"icon": "github", "text": "GitHub", "href": "https://github.com/x"}]
+    assert site_nav(links, nav["items"])["website"]["navbar"]["right"][-1]["aria-label"] == "GitHub"
+    # a retired source is no input: the path it rendered resolves to nothing and refuses
+    gone = nav_entries(got["entries"], ["blog.qmd"])
+    assert [e["path"] for e in gone["errors"]] == ["/series/tutorials/"] and len(gone["items"]) == 2
+    # an entry needs its text and path; no key states no entries
+    (tmp_path / "_quarto.yml").write_text("site-nav:\n  - text: Blog\n")
+    assert load_site_nav(str(tmp_path))["errors"][0]["missing"] == ["path"]
+    (tmp_path / "_quarto.yml").write_text("title: t\n")
+    assert load_site_nav(str(tmp_path)) == {"entries": [], "errors": []}
 
 
 def test_the_reading_guide_is_stated_once(tmp_path):

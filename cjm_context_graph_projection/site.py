@@ -254,6 +254,59 @@ async def publish_guard(
     return {"scanned": scanned, "errors": errors}
 
 
+def check_rendered_site(
+    output_dir: str,  # A profile's output dir, after the render and the redirects
+) -> Dict[str, Any]:  # {checked, dead: [{target, url, pages, first}], outside: [page]}
+    """Every rendered page, read whole (findings c6befeb6 + d807a18f): each internal href / src
+    resolves to a file in the output -- any URL scheme is external, a fragment-only link is the
+    page's own -- and the title block renders inside the content grid (a banner title block sits
+    outside it, and the site's theme styles none). A link the source states is checked as the
+    reader meets it, so a navbar, a listing's description or a post body fails alike."""
+    from html.parser import HTMLParser
+    from urllib.parse import unquote
+    scheme = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
+
+    class _Links(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.found: List[str] = []
+
+        def handle_starttag(self, tag, attrs):
+            self.found += [v for k, v in attrs if k in ("href", "src") and v]
+
+    out = Path(output_dir)
+    dead: Dict[str, Dict[str, Any]] = {}
+    outside: List[str] = []
+    checked = 0
+    for page in sorted(out.rglob("*.html")):
+        if "site_libs" in page.parts:
+            continue
+        checked += 1
+        rel = page.relative_to(out).as_posix()
+        text = page.read_text(encoding="utf-8", errors="replace")
+        header, grid = text.find('id="title-block-header"'), text.find('id="quarto-content"')
+        if header != -1 and grid != -1 and header < grid:
+            outside.append(rel)
+        parser = _Links()
+        parser.feed(text)
+        for url in parser.found:
+            if scheme.match(url) or url.startswith(("#", "//")):
+                continue
+            path = unquote(url.split("#", 1)[0].split("?", 1)[0])
+            if not path:
+                continue
+            target = (path.lstrip("/") if path.startswith("/")
+                      else posixpath.normpath(posixpath.join(posixpath.dirname(rel), path)))
+            hit = out / target
+            if path.endswith("/") or hit.is_dir():
+                hit = hit / "index.html"
+            if not hit.exists():
+                row = dead.setdefault(target, {"target": target, "url": url, "pages": 0, "first": rel})
+                row["pages"] += 1
+    return {"checked": checked, "dead": sorted(dead.values(), key=lambda r: (-r["pages"], r["target"])),
+            "outside": outside}
+
+
 def quarto_inspect(
     website_root: str,  # The site project root
     profile: str,       # The Quarto profile
@@ -417,7 +470,17 @@ async def site_build(
     rep["redirects"] = {"stubs": len(stubs), "category_stubs": len(pages["stubs"]),
                         "written": red["written"], "unchanged": red["unchanged"]}
     rep["errors"] += red["errors"]
+    # Every rendered page read whole (findings c6befeb6 + d807a18f): a dead internal link or a title
+    # block outside the content grid refuses the public build; staging reports them
+    whole = check_rendered_site(info["output_dir"])
+    rep["rendered"] = {"checked": whole["checked"], "dead": len(whole["dead"]), "outside": len(whole["outside"])}
+    if whole["dead"] or whole["outside"]:
+        rep["rendered_report"] = {"dead": whole["dead"], "outside": whole["outside"]}
     if profile == "public":
+        rep["errors"] += [{"kind": "dead-link", **d, "why": "an internal link resolves to no rendered file"}
+                          for d in whole["dead"]]
+        rep["errors"] += [{"kind": "title-outside-grid", "page": p,
+                           "why": "the page's title block renders outside the content grid"} for p in whole["outside"]]
         guard = await publish_guard(gx, info["output_dir"], drafts_dir)
         rep["guard"] = {"scanned": guard["scanned"]}
         rep["errors"] += guard["errors"]

@@ -9,7 +9,8 @@ import pytest
 
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
 from cjm_context_graph_projection.derivedblocks import _nav_step
-from cjm_context_graph_projection.site import output_href, publish_guard, redirect_page, site_build, stated
+from cjm_context_graph_projection.site import (check_rendered_site, output_href, publish_guard, redirect_page,
+                                               site_build, stated)
 from cjm_context_graph_projection.write import assert_value, decide
 
 _HAVE_GRAPH = (Path(DEFAULT_MANIFESTS) / f"{DEFAULT_GRAPH_ID}.json").exists()
@@ -43,6 +44,29 @@ def test_output_href_and_redirect_page_are_quartos():
     assert output_href("/log/2020/09/21/X") == "log/2020/09/21/X/index.html"   # no extension = a dir
     assert output_href("/series/notes/x.html") == "series/notes/x.html"
     assert redirect_page({"": "../posts/advanced-git-tools-notes/index.html"}) == _QUARTO_STUB
+
+
+def test_check_rendered_site_reads_every_page_whole(tmp_path):
+    # Findings c6befeb6 + d807a18f: every internal href / src resolves to an output file, any URL
+    # scheme is external, and a title block outside the content grid is named
+    (tmp_path / "posts" / "a").mkdir(parents=True)
+    (tmp_path / "site_libs").mkdir()
+    (tmp_path / "blog.xml").write_text("<rss/>")
+    (tmp_path / "index.html").write_text(
+        '<div id="quarto-content"><header id="title-block-header"></header>'
+        '<a href="posts/a/">a</a><a href="blog.xml">feed</a><a href="#top">top</a>'
+        '<a href="unityhub://2020.3/x">hub</a><a href="https://x.org">x</a>'
+        '<a href="series/tutorials/index.md">tutorials</a><img src="images/gone.png"></div>')
+    (tmp_path / "posts" / "a" / "index.html").write_text(
+        '<header id="title-block-header"></header><div id="quarto-content">'
+        '<a href="../../index.html">home</a><a href="../../series/tutorials/index.md">tutorials</a>'
+        '<code>href="not/a/link"</code></div>')
+    (tmp_path / "site_libs" / "x.html").write_text('<a href="nowhere.html">skipped</a>')
+    got = check_rendered_site(str(tmp_path))
+    assert got["checked"] == 2
+    assert got["outside"] == ["posts/a/index.html"]
+    assert [(d["target"], d["pages"]) for d in got["dead"]] == [("series/tutorials/index.md", 2),
+                                                               ("images/gone.png", 1)]
 
 
 def _site(root: Path) -> None:
