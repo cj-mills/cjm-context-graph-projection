@@ -24,12 +24,9 @@ from .runtime import GraphHandle
 
 LAYOUT = "coverage-matrix"   # The Lens view layout this page projects
 TUTORIAL_KIND = "tutorial"
-# The learning-paths listing keeps the look of the hand page it replaces (series/tutorials/index.md)
-# but its categories sidebar: the sidebar sits in the page margin beside the GRID, where it reads
-# as the grid's filter though it filters only this listing (user, 2026-09-29; finding 15e7b315)
-PATHS_LISTING = {"id": "learning-paths", "sort": ["date-modified desc"], "type": "default",
-                 "categories": False, "sort-ui": False, "filter-ui": False,
-                 "fields": ["title", "date-modified", "categories", "description"]}
+# The learning paths are the projected listing (sitelisting.py, design 0efb5497 (2)), newest
+# update first; the Tutorials structure itself waits on 78e5b21b
+PATHS_SORT = ["date-modified desc"]
 # The grid collapses to the per-task lists on narrow screens (903bc108 (1)). Quarto's bundle sets
 # `.table a { word-break: break-word }`, which with auto column widths broke the grid's links
 # mid-word (finding 15e7b315): the page class keeps link text whole and sizes the task column to
@@ -82,8 +79,9 @@ def render_body(
     matrix: Dict[str, Any],                  # coverage.project_matrix's result over the listed population
     items: Dict[str, Dict[str, Any]],        # {note id: {title, href, date, description, marks}}
     profile: str,                            # public | staging
+    paths: str = "",                         # The learning paths' listing markup (sitelisting.render_listing)
 ) -> str:  # The page body (markdown)
-    """The grid, the learning-paths slot, the tutorials by task, the off-grid list, and (staging)
+    """The grid, the learning paths, the tutorials by task, the off-grid list, and (staging)
     the gaps. Pure: every value comes from the arguments."""
     tasks, stages, cells = matrix["tasks"], matrix["stages"], matrix["cells"]
     names = {t["key"]: t["name"] for t in tasks} | {t["key"]: t["name"] for t in matrix["off_grid_tasks"]}
@@ -111,7 +109,7 @@ def render_body(
     covers = sorted({names[b[0]] for b in covered.values()})
     if covers:
         out += ["", ": ↓ = covered by the " + " / ".join(covers) + " tutorials of that stage"]
-    out += [":::", "", "## Learning paths", "", "::: {#learning-paths}", ":::", "", "## By task", ""]
+    out += [":::", "", "## Learning paths", ""] + ([paths.rstrip("\n"), ""] if paths.strip() else []) + ["## By task", ""]
 
     def lines(ids: List[str]) -> List[str]:
         rows = sorted(ids, key=lambda i: (items[i].get("date") or "", items[i].get("title") or ""), reverse=True)
@@ -208,12 +206,13 @@ async def plan_matrix_page(
     planned: List[Dict[str, Any]],           # The other planned pages (the learning-path candidates)
     listing_href: str = "",                  # The category listing's page path ("" = none: chips are labels)
     category_pages: Optional[Dict[str, str]] = None,  # chip -> its category page's path (design a62f2499 (7))
+    chips: Optional[Dict[str, Any]] = None,  # categories.load_post_categories' result (the filter's kinds)
 ) -> Dict[str, Any]:  # {page: planned entry} | {errors}
     """Plan the Tutorials page: the listed population under the profile, the matrix over it,
     the learning paths, the page text."""
     from .coverage import load_coverage_facts, load_vocab, project_matrix
-    from .sitepages import (GENERATED, _listed, listing_categories, listing_items, member_updated,
-                            with_category_links)
+    from .sitelisting import chip_hrefs, listing_kinds, page_item, render_listing, sort_rows, title_html
+    from .sitepages import GENERATED, _listed, member_updated
     import yaml
     sid, key, src = str(F.nid(node)), str(F.prop(node, "key") or ""), page["source"]
     listed = _listed(members, src, root, profile, states, types, drafts, sid)
@@ -236,10 +235,9 @@ async def plan_matrix_page(
     paths = learning_paths(planned, types, src)
     errors += paths["errors"]
     # the learning paths in the order the page's listing shows them (the home page's map, 5c3c2662 (5))
-    from .sitepages import hub_order
-    hubs = hub_order(paths["pages"], list(PATHS_LISTING["sort"]))
-    if hubs.get("error"):
-        errors.append({"kind": "lens-hubs", "subject": sid, "key": key, "why": hubs["error"]})
+    ordered = sort_rows([page_item(p, src) for p in paths["pages"]], PATHS_SORT)
+    if ordered.get("error"):
+        errors.append({"kind": "lens-hubs", "subject": sid, "key": key, "why": ordered["error"]})
     if errors:
         return {"errors": errors}
     marks = await hardware_marks(gx, profile)
@@ -260,14 +258,17 @@ async def plan_matrix_page(
     if listed["updated"]:
         front["date-modified"] = listed["updated"]
     front["page-layout"] = "full"
-    # The learning paths' chips link into the category listing like every projected listing's (design a7224060)
-    known = {p["source"]: p.get("categories") or [] for p in planned}
-    front["listing"] = with_category_links({**PATHS_LISTING, "contents": listing_items(paths["contents"], src, known)}, src,
-                                           listing_categories(paths["contents"], src, known), listing_href,
-                                           pages=category_pages)
+    # The learning paths: the projected listing, their chips linking like every listing's (a62f2499 (7))
+    paths_items = ordered["rows"]
+    chips = chips or {"kinds": {}, "rank": {}}
+    markup = render_listing(paths_items, src, kinds=listing_kinds(paths_items, chips["kinds"], chips["rank"]),
+                            hrefs=chip_hrefs(sorted({c for it in paths_items for c in it["categories"]}),
+                                             listing_href, category_pages), noun="paths",
+                            titles=title_html([it["title"] for it in paths_items]))
     head = yaml.safe_dump(front, sort_keys=False, allow_unicode=True, width=10_000)
-    text = f"---\n{GENERATED}\n{head}---\n\n" + render_body(matrix, items, profile)
+    text = f"---\n{GENERATED}\n{head}---\n\n" + render_body(matrix, items, profile, paths=markup)
     return {"page": {"source": src, "kind": "Lens", "key": key, "subject": sid,
                      "members": len(listed["contents"]), "updated": listed["updated"],
                      "listed": listed["ids"], "href": page["href"], "title": front["title"],
-                     "layout": LAYOUT, "paths": len(paths["contents"]), "hubs": hubs["hubs"], "text": text}}
+                     "layout": LAYOUT, "paths": len(paths["contents"]),
+                     "hubs": [{"title": it["title"], "source": it["source"]} for it in paths_items], "text": text}}

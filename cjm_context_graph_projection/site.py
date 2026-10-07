@@ -351,7 +351,9 @@ async def site_build(
                              write_llms_txt)
     from .derivedblocks import check_derived, check_end_placement, derived_plan, write_derived
     from .runtime import DEFAULT_MANIFESTS
-    from .sitepages import check_listing_chips, check_page_outputs, project_pages
+    from .sitefeeds import write_feeds
+    from .sitelisting import check_listing_chips
+    from .sitepages import check_page_outputs, project_pages
     from .sitetheme import project_theme
     rep: Dict[str, Any] = {"profile": profile, "errors": []}
     plan = await redirect_plan(gx)
@@ -434,6 +436,20 @@ async def site_build(
     rep["errors"] += check_page_outputs(info["output_dir"], pages["sources"])
     if render and pages.get("category_listing"):   # every projected chip a link (design a7224060)
         rep["errors"] += check_listing_chips(info["output_dir"], pages["sources"])
+    # The feeds (design 0efb5497 (3b)): the category listing's and every category page's, each item
+    # the rendered post's main content -- derived after the render, as Quarto's were
+    feeds = [p["feed"] for p in pages["plan"] if p.get("feed")]
+    if render and feeds:
+        from . import __version__
+        web = info.get("website") or {}
+        img = web.get("image")
+        fed = write_feeds(info["output_dir"], feeds,
+                          {"url": web.get("site-url") or "", "title": web.get("title") or "",
+                           "description": web.get("description") or "",
+                           "image": (img.get("src") if isinstance(img, dict) else img) or ""},
+                          f"cjm-context-graph-projection {__version__}", source_root=website_root)
+        rep["feeds"] = {"written": len(fed["written"]), "unchanged": fed["unchanged"], "items": fed["items"]}
+        rep["errors"] += fed["errors"]
     if render:   # the filter reports only when it ran: a projection onto old output has nothing to check
         chk = check_derived(website_root, derived)
         rep["derived"]["reported"] = chk["reported"]

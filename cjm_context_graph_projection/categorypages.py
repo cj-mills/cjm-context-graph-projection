@@ -11,7 +11,8 @@ broken link. A retired entry's URL redirects to the category index.
 A category page is projected from its Entity through the Lens page machinery -- no Lens node is
 minted per entry, since the selection is a pure function of the entry: the posts the index Lens
 selects whose chips (categories.py, the one reader) carry the entry's display name, listed with
-the index Lens's sort, the sort and filter UI and a feed. The index (a Lens whose view layout is
+the index Lens's sort as the projected listing (sitelisting.py, design 0efb5497), the entry's own
+category left out of its filter, with a feed. The index (a Lens whose view layout is
 `category-index`) lists every entry that earns a page, grouped by kind in the chip order, each
 with its post count and description; under the public profile a public post its selection leaves
 out refuses, since every count would read short.
@@ -129,6 +130,7 @@ async def plan_category_pages(
     drafts: Optional[Path],
     chips: Dict[str, Any],              # categories.load_post_categories' result
     listing_href: str,                  # The category listing's page path ("" = none)
+    site_title: str = "",               # The site title (each page's feed is named under it)
 ) -> Dict[str, Any]:  # {pages: [planned entries], stubs, links: {chip: page path}, undescribed, errors}
     """Plan the category index and every category page, and the redirect stub of every entry
     below the threshold. `links` names each earned page by its chip text: every chip on the site
@@ -138,8 +140,9 @@ async def plan_category_pages(
     moved since their description was written: reported, never refused."""
     from .facetjudge import load_facet_vocab
     from .lens import LENS_LABEL, apply_lens
-    from .sitepages import (LENS_LISTING, _listed, listing_categories, listing_items, page_source,
-                            render_page, unlisted_posts, with_category_links)
+    from .sitelisting import (chip_hrefs, feed_header, feed_plan, listing_kinds, note_item, render_listing,
+                              sort_rows, title_html)
+    from .sitepages import _listed, page_source, render_page, unlisted_posts
     out: Dict[str, Any] = {"pages": [], "stubs": [], "links": {}, "undescribed": [], "stale_descriptions": [],
                            "errors": []}
     vocab = await load_facet_vocab(gx)
@@ -227,21 +230,30 @@ async def plan_category_pages(
         csrc = e["source"]
         got = _listed([by_id[i] for i in e["ids"]], csrc, root, profile, states, types, drafts, e["entry"]["id"],
                       post_cats=chips["posts"])
-        listing = {**({"sort": sort} if sort else {}), **LENS_LISTING, "feed": True}
-        listing = with_category_links({"contents": listing_items(got["contents"], csrc, got["cats"]), **listing}, csrc,
-                                      listing_categories(got["contents"], csrc, got["cats"]), listing_href, pages=links)
+        # The projected listing (design 0efb5497): the page's own category left out of its filter,
+        # since every item carries it (amendment e66296bd (4)), and the page's feed
+        srcs = {i: posixpath.normpath(posixpath.join(posixpath.dirname(csrc), c))
+                for i, c in zip(got["ids"], got["contents"])}
+        items = [note_item(by_id[i], srcs[i], csrc, chips["posts"].get(i, [])) for i in got["ids"]]
+        if sort:
+            items = sort_rows(items, sort).get("rows") or items
+        hrefs = chip_hrefs(sorted({c for it in items for c in it["categories"]}), listing_href, links)
+        body = render_listing(items, csrc, kinds=listing_kinds(items, chips["kinds"], chips["rank"], exclude=[e["name"]]),
+                              hrefs=hrefs, titles=title_html([it["title"] for it in items]))
+        of = {s: i for i, s in srcs.items()}   # the feed takes the listing's order (its ties as listed)
+        feed = feed_plan(csrc, e["description"], [(by_id[of[it["source"]]], it["source"], it["categories"]) for it in items])
         front: Dict[str, Any] = {"title": e["name"], "description": e["description"]}
         if got["updated"]:
             front["date-modified"] = got["updated"]
-        front["listing"] = listing
+        front.update(feed_header(posixpath.basename(feed["xml"]), site_title))
         e["updated"] = got["updated"]
         out["pages"].append({"source": csrc, "kind": DevNodeKinds.ENTITY,
                              "key": f"{e['entry']['entity_kind']}:{e['entry']['key']}", "subject": e["entry"]["id"],
                              "categories": [], "members": len(got["contents"]), "updated": got["updated"],
                              "listed": got["ids"], "href": e["href"], "sequence": False, "title": e["name"],
                              "description": e["description"],
-                             "layout": PAGE_LAYOUT, "entity_kind": e["entry"]["entity_kind"],
-                             "text": render_page(front)})
+                             "layout": PAGE_LAYOUT, "entity_kind": e["entry"]["entity_kind"], "feed": feed,
+                             "text": render_page(front, body=body)})
     dates = [e["updated"] for e in earned if e["updated"]]
     front = {"title": F.prop(node, "title") or key}
     if F.prop(node, "description"):

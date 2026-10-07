@@ -25,6 +25,7 @@ dependencies = [
     'cjm-notebook-decompose-core>=0.0.4',
     'cjm-harness-transcripts>=0.0.2',
     'pyyaml>=6.0',
+    'beautifulsoup4>=4.12',
 ]
 
 [project.scripts]

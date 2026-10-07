@@ -57,8 +57,9 @@ def post_chips(
 
 async def load_post_categories(
     gx: GraphHandle,
-) -> Dict[str, Any]:  # {posts: {note id: [chips]}, rank: {chip: position}, errors}
-    """Every post's chips from the graph (a post with none is absent)."""
+) -> Dict[str, Any]:  # {posts: {note id: [chips]}, rank: {chip: position}, kinds: {chip: entity kind}, errors}
+    """Every post's chips from the graph (a post with none is absent), each chip's place in the
+    chip order and its kind (the projected listing's filter groups by kind, design e66296bd (1))."""
     from .coverage import load_coverage_facts
     from .facetjudge import load_facet_vocab
     from .facetreview import load_confirmed
@@ -69,7 +70,8 @@ async def load_post_categories(
             for pred, vals in by_pred.items():
                 facts.setdefault(n, {}).setdefault(pred, []).extend(vals)
     posts = {n: chips for n, f in facts.items() if (chips := post_chips(f, vocab["names"], vocab["rank"]))}
-    return {"posts": posts, "rank": vocab["rank"], "errors": vocab["errors"]}
+    kinds = {name: kind for (kind, _), name in vocab["names"].items()}   # a listing's filter groups by it
+    return {"posts": posts, "rank": vocab["rank"], "kinds": kinds, "errors": vocab["errors"]}
 
 
 def majority(

@@ -4,6 +4,7 @@ stay blank and only stated verifications render publicly; staging adds the gaps;
 vocabulary keys; a refusal or a mixed collection refuses the page."""
 
 import asyncio
+import re
 from pathlib import Path
 
 import pytest
@@ -67,7 +68,8 @@ def test_the_body_grid_lists_and_profiles():
     assert ("- [Train \\[YOLOX\\]](../../posts/yolo/index.md) · 2023-08-21 — A detector. "
             "_(Tested on RTX 4090, Ubuntu)_") in pub
     assert "## Other tutorials {#other}" in pub and "[Blender]" in pub
-    assert "::: {#learning-paths}" in pub and "## Gaps" not in pub
+    assert "## Learning paths\n\n## By task" in pub and "## Gaps" not in pub   # no paths: an empty slot
+    assert "## Learning paths\n\nPATHS\n\n## By task" in render_body(m, items, "public", paths="PATHS\n")
     stg = render_body(m, items, "staging")
     assert "## Gaps {#gaps}" in stg and "- Object detection × Deployment" in stg
     assert anchor("object-detection", "data-creation") == "object-detection-data-creation"
@@ -170,13 +172,14 @@ def test_the_matrix_lens_projects_the_tutorials_page(tmp_path):
     assert "date-modified: '2024-01-01'" in text and "page-layout: full" in text
     # a path's chips are its Series page's: what most of its members carry -- a tutorial's teaches_*
     # facts, the matrix's structural rows never (design ce17606b (1), (4))
-    assert "listing:\n  id: learning-paths\n" in text
-    assert "  contents:\n  - path: det.qmd\n    categories:\n    - Object detection\n    - Training\n" in text
-    assert "  categories: false\n" in text   # no sidebar: it read as the grid's filter (15e7b315)
-    # its chips link into the category listing, through the site listing template (design a7224060)
-    assert "  template: ../../_derived/listing-default.ejs.md\n" in text
-    assert ("    category-links:\n      Object detection: /blog.html#category=Object%20detection\n"
-            "      Training: /blog.html#category=Training\n") in text
+    # the learning paths are the projected listing (design 0efb5497 (2)), no Quarto listing
+    assert "listing:" not in text.split("---\n")[1] and '<div class="site-listing"' in text
+    assert re.findall(r'listing-title"><a href="([^"]+)"', text) == ["det.html"]
+    assert 'data-categories="[&quot;Object detection&quot;, &quot;Training&quot;]"' in text
+    assert "&quot;noun&quot;: [&quot;learning path&quot;, &quot;learning paths&quot;]" in text
+    # its chips link into the category listing like every listing's (design a7224060)
+    assert '<a class="listing-category kit-chip" href="/blog.html#category=Object%20detection">' in text
+    assert '<a class="listing-category kit-chip" href="/blog.html#category=Training">' in text
     assert "[1](#object-detection-training)" in text and "(#general-setup){.covered-mark}" in text
     assert "_(Tested on RTX 4090, Ubuntu)_" in text and "[timeline]" not in text
     assert "About Train YOLOX." in text and "A Note" not in text
