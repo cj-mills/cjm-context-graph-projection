@@ -36,13 +36,15 @@ PORTRAIT = {"image": "images/cut.webp", "alt": "N: a photograph with its backgro
 
 
 def test_the_body_is_the_essay_layout():
-    # Layout 1a (2fba772c (1)): the label, the name heading, the standfirst (the role, then what the
-    # site holds) beside the portrait; the background; the guide's panel; the links with icons
+    # Layout 1a (2fba772c (1)): the portrait, then the label, the name heading and the standfirst
+    # (the role as a sentence, then what the site holds); the background; the guide's panel; the
+    # links with icons
     body = about_body("About", "N", "R", "The site.", PORTRAIT, "I started.", "Read the dates.", LINKS)
     assert body.split("\n") == [
-        "::: {.about-opening}", "", "::: {.about-intro}", "", "[About]{.about-label}", "", "# N", "",
-        "::: {.about-standfirst}", "", "R", "", "The site.", "", ":::", "", ":::", "",
-        '![](images/cut.webp){.about-portrait fig-alt="N: a photograph with its background removed"}', "", ":::", "",
+        "::: {.about-opening}", "",
+        '![](images/cut.webp){.about-portrait fig-alt="N: a photograph with its background removed"}', "",
+        "::: {.about-intro}", "", "[About]{.about-label}", "", "# N", "",
+        "::: {.about-standfirst}", "", "R. The site.", "", ":::", "", ":::", "", ":::", "",
         "::: {.about-background}", "", "I started.", "", ":::", "",
         "::: {.about-guide}", "", "## How to read this site", "", "Read the dates.", "", ":::", "",
         "::: {.about-links}", "",
@@ -66,7 +68,9 @@ def test_the_portrait_is_a_derivative_with_its_provenance(tmp_path):
         fields = {**PORTRAIT, **over}
         cfg.write_text(head + "  portrait:\n" + "".join(f"    {k}: {v!r}\n" for k, v in fields.items() if v is not None))
         return load_portrait(str(tmp_path))
-    assert with_portrait() == {"portrait": PORTRAIT, "errors": []}
+    assert with_portrait() == {"portrait": {**PORTRAIT, "edit": ""}, "errors": []}
+    # an edit by hand after the model is stated with the provenance
+    assert with_portrait(edit="cropped to a circle")["portrait"]["edit"] == "cropped to a circle"
     for over, why in (({"model": None}, "model"), ({"prompt": None}, "prompt"), ({"alt": ""}, "alt"),
                       ({"source": "images/other.jpg"}, "not the photo"), ({"image": "images/gone.webp"}, "not in the site")):
         got = with_portrait(**over)
@@ -158,9 +162,9 @@ def test_the_about_page_is_projected_under_its_backgrounds_approval(tmp_path):
     assert "page content" in emitted["error"]
     assert pub["ok"], pub
     body = text.split("---\n", 2)[2]
-    # the opening: the label, the name, the standfirst from the role and the holds clause, the cutout
-    assert body.split("\n")[1:13] == ["::: {.about-opening}", "", "::: {.about-intro}", "", "[About]{.about-label}", "",
-                                      "# N", "", "::: {.about-standfirst}", "", "R", ""]
+    # the opening: the cutout, then the label, the name, the standfirst from the role and the holds clause
+    assert body.split("\n")[1:3] == ["::: {.about-opening}", ""]
+    assert "::: {.about-intro}\n\n[About]{.about-label}\n\n# N\n\n::: {.about-standfirst}\n\nR. S.\n" in body
     assert '![](images/cut.png){.about-portrait fig-alt="N: a photograph with its background removed"}' in body
     assert "::: {.about-background}\n\nI started in 2016.\n\n:::" in body
     assert "::: {.about-guide}\n\n## How to read this site\n\nRead the dates, N.\n" in body and "Draft" not in body

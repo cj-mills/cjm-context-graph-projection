@@ -8,11 +8,12 @@ type. Everything around the background is read from the site config's one statem
 nothing is stored. The page is layout 1a, the essay (2fba772c (1)), as Quarto markdown with About
 classes styled by rules reading token roles only (898c81d6):
 
-1. the OPENING: the page's title as a small label (the Lens's title), the author's name as the
-   page heading (`site-author.name`), and the STANDFIRST -- the role (`site-author.role`), then
-   what the site holds (`site-holds`, as its own sentence) -- the two parts the home page reads
-   (2fba772c (2)); the role appears nowhere else on the page;
-2. the PORTRAIT beside the opening, a cutout with no mat (2fba772c (3)): the derivative the site
+1. the OPENING: the PORTRAIT first, then the page's title as a small label (the Lens's title), the
+   author's name as the page heading (`site-author.name`) and the STANDFIRST -- one paragraph, the
+   role (`site-author.role`) as a sentence, then what the site holds (`site-holds`) -- the two
+   parts the home page reads (2fba772c (2)); the role appears nowhere else on the page;
+2. the PORTRAIT, a cutout with no mat (2fba772c (3)), cropped by hand into a circle under the
+   shoulders (the user's review of 9f629c75): the derivative the site
    config states with its provenance (`site-author.portrait`: the file, its text alternative,
    the photo it derives from, the model, the prompt), never the photo itself, which stays the
    image the JSON-LD and the social card state (2fba772c (4), 60681b4f); a portrait lacking any
@@ -50,6 +51,7 @@ PAGE_CONTENT_KEY = "page-content"   # The background Note's deliverable type: pr
 READING_HEADING = "How to read this site"
 PORTRAIT_KEY = "portrait"   # The displayed derivative under site-author (2fba772c (4))
 PORTRAIT_FIELDS = ("image", "alt", "source", "model")   # Each must be stated; `prompt` must be present, "" for none
+PORTRAIT_EDIT = "edit"   # Optional: any edit by hand after the model (a crop), stated with the provenance
 # What staging shows above a background the public build would refuse
 DRAFT_MARKER = ("::: {{.callout-warning}}\n## Draft background\nThe background's publish_state is {states}; "
                 "the public build refuses this page until it is approved.\n:::\n")
@@ -98,9 +100,10 @@ def load_author_extras(
 
 def load_portrait(
     website_root: str,  # The site project root
-) -> Dict[str, Any]:  # {portrait: {image, alt, source, model, prompt}, errors}
+) -> Dict[str, Any]:  # {portrait: {image, alt, source, model, prompt, edit}, errors}
     """The displayed portrait (`site-author.portrait`, 2fba772c (4)): a derivative of the photo,
-    stated with its provenance. A missing portrait or field, a source other than the photo
+    stated with its provenance -- `edit` names any edit by hand after the model ("" for none). A
+    missing portrait or field, a source other than the photo
     (`site-author.image`), or an image file the site does not hold refuses -- never the photo
     shown in its place."""
     from pathlib import Path
@@ -116,7 +119,7 @@ def load_portrait(
     if missing or "prompt" not in got:
         return _err(f"the portrait lacks its {', '.join(missing + ([] if 'prompt' in got else ['prompt']))} "
                     "(a derivative carries its provenance)")
-    out = {f: " ".join(str(got.get(f) or "").split()) for f in PORTRAIT_FIELDS + ("prompt",)}
+    out = {f: " ".join(str(got.get(f) or "").split()) for f in PORTRAIT_FIELDS + ("prompt", PORTRAIT_EDIT)}
     if out["source"] != " ".join(str(author.get("image") or "").split()):
         return _err(f"the portrait derives from {out['source']!r}, not the photo `{SITE_AUTHOR_KEY}.image`")
     if not (Path(website_root) / out["image"]).is_file():
@@ -140,10 +143,14 @@ def about_body(
     marker: str = "",                   # The staging draft marker ("" = none)
     band: Optional[Dict[str, str]] = None,  # The Work-with-me page {title, href}, once published
 ) -> str:  # The page's body
-    lines = ["::: {.about-opening}", "", "::: {.about-intro}", "", f"[{label}]{{.about-label}}", "", f"# {name}", "",
-             "::: {.about-standfirst}", "", role, "", holds, "", ":::", "", ":::", "",
-             # an empty caption and fig-alt: Pandoc would caption a lone image with its alt text
-             f"![]({portrait['image']}){{.about-portrait fig-alt=\"{_attr(portrait['alt'])}\"}}", "", ":::", ""]
+    from .postpage import holds_line
+    # the portrait first, then the label, the name and the standfirst -- the role as a sentence,
+    # then what the site holds, one paragraph (layout 1a as the exploration sets it); an empty
+    # caption and fig-alt, since Pandoc would caption a lone image with its alt text
+    lines = ["::: {.about-opening}", "",
+             f"![]({portrait['image']}){{.about-portrait fig-alt=\"{_attr(portrait['alt'])}\"}}", "",
+             "::: {.about-intro}", "", f"[{label}]{{.about-label}}", "", f"# {name}", "",
+             "::: {.about-standfirst}", "", f"{holds_line(role)} {holds}", "", ":::", "", ":::", "", ":::", ""]
     if marker:
         lines += [marker, ""]
     if background:
