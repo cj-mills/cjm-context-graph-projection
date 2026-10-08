@@ -318,7 +318,7 @@ def write_feeds(
     generator: str,               # The <generator> text (e.g. "cjm-context-graph-projection 0.0.78")
     *,
     source_root: Optional[str] = None,  # The site project root: an image's size is read from its SOURCE, as Quarto read it (None = the output dir)
-    theme_dir: Optional[str] = None,    # Quarto's highlight-styles dir (None = beside the quarto on PATH)
+    theme_dir: Optional[str] = None,    # Quarto's highlight-styles dir (None = beside the quarto on PATH; none found = an error row, nothing written)
 ) -> Dict[str, Any]:  # {written, unchanged, items, errors}
     """Write every feed whose text changed. An item is {output, date, categories, image, authors?}:
     its rendered page relative to the output dir, its ISO day, its chips, its front-matter image as
@@ -333,6 +333,11 @@ def write_feeds(
     url = str(site.get("url") or "")
     if not url:
         rep["errors"].append({"kind": "feed-site-url", "why": "the site config names no site-url; a feed's links would be relative"})
+        return rep
+    if not styles:   # fail closed: a feed written without the theme silently loses Quarto's code styles
+        rep["errors"].append({"kind": "feed-highlight-theme",
+                              "why": f"no {HIGHLIGHT_THEME} highlight theme (theme_dir, or beside the quarto on PATH); "
+                                     "no feed is written"})
         return rep
     for feed in feeds:
         rows: List[Dict[str, Any]] = []

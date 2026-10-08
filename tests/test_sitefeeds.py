@@ -1,12 +1,14 @@
 """The site's feeds, written by the build after the render (design 0efb5497 (3b); build 5ad21874):
 Quarto 1.10's feed reader reproduced on the rendered page, midnight-UTC days, the newest 20,
-a missing page refusing its feed, a file written only when its text changed."""
+a missing page or a missing highlight theme refusing its feed, a file written only when its text
+changed."""
 
+import json
 import struct
 import zlib
 
-from cjm_context_graph_projection.sitefeeds import (absolute_url, feed_image_size, feed_order, item_image,
-                                                    math_image_url, write_feeds)
+from cjm_context_graph_projection.sitefeeds import (HIGHLIGHT_THEME, absolute_url, feed_image_size, feed_order,
+                                                    item_image, math_image_url, write_feeds)
 
 SITE = {"url": "https://example.com", "title": "Ex & Co", "description": "The site's own words.",
         "image": "images/logo.png"}
@@ -41,6 +43,16 @@ def _site(tmp_path, n=1):
     return tmp_path
 
 
+def _theme(tmp_path):
+    """The highlight theme a feed's code spans are styled from -- the one style the tests read, so a
+    test never depends on the machine's Quarto (CI has none)."""
+    d = tmp_path / "highlight-styles"
+    d.mkdir(exist_ok=True)
+    (d / f"{HIGHLIGHT_THEME}.theme").write_text(json.dumps({"text-styles": {"Comment": {
+        "text-color": "#5E5E5E", "background-color": None, "bold": False, "italic": False, "underline": False}}}))
+    return str(d)
+
+
 def _feed(items, xml="blog.xml", page="blog.html", description=""):
     return {"page": page, "xml": xml, "description": description, "items": items}
 
@@ -49,7 +61,7 @@ def test_the_feed_reader_reproduces_quartos_transforms(tmp_path):
     site = _site(tmp_path)
     rep = write_feeds(str(site), [_feed([{"output": "posts/p0/index.html", "date": "2025-10-14",
                                           "categories": ["A & B"], "image": "./images/pic.png"}])],
-                      SITE, "gen")
+                      SITE, "gen", theme_dir=_theme(tmp_path))
     assert rep["errors"] == [] and rep["written"] == ["blog.xml"] and rep["items"] == 1
     xml = (site / "blog.xml").read_text()
     # the channel: the site's title escaped, the page's folder link, the scaled site image, the fallback description
@@ -86,14 +98,14 @@ def test_items_run_newest_first_and_the_feed_keeps_twenty(tmp_path):
     # equal dates keep the order given (the listing's)
     tie = [{"output": "b", "date": "2024-01-01"}, {"output": "a", "date": "2024-01-01"}]
     assert [i["output"] for i in feed_order(tie)] == ["b", "a"]
-    write_feeds(str(site), [_feed(items)], SITE, "gen")
+    write_feeds(str(site), [_feed(items)], SITE, "gen", theme_dir=_theme(tmp_path))
     xml = (site / "blog.xml").read_text()
     assert xml.count("<item>") == 20 and "<lastBuildDate>Mon, 22 Jan 2024 00:00:00 GMT</lastBuildDate>" in xml
 
 
 def test_an_undated_feed_carries_no_build_clock(tmp_path):
     site = _site(tmp_path)
-    write_feeds(str(site), [_feed([{"output": "posts/p0/index.html", "date": "", "categories": []}])], SITE, "gen")
+    write_feeds(str(site), [_feed([{"output": "posts/p0/index.html", "date": "", "categories": []}])], SITE, "gen", theme_dir=_theme(tmp_path))
     xml = (site / "blog.xml").read_text()
     assert "<lastBuildDate>" not in xml and "<pubDate>" not in xml
 
@@ -104,7 +116,7 @@ def test_a_page_that_did_not_render_refuses_its_feed(tmp_path):
                                          {"output": "posts/gone/index.html", "date": "2024-01-02", "categories": []}]),
                                   _feed([{"output": "posts/p0/index.html", "date": "2024-01-01", "categories": []}],
                                         xml="categories/a/index.xml", page="categories/a/index.html", description="A.")],
-                      SITE, "gen")
+                      SITE, "gen", theme_dir=_theme(tmp_path))
     assert [(e["kind"], e["feed"], e["items"]) for e in rep["errors"]] == [
         ("feed-item-missing", "blog.xml", ["posts/gone/index.html"])]
     assert not (site / "blog.xml").exists() and rep["written"] == ["categories/a/index.xml"]
@@ -115,11 +127,11 @@ def test_a_page_that_did_not_render_refuses_its_feed(tmp_path):
 def test_a_feed_is_written_only_when_its_text_changed(tmp_path):
     site = _site(tmp_path)
     feed = _feed([{"output": "posts/p0/index.html", "date": "2024-01-01", "categories": [], "authors": ["Given"]}])
-    assert write_feeds(str(site), [feed], SITE, "gen")["written"] == ["blog.xml"]
+    assert write_feeds(str(site), [feed], SITE, "gen", theme_dir=_theme(tmp_path))["written"] == ["blog.xml"]
     assert "<dc:creator>Given</dc:creator>" in (site / "blog.xml").read_text()   # supplied authors stand
-    again = write_feeds(str(site), [feed], SITE, "gen")
+    again = write_feeds(str(site), [feed], SITE, "gen", theme_dir=_theme(tmp_path))
     assert again["written"] == [] and again["unchanged"] == 1
-    assert write_feeds(str(site), [feed], SITE, "gen2")["written"] == ["blog.xml"]
+    assert write_feeds(str(site), [feed], SITE, "gen2", theme_dir=_theme(tmp_path))["written"] == ["blog.xml"]
 
 
 def test_urls_images_and_sizes_as_quarto_derives_them(tmp_path):
@@ -134,3 +146,11 @@ def test_urls_images_and_sizes_as_quarto_derives_them(tmp_path):
     _png(tmp_path / "images" / "logo.png", 300, 300)
     write_feeds(str(tmp_path), [], {**SITE, "url": ""}, "gen")   # no site url: nothing, an error row
     assert write_feeds(str(tmp_path), [], {**SITE, "url": ""}, "gen")["errors"][0]["kind"] == "feed-site-url"
+
+
+def test_no_highlight_theme_refuses_every_feed(tmp_path):
+    site = _site(tmp_path)
+    rep = write_feeds(str(site), [_feed([{"output": "posts/p0/index.html", "date": "2024-01-01", "categories": []}])],
+                      SITE, "gen", theme_dir=str(tmp_path / "nowhere"))
+    assert [e["kind"] for e in rep["errors"]] == ["feed-highlight-theme"] and rep["written"] == []
+    assert not (site / "blog.xml").exists()
