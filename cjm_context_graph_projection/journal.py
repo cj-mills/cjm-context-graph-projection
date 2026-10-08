@@ -103,7 +103,7 @@ JOURNAL_VERBS = ("decide", "alias", "assert", "link", "unlink", "section", "new-
                  "render-work-page", "rehome-points", "place-point",
                  "series", "series-members", "place-in-series", "entity", "verified-on",
                  "supports", "retire-source", "transfer-path", "judge-related", "judge-facets", "review-facets",
-                 "harvest-discussions",
+                 "harvest-discussions", "ingest-evidence",
                  "derived-from", "work-member", "relate")
 
 
@@ -463,6 +463,11 @@ async def _apply_op(
         # carries whole, so replay never asks GitHub; the journaled content hashes bind the facts.
         from .comments import apply_harvest
         await apply_harvest(gx, a["run"], actor=a.get("actor", "agent:session"))
+    elif verb == "ingest-evidence":
+        # One evidence snapshot ingested (design 7f315830): the measures are observations the op
+        # carries whole, so replay never reads the evidence files and never asks a source.
+        from .evidence import apply_evidence
+        await apply_evidence(gx, a["run"], actor=a.get("actor", "agent:session"))
     elif verb == "retire-source":
         # An archive source retired (design amendment e916a4b9 (1)): the ingest already restored
         # the node from the journaled commit, so replay re-lands the fact and the successor edge
@@ -723,6 +728,12 @@ def touched_node_ids(
         out.extend(sorted({r[0] for r in (run.get("confirm") or []) + (run.get("mark") or [])}))
     elif verb == "harvest-discussions":
         out.extend(sorted((a.get("run") or {}).get("plan") or {}))
+    elif verb == "ingest-evidence":   # the snapshot and every web_path its measures land on (7f315830)
+        from .evidence import snapshot_id, web_path_id
+        run = a.get("run") or {}
+        if (run.get("snapshot") or {}).get("key"):
+            out.append(snapshot_id(run["snapshot"]["key"]))
+        out.extend(sorted({web_path_id(m["key"]) for m in run.get("measures") or []}))
     elif verb == "retire-source":
         out.extend(r for r in (a.get("note"), a.get("successor")) if r)
     elif verb == "transfer-path":

@@ -7,7 +7,7 @@ two surfaces — correctness/chainability over token-economy for v1.
 
 import json
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 def _short(text: Any, limit: int = 160) -> str:
@@ -462,6 +462,8 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         return "\n".join(lines)
     if kind == "harvest-discussions":
         return _render_harvest(obj)
+    if kind in ("pull-evidence", "ingest-evidence", "traffic"):
+        return _render_evidence(kind, obj)
     if kind == "judge-facets":
         return _render_facets(obj)
     if kind == "review-facets":
@@ -1561,6 +1563,60 @@ def _render_claims(obj: Dict[str, Any]) -> str:
                              + (f" — {r['note']}" if r.get("note") else ""))
         lines.append("")
     return "\n".join(lines).rstrip() if claims else "_(no claims — `entity claim <key> --name ... --statement ... --position N`)_"
+
+
+def _iv(m: Optional[Dict[str, Any]]) -> str:
+    """One estimate with its 95% interval, as the evidence reads render it."""
+    if not m:
+        return "–"
+    if not m.get("sample_size"):
+        return f"{m['estimate']}"
+    return f"{m['estimate']} [{m['lower']:.0f}–{m['upper']:.0f}]"
+
+
+def _render_evidence(kind: str, obj: Dict[str, Any]) -> str:
+    """The evidence verbs (design 7f315830): a pull's snapshot, an ingest's changes, the traffic read."""
+    if obj.get("error"):
+        return f"⚠ {obj['error']}"
+    if kind == "pull-evidence":
+        rows = sum(int(f.get("rows") or 0) for f in obj.get("files") or [])
+        return (f"**pulled** `{obj['key']}` · {obj['window'][0]} → {obj['window'][1]} · {len(obj['files'])} file(s), "
+                f"{rows} row(s) · next: `ingest-evidence {obj['key']}`")
+    if kind == "ingest-evidence":
+        head = (f"**{'ingested' if obj.get('written') else 'would ingest'}** `{obj['snapshot']}` · "
+                f"{obj['computed']} (path, month) measure(s) computed · {obj['changes']} to land "
+                f"({obj['superseding']} superseding a prior value)")
+        lines = [head]
+        ap = obj.get("applied")
+        if ap:
+            lines.append(f"  landed {ap['landed']} · superseded {ap['superseded']} · corroborated {ap['corroborated']}"
+                         f" · reinstated {ap.get('reinstated', 0)} · web_paths {ap['web_paths']}")
+        if obj.get("foreign"):
+            lines.append("  other hosts (not counted): " + ", ".join(f"{h or '(none)'} {n}" for h, n in sorted(obj["foreign"].items())))
+        if obj.get("unkeyed"):
+            lines.append(f"  unkeyable path(s): {len(obj['unkeyed'])}")
+        return "\n".join(lines)
+    top = obj.get("top") or 0
+    holders = obj.get("holders") or []
+    lines = [f"## Traffic · months {', '.join(obj.get('months') or []) or '–'}", "",
+             "_Cloudflare visits (95% interval) · Search Console clicks / impressions · derived across every path a page holds or held_", ""]
+    for h in holders[:top] if top else holders:
+        cf, sc = h.get("cloudflare") or {}, h.get("search_console") or {}
+        extra = f" · {len(h['paths'])} paths" if len(h["paths"]) > 1 else ""
+        inc = f" · incomplete {', '.join(cf['incomplete'])}" if cf.get("incomplete") else ""
+        lines.append(f"- **{h['title'] or h['path']}** `{h['id'][:8]}` — visits {_iv(cf.get('visits'))}"
+                     f" · GSC {sc.get('clicks', '–')}/{sc.get('impressions', '–')}{extra}{inc}")
+    if top and len(holders) > top:
+        lines.append(f"- … {len(holders) - top} more page(s) (`--top 0` lists all)")
+    un = obj.get("unresolved") or []
+    if un:
+        lines += ["", f"**Held by no page** ({len(un)}):"]
+        for u in un[:top] if top else un:
+            lines.append(f"- `{u['key']}` — visits {_iv((u.get('cloudflare') or {}).get('visits'))}"
+                         f" · GSC {(u.get('search_console') or {}).get('impressions', '–')} impressions")
+    for a in obj.get("ambiguous") or []:
+        lines.append(f"- ⚠ `{a['key']}` held by {len(a['holders'])} pages: " + ", ".join(x[:8] for x in a["holders"]))
+    return "\n".join(lines)
 
 
 def _render_harvest(obj: Dict[str, Any]) -> str:

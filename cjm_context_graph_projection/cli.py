@@ -1234,6 +1234,29 @@ async def _dispatch(args) -> int:
             if args.journal_path and res.get("written"):
                 append_write(args.journal_path, "harvest-discussions", {"run": res["run"], "actor": args.actor})
             return 1 if res.get("error") else 0
+        elif args.command in ("pull-evidence", "ingest-evidence"):
+            # The evidence (design 7f315830): a pull asks the source and writes files only; an
+            # ingest reads them and its op carries the computed run, so replay reads no file.
+            from .evidence import evidence_config, ingest_evidence, pull_evidence
+            ev = evidence_config(load_graph_config(args.graph_db_path))
+            if ev["errors"]:
+                print("error: " + "; ".join(ev["errors"]) + " (the graph-sibling graph.config.json)", file=sys.stderr)
+                return 1
+            if args.command == "pull-evidence":
+                res = pull_evidence(ev["config"], args.source, first=args.first, last=args.last)
+                print(render("pull-evidence", res, args.format))
+                return 1 if res.get("error") else 0
+            res = await ingest_evidence(gx, ev["config"], args.snapshot, dry_run=args.dry_run, actor=args.actor)
+            print(render("ingest-evidence", res, args.format))
+            if args.journal_path and res.get("written"):
+                append_write(args.journal_path, "ingest-evidence", {"run": res["run"], "actor": args.actor})
+            return 1 if res.get("error") else 0
+        elif args.command == "traffic":
+            from .evidence import traffic_report
+            res = await traffic_report(gx, since=args.since, until=args.until, holder=args.holder)
+            res["top"] = args.top
+            print(render("traffic", res, args.format))
+            return 1 if res.get("error") else 0
         elif args.command == "retire-source":
             # An archive source retires as a FACT (design amendment e916a4b9 (1)): the op records
             # where its source lived (the website clone's path + commit), so the ingest can restore
@@ -3590,6 +3613,27 @@ def main() -> int:
                       help="The site project root: the widget's settings and the site title (default: the "
                            "sibling config's website_root)")
     p_hd.add_argument("--actor", default=_DEFAULT_ACTOR)
+    p_pe = sub.add_parser("pull-evidence",
+                          help="Pull one evidence source's raw API responses into a new snapshot under the "
+                               "evidence root (design 7f315830; files only, never the graph): by default from "
+                               "where the snapshots on disk end, re-reading the overlap")
+    p_pe.add_argument("source", choices=["cloudflare", "search-console"])
+    p_pe.add_argument("--first", default=None, help="First day pulled (YYYY-MM-DD)")
+    p_pe.add_argument("--last", default=None, help="Last day pulled (YYYY-MM-DD; default today)")
+    p_ie = sub.add_parser("ingest-evidence",
+                          help="Ingest one evidence snapshot (journaled; design 7f315830): hash-checked, its "
+                               "source's months recomputed over every snapshot, the changed traffic facts landed "
+                               "on web_path nodes with EVIDENCED_BY edges to the snapshots")
+    p_ie.add_argument("snapshot", help="'<source>/<pull date>' under the evidence root")
+    p_ie.add_argument("--dry-run", action="store_true", help="Report what would land; write nothing")
+    p_ie.add_argument("--actor", default=_DEFAULT_ACTOR)
+    p_tr = sub.add_parser("traffic",
+                          help="Each page's traffic DERIVED across every path it holds or held (design 7f315830), "
+                               "per source over the months in range, and the URLs no page holds")
+    p_tr.add_argument("--since", default=None, help="First month counted (YYYY-MM)")
+    p_tr.add_argument("--until", default=None, help="Last month counted (YYYY-MM)")
+    p_tr.add_argument("--holder", default=None, help="One page (node id or unique prefix) in full")
+    p_tr.add_argument("--top", type=int, default=40, help="Pages listed (default 40; 0 = all)")
     p_rs = sub.add_parser("retire-source",
                           help="Retire an ARCHIVE source as a fact (journaled; design amendment e916a4b9): "
                                "publish_state retired + where its source lived, so a rebuild restores it "
