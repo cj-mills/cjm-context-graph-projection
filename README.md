@@ -7,10 +7,13 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 ## Modules
 
 - **`cjm_context_graph_projection.__init__`**
+- **`cjm_context_graph_projection.aboutpage`** — The ABOUT PAGE: the author's identity, background and how the site is made -- never an offer
 - **`cjm_context_graph_projection.agentlayer`** — The post page's AGENT LAYER (design 39c51c15 (7), amendment 23a49667, under the redesign build
 - **`cjm_context_graph_projection.archive`** — Retiring an archive source, restoring it from git, and moving a page's path between holders
 - **`cjm_context_graph_projection.artifacts`** — Observed-source ARTIFACTS (design 9a7224a7, work item 4765b699): files the graph VERSIONS
 - **`cjm_context_graph_projection.authoring`** — The B write surface: AUTHOR a verbatim-text slot on-graph, emit the canonical artifact.
+- **`cjm_context_graph_projection.categories`** — A post's CATEGORIES: the one reader every renderer calls (design ce17606b (1) under the category
+- **`cjm_context_graph_projection.categorypages`** — CATEGORY PAGES (design a62f2499 under the category model 0f7fcdcb (5), work item 779c7a79).
 - **`cjm_context_graph_projection.claims`** — The claims the site may make about the user's work, and the deliverables that back them
 - **`cjm_context_graph_projection.cli`** — The `cjm-context-graph` CLI — first driver of the projection core.
 - **`cjm_context_graph_projection.code_edges`** — Orphaned code-target edge detector: journaled links whose endpoint no longer resolves.
@@ -25,11 +28,15 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - **`cjm_context_graph_projection.devgraph`** — Build the dev graph's nodes + edges from its sources (the dev-graph DRIVER).
 - **`cjm_context_graph_projection.display`** — Graph-carried display rules: the presentation vocabulary (DEC `16bcd96e`).
 - **`cjm_context_graph_projection.explorer_page`** — The graph EXPLORER client page — the first client of the `serve` data API.
+- **`cjm_context_graph_projection.facetjudge`** — The facet judge (design eefda2dd under the category model 0f7fcdcb and amendment 3c5cff97).
+- **`cjm_context_graph_projection.facetreview`** — The facet review and the public build's facet gate (design eefda2dd (5), (7)).
 - **`cjm_context_graph_projection.factlayer`** — Shared fine-tier reads over the fact-layering schema (slots + assertions).
 - **`cjm_context_graph_projection.filing`** — Filing reconciler: propose PART_OF program anchors for unfiled work items.
 - **`cjm_context_graph_projection.gitfold`** — Ingested sources' times from git history (design amendment 19edbe97 to 8f6f2343; leg C 7ddcea72).
+- **`cjm_context_graph_projection.homepage`** — The HOME PAGE: a projected map of the site under its role and what it holds (design e55201e2,
 - **`cjm_context_graph_projection.hybrid_page`** — The HYBRID graph explorer client — GPU physics canvas + DOM overlay (check-in 1233ab46).
 - **`cjm_context_graph_projection.journal`** — The write journal: the durable, replayable source of truth for born-on-graph writes.
+- **`cjm_context_graph_projection.judgeengine`** — The judge verb family's shared engine (design eefda2dd (8), capture e0b6f945 condition 1).
 - **`cjm_context_graph_projection.judging`** — Judged related posts (design e09e262b, answering ruling 98d33f9e (1); the spike 245fb5b3).
 - **`cjm_context_graph_projection.lens`** — Lenses: graph-carried, parameterized views (DEC `f1b02b95` — tier 2 of the
 - **`cjm_context_graph_projection.library`** — The Library's provenance (design 5de7fae9, design leg 4a4ef27e).
@@ -41,6 +48,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - **`cjm_context_graph_projection.notes_place`** — The PLACEMENT PASS of the notes lane — the second of the standalone lecture resource's
 - **`cjm_context_graph_projection.onboarding`** — Project the MEMORY onboarding surface from the graph's ASSERTED lead structure.
 - **`cjm_context_graph_projection.oracle`** — The version oracle: a programmatic Procedure that keeps `version` slots fresh.
+- **`cjm_context_graph_projection.paths`** — The path model (design ae698640, the walk 57287d1b, the refactor leg ad9bef5a): artifacts,
 - **`cjm_context_graph_projection.postpage`** — The post page's projected parts (the post page of de808eae (2); its rest designed as 39c51c15
 - **`cjm_context_graph_projection.projection`** — The projection core: schema / show / relevance / state over a context graph.
 - **`cjm_context_graph_projection.propose`** — Triage proposals: an agent DRAFTS the update for a stale deliverable (work item bb015d12).
@@ -65,8 +73,11 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - **`cjm_context_graph_projection.series`** — Series born on-graph: the node, its membership and its ORDER as journaled intent
 - **`cjm_context_graph_projection.serve`** — A served, read-only graph EXPLORER data API over the read verbs — the richer-viz INSTRUMENT.
 - **`cjm_context_graph_projection.site`** — The public site's BUILD: one verb, run where the graph is (ruling 941f7f13; DEC 98293e72 (2)).
+- **`cjm_context_graph_projection.sitefeeds`** — The site's FEEDS, written by the build after the render (design 0efb5497 (3b) under the web
 - **`cjm_context_graph_projection.sitelinks`** — In-body site links, RESOLVED through site_path facts (DEC 72d669c5 (1); the step, 9ee4e346).
+- **`cjm_context_graph_projection.sitelisting`** — The site's PROJECTED LISTING: one component for every listing (design 0efb5497 + amendment
 - **`cjm_context_graph_projection.sitepages`** — The site's PROJECTED pages: every series page from its Series, every topic page from its Lens
+- **`cjm_context_graph_projection.sitetheme`** — The site's THEME, projected from the design system its profile is bound to (leg C of the
 - **`cjm_context_graph_projection.source_state`** — N+3 Phase 1 (SHADOW): capture a module's canonical source into a SOURCE journal and
 - **`cjm_context_graph_projection.sourcemoves`** — Which rows a moved source accounts for (design amendment a9176261 to 19edbe97 (6)).
 - **`cjm_context_graph_projection.sources`** — The post page's sources (design 39c51c15 (3), amendment 722a8232, under the redesign build
@@ -79,6 +90,16 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 
 ## API
 
+### `cjm_context_graph_projection.aboutpage`
+
+- `about_body` _function_
+- `background_ref` _function_ — The background: the one ref of the selection's one `subgraph` clause. Any other shape
+- `body_of` _function_
+- `load_author_extras` _function_
+- `load_portrait` _function_ — The displayed portrait (`site-author.portrait`, 2fba772c (4)): a derivative of the photo,
+- `load_site_config` _function_
+- `plan_about_page` _function_ — Plan the About page: the opening, the portrait, the background under its approval, the
+
 ### `cjm_context_graph_projection.agentlayer`
 
 - `agent_plan` _function_ — The agent layer's plan: each licensed post's JSON-LD and llms.txt. A page's title and
@@ -90,14 +111,16 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `jsonld_script` _function_
 - `llms_index` _function_ — llms.txt (amendment 23a49667 (2), 465ab923): the author's intro, the build's own lines,
 - `llms_path` _function_
-- `load_index_copy` _function_ — llms.txt's intro copy from the site config: a missing key or summary refuses (the build
+- `load_index_copy` _function_ — llms.txt's intro copy: the summary is the site's one sentence (`site-summary`, amendment
 - `map_outside_code` _function_ — The ONE walker of the markdown layer's code regions (design b82d2a98 (3)), shared by the
 - `plain` _function_ — A description in llms.txt or JSON-LD is text: the page's link is the only link there, and a
 - `post_jsonld` _function_ — A post's structured data (39c51c15 (7), amendment 23a49667 (4)): a draft has no
+- `profile_jsonld` _function_ — The About page's ProfilePage, its Person the site author (design ff0c6338 (8)): the name and
 - `read_jsonld` _function_
 - `restore_llms_anchors` _function_ — The markdown layer carries the ids its page carries (design b82d2a98 (1)): each anchor
 - `rewrite_llms_links` _function_ — Keep an agent in the markdown layer (amendment 23a49667 (3)): every internal link in a
 - `rewrite_markdown_links` _function_ — Rewrite each link target `resolve` maps, outside fenced code and inline code spans.
+- `state_category_links` _function_ — The markdown layer STATES a category, never links the category listing's filtered view
 - `write_llms_txt` _function_ — Write llms.txt over Quarto's flat list -- only when every link names a `.llms.md` the
 
 ### `cjm_context_graph_projection.archive`
@@ -133,10 +156,36 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `emit_post` _function_ — Emit a born post to the PUBLIC website clone — GATED on publish_state=published.
 - `file_section_raws` _function_ — Each of a note's sections' `raw` span as the FILE currently decomposes (the other
 - `graph_section_raws` _function_ — Each of a note's sections' on-graph `raw` span, keyed by anchor (the divergence/
+- `note_approval` _function_ — A born Note's approval, the one reading every public consumer of a born Note shares
 - `read_node` _function_ — Deliver a node's verbatim CONTENT — the read DUAL of `author`/`emit`.
 - `read_slot` _function_ — Read a node's current verbatim-slot text (the `--editor` pop / preview input).
 - `reharvest_note_relations` _function_ — Re-run the relationship harvest on an EDITED note and apply the edge DIFF (finding cbde404c).
 - `section_divergence` _function_ — Read-only: detect, at SECTION grain, where a note's `.md` has drifted from the graph.
+
+### `cjm_context_graph_projection.categories`
+
+- `chip_vocab` _function_ — Each live facet entry's chip text and its place in the chip order.
+- `load_post_categories` _function_ — Every post's chips from the graph (a post with none is absent), each chip's place in the
+- `majority` _function_ — A collection page's chips (design ce17606b (4)): what most of it is about -- the
+- `post_chips` _function_
+
+### `cjm_context_graph_projection.categorypages`
+
+- `category_page_min` _function_ — The index Lens's active `category_page_min` (a62f2499 (3)): one positive integer.
+- `category_slug` _function_
+- `describe_categories` _function_ — The description verb (amendment e38d403c (5)): the document, or one landed review -- the
+- `description_basis` _function_
+- `description_criteria` _function_
+- `description_document` _function_
+- `description_stale` _function_
+- `description_state` _function_ — Every category page the PUBLIC build earns, in the index's order, with the posts it lists
+- `entry_record` _function_
+- `index_body` _function_
+- `index_hubs` _function_ — The category pages the index links, in its order (the home page's map entry, 5c3c2662 (5)).
+- `parse_descriptions` _function_ — Each section's entry, basis and description (whitespace collapsed to single spaces). A
+- `plan_category_pages` _function_ — Plan the category index and every category page, and the redirect stub of every entry
+- `plan_category_paths` _function_ — The `site_path` each live facet entry should hold (a62f2499 (1)): `/categories/<slug>/`,
+- `plan_descriptions` _function_ — Check every section against the graph (a live facet entry, its record unchanged since the
 
 ### `cjm_context_graph_projection.claims`
 
@@ -207,6 +256,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `load_hardware` _function_ — Every hardware Entity with its ACTIVE standing (None if never asserted; two active
 - `load_verifications` _function_ — The verification edges (deliverable -> device) with their evidence.
 - `load_vocab` _function_ — The live (unretired) vocabulary of both axes, each entry its properties plus `id`.
+- `mint_entities` _function_ — A vocabulary batch (amendment 3c5cff97), checked WHOLE before anything lands, as the
 - `mint_entity` _function_ — Mint or update a typed Entity from its WHOLE record (journaled `entity`; upsert by
 - `project_matrix` _function_ — The pure projection (no graph access): see the module docstring for the rules. A filter
 - `record_verification` _function_ — Write one VERIFIED_ON edge with its evidence (journaled `verified-on`), or retract it.
@@ -243,6 +293,42 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `node_title` _function_ — Best display label for a node: the stored/cascade tiers of the resolution order.
 - `parse_template` _function_ — Parse a display template into literal / property / edge parts.
 - `set_display_rule` _function_ — Author/update the graph-carried DisplayRule for a kind (presentation vocabulary).
+
+### `cjm_context_graph_projection.facetjudge`
+
+- `applies` _function_ — Task and stage entries are asked of non-tutorial posts only (eefda2dd (4)).
+- `apply_facet_run` _function_ — Land one facet run: each asked pair's standing judgment is replaced by the run's (a post
+- `code_signals` _function_ — What the post's code says about its tools, read from its fenced blocks.
+- `criteria_hash` _function_ — The hash of an entry's Noul as asked: the entry's fields and its kind's text together.
+- `entry_id` _function_
+- `entry_question` _function_ — One entry's Noul: its kind's instructions naming it, its description and not-for line as criteria.
+- `facet_view` _function_ — What the facet judge sees of a post -- and what its staleness is measured against.
+- `facets_stale` _function_ — The public posts with missing or stale facet judgments.
+- `is_facet_entry` _function_ — A live entry of a facet kind that is not a matrix-structural task row: the cross-task row
+- `judge_facets` _function_ — The facet judge verb: find the stale pairs, ask one request per post, land the run.
+- `load_facet_judgments` _function_ — Every stored facet judgment.
+- `load_facet_records` _function_ — What each judged post's facet judgments were made against (`_value` = the fact's text).
+- `load_facet_views` _function_ — The facet judge's state of every public post, from the graph (the audience rule: only
+- `load_facet_vocab` _function_ — Every entry of the five facet kinds the judge asks (is_facet_entry).
+- `measure` _function_ — The measuring pass's report (eefda2dd (6)), from the stored judgments: per entry the posts
+- `opening_prose` _function_ — The post's opening prose, whitespace collapsed.
+- `post_outline` _function_ — A post's section outline for a judged state: each content section's title, links reduced
+- `record_value` _function_ — The canonical JSON of a post's record (key-sorted, compact).
+- `request_body` _function_
+- `review_basis` _function_ — A pair's basis: the post's judged state and the entry's criteria. A mark whose basis is
+- `run_facets` _function_ — One request per post with a Noul per entry; a response missing an asked entry is a failure.
+- `stale_pairs` _function_ — A pair is stale when its post has no record, the post's state moved, or the record holds
+
+### `cjm_context_graph_projection.facetreview`
+
+- `apply_review` _function_ — Land one review: assert each confirmation (checked at write time like any facet), then set
+- `facet_gate` _function_ — The public build's facet gate (eefda2dd (7)): the public posts with stale pairs, the ones
+- `load_confirmed` _function_ — Every post's ACTIVE confirmed facets (supersession applied).
+- `parse_review` _function_ — The document's rows; a repeated pair is an error (the file is refused whole).
+- `plan_review` _function_ — Check every row against the graph (its pair fresh, its basis current, its edge present) and
+- `review_document` _function_ — The review document, grouped by entry, each entry's rows by p (module docstring).
+- `review_facets` _function_ — The review verb: the document (counts and stale pairs alongside), or one landed review.
+- `review_state` _function_ — Every fresh pair's review row (module docstring), the stale pairs apart, and the reads
 
 ### `cjm_context_graph_projection.factlayer`
 
@@ -289,6 +375,16 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `unquote_path` _function_ — Undo git's C-style path quoting (core.quotePath=false leaves UTF-8 bare, not `"` / `\`).
 - `worktree_changes` _function_ — What HEAD does not carry: reported by the ingest, never read from the tree.
 
+### `cjm_context_graph_projection.homepage`
+
+- `entry_anchor` _function_
+- `entry_refs` _function_ — The map's entries in their order: the refs of the selection's `subgraph` clauses, in turn.
+- `home_body` _function_
+- `map_entries` _function_ — Each named page as a map entry (the module docstring's (2)). An entry's `form` names its
+- `plan_home_page` _function_ — Plan the home page: the identity, the map, the jump links, the band.
+- `post_line` _function_
+- `recent_posts` _function_
+
 ### `cjm_context_graph_projection.journal`
 
 - `journal_sourced_note_paths` _function_ — The memory `.md` files `ingest` must NOT read — they're journal-sourced now.
@@ -300,19 +396,28 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `replay_journal` _function_ — Re-apply every journaled write through its core verb (idempotent).
 - `touched_node_ids` _function_ — Best-effort node refs a journaled op touched — the session-lens feed (2f51ff5d).
 
+### `cjm_context_graph_projection.judgeengine`
+
+- `digest` _function_ — The hash staleness is keyed by: key-sorted JSON, so equal content hashes equal.
+- `http_ask` _function_ — The HTTP judge: one POST per request, retried with backoff on overload and network faults.
+- `normalized` _function_ — The journal writes ops `sort_keys`, so replay rebuilds every dict key-sorted: live and
+- `post_sections` _function_ — Every Note's sections in order (HAS_SECTION), for a family's judged state to read from
+- `public_posts` _function_ — The posts a judge may be shown (the audience rule e1fd4d64: only public posts are sent).
+- `read_key` _function_ — The key from KEY_ENV, else KEY_FILE -- never printed, never journaled.
+- `resolve_ask` _function_ — The judge a run asks: the one given, else HTTP with the key -- or the reason there is none.
+- `run_requests` _function_ — Ask every request on a worker pool; every answer is kept (the family applies its floor).
+
 ### `cjm_context_graph_projection.judging`
 
 - `apply_judgments` _function_ — Land one judge run: every stored judgment touching a re-judged post is replaced by the
-- `http_ask` _function_ — The HTTP judge: one POST per pair, retried with backoff on overload and network faults.
 - `judge_pairs` _function_ — Both directions for every stale post, against every other judged post.
 - `judge_related` _function_ — The judge verb: find the stale posts, judge every pair touching them, land the run.
 - `judgment_of` _function_ — The judgment as the edge stores it, from the service's typed answers.
 - `load_judged` _function_ — Every stored judgment.
 - `load_post_views` _function_ — The judged state of every public post (the audience rule: only public posts are sent).
 - `load_records` _function_ — What each judged post's judgments were made against.
-- `post_view` _function_ — What the judge sees of a post -- and what its staleness is measured against.
+- `post_view` _function_ — What the judge sees of a post -- and what its staleness is measured against. An empty
 - `question_hash` _function_ — The questions' identity: a changed question makes every judgment stale.
-- `read_key` _function_ — The key from KEY_ENV, else KEY_FILE -- never printed, never journaled.
 - `related_stale` _function_ — The public posts whose related judgments are missing or stale -- the build's report.
 - `run_judge` _function_ — Ask the judge about every pair; every answer is kept (the caller applies the floor).
 - `stale_posts` _function_ — A post is stale when it has no record or its record names another state or question.
@@ -322,6 +427,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 
 - `apply_lens` _function_ — APPLY a lens: bind params -> run each selection clause through the real
 - `bind_params` _function_ — Bind an application's params: defaults + provided, typed, loud on gaps.
+- `lens_count` _function_ — A number a page projected from a Lens reads off its Lens (a62f2499 (3), 5c3c2662 (5)):
 - `lens_node_id` _function_ — Deterministic Lens id — one lens per slug, so re-authoring converges.
 - `load_lenses` _function_ — Every well-formed Lens on this graph (the shelf feed), slug-sorted.
 - `set_lens` _function_ — Author/update a graph-carried Lens (journaled upsert-by-slug).
@@ -345,7 +451,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `plan_library_pages` _function_ — Plan the Library index and every work page it links: the Library under the profile, a
 - `render_index` _function_ — The topic line, then one section per form: each work's name (linked to its work page when
 - `render_work` _function_ — The card, the units grouped by part, and the outputs on the whole work. A unit with one
-- `topic_pages` _function_ — The topical Lens pages: a Lens page whose listed members are all notes; one mixing notes
+- `topic_pages` _function_ — The topical pages: a SUBJECT's category page listing at least one notes post (the topic
 - `unit_anchor` _function_
 - `work_description` _function_
 - `year` _function_
@@ -400,17 +506,53 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `read_repo_version` _function_ — Read a repo's version: installed metadata first, else `__version__` on disk.
 - `run_version_oracle` _function_ — Refresh `version` slots for repo entities; report what changed.
 
+### `cjm_context_graph_projection.paths`
+
+- `alternatives` _function_ — alternatives: steps sharing an input ARTIFACT and producing one artifact KIND -- [{input,
+- `analogues` _function_ — analogues (ad9bef5a (2)): steps making the SAME stage transition with DIFFERENT base models
+- `check_record_refs` _function_ — Every Entity a record names is live (or earlier in its batch) and unretired, and its
+- `continues_from` _function_ — continues-from: a step's REQUIRES matched to another step's PRODUCES -- [{step, from, via,
+- `endpoint_kind` _function_ — What a node is, in RELATION_ENDPOINTS' vocabulary.
+- `flywheel_cycles` _function_ — Flywheel paths (ae698640 (2)): a flywheel is a CYCLE AT THE KIND LEVEL over ACYCLIC instance
+- `gaps` _function_ — gaps: an ASSUMED concept that no deliverable TEACHES and no Library unit or work COVERS --
+- `land_record_edges` _function_ — Reconcile the edges a record owns with the record: the ones it no longer implies go, the new
+- `load_path_graph` _function_ — The path model's slice of the graph as plain data: the Entities it names (by id: their
+- `path_reads` _function_ — The `paths` read verb: one derived read, or all of them, with every node it mentions named.
+- `prepares_for` _function_ — What a work, a unit or a deliverable PREPARES YOU FOR (e2b3a414): the deliverables that
+- `record_edges` _function_ — The edges a record lands: an artifact's lineage, an environment's parts and requirements,
+- `record_field_error` _function_ — The SHAPE of a path-model record field (pure; the live references are checked by
+- `record_refs` _function_ — The Entities a record names (its references), from its fields.
+- `record_relation` _function_ — Write one path-model relation (journaled `relate`), or retract it. The endpoints' kinds must
+- `resolve_endpoint` _function_ — Resolve a relation endpoint argument: an Entity by `kind:key`, else a deliverable by id or
+- `split_candidates` _function_ — SPLIT CANDIDATES (ae698640 (6)): a post turning A into B and B into C -- it PRODUCES B and C,
+- `stage_matches` _function_ — A step's DERIVED stage and task (ae698640 (2)): its input artifact kinds and output kinds
+- `staleness` _function_ — Environment staleness (ae698640 (3)): a deliverable that requires or produces an environment
+- `step_view` _function_ — One step in context: its relations, what it continues from and what continues from it, its
+- `steps_of` _function_ — Every deliverable with relations, as a step: what it requires (artifact / environment ->
+- `transitions_error` _function_ — A stage's transitions (ae698640 (2)): each {in: [kinds], optional: [kinds], out: kind}, the
+
 ### `cjm_context_graph_projection.postpage`
 
+- `category_links` _function_ — Each category as a link to its category page where one exists (design a62f2499 (7)), else
 - `display_date` _function_ — Quarto formats a page's dates BEFORE user filters run, so a date the filter sets must
 - `end_plan` _function_ — Every post's end matter. A Note of no post kind (a site page, an untyped Note) has none.
-- `fill_copy` _function_ — Copy names the site author through {name} / {role}; any other placeholder refuses.
+- `fill_copy` _function_ — Copy names the site author through {name} / {role} (the summary its holds clause through
 - `header_facts` _function_ — The header's dated facts (39c51c15 (2)): when a deliverable's `published` state was asserted,
 - `header_meta` _function_ — The header's projected metadata (39c51c15 (2)): the kind label; a born post's date is its
+- `holds_line` _function_
+- `is_category_link` _function_ — A link to the category listing opened filtered to a category (category_links' form,
 - `license_facts` _function_ — The license facts (39c51c15 (6)): per deliverable class on the DeliverableType, per
+- `links_line` _function_
+- `load_category_listing` _function_ — The listing a post's categories link into (`category-listing` in the site config: a listing
 - `load_holder` _function_ — The copyright holder the footer names (`copyright-holder` in the site config): a missing
+- `load_reading_guide` _function_ — The site's one statement of how to read it (`reading-guide` in the site config, design
 - `load_site_author` _function_ — The site's one statement of its author (`site-author` in the site config, amendment
+- `load_site_holds` _function_ — What the site holds (`site-holds` in the site config, design 8b4f15d0 (3)): the second part
+- `load_site_links` _function_ — The site's one statement of its contact links (`site-links` in the site config, design
+- `load_site_nav` _function_ — The navbar's own entries (`site-nav` in the site config, finding c6befeb6): each names its
+- `load_site_summary` _function_ — The site's one sentence of who and what (`site-summary` in the site config, amendment
 - `load_strip_copy` _function_ — The strip's copy from the site config: a missing key or field refuses (the build never
+- `nav_entries` _function_ — Resolve each navbar entry to what Quarto links (finding c6befeb6): a page path to the ONE
 - `offered_backing` _function_ — The posts that back an OFFERED claim through a backing kind, read through the public
 - `pitch_target` _function_ — The page the pitch points at: the Work-with-me page (903bc108 (5)). It is not on-graph
 - `post_dates` _function_ — A post's public dates (39c51c15 (2)): an archive post's own date, a born post's publication;
@@ -421,6 +563,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `render_related` _function_ — Related posts, each with its reason, as a plain classed div (styled by the site).
 - `render_reuse` _function_ — The license line, as Quarto's own Reuse section (a filter-set `license` never reaches
 - `site_footer` _function_ — The footer, derived (39c51c15 (6)): the copyright years run from the first publication to
+- `site_nav` _function_ — The navbar's right side: its own entries in their stated order (finding c6befeb6), then the
 
 ### `cjm_context_graph_projection.projection`
 
@@ -664,6 +807,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 
 ### `cjm_context_graph_projection.site`
 
+- `check_rendered_site` _function_ — Every rendered page, read whole (findings c6befeb6 + d807a18f): each internal href / src
 - `check_source_aliases` _function_ — Every front-matter alias must be a superseded `site_path` of the page that declares it:
 - `output_href` _function_ — Quarto's alias `fixupHref`: a trailing slash or an extension-less path names the
 - `page_outputs` _function_
@@ -675,6 +819,22 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `stated` _function_ — The ONE reader of what a post's page states (finding 12d98020): its front matter first,
 - `write_redirects` _function_ — Write each redirect page; a stub landing on a rendered page is an error (Quarto skips it
 
+### `cjm_context_graph_projection.sitefeeds`
+
+- `absolute_url` _function_
+- `day_time` _function_
+- `escape` _function_
+- `feed_image_size` _function_
+- `feed_order` _function_ — prepareItems: an undated item sorts last, equal dates keep the order given.
+- `highlight_styles` _function_ — Quarto's defaultSyntaxHighlightingClassMap: each text style of the default theme as the
+- `item_image` _function_ — A site-absolute image stands; a relative one is relative to the post's folder.
+- `math_image_url` _function_
+- `png_size` _function_
+- `render_feed` _function_
+- `rendered_contents` _function_ — readRenderedContents under kFeedOptions, on the page as rendered. The authors are the
+- `rss_date` _function_
+- `write_feeds` _function_ — Write every feed whose text changed. An item is {output, date, categories, image, authors?}:
+
 ### `cjm_context_graph_projection.sitelinks`
 
 - `resolve_site_links` _function_ — Reconcile the `site_link` REFERENCES edges of the scoped notes against the facts.
@@ -684,10 +844,29 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `step_site_links` _function_ — THE STEP (design amendment 9ee4e346): one whole-graph resolve at a window's close, run
 - `touches_inputs` _function_ — Whether a window moved an input of the resolve (design amendment 9ee4e346 (3)).
 
+### `cjm_context_graph_projection.sitelisting`
+
+- `check_listing_chips` _function_ — After the render, with a category listing named: every chip on a projected page is a link
+- `chip_hrefs` _function_ — Every chip's href from the one encoder (postpage.category_links); on the category listing a
+- `date_text` _function_
+- `feed_header` _function_
+- `feed_plan` _function_ — A listing's feed (design 0efb5497 (3b)): the page's output and the feed beside it (the page's
+- `listing_kinds` _function_ — The filter's kinds (e66296bd (1)): only the categories this listing's items carry, so a
+- `listing_script` _function_ — The site script, its words baked in from WORDS.
+- `load_site_title` _function_
+- `note_item` _function_ — A post as a listing shows it: what its page states (site.stated, the one reader).
+- `output_href` _function_
+- `page_item` _function_ — A collection page as a listing shows it (the logs index's series, the learning paths): its
+- `render_listing` _function_ — The listing's markup: a container carrying the filter's data, an ordered list of the items,
+- `sort_rows` _function_ — The rows in the order a listing shows them, each term applied as a stable sort from the last
+- `title_html` _function_ — A title is the author's markdown: Quarto rendered a listed title through Pandoc (its smart
+
 ### `cjm_context_graph_projection.sitepages`
 
+- `check_category_listing` _function_ — The category listing a Lens projects (design ce17606b (3)) is the page every chip links
 - `check_page_outputs` _function_ — Every Series or Lens page the build projected has its rendered page (the guard's check,
 - `group_through_series` _function_ — A Lens with view.group_by "series" lists a member THROUGH its Series page (design 7657c4a5
+- `hub_order` _function_ — The pages a listing links in the order the listing SHOWS them: its sort applied to what the
 - `is_generated` _function_
 - `is_public` _function_ — A publish_state decides (public only when `published`); with none, a Note of an ARCHIVE
 - `member_updated` _function_ — `last-modified` is a file mtime (a checkout time, not an edit), so it never counts.
@@ -696,6 +875,17 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `parse_date` _function_
 - `project_pages` _function_ — Write the planned pages into the source tree (only those whose text changed), remove
 - `render_page` _function_
+- `unlisted_posts` _function_ — The posts a page meant to cover every post leaves out (the category listing, ce17606b (3);
+
+### `cjm_context_graph_projection.sitetheme`
+
+- `bound_system` _function_ — The design system the binding names, read from the sibling at its latest capture.
+- `mode_pair` _function_ — The light / dark pair: the profile's facts, else the system's scheme map (9a7224a7 (3)).
+- `profile_key` _function_
+- `project_theme` _function_ — Write the profile's theme from its bound design system (the module docstring's steps).
+- `site_binding` _function_ — The profile Entity, its ONE STYLED_BY Reference and its mode facts.
+- `system_fonts` _function_ — THE FONT SEAM (amendment 4b58c9db (2)): the files the captured tokens name, found beside
+- `theme_wanted` _function_
 
 ### `cjm_context_graph_projection.source_state`
 
@@ -752,7 +942,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `hardware_marks` _function_ — The verification marks per deliverable: STATED evidence under every profile, the
 - `learning_paths` _function_ — The collection pages whose listed members are ALL tutorials; a collection mixing
 - `plan_matrix_page` _function_ — Plan the Tutorials page: the listed population under the profile, the matrix over it,
-- `render_body` _function_ — The grid, the learning-paths slot, the tutorials by task, the off-grid list, and (staging)
+- `render_body` _function_ — The grid, the learning paths, the tutorials by task, the off-grid list, and (staging)
 
 ### `cjm_context_graph_projection.viz`
 
@@ -793,5 +983,5 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 
 ## Dependencies
 
-**Depends on:** `cjm-context-graph-layer`, `cjm-context-graph-primitives`, `cjm-design-system`, `cjm-dev-graph-schema`, `cjm-harness-transcripts`, `cjm-markdown-decompose-core`, `cjm-notebook-decompose-core`, `cjm-python-decompose-core`, `cjm-substrate`, `pyyaml`
-**Used by:** `cjm-graph-workbench-qt`, `cjm-notebook-decompose-core`, `cjm-session-scratchpad-qt`
+**Depends on:** `beautifulsoup4`, `cjm-context-graph-layer`, `cjm-context-graph-primitives`, `cjm-design-system`, `cjm-dev-graph-schema`, `cjm-harness-transcripts`, `cjm-markdown-decompose-core`, `cjm-notebook-decompose-core`, `cjm-python-decompose-core`, `cjm-substrate`, `pyyaml`
+**Used by:** `cjm-graph-workbench-qt`, `cjm-notebook-decompose-core`, `cjm-session-scratchpad-qt`, `cjm-substrate`
