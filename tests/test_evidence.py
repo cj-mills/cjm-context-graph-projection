@@ -14,10 +14,11 @@ from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 
 from cjm_context_graph_projection import factlayer as F
-from cjm_context_graph_projection.evidence import (cloudflare_measures, ingest_evidence, pull_cloudflare,
-                                                   pull_evidence, pull_search_console, read_snapshot,
-                                                   search_console_measures, snapshot_id, traffic_report,
-                                                   web_path_id, write_snapshot)
+from cjm_context_graph_projection.evidence import (cloudflare_measures, evidence_timer, ingest_evidence,
+                                                   pending_snapshots, pull_cloudflare, pull_evidence,
+                                                   pull_search_console, read_snapshot, search_console_measures,
+                                                   snapshot_id, traffic_report, web_path_id, write_snapshot,
+                                                   _run_systemd)
 from cjm_context_graph_projection.journal import replay_journal
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
 from cjm_context_graph_projection.write import assert_value
@@ -63,6 +64,24 @@ def test_a_day_is_read_at_its_finest_resolution_and_a_month_sums_its_days():
     assert m["complete"] is True                             # September covered, ended before the pull
     assert got["measures"][("/posts/a", "2026-10")]["measure"]["complete"] is False
     assert got["foreign"] == {"evil.test": 10}
+
+
+def test_a_complete_day_outranks_a_partial_reading_at_any_resolution():
+    # the pull day read mid-day at interval 1, then read complete a week later, downsampled to 10
+    early = _cf_snap("cloudflare/2026-10-08", ["2026-10-01", "2026-10-08"], [
+        _cf_row("2026-10-08", "/posts/a/", 50, 40, 1)], "2026-10-08T20:22:00+00:00")
+    late = _cf_snap("cloudflare/2026-10-15", ["2026-10-07", "2026-10-15"], [
+        _cf_row("2026-10-08", "/posts/a/", 70, 60, 10)], "2026-10-15T20:00:00+00:00")
+    got = cloudflare_measures([early, late], HOST)
+    assert got["day_source"]["2026-10-08"] == "cloudflare/2026-10-15"
+    assert got["measures"][("/posts/a", "2026-10")]["measure"]["pageloads"]["estimate"] == 70
+    # inside the settle hour a reading is still partial; among complete readings the finer wins
+    settling = _cf_snap("cloudflare/2026-10-09", ["2026-10-07", "2026-10-09"], [
+        _cf_row("2026-10-08", "/posts/a/", 60, 50, 1)], "2026-10-09T00:30:00+00:00")
+    complete = _cf_snap("cloudflare/2026-10-10", ["2026-10-08", "2026-10-10"], [
+        _cf_row("2026-10-08", "/posts/a/", 66, 55, 1.02)], "2026-10-10T08:00:00+00:00")
+    got = cloudflare_measures([early, settling, complete, late], HOST)
+    assert got["day_source"]["2026-10-08"] == "cloudflare/2026-10-10"
 
 
 def _sc_snap(key, window, rows, pulled_at):
@@ -120,9 +139,69 @@ def test_the_pulls_go_month_by_month_and_never_truncate(tmp_path):
     conf = {"root": str(tmp_path), "cloudflare": {"account": "a", "site_tag": "t"}}
     first = pull_evidence(conf, "cloudflare", today=dt.date(2026, 10, 8), ask=cf)
     assert first["window"] == ["2026-04-08", "2026-10-08"]                  # a first pull reaches the retention
-    assert "already exists" in pull_evidence(conf, "cloudflare", today=dt.date(2026, 10, 8), ask=cf)["error"]
+    n = len(asked)
+    assert pull_evidence(conf, "cloudflare", today=dt.date(2026, 10, 8), ask=cf)["skipped"] == "already pulled today"
+    assert len(asked) == n                                                   # skipped without asking the source
     again = pull_evidence(conf, "cloudflare", today=dt.date(2026, 10, 15), ask=cf)
     assert again["window"] == ["2026-10-07", "2026-10-15"]                   # from the last end, the overlap re-read
+
+
+def test_the_timer_pulls_files_only_and_ingest_reads_what_is_pending(tmp_path):
+    root = tmp_path / "evidence"
+    for key in ("cloudflare/2026-10-08", "cloudflare/2026-10-12", "search-console/2026-10-12"):
+        source, day = key.split("/")
+        write_snapshot(str(root), source, day, {"x.json": {"window": [day, day]}})
+    (root / "liveness" / "2026-10-08").mkdir(parents=True)                # not a traffic source: never pending
+    assert pending_snapshots(str(root), ["cloudflare/2026-10-08"]) == ["cloudflare/2026-10-12", "search-console/2026-10-12"]
+    exe = tmp_path / "bin" / "cjm-context-graph"
+    exe.parent.mkdir()
+    exe.write_text("")
+    calls = []
+
+    def run(argv):
+        calls.append(argv)
+        return 0, ("ActiveState=active\nResult=success" if argv[2:3] == ["show"] else "")
+    conf = {"root": str(root), "host": HOST, "schedule": "Mon,Thu *-*-* 09:30:00",
+            "cloudflare": {"account": "a"}, "search_console": {"property": "p"}}
+    units, db = tmp_path / "units", str(tmp_path / "notes 100%.db")
+    kw = {"db_path": db, "exe": str(exe), "unit_dir": str(units), "today": dt.date(2026, 10, 19)}
+    res = evidence_timer(conf, "install", run=run, **kw)
+    service = (units / "cjm-evidence-pull.service").read_text()
+    timer = (units / "cjm-evidence-pull.timer").read_text()
+    assert "pull-evidence cloudflare search-console\n" in service and "ingest" not in service   # files only
+    assert 'notes 100%%.db"' in service                                    # quoted, the specifier sign doubled
+    assert "OnCalendar=Mon,Thu *-*-* 09:30:00" in timer and "Persistent=true" in timer
+    assert calls[0][:2] == ["systemd-analyze", "calendar"]                  # the schedule checked before any write
+    assert ["systemctl", "--user", "enable", "--now", "cjm-evidence-pull.timer"] in calls
+    assert res["installed"] and res["stale"] == [] and res["units"]["cjm-evidence-pull.timer"]["ActiveState"] == "active"
+    assert res["latest"]["cloudflare"] == {"key": "cloudflare/2026-10-12", "through": "2026-10-12"}
+    assert any("pull now" in w for w in res["warnings"])                   # 7 days since the last covered day
+    moved = evidence_timer({**conf, "schedule": "Tue *-*-* 09:30:00"}, "status", run=run, **kw)
+    assert moved["stale"] == ["cjm-evidence-pull.timer"]                   # the config moved on: reinstall
+    bad = evidence_timer({**conf, "schedule": "fortnightly"}, "install",
+                         run=lambda argv: (1, "bad") if argv[1] == "calendar" else (0, ""), **kw)
+    assert "not a systemd calendar expression" in bad["error"] and timer == (units / "cjm-evidence-pull.timer").read_text()
+    gone = evidence_timer(conf, "remove", run=run, **kw)
+    assert not gone["installed"] and not list(units.iterdir())
+    import sys
+    assert _run_systemd([sys.executable, "-c", "print('ok')"]) == (0, "ok")   # the default runner itself
+    assert _run_systemd(["no-such-systemd-tool"])[0] == 127                 # no systemd: reported, never raised
+
+
+def test_pull_evidence_never_opens_the_graph(tmp_path, monkeypatch, capsys):
+    import sys
+    from cjm_context_graph_projection import cli, evidence
+    (tmp_path / "graph.config.json").write_text(json.dumps({"evidence": {"root": str(tmp_path / "ev"), "host": HOST}}))
+
+    def no_graph(*a, **k):
+        raise AssertionError("pull-evidence opened the graph")
+    monkeypatch.setattr(cli, "open_graph", no_graph)
+    monkeypatch.setattr(evidence, "pull_evidence",
+                        lambda conf, source, **k: {"key": f"{source}/2026-10-12", "skipped": "already pulled today"})
+    monkeypatch.setattr(sys, "argv", ["cjm-context-graph", "--graph-db-path", str(tmp_path / "g.db"),
+                                      "pull-evidence", "cloudflare", "search-console"])
+    assert cli.main() == 0
+    assert capsys.readouterr().out.count("**skipped**") == 2
 
 
 def _write_cf(root, pulled, window, rows):

@@ -8,6 +8,10 @@ files only. `ingest-evidence <source>/<date>` verifies the hashes, registers the
 `evidence_snapshot` Entity and lands what changed: the journaled op carries the computed run, so
 replay never reads a file and never asks a source.
 
+A TIMER PULLS, A SESSION INGESTS (ruling 56c17a80, cadence 6e283d4b). `evidence-timer install`
+generates systemd user units that run `pull-evidence` on evidence.schedule, files only; `ingest-evidence`
+with no snapshot named ingests every snapshot on disk the graph does not hold yet.
+
 THE URL IS A NODE. A `web_path` Entity is keyed by the site-link resolver's equivalence key
 (`site_path_key`), the host checked here since the resolver ignores it; a URL no page holds still
 gets its node. Traffic is a SET fact on it, one value per (source, calendar month), and the
@@ -30,6 +34,8 @@ import hashlib
 import json
 import math
 import os
+import subprocess
+import sys
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -67,6 +73,9 @@ CF_QUERY = ("query($a:String!,$s:Date!,$e:Date!,$t:String!,$n:Int!){viewer{accou
 GSC_SHAPES = {"page-date": ["page", "date"], "page-query-date": ["page", "query", "date"]}
 GSC_RETENTION_DAYS = 486    # Search Console keeps about 16 months
 CF_RETENTION_DAYS = 183     # Cloudflare Web Analytics keeps 26 weeks 2 days
+CF_SETTLE = dt.timedelta(hours=1)   # a day's late events: a reading earlier than this after the day ends is partial
+CF_FULL_DAYS = 6            # Cloudflare serves a day at interval 1 for just under 7 days (6e283d4b)
+TIMER_UNIT = "cjm-evidence-pull"   # the systemd user units' name (ruling 56c17a80, cadence 6e283d4b)
 
 
 # ---------------------------------------------------------------- config
@@ -282,7 +291,9 @@ def pull_evidence(
 ) -> Dict[str, Any]:  # {key, files, window} or {error}
     """Pull one source into a new snapshot. By default it starts where the snapshots on disk end,
     re-reading a few days (Cloudflare holds a fresh day at full resolution for about a week;
-    Search Console revises recent days), and a first pull reaches back the source's retention."""
+    Search Console revises recent days), and a first pull reaches back the source's retention.
+    A source already pulled today is skipped without asking it (a snapshot is never overwritten,
+    and the timer's retry after a failed sibling source must not fail on the one that landed)."""
     today = today or dt.date.today()
     overlap = {"cloudflare": 1, "search-console": 4}.get(source)
     if overlap is None:
@@ -290,6 +301,8 @@ def pull_evidence(
     sub = conf.get({"cloudflare": "cloudflare", "search-console": "search_console"}[source]) or {}
     if not sub:
         return {"error": f"evidence.{'search_console' if source == 'search-console' else source} is not configured"}
+    if (Path(conf["root"]) / source / today.isoformat()).exists():
+        return {"key": f"{source}/{today.isoformat()}", "skipped": "already pulled today"}
     end = dt.date.fromisoformat(last) if last else today
     if first:
         start = dt.date.fromisoformat(first)
@@ -310,6 +323,115 @@ def pull_evidence(
             "files": manifest["files"]}
 
 
+def timer_units(
+    conf: Dict[str, Any],   # The evidence config block (its schedule and the sources configured)
+    db_path: str,           # The graph db whose sibling config the pull reads
+    exe: str,               # The cjm-context-graph console script the service runs
+) -> Dict[str, str]:  # {unit file name: text}
+    """The pull-only timer as systemd user units (ruling 56c17a80; cadence 6e283d4b): the service
+    runs pull-evidence for every configured source and nothing else -- files under the evidence
+    root, never the graph; a failed pull retries every half hour, at most a dozen times a day; the
+    timer is persistent, so a run missed while the machine was off runs at the next boot."""
+    def q(s: str) -> str:   # systemd's argument quoting: the specifier and variable signs doubled
+        return '"' + s.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%").replace("$", "$$") + '"'
+    sources = [s for s in P.TRAFFIC_SOURCES if conf.get("search_console" if s == "search-console" else s)]
+    head = f"Pull the traffic evidence for {db_path} (files only; design 7f315830)".replace("%", "%%")
+    service = ("[Unit]\n"
+               f"Description={head}\n"
+               "StartLimitIntervalSec=1d\nStartLimitBurst=12\n\n"
+               "[Service]\nType=oneshot\n"
+               f"ExecStart={q(exe)} --graph-db-path {q(db_path)} pull-evidence {' '.join(sources)}\n"
+               "Restart=on-failure\nRestartSec=30min\n")
+    timer = ("[Unit]\n"
+             f"Description={head}, on {conf['schedule']}\n\n"
+             f"[Timer]\nOnCalendar={conf['schedule']}\nPersistent=true\n\n"
+             "[Install]\nWantedBy=timers.target\n")
+    return {f"{TIMER_UNIT}.service": service, f"{TIMER_UNIT}.timer": timer}
+
+
+def _run_systemd(argv: List[str]) -> Tuple[int, str]:  # (exit code, stdout + stderr) of one systemd tool call
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True)
+    except FileNotFoundError:
+        return 127, f"{argv[0]} is not on this machine (the timer needs a systemd user session)"
+    return p.returncode, (p.stdout + p.stderr).strip()
+
+
+def evidence_timer(
+    conf: Dict[str, Any],     # The evidence config block
+    action: str,              # 'install' | 'status' | 'remove'
+    *,
+    db_path: str,             # The graph db the service passes (its sibling config is the pull's)
+    exe: Optional[str] = None,       # Default: the console script beside this interpreter
+    unit_dir: Optional[str] = None,  # Default: ~/.config/systemd/user
+    run: Optional[Callable[[List[str]], Tuple[int, str]]] = None,   # argv -> (rc, output); default subprocess
+    today: Optional[dt.date] = None,
+) -> Dict[str, Any]:  # {action, unit_dir, units, installed, stale, latest, warnings} or {error}
+    """Install, report or remove the pull-only timer. The units are GENERATED here from the config
+    and this environment's console script, never committed (aa00d43c: nothing from this machine's
+    paths in a repo); install checks the schedule and the units with systemd-analyze before
+    enabling. Status reads systemd's view of both units, flags an installed unit that differs from
+    what the config now generates, and names each source's latest snapshot on disk with a warning
+    once Cloudflare's oldest full-resolution day is about to age out."""
+    run = run or _run_systemd
+    udir = Path(os.path.expanduser(unit_dir or "~/.config/systemd/user"))
+    exe = exe or str(Path(sys.executable).parent / "cjm-context-graph")
+    db = str(Path(db_path).resolve())
+    timer = f"{TIMER_UNIT}.timer"
+    if action not in ("install", "status", "remove"):
+        return {"error": f"evidence-timer takes install, status or remove (got {action!r})"}
+    if action == "install":
+        if not conf.get("schedule"):
+            return {"error": "evidence.schedule is missing (a systemd OnCalendar expression, e.g. 'Mon,Thu *-*-* 09:30')"}
+        if not Path(exe).exists():
+            return {"error": f"the console script the service would run is not at {exe}"}
+        if not (conf.get("cloudflare") or conf.get("search_console")):
+            return {"error": "no evidence source is configured (evidence.cloudflare / evidence.search_console)"}
+        units = timer_units(conf, db, exe)
+        rc, out = run(["systemd-analyze", "calendar", conf["schedule"]])
+        if rc:
+            return {"error": f"evidence.schedule {conf['schedule']!r} is not a systemd calendar expression: {out}"}
+        udir.mkdir(parents=True, exist_ok=True)
+        for name, text in units.items():
+            (udir / name).write_text(text)
+        for argv in (["systemd-analyze", "--user", "verify", *[str(udir / n) for n in units]],
+                     ["systemctl", "--user", "daemon-reload"], ["systemctl", "--user", "enable", "--now", timer]):
+            rc, out = run(argv)
+            if rc:
+                return {"error": f"{' '.join(argv[:3])}: {out}"[:600]}
+    elif action == "remove":
+        rc, out = run(["systemctl", "--user", "disable", "--now", timer])
+        for name in (f"{TIMER_UNIT}.service", timer):
+            (udir / name).unlink(missing_ok=True)
+        run(["systemctl", "--user", "daemon-reload"])
+        if rc and "not loaded" not in out and "does not exist" not in out:
+            return {"error": f"systemctl --user disable: {out}"[:600]}
+    units_now: Dict[str, Dict[str, str]] = {}
+    for name, props in ((timer, "ActiveState,UnitFileState,NextElapseUSecRealtime,LastTriggerUSec"),
+                        (f"{TIMER_UNIT}.service", "ActiveState,Result,ExecMainStatus,ExecMainExitTimestamp")):
+        rc, out = run(["systemctl", "--user", "show", name, "-p", props])
+        units_now[name] = dict(line.split("=", 1) for line in out.splitlines() if "=" in line) if not rc else {}
+    installed = all((udir / n).exists() for n in (f"{TIMER_UNIT}.service", timer))
+    stale = []
+    if installed and conf.get("schedule") and Path(exe).exists():
+        stale = [n for n, text in timer_units(conf, db, exe).items() if (udir / n).read_text() != text]
+    today = today or dt.date.today()
+    latest: Dict[str, Dict[str, Any]] = {}
+    warnings = []
+    for source in P.TRAFFIC_SOURCES:
+        snaps = sorted(p.parent.name for p in (Path(conf["root"]) / source).glob(f"*/{MANIFEST}"))
+        through = _covered_until(conf["root"], source)
+        if snaps:
+            latest[source] = {"key": f"{source}/{snaps[-1]}", "through": through.isoformat() if through else None}
+        if source == "cloudflare" and through and (today - through).days >= CF_FULL_DAYS:
+            warnings.append(f"cloudflare is covered through {through}: the next day leaves Cloudflare's full "
+                            f"resolution within about a day -- pull now (pull-evidence cloudflare)")
+    if action != "remove" and not installed:
+        warnings.append("the timer is not installed (evidence-timer install)")
+    return {"action": action, "unit_dir": str(udir), "exe": exe, "db": db, "schedule": conf.get("schedule"),
+            "units": units_now, "installed": installed, "stale": stale, "latest": latest, "warnings": warnings}
+
+
 # ---------------------------------------------------------------- the month measures
 
 def _days(window: List[str]) -> Set[str]:
@@ -323,6 +445,17 @@ def _complete(month: str, covered: Set[str], latest_pull: str) -> bool:
     return days <= covered and max(days) < latest_pull[:10]
 
 
+def _day_complete(
+    day: str,         # A Cloudflare date dimension ('YYYY-MM-DD', UTC)
+    pulled_at: str,   # When the reading was taken (ISO, with its offset)
+) -> bool:  # True when the reading was taken after the day ended and settled
+    """A day read before it ended is partial: once the complete day is read, that reading wins
+    even at a coarser interval (6e283d4b)."""
+    end = dt.datetime.fromisoformat(day).replace(tzinfo=dt.timezone.utc) + dt.timedelta(days=1) + CF_SETTLE
+    at = dt.datetime.fromisoformat(pulled_at)
+    return (at if at.tzinfo else at.replace(tzinfo=dt.timezone.utc)) >= end
+
+
 def _interval(est: float, var: float, sample: float) -> Dict[str, Any]:
     half = Z95 * math.sqrt(max(var, 0.0))
     return {"estimate": round(est), "lower": round(max(0.0, est - half), 1), "upper": round(est + half, 1),
@@ -333,13 +466,16 @@ def cloudflare_measures(
     snapshots: List[Dict[str, Any]],   # Every cloudflare snapshot (read_snapshot results)
     host: str,                          # The site's host; other hosts are reported, never counted
 ) -> Dict[str, Any]:  # {measures: {(key, month): {measure, snapshots}}, foreign, unkeyed, day_source}
-    """Each day from the snapshot holding it at the finest resolution (ties: the latest pull); bot
-    rows excluded; a month's page loads and visits summed over its days with a Poisson interval."""
-    best: Dict[str, Tuple[float, str, str]] = {}      # day -> (mean interval, pulled_at, snapshot key)
+    """Each day from the snapshot holding its best reading: a COMPLETE reading (taken after the UTC
+    day ended) over a partial one whatever their resolutions (6e283d4b: the pull day itself is
+    partial), then the finest resolution, then the latest pull; bot rows excluded; a month's page
+    loads and visits summed over its days with a binomial interval."""
+    best: Dict[str, Tuple[bool, float, str, str]] = {}   # day -> (complete, -mean interval, pulled_at, snapshot key)
     rows_by: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
     covered: Set[str] = set()
     for snap in snapshots:
         per_day: Dict[str, List[float]] = {}
+        read_at: Dict[str, str] = {}
         for env in snap["envelopes"].values():
             if env.get("shape") != "daily-path":
                 continue
@@ -348,15 +484,16 @@ def cloudflare_measures(
                 day = r["dimensions"]["date"]
                 rows_by.setdefault((snap["key"], day), []).append(r)
                 per_day.setdefault(day, []).append(float(r["avg"]["sampleInterval"]))
+                read_at[day] = str(env.get("pulled_at") or snap["pulled_at"])
         for day, ivs in per_day.items():
-            cand = (sum(ivs) / len(ivs), snap["pulled_at"], snap["key"])
+            cand = (_day_complete(day, read_at[day]), -(sum(ivs) / len(ivs)), snap["pulled_at"], snap["key"])
             cur = best.get(day)
-            if cur is None or cand[0] < cur[0] or (cand[0] == cur[0] and cand[1] > cur[1]):
+            if cur is None or cand[:3] > cur[:3]:
                 best[day] = cand
     acc: Dict[Tuple[str, str], Dict[str, Any]] = {}
     foreign: Dict[str, int] = {}
     unkeyed: Set[str] = set()
-    for day, (_, _, key) in sorted(best.items()):
+    for day, (_, _, _, key) in sorted(best.items()):
         for r in rows_by[(key, day)]:
             d = r["dimensions"]
             if d.get("bot"):
@@ -382,7 +519,7 @@ def cloudflare_measures(
             "days": len(a["days"]), "pageloads": _interval(a["pl"], a["plv"], a["pln"]),
             "visits": _interval(a["v"], a["vv"], a["vn"])}}
     return {"measures": measures, "foreign": foreign, "unkeyed": sorted(unkeyed),
-            "day_source": {d: v[2] for d, v in best.items()}}
+            "day_source": {d: v[3] for d, v in best.items()}}
 
 
 def search_console_measures(
@@ -555,6 +692,24 @@ async def ingested_snapshots(gx: GraphHandle) -> List[str]:   # The snapshot key
     rows = await F.load_label_where(gx, DevNodeKinds.ENTITY,
                                     [PropertyPredicate("entity_kind", "eq", P.ENTITY_EVIDENCE_SNAPSHOT)])
     return sorted(str(F.prop(n, "key")) for n in rows)
+
+
+def pending_snapshots(
+    root: str,                # The evidence root
+    ingested: Iterable[str],  # The snapshot keys already on the graph
+) -> List[str]:  # '<source>/<pull date>' keys on disk and not on the graph, each source in pull order
+    """What the next ingest reads (ruling 56c17a80: the timer pulls, a session ingests every
+    snapshot written since the last one): each snapshot directory with a manifest under a traffic
+    source that no evidence_snapshot node holds."""
+    have = set(ingested)
+    out = []
+    for source in P.TRAFFIC_SOURCES:
+        d = Path(root) / source
+        for m in sorted(d.glob(f"*/{MANIFEST}")) if d.exists() else []:
+            key = f"{source}/{m.parent.name}"
+            if key not in have:
+                out.append(key)
+    return out
 
 
 async def ingest_evidence(

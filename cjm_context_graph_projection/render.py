@@ -462,7 +462,7 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         return "\n".join(lines)
     if kind == "harvest-discussions":
         return _render_harvest(obj)
-    if kind in ("pull-evidence", "ingest-evidence", "traffic"):
+    if kind in ("pull-evidence", "ingest-evidence", "traffic", "evidence-timer"):
         return _render_evidence(kind, obj)
     if kind == "judge-facets":
         return _render_facets(obj)
@@ -1579,9 +1579,40 @@ def _render_evidence(kind: str, obj: Dict[str, Any]) -> str:
     if obj.get("error"):
         return f"⚠ {obj['error']}"
     if kind == "pull-evidence":
-        rows = sum(int(f.get("rows") or 0) for f in obj.get("files") or [])
-        return (f"**pulled** `{obj['key']}` · {obj['window'][0]} → {obj['window'][1]} · {len(obj['files'])} file(s), "
-                f"{rows} row(s) · next: `ingest-evidence {obj['key']}`")
+        lines = []
+        for p in obj.get("pulls") or []:
+            if p.get("error"):
+                lines.append(f"⚠ {p['error']}")
+            elif p.get("skipped"):
+                lines.append(f"**skipped** `{p['key']}` · {p['skipped']}")
+            else:
+                rows = sum(int(f.get("rows") or 0) for f in p.get("files") or [])
+                lines.append(f"**pulled** `{p['key']}` · {p['window'][0]} → {p['window'][1]} · "
+                             f"{len(p['files'])} file(s), {rows} row(s)")
+        if any(not p.get("error") for p in obj.get("pulls") or []):
+            lines.append("next, in a session: `ingest-evidence` (every snapshot the graph does not hold)")
+        return "\n".join(lines)
+    if kind == "evidence-timer":
+        t = (obj.get("units") or {}).get("cjm-evidence-pull.timer") or {}
+        s = (obj.get("units") or {}).get("cjm-evidence-pull.service") or {}
+        lines = [f"**evidence timer** ({obj['action']}) · {'installed' if obj.get('installed') else 'not installed'}"
+                 f" in `{obj['unit_dir']}` · schedule `{obj.get('schedule') or '–'}`"]
+        if obj.get("installed"):
+            lines.append(f"  timer {t.get('ActiveState', '?')} / {t.get('UnitFileState', '?')} · next "
+                         f"{t.get('NextElapseUSecRealtime') or '–'} · last {t.get('LastTriggerUSec') or '–'}")
+            lines.append(f"  last pull: {s.get('Result', '?')} (exit {s.get('ExecMainStatus', '?')}) at "
+                         f"{s['ExecMainExitTimestamp']} · `journalctl --user -u cjm-evidence-pull`"
+                         if s.get("ExecMainExitTimestamp") else "  last pull: none since the units loaded")
+            lines.append(f"  runs `{obj['exe']}` against `{obj['db']}`")
+        if obj.get("stale"):
+            lines.append(f"  ⚠ installed unit(s) differ from what the config generates: {', '.join(obj['stale'])}"
+                         " -- `evidence-timer install` again")
+        for source, l in sorted((obj.get("latest") or {}).items()):
+            lines.append(f"  {source}: latest snapshot `{l['key']}`, covered through {l.get('through') or '–'}")
+        lines += [f"  ⚠ {w}" for w in obj.get("warnings") or []]
+        return "\n".join(lines)
+    if kind == "ingest-evidence" and "pending" in obj:
+        return "**nothing to ingest** · every evidence snapshot on disk is on the graph"
     if kind == "ingest-evidence":
         head = (f"**{'ingested' if obj.get('written') else 'would ingest'}** `{obj['snapshot']}` · "
                 f"{obj['computed']} (path, month) measure(s) computed · {obj['changes']} to land "

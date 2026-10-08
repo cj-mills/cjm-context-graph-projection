@@ -392,6 +392,22 @@ async def _dispatch(args) -> int:
                                  manifests_dir=args.manifests_dir)
         print(render_rebuild_diff(res, args.format))
         return 0 if res["clean"] else 3
+    if args.command in ("pull-evidence", "evidence-timer"):
+        # Files only (ruling 56c17a80): a pull asks the sources and writes snapshots, the timer
+        # verb writes systemd units -- neither opens the graph, so an unattended run never holds
+        # the db a session may be writing.
+        from .evidence import evidence_config, evidence_timer, pull_evidence
+        ev = evidence_config(load_graph_config(args.graph_db_path))
+        if ev["errors"]:
+            print("error: " + "; ".join(ev["errors"]) + " (the graph-sibling graph.config.json)", file=sys.stderr)
+            return 1
+        if args.command == "evidence-timer":
+            res = evidence_timer(ev["config"], args.action, db_path=args.graph_db_path)
+            print(render("evidence-timer", res, args.format))
+            return 1 if res.get("error") else 0
+        pulls = [pull_evidence(ev["config"], s, first=args.first, last=args.last) for s in args.source]
+        print(render("pull-evidence", {"pulls": pulls}, args.format))
+        return 1 if any(p.get("error") for p in pulls) else 0
     # One live write window per invocation (design amendment 9ee4e346): the site-link step
     # runs once at its close, inside the op clock, when the invocation moved an input.
     async with open_graph(args.graph_db_path, args.manifests_dir) as gx, \
@@ -1234,23 +1250,28 @@ async def _dispatch(args) -> int:
             if args.journal_path and res.get("written"):
                 append_write(args.journal_path, "harvest-discussions", {"run": res["run"], "actor": args.actor})
             return 1 if res.get("error") else 0
-        elif args.command in ("pull-evidence", "ingest-evidence"):
-            # The evidence (design 7f315830): a pull asks the source and writes files only; an
-            # ingest reads them and its op carries the computed run, so replay reads no file.
-            from .evidence import evidence_config, ingest_evidence, pull_evidence
+        elif args.command == "ingest-evidence":
+            # The evidence (design 7f315830): an ingest reads the pulled files and its op carries
+            # the computed run, so replay reads no file. No snapshot named = every snapshot on disk
+            # the graph does not hold yet, each source in pull order, one op each (56c17a80).
+            from .evidence import evidence_config, ingest_evidence, ingested_snapshots, pending_snapshots
             ev = evidence_config(load_graph_config(args.graph_db_path))
             if ev["errors"]:
                 print("error: " + "; ".join(ev["errors"]) + " (the graph-sibling graph.config.json)", file=sys.stderr)
                 return 1
-            if args.command == "pull-evidence":
-                res = pull_evidence(ev["config"], args.source, first=args.first, last=args.last)
-                print(render("pull-evidence", res, args.format))
-                return 1 if res.get("error") else 0
-            res = await ingest_evidence(gx, ev["config"], args.snapshot, dry_run=args.dry_run, actor=args.actor)
-            print(render("ingest-evidence", res, args.format))
-            if args.journal_path and res.get("written"):
-                append_write(args.journal_path, "ingest-evidence", {"run": res["run"], "actor": args.actor})
-            return 1 if res.get("error") else 0
+            keys = ([args.snapshot] if args.snapshot
+                    else pending_snapshots(ev["config"]["root"], await ingested_snapshots(gx)))
+            if not keys:
+                print(render("ingest-evidence", {"pending": []}, args.format))
+                return 0
+            for key in keys:
+                res = await ingest_evidence(gx, ev["config"], key, dry_run=args.dry_run, actor=args.actor)
+                print(render("ingest-evidence", res, args.format))
+                if args.journal_path and res.get("written"):
+                    append_write(args.journal_path, "ingest-evidence", {"run": res["run"], "actor": args.actor})
+                if res.get("error"):
+                    return 1
+            return 0
         elif args.command == "traffic":
             from .evidence import traffic_report
             res = await traffic_report(gx, since=args.since, until=args.until, holder=args.holder)
@@ -3614,18 +3635,28 @@ def main() -> int:
                            "sibling config's website_root)")
     p_hd.add_argument("--actor", default=_DEFAULT_ACTOR)
     p_pe = sub.add_parser("pull-evidence",
-                          help="Pull one evidence source's raw API responses into a new snapshot under the "
-                               "evidence root (design 7f315830; files only, never the graph): by default from "
-                               "where the snapshots on disk end, re-reading the overlap")
-    p_pe.add_argument("source", choices=["cloudflare", "search-console"])
+                          help="Pull evidence sources' raw API responses into new snapshots under the evidence "
+                               "root (design 7f315830; files only, never the graph -- it does not open the db): "
+                               "by default from where the snapshots on disk end, re-reading the overlap; a "
+                               "source already pulled today is skipped")
+    p_pe.add_argument("source", nargs="+", choices=["cloudflare", "search-console"])
     p_pe.add_argument("--first", default=None, help="First day pulled (YYYY-MM-DD)")
     p_pe.add_argument("--last", default=None, help="Last day pulled (YYYY-MM-DD; default today)")
+    p_et = sub.add_parser("evidence-timer",
+                          help="Install, report or remove the pull-only systemd user timer (ruling 56c17a80, "
+                               "cadence 6e283d4b): units generated from evidence.schedule and this env's console "
+                               "script; it pulls files only and never ingests")
+    p_et.add_argument("action", choices=["install", "status", "remove"])
     p_ie = sub.add_parser("ingest-evidence",
-                          help="Ingest one evidence snapshot (journaled; design 7f315830): hash-checked, its "
+                          help="Ingest evidence snapshots (journaled; design 7f315830): hash-checked, the "
                                "source's months recomputed over every snapshot, the changed traffic facts landed "
                                "on web_path nodes with EVIDENCED_BY edges to the snapshots")
-    p_ie.add_argument("snapshot", help="'<source>/<pull date>' under the evidence root")
-    p_ie.add_argument("--dry-run", action="store_true", help="Report what would land; write nothing")
+    p_ie.add_argument("snapshot", nargs="?", default=None,
+                      help="'<source>/<pull date>' under the evidence root (default: every snapshot on disk the "
+                           "graph does not hold, each source in pull order)")
+    p_ie.add_argument("--dry-run", action="store_true",
+                      help="Report what would land; write nothing (each pending snapshot planned against the "
+                           "graph as it stands, without the ones before it)")
     p_ie.add_argument("--actor", default=_DEFAULT_ACTOR)
     p_tr = sub.add_parser("traffic",
                           help="Each page's traffic DERIVED across every path it holds or held (design 7f315830), "
