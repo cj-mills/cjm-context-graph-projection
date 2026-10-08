@@ -93,6 +93,8 @@ M3_BASELINE_ACTOR = "import:m3-baseline"
 # GitHub. `derived-from` = an archive deliverable's one provenance edge to its work or unit
 # (design leg 4a4ef27e (2)), or its retraction. `work-member` = a metabolized Source /
 # Collection Reference's place in its work (PART_OF its unit or work), or its retraction.
+# `relate` = one path-model relation (design ae698640 (5): PRODUCES / REQUIRES / TEACHES / ASSUMES /
+# COVERS / EXPLAINS) between resolved node ids with its strength and note, or its retraction.
 JOURNAL_VERBS = ("decide", "alias", "assert", "link", "unlink", "section", "new-note",
                  "add-section", "display-rule", "set-lens", "check", "session",
                  "retract-session", "pull-transcript", "mint-messages", "edit-message",
@@ -102,7 +104,7 @@ JOURNAL_VERBS = ("decide", "alias", "assert", "link", "unlink", "section", "new-
                  "series", "series-members", "place-in-series", "entity", "verified-on",
                  "supports", "retire-source", "transfer-path", "judge-related", "judge-facets", "review-facets",
                  "harvest-discussions",
-                 "derived-from", "work-member")
+                 "derived-from", "work-member", "relate")
 
 
 def m3_baseline_import(
@@ -434,6 +436,13 @@ async def _apply_op(
         await record_support(gx, a["deliverable"], a["claim"], kind=a.get("kind", ""),
                              note=a.get("note", ""), retract=bool(a.get("retract")),
                              actor=a.get("actor", "agent:session"))
+    elif verb == "relate":
+        # One path-model relation (design ae698640 (5)): the op names the resolved node ids, so
+        # replay re-lands the same edge; a retraction replays as the compensating delete.
+        from .paths import record_relation
+        await record_relation(gx, a["relation"], a["source"], a["target"], strength=a.get("strength", ""),
+                              note=a.get("note", ""), retract=bool(a.get("retract")),
+                              actor=a.get("actor", "agent:session"))
     elif verb == "judge-related":
         # One judge run (design e09e262b): the judgments are observations the op carries whole,
         # so replay never calls the judge; the journaled content hashes bind the records the same.
@@ -705,6 +714,8 @@ def touched_node_ids(
             out.append(a["deliverable"])
         if a.get("claim"):
             out.append(entity_node_id("claim", a["claim"]))
+    elif verb == "relate":
+        out.extend(r for r in (a.get("source"), a.get("target")) if r)
     elif verb in ("judge-related", "judge-facets"):
         out.extend(sorted((a.get("run") or {}).get("posts") or {}))
     elif verb == "review-facets":

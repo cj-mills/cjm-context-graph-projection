@@ -13,8 +13,9 @@ description, the kind, the section outline, the code signals (block languages, p
 C# / C++ usings and includes, install commands) and the opening prose. No hand tags: the facets
 replace them.
 
-Storage and staleness are PER (POST, ENTRY): a JUDGED_FACET edge for each judgment at or above
-STORE_FLOOR (the near-miss band stays visible), carrying p, the model, the entry's criteria hash
+Storage and staleness are PER (POST, ENTRY): a JUDGED edge (the family of design ae698640 (5),
+`proposes` = the entry's facet predicate) for each judgment at or above STORE_FLOOR (the
+near-miss band stays visible), carrying p, the model, the entry's criteria hash
 and the post's state hash; and each judged post's `facets_judged` record naming the state and
 every judged entry's criteria hash -- the pairs below the floor included, since they leave no
 edge. A pair is STALE when the post's state or the entry's criteria (with its kind's
@@ -33,7 +34,7 @@ from cjm_context_graph_layer.ops import extend_graph, graph_task
 from cjm_context_graph_primitives.query import EdgeQuery
 from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.identity import entity_node_id
-from cjm_dev_graph_schema.nodes import judged_facet_edge
+from cjm_dev_graph_schema.nodes import judged_edge
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 
 from . import factlayer as F, judgeengine as E
@@ -292,12 +293,14 @@ async def load_facet_judgments(
 ) -> Dict[Tuple[str, str], Dict[str, Any]]:  # {(post, Entity id): the edge's judgment + _id}
     """Every stored facet judgment."""
     res = await graph_task(gx.queue, gx.graph_id, "query_edges",
-                           query=EdgeQuery(relation_type=DevRelations.JUDGED_FACET).to_dict())
+                           query=EdgeQuery(relation_type=DevRelations.JUDGED).to_dict())
     raw = getattr(res, "edges", None) or getattr(res, "rows", None) or []
     out = {}
     for e in raw:
         e = e.to_dict() if hasattr(e, "to_dict") else dict(e)
-        out[(str(e["source_id"]), str(e["target_id"]))] = {**(e.get("properties") or {}), "_id": str(e["id"])}
+        props = e.get("properties") or {}
+        if props.get("proposes") in P.FACET_PREDICATES:   # the family's facet judgments (ae698640 (5))
+            out[(str(e["source_id"]), str(e["target_id"]))] = {**props, "_id": str(e["id"])}
     return out
 
 
@@ -333,8 +336,9 @@ async def apply_facet_run(
         await graph_task(gx.queue, gx.graph_id, "delete_edges", edge_ids=sorted(set(drop)))
     edges = []
     for j in run["judgments"]:
-        edge = judged_facet_edge(j["post"], ids[j["entry"]], p=j["p"], model=j["model"],
-                                 criteria=run["criteria"][j["entry"]], state=run["posts"][j["post"]])
+        edge = judged_edge(j["post"], ids[j["entry"]], proposes=FACET_OF_KIND[j["entry"].split(":", 1)[0]],
+                           p=j["p"], model=j["model"], criteria=run["criteria"][j["entry"]],
+                           state=run["posts"][j["post"]])
         mark = (standing.get((j["post"], ids[j["entry"]])) or {}).get("reviewed")
         if mark and mark == review_basis(run["posts"][j["post"]], run["criteria"][j["entry"]]):
             edge["properties"]["reviewed"] = mark

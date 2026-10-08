@@ -927,6 +927,23 @@ async def _dispatch(args) -> int:
             for f in ("form", "author", "subtitle", "published", "isbn", "locator", "part"):   # the Library (4a4ef27e)
                 if getattr(args, f):
                     fields[f] = getattr(args, f)
+            # The path model (design ae698640): an artifact's record, an environment's, a concept's
+            for f in ("artifact_kind", "task", "base_model", "precision", "format", "target", "license", "subject"):
+                if getattr(args, f):
+                    fields[f] = getattr(args, f)
+            for f, flag in (("derived_from", "derived_from"), ("parts", "env_part"), ("requires", "requires"),
+                            ("variants", "variant")):
+                if getattr(args, flag):
+                    fields[f] = list(getattr(args, flag))
+            if args.transitions:
+                try:
+                    fields["transitions"] = json.loads(args.transitions)
+                except ValueError as exc:
+                    print(f"error: --transitions is a JSON list ({exc})", file=sys.stderr)
+                    return 1
+                if not isinstance(fields["transitions"], list):
+                    print("error: --transitions is a JSON list of {in, optional, out}", file=sys.stderr)
+                    return 1
             for flag in ("cross_task", "off_grid", "retired"):
                 if getattr(args, flag):
                     fields[flag] = True
@@ -1130,6 +1147,26 @@ async def _dispatch(args) -> int:
                 if args.retract:
                     op["retract"] = True
                 append_write(args.journal_path, "supports", op)
+            return 1 if res.get("error") else 0
+        elif args.command == "relate":
+            # One path-model relation (design ae698640 (5)): the op carries the resolved node ids, so
+            # replay never depends on slug or key resolution; --retract compensates.
+            from .paths import record_relation
+            res = await record_relation(gx, args.relation, args.source, args.target, strength=args.strength,
+                                        note=args.note, retract=args.retract, actor=args.actor)
+            print(render("relate", res, args.format))
+            if args.journal_path and res.get("written"):
+                op = {"relation": args.relation, "source": res["source_id"], "target": res["target_id"],
+                      "strength": args.strength, "note": args.note, "actor": args.actor}
+                if args.retract:
+                    op["retract"] = True
+                append_write(args.journal_path, "relate", op)
+            return 1 if res.get("error") else 0
+        elif args.command == "paths":
+            # The path model's derived reads (design ae698640 (6), ad9bef5a (2)): nothing stored
+            from .paths import path_reads
+            res = await path_reads(gx, args.read, node=args.node)
+            print(render("paths", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "judge-related":
             # Judged related posts (design e09e262b): the judge is asked here and only here; the op
@@ -3344,10 +3381,11 @@ def main() -> int:
 
     p_ent = sub.add_parser("entity",
                            help="Mint/update a typed Entity (task | stage | hardware | claim | work | unit | "
-                                "output_class | tool | subject | model) from its WHOLE record (journaled upsert by "
+                                "output_class | tool | subject | model | artifact_kind | artifact | environment | "
+                                "concept) from its WHOLE record (journaled upsert by "
                                 "kind + key; a field or flag left off clears; designs 8cbdc883 / 4a4ef27e / 3c5cff97)")
     p_ent.add_argument("kind", help="The Entity sub-kind (task | stage | hardware | claim | work | unit | output_class "
-                                    "| tool | subject | model)")
+                                    "| tool | subject | model | artifact_kind | artifact | environment | concept)")
     p_ent.add_argument("key", help="The durable key the teaches_* facts name (never renamed; --name is the display)")
     p_ent.add_argument("--name", required=True, help="The display name")
     p_ent.add_argument("--description", default="", help="One line on what the entry covers")
@@ -3375,8 +3413,30 @@ def main() -> int:
                        help="work: when the edition read was published or the talk given (ISO: YYYY, YYYY-MM or YYYY-MM-DD)")
     p_ent.add_argument("--isbn", default="", help="work / unit (a volume): the ISBN-13 of the edition read, digits only")
     p_ent.add_argument("--locator", default="",
-                       help="work: a hand locator (URL) for a work no Source can observe")
+                       help="work: a hand locator (URL) for a work no Source can observe; artifact: where it is "
+                            "observed (a Hub page, a download URL)")
     p_ent.add_argument("--part", default="", help="unit: the part of the work it sits in (e.g. Workshops)")
+    # The path model (design ae698640 (1)-(4), ad9bef5a (1))
+    p_ent.add_argument("--artifact-kind", default="", help="artifact: its kind (an artifact_kind key)")
+    p_ent.add_argument("--task", default="", help="artifact: what a model artifact does (a task key)")
+    p_ent.add_argument("--base-model", default="", help="artifact: its base model (a model key)")
+    p_ent.add_argument("--precision", default="", help="artifact: its precision (e.g. fp32, int8)")
+    p_ent.add_argument("--format", default="", help="artifact: its format (e.g. ONNX, TFJS graph model, HEF)")
+    p_ent.add_argument("--target", default="",
+                       help="artifact: what it targets, hardware:<key> or environment:<key>")
+    p_ent.add_argument("--license", default="", help="artifact: its license (SPDX)")
+    p_ent.add_argument("--derived-from", action="append", default=None, metavar="ARTIFACT",
+                       help="artifact: an artifact it derives from (repeatable; its lineage, kept acyclic)")
+    p_ent.add_argument("--part-of-env", dest="env_part", action="append", default=None, metavar="KIND:KEY",
+                       help="environment: a part of it, tool:<key> or hardware:<key> (repeatable)")
+    p_ent.add_argument("--requires", action="append", default=None, metavar="ENVIRONMENT",
+                       help="environment: an environment it requires (repeatable; kept acyclic)")
+    p_ent.add_argument("--variant", action="append", default=None,
+                       help="environment: one way to reach it, e.g. Mamba / Conda / Google Colab (repeatable)")
+    p_ent.add_argument("--subject", default="", help="concept: the subject it sits under (a subject key)")
+    p_ent.add_argument("--transitions", default="",
+                       help='stage: its transitions as JSON, e.g. [{"in": ["dataset"], "optional": ["checkpoint"], '
+                            '"out": "checkpoint"}] ("environment" as out = a setup step)')
     p_ent.add_argument("--actor", default=_DEFAULT_ACTOR)
 
     p_eb = sub.add_parser("entity-batch",
@@ -3462,6 +3522,27 @@ def main() -> int:
     p_sup.add_argument("--note", default="", help="Why this deliverable backs the claim, in one line")
     p_sup.add_argument("--retract", action="store_true", help="Remove this (deliverable, claim) support")
     p_sup.add_argument("--actor", default=_DEFAULT_ACTOR)
+    p_rel = sub.add_parser("relate",
+                           help="Record (or --retract) one path-model relation: PRODUCES | REQUIRES | TEACHES | "
+                                "ASSUMES | COVERS | EXPLAINS (journaled; endpoint kinds checked against the schema; "
+                                "one edge per relation + source + target; design ae698640 (5))")
+    p_rel.add_argument("relation", help="PRODUCES | REQUIRES | TEACHES | ASSUMES | COVERS | EXPLAINS")
+    p_rel.add_argument("source", help="A deliverable (id or post slug), a Section id, or kind:key (unit / work)")
+    p_rel.add_argument("target", help="kind:key (artifact / environment / concept), or a deliverable for EXPLAINS")
+    p_rel.add_argument("--strength", default="", help="REQUIRES / ASSUMES: required (default) | recommended")
+    p_rel.add_argument("--note", default="", help="One line on the pair")
+    p_rel.add_argument("--retract", action="store_true", help="Remove this (relation, source, target) edge")
+    p_rel.add_argument("--actor", default=_DEFAULT_ACTOR)
+    p_paths = sub.add_parser("paths",
+                             help="The path model's derived reads (READ verb; design ae698640 (6)): all | step | "
+                                  "continues | alternatives | stages | analogues | cycles | gaps | prepares | stale "
+                                  "| splits -- nothing stored, every undecidable case refused")
+    p_paths.add_argument("read", nargs="?", default="all",
+                         help="all | step | continues | alternatives | stages | analogues | cycles | gaps | "
+                              "prepares | stale | splits")
+    p_paths.add_argument("node", nargs="?", default="",
+                         help="step: the deliverable (id or post slug); prepares: kind:key (work / unit) or a "
+                              "deliverable")
     p_jr = sub.add_parser("judge-related",
                           help="Judge related posts (journaled; design e09e262b): every pair touching a stale "
                                "public post is asked of the judge; the judgments at or above the store floor "
@@ -3475,7 +3556,7 @@ def main() -> int:
     p_jf = sub.add_parser("judge-facets",
                           help="Judge the category facets (journaled; design eefda2dd): one request per public "
                                "post with a Noul per stale vocabulary entry; the judgments at or above the store "
-                               "floor land as JUDGED_FACET edges and each post records what it was judged against")
+                               "floor land as JUDGED edges and each post records what it was judged against")
     p_jf.add_argument("--all", action="store_true", help="Re-judge every pair, not only the stale ones")
     p_jf.add_argument("--dry-run", action="store_true",
                       help="Report the stale pairs, the request count and a token estimate; ask nothing")

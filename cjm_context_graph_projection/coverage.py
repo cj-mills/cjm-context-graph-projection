@@ -45,8 +45,9 @@ ENTITY_FIELDS: Dict[str, Dict[str, type]] = {
     # a task / stage is a facet too (its category page's page_description, amendment e38d403c (1))
     P.ENTITY_TASK: {"description": str, "position": int, "cross_task": bool, "off_grid": bool,
                     "retired": bool, "page_description": str, "page_description_basis": str},
+    # a stage's transitions are data over the artifact kinds (design ae698640 (2)); see paths.py
     P.ENTITY_STAGE: {"description": str, "position": int, "cross_task": bool, "retired": bool,
-                     "page_description": str, "page_description_basis": str},
+                     "page_description": str, "page_description_basis": str, "transitions": list},
     P.ENTITY_HARDWARE: {"description": str, "device_class": str},
     P.ENTITY_CLAIM: {"statement": str, "position": int},   # amendment 98e99fe5 (1); see claims.py
     # The Library (design leg 4a4ef27e); see library.py
@@ -63,12 +64,23 @@ ENTITY_FIELDS: Dict[str, Dict[str, type]] = {
     # never part of the criteria, and page_description_basis, the criteria hash it was written
     # against (a criteria change re-surfaces it for review)
     **{k: {"description": str, "not_for": str, "retired": bool, "page_description": str, "page_description_basis": str} for k in P.FACET_KINDS},
+    # The path model (design ae698640 (1)-(4), ad9bef5a (1)); the references a record makes are
+    # checked live and its edges landed by paths.py
+    P.ENTITY_ARTIFACT_KIND: {"description": str, "position": int, "retired": bool},
+    P.ENTITY_ARTIFACT: {"description": str, "artifact_kind": str, "task": str, "base_model": str,
+                        "precision": str, "format": str, "target": str, "license": str, "locator": str,
+                        "derived_from": list, "retired": bool},
+    P.ENTITY_ENVIRONMENT: {"description": str, "parts": list, "requires": list, "variants": list,
+                           "retired": bool},
+    P.ENTITY_CONCEPT: {"description": str, "not_for": str, "subject": str, "retired": bool},
 }
 _REQUIRED = {P.ENTITY_TASK: ("position",), P.ENTITY_STAGE: ("position",),
              P.ENTITY_HARDWARE: ("device_class",), P.ENTITY_CLAIM: ("statement", "position"),
              P.ENTITY_WORK: ("form",), P.ENTITY_UNIT: ("position",),
              P.ENTITY_OUTPUT_CLASS: ("position",),
-             **{k: ("description", "not_for") for k in P.FACET_KINDS}}
+             **{k: ("description", "not_for") for k in P.FACET_KINDS},
+             P.ENTITY_ARTIFACT_KIND: ("description",), P.ENTITY_ARTIFACT: ("artifact_kind",),
+             P.ENTITY_ENVIRONMENT: ("description",), P.ENTITY_CONCEPT: ("description", "not_for", "subject")}
 _ALLOWED = {(P.ENTITY_HARDWARE, "device_class"): P.DEVICE_CLASSES,   # closed slates on a field
             (P.ENTITY_WORK, "form"): P.WORK_FORMS}
 TUTORIAL_KIND = "tutorial"   # the navigation kind (predicates.DELIVERABLE_KINDS) the matrix reads
@@ -113,6 +125,11 @@ def validate_entity(
         bad = field_format_error(f, v)
         if bad:
             return bad
+        if t is list or kind in (P.ENTITY_ARTIFACT, P.ENTITY_ENVIRONMENT, P.ENTITY_CONCEPT):
+            from .paths import record_field_error   # the path model's shapes (ae698640)
+            bad = record_field_error(kind, key, f, v)
+            if bad:
+                return bad
     missing = [f for f in _REQUIRED.get(kind, ()) if f not in fields]
     if missing:
         return f"`{kind}` needs {', '.join(missing)}"
@@ -167,6 +184,10 @@ async def mint_entity(
         if work is None or F.prop(work, "entity_kind") != P.ENTITY_WORK:
             return {"error": f"no work `{work_key}` -- mint it first (`entity work {work_key} ...`)",
                     "written": False}
+    from .paths import check_record_refs, land_record_edges   # the path model's records (ae698640)
+    err = await check_record_refs(gx, kind, key, fields)
+    if err:
+        return {"error": err, "written": False}
     props = {f: fields[f] for f in ENTITY_FIELDS[kind] if f in fields}
     node = EntityNode(kind=kind, key=key, name=name, properties=props).to_graph_node()
     eid = node["id"]
@@ -180,8 +201,10 @@ async def mint_entity(
         await extend_graph(gx.queue, gx.graph_id, [node], [])
     if work_id is not None:   # the unit's PART_OF, from its key (one per unit, so a re-mint re-lands it)
         await extend_graph(gx.queue, gx.graph_id, [], [unit_part_of_edge(eid, work_id)])
+    edges = await land_record_edges(gx, kind, key, props)   # lineage, parts, requires, subject
     return {"entity_id": eid, "kind": kind, "key": key, "name": name, "fields": props,
-            "updated": existing is not None, "written": True}
+            "updated": existing is not None, "written": True,
+            **({"record_edges": edges} if any(edges.values()) else {})}
 
 
 async def mint_entities(
@@ -213,6 +236,9 @@ async def mint_entities(
             if (P.ENTITY_WORK, work_key) not in seen and (
                     work is None or F.prop(work, "entity_kind") != P.ENTITY_WORK):
                 err = f"no work `{work_key}` live or earlier in the batch"
+        if not err:   # the path model's references, live or earlier in the batch (ae698640)
+            from .paths import check_record_refs
+            err = await check_record_refs(gx, kind, key, fields, pending=seen)
         if err:
             errors.append(f"record {i + 1} ({kind} `{key}`): {err}")
             continue
@@ -260,6 +286,17 @@ async def check_coverage_value(
         node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=subject_id)
         if node is None or F.prop(node, "entity_kind") != owner:
             return f"a {what} belongs to a {owner} Entity (`entity {owner} <key> ...`)"
+        return None
+    if predicate == P.ENVIRONMENT_VERSIONS:   # an environment's versions (ae698640 (3))
+        import json
+        try:
+            P.versions_value(json.loads(value))
+        except (ValueError, AttributeError):
+            return ('environment versions are a JSON object of component versions '
+                    f'(e.g. {{"torch": "2.4.1", "cuda": "12.4"}}; got {value!r})')
+        node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=subject_id)
+        if node is None or F.prop(node, "entity_kind") != P.ENTITY_ENVIRONMENT:
+            return "environment versions belong to an environment Entity (`entity environment <key> ...`)"
         return None
     kind = P.COVERAGE_KINDS.get(predicate) or P.FACET_PREDICATES.get(predicate)
     if kind is None:

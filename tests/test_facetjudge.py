@@ -220,7 +220,7 @@ def _rows(db):
     con = sqlite3.connect(str(db))
     try:
         return (sorted(r[0] for r in con.execute("select id from nodes")),
-                sorted(r for r in con.execute("select id, properties from edges where relation_type = 'JUDGED_FACET'")),
+                sorted(r for r in con.execute("select id, properties from edges where relation_type = 'JUDGED'")),
                 sorted(r for r in con.execute(   # the records (a live assertion's asserted_at is the live clock's)
                     "select json_extract(properties, '$.subject_id'), json_extract(properties, '$.value') "
                     "from nodes where label = 'Assertion' and json_extract(properties, '$.predicate') = 'facets_judged'")))

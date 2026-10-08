@@ -431,6 +431,17 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             return f"**retracted** support `{obj['edge_id']}`"
         return (f"**{'restated' if obj.get('replaced') else 'supports'}** `{str(obj['deliverable_id'])[:8]}` "
                 f"→ claim `{obj.get('claim')}` as _{obj.get('kind')}_ `{obj['edge_id']}`")
+    if kind == "relate":
+        if obj.get("error"):
+            return f"⚠ {obj['error']}"
+        if obj.get("retracted"):
+            return f"**retracted** {obj['relation']} `{obj['edge_id']}`"
+        extra = " · ".join(f"{k} {obj[k]}" for k in ("strength", "note") if obj.get(k))
+        return (f"**{'restated' if obj.get('replaced') else 'related'}** `{str(obj['source_id'])[:8]}` "
+                f"{obj['relation']} `{str(obj['target_id'])[:8]}`" + (f" · {extra}" if extra else "")
+                + f" `{obj['edge_id']}`")
+    if kind == "paths":
+        return f"⚠ {obj['error']}" if obj.get("error") else _render_paths(obj)
     if kind == "judge-related":
         lines = []
         if obj.get("error"):
@@ -1659,6 +1670,100 @@ def _render_facet_review(obj: Dict[str, Any]) -> str:
         ap = obj.get("applied") or {}
         lines.append(f"  asserted {ap.get('asserted', 0)} fact(s) · marked {ap.get('marked', 0)} judgment(s) reviewed")
     return "\n".join(lines)
+
+
+def _render_paths(obj: Dict[str, Any]) -> str:
+    """The path model's derived reads (design ae698640 (6)): each section only when read."""
+    names = obj.get("names") or {}
+
+    def n(i: str) -> str:
+        x = names.get(i) or {}
+        return f"{x.get('name') or i} `{str(i)[:8]}`" + (f" _({x['kind']})_" if x.get("kind") not in (None, "deliverable") else "")
+
+    lines = [f"## Paths — {obj.get('read')} · {obj.get('steps', 0)} step(s)", ""]
+    v = obj.get("step_view")
+    if v:
+        lines.append(f"### Step: {n(v['step'])}")
+        for label, key in (("requires", "requires"), ("assumes", "assumes")):
+            for x, strength in sorted((v.get(key) or {}).items()):
+                lines.append(f"- {label} {n(x)} · _{strength}_")
+        for label in ("produces", "teaches", "explains"):
+            lines += [f"- {label} {n(x)}" for x in v.get(label) or []]
+        st = v.get("stage") or {}
+        if st:
+            lines.append(f"- stage: {st.get('stage') or '—'}" + (f" · task {st['task']}" if st.get("task") else "")
+                         + (f" · ⚠ {st['refusal']}" if st.get("refusal") else "") + (f" · {st['note']}" if st.get("note") else ""))
+        lines += [f"- continues from {n(c['from'])} via {n(c['via'])}" for c in v.get("continues_from") or []]
+        lines += [f"- continued by {n(c['step'])} via {n(c['via'])}" for c in v.get("continued_by") or []]
+        lines += [f"- explained by {n(x)}" for x in v.get("explained_by") or []]
+        for a in v.get("alternatives") or []:
+            others = [m for m in a["steps"] if m["step"] != v["step"]]
+            lines.append(f"- alternatives from {n(a['input'])} (→ {a['kind']}): " + "; ".join(n(m["step"]) for m in others))
+        for a in v.get("analogues") or []:
+            lines.append(f"- analogues ({a['stage']}): " + "; ".join(f"{n(m['step'])} [{', '.join(m['base_models'])}]"
+                                                                   for m in a["steps"] if m["step"] != v["step"]))
+        lines.append("")
+    if "continues" in obj:
+        lines.append(f"### Continues from — {len(obj['continues'])}")
+        lines += [f"- {n(c['step'])} ← {n(c['from'])} via {n(c['via'])}" + ("" if c["strength"] == "required" else f" · _{c['strength']}_")
+                  for c in obj["continues"]]
+        lines.append("")
+    if "alternatives" in obj:
+        lines.append(f"### Alternatives — {len(obj['alternatives'])}")
+        for a in obj["alternatives"]:
+            lines.append(f"- from {n(a['input'])} → {a['kind']}:")
+            for m in a["steps"]:
+                lines.append(f"  - {n(m['step'])}" + (" · differs: " + ", ".join(n(x) for x in m["differs"]) if m["differs"] else ""))
+        lines.append("")
+    if "stages" in obj:
+        lines.append(f"### Derived stages — {len(obj['stages'])}")
+        for sid, r in obj["stages"].items():
+            lines.append(f"- {n(sid)}: {' + '.join(r['inputs']) or '∅'} → {' + '.join(r['outputs']) or '∅'} = "
+                         + (r.get("stage") or r.get("note") or f"⚠ {r.get('refusal')}")
+                         + (f" · task {r['task']}" if r.get("task") else ""))
+        lines.append("")
+    if "analogues" in obj:
+        lines.append(f"### Analogues — {len(obj['analogues'])}")
+        for a in obj["analogues"]:
+            lines.append(f"- {a['stage']} (transition {a['transition'] + 1}): "
+                         + "; ".join(f"{n(m['step'])} [{', '.join(m['base_models'])}]" for m in a["steps"]))
+        lines.append("")
+    if "cycles" in obj:
+        cy = obj["cycles"]
+        lines.append(f"### Flywheel cycles (kind level) — {len(cy['cycles'])}")
+        for c in cy["cycles"]:
+            lines.append(f"- {' → '.join(c['kinds'] + [c['kinds'][0]])} · {len(c['chains'])} instance chain(s)")
+            lines += [f"  - {' → '.join(n(x) for x in ch)}" for ch in c["chains"]]
+        if cy.get("lineage_cycle"):
+            lines.append("⚠ instance lineage cycle: " + " ← ".join(n(x) for x in cy["lineage_cycle"]))
+        lines.append("")
+    if "gaps" in obj:
+        lines.append(f"### Gaps — {len(obj['gaps'])}")
+        lines += [f"- {n(gp['concept'])} assumed by " + "; ".join(n(a["step"]) for a in gp["assumed_by"]) for gp in obj["gaps"]]
+        lines.append("")
+    for pr in obj.get("prepares") or []:
+        lines.append(f"### {n(pr['node'])} prepares you for — {len(pr['prepares'])}")
+        lines += [f"- {n(r['step'])} through " + ", ".join(n(x) for x in r["through"]) for r in pr["prepares"]]
+        lines.append("")
+    if "stale" in obj:
+        sl = obj["stale"]
+        lines.append(f"### Stale against their environments — {len(sl['stale'])}")
+        for r in sl["stale"]:
+            lines.append(f"- {n(r['step'])} on {n(r['hardware'])} ({r['date']}) vs {n(r['environment'])}: "
+                         + ", ".join(f"{c['component']} {c['verified']} < {c['current']}" for c in r["components"]))
+        for r in sl["incomparable"]:
+            lines.append(f"- ? {n(r['step'])} vs {n(r['environment'])}: "
+                         + ", ".join(f"{c['component']} {c['verified']} vs {c['current']}" for c in r["components"]))
+        lines += [f"⚠ {n(e)} holds two active versions values" for e in sl["conflicts"]]
+        lines.append("")
+    if "splits" in obj:
+        lines.append(f"### Split candidates — {len(obj['splits'])}")
+        lines += [f"- {n(r['step'])} at {n(r['at'])} → " + ", ".join(n(x) for x in r["then"])
+                  + " · also starting from it: " + "; ".join(n(x) for x in r["also_from"]) for r in obj["splits"]]
+        lines.append("")
+    for r in obj.get("refusals") or []:
+        lines.append(f"⚠ **{r['reason']}** {n(r['step'])} — {r['detail']}")
+    return "\n".join(lines).rstrip()
 
 
 def _render_coverage(obj: Dict[str, Any]) -> str:
