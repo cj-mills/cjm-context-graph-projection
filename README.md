@@ -83,6 +83,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - **`cjm_context_graph_projection.source_state`** — N+3 Phase 1 (SHADOW): capture a module's canonical source into a SOURCE journal and
 - **`cjm_context_graph_projection.sourcemoves`** — Which rows a moved source accounts for (design amendment a9176261 to 19edbe97 (6)).
 - **`cjm_context_graph_projection.sources`** — The post page's sources (design 39c51c15 (3), amendment 722a8232, under the redesign build
+- **`cjm_context_graph_projection.standing`** — A page's STANDING (design amendment cbd5f154 to the disposition pass 9a21e345, amended by
 - **`cjm_context_graph_projection.structure`** — M2a GRADIENT — structural memory authoring: create a note / add a section, born on-graph.
 - **`cjm_context_graph_projection.tutorialspage`** — The Tutorials page: a Lens whose view layout is `coverage-matrix` projects the task x stage
 - **`cjm_context_graph_projection.viz`** — A minimal READ-ONLY visualization: the readiness frontier + its dependency DAG, as HTML.
@@ -191,7 +192,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 
 ### `cjm_context_graph_projection.claims`
 
-- `claims_report` _function_ — The claims over the live graph: every claim Entity with its state and backing.
+- `claims_report` _function_ — The claims over the live graph: every claim Entity with its state and its CURRENT backing
 - `load_claim_states` _function_ — Every claim's active state(s); more than one is a conflict the report refuses.
 - `load_claims` _function_ — The claim Entities in display order.
 - `load_supports` _function_ — The support edges (deliverable -> claim) with their kind and note.
@@ -971,6 +972,16 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `observed_facts` _function_ — The facts a source states about itself, read at observation (722a8232 (1), (2)); its
 - `render_draws` _function_ — What the post draws on (design 37f82f72 (2)): each work or unit named from the Library's
 - `source_text` _function_
+
+### `cjm_context_graph_projection.standing`
+
+- `load_relocations` _function_ — Every RELOCATED_TO edge, its web Reference read back to the URL it keys.
+- `load_standing` _function_ — Every page's standing over the live graph.
+- `matches` _function_ — The `--standing` filter the standing, traffic and inbound-links reads share.
+- `project_standing` _function_ — The pure projection (no graph access): see the module docstring for the rules. A row is
+- `standing_label` _function_ — One page's standing in a word or two: the label, `superseded` beside it when it is.
+- `standing_report` _function_ — The disposition worklist as a read (9a21e345): each page's standing, and with `evidence`
+- `support_standing` _function_ — What a page's standing does to the claim support it gives (cbd5f154 (6)): a superseded
 
 ### `cjm_context_graph_projection.structure`
 

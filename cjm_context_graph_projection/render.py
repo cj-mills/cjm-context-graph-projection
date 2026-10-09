@@ -472,6 +472,8 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         return _render_facet_review(obj)
     if kind == "claims":
         return _render_claims(obj)
+    if kind == "standing":
+        return _render_standing(obj)
     if kind == "series-order":
         if obj.get("error"):
             return f"⚠ {obj['error']}"
@@ -1562,9 +1564,58 @@ def _render_claims(obj: Dict[str, Any]) -> str:
             for r in rows if k != "knowledge" else []:
                 lines.append(f"  - _{k}_ **{_short(r.get('title') or r.get('slug'), 70)}** `{r['id'][:8]}`"
                              + ("" if r.get("public") else " (not public)")
+                             + (f" ← passed on by {', '.join(v[:8] for v in r['via'])}" if r.get("via") else "")
                              + (f" — {r['note']}" if r.get("note") else ""))
+        wd = c.get("withdrawn") or []
+        if wd:   # cbd5f154 (6): listed, never counted
+            by: Dict[str, int] = {}
+            for r in wd:
+                by[r["withdrawn"]] = by.get(r["withdrawn"], 0) + 1
+            lines.append(f"- withdrawn {len(wd)}: " + " · ".join(f"{k} {n}" for k, n in sorted(by.items())))
+            for r in wd if len(wd) <= 12 else []:
+                lines.append(f"  - ~~{_short(r.get('title') or r.get('slug'), 70)}~~ `{r['id'][:8]}` · {r['withdrawn']}"
+                             + (f" → {', '.join(s['slug'] for s in r['passes_to'])}" if r.get("passes_to") else ""))
         lines.append("")
     return "\n".join(lines).rstrip() if claims else "_(no claims — `entity claim <key> --name ... --statement ... --position N`)_"
+
+
+def _render_standing(obj: Dict[str, Any]) -> str:
+    """The standing read (amendment cbd5f154, 6514869f): the counts, what the inputs cannot decide,
+    then each page's standing, destination and evidence -- the disposition worklist."""
+    if obj.get("error"):
+        return f"⚠ {obj['error']}"
+    c, rows, top = obj.get("counts") or {}, obj.get("rows") or [], obj.get("top") or 0
+    order = ("current", "archived", "removed", "retired", "unruled", "conflict", "superseded", "born")
+    lines = [f"## Standing — " + " · ".join(f"{k} {c[k]}" for k in order if c.get(k))
+             + (f" · pending relocation {len(obj.get('pending') or [])}" if obj.get("pending") else "")
+             + (f" — showing `{obj['filter']}` ({len(rows)})" if obj.get("filter") else ""), ""]
+    for a in obj.get("anomalies") or []:
+        lines.append(f"- ⚠ `{a['slug']}` `{a['id'][:8]}` — {'; '.join(a['why'])}")
+    if obj.get("anomalies"):
+        lines.append("")
+    for r in rows[:top] if top else rows:
+        bits = [f"_{r['standing'] or 'born'}_"]
+        if r.get("superseded_by"):
+            bits.append("superseded by " + ", ".join(s["slug"] for s in r["superseded_by"]))
+        d = r.get("destination") or {}
+        if d:
+            bits.append("→ " + (", ".join(s["slug"] for s in d["to"]) if d["kind"] == "successor" else
+                                ", ".join(d["to"]) if d["kind"] == "repo" else "the nearest hub (derived)"))
+        if r.get("pending"):
+            bits.append("pending relocation" if d.get("kind") != "successor" else "pending retirement")
+        if "traffic" in r:
+            t, i = r["traffic"], r.get("inbound") or {}
+            bits.append(f"visits {_iv(t.get('visits'))} · GSC {t.get('clicks') if t.get('clicks') is not None else '–'}"
+                        f"/{t.get('impressions') if t.get('impressions') is not None else '–'}")
+            if i:
+                bits.append(f"links {i['pages']}/{i['hosts']} ({i['verified']} fetched)")
+            if r.get("claims"):
+                bits.append("claims " + ", ".join(f"~~{x['claim']}~~" if x.get("withdrawn") else x["claim"]
+                                                  for x in r["claims"]))
+        lines.append(f"- **{_short(r['title'] or r['slug'], 70)}** `{r['id'][:8]}` — " + " · ".join(bits))
+    if top and len(rows) > top:
+        lines.append(f"- … {len(rows) - top} more page(s) (`--top 0` lists all)")
+    return "\n".join(lines).rstrip()
 
 
 def _iv(m: Optional[Dict[str, Any]]) -> str:
@@ -1640,7 +1691,8 @@ def _render_evidence(kind: str, obj: Dict[str, Any]) -> str:
         extra = f" · {len(h['paths'])} paths" if len(h["paths"]) > 1 else ""
         inc = f" · incomplete {', '.join(cf['incomplete'])}" if cf.get("incomplete") else ""
         lines.append(f"- **{h['title'] or h['path']}** `{h['id'][:8]}` — visits {_iv(cf.get('visits'))}"
-                     f" · GSC {sc.get('clicks', '–')}/{sc.get('impressions', '–')}{extra}{inc}")
+                     f" · GSC {sc.get('clicks', '–')}/{sc.get('impressions', '–')}{extra}{inc}"
+                     + (f" · _{h['standing']}_" if h.get("standing") else ""))
     if top and len(holders) > top:
         lines.append(f"- … {len(holders) - top} more page(s) (`--top 0` lists all)")
     un = obj.get("unresolved") or []
@@ -1697,7 +1749,8 @@ def _render_inbound(kind: str, obj: Dict[str, Any]) -> str:
     for h in holders[:top] if top else holders:
         lines.append(f"- **{h['title'] or h['path']}** `{h['id'][:8]}` — {len(h['pages'])} page(s) on "
                      f"{len(h['sites'])} host(s) · Google {h['google_links'] if h['google_links'] is not None else '–'} link(s)"
-                     f" · fetched {h['verified']}" + (f" · {len(h['paths'])} paths" if len(h["paths"]) > 1 else ""))
+                     f" · fetched {h['verified']}" + (f" · {len(h['paths'])} paths" if len(h["paths"]) > 1 else "")
+                     + (f" · _{h['standing']}_" if h.get("standing") else ""))
         if len(holders) == 1 or (top and top <= 5):
             for p in h["pages"]:
                 f = p.get("fetch") or {}

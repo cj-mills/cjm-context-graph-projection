@@ -805,6 +805,8 @@ async def inbound_report(
     gx: GraphHandle,
     *,
     holder: Optional[str] = None,   # One holder (node id or unique prefix) in full
+    standing: Optional[str] = None,  # Only pages carrying this standing (standing.matches)
+    standings: Optional[Dict[str, Any]] = None,  # standing.load_standing's result, when the caller holds it
 ) -> Dict[str, Any]:  # {holders, unresolved, ambiguous, untargeted, observers}
     """Each page's inbound links DERIVED across every path it holds or held: per linking site, the
     pages and what each observer last saw (Google's report, the fetch's outcome), beside Google's
@@ -869,6 +871,12 @@ async def inbound_report(
                      "google_links": sum(c["links"] for c in google) if google else None,
                      "verified": sum(1 for p in pages if p["fetched"])})
     rows.sort(key=lambda r: (-len(r["pages"]), r["path"]))
+    from .standing import load_standing, matches, standing_label
+    by_id = (standings or await load_standing(gx))["by_id"]
+    for r in rows:   # each page beside its ruling (cbd5f154)
+        r["standing"] = standing_label(by_id.get(r["id"]))
+    if standing:
+        rows = [r for r in rows if matches(by_id.get(r["id"]), standing)]
     targeted = {str(e["source_id"]) for e in edges}
     untargeted = sorted(({"url": str(F.prop(n, "foreign_id")), "fetch": _latest_by(obs.get(rid, []), "fetch")}
                          for rid, n in refs.items() if rid not in targeted), key=lambda x: x["url"])

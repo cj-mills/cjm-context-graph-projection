@@ -129,7 +129,8 @@ async def retire_source(
     fact = await assert_value(gx, nid, P.PUBLISH_STATE, P.PUBLISH_RETIRED, actor=actor)
     if fact.get("error"):
         return {"error": fact["error"], "written": False}
-    if successor_id:
+    # A successor already standing (the relate verb's SUPERSEDES, cbd5f154 (3)) is not landed twice.
+    if successor_id and (successor_id, nid) not in set(await F.load_supersedes(gx)):
         await extend_graph(gx.queue, gx.graph_id, [], [make_edge(successor_id, nid, DevRelations.SUPERSEDES)])
     return {"note_id": nid, "slug": slug, "path": rel_path, "commit": commit, "reason": reason,
             "successor_id": successor_id, "written": True}

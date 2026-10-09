@@ -279,6 +279,14 @@ async def check_coverage_value(
     task and stage are its teaches_* facts."""
     owned = {P.VERIFICATION_STANDING: ("verification standing", P.VERIFICATION_STANDINGS, P.ENTITY_HARDWARE),
              P.CLAIM_STATE: ("claim state", P.CLAIM_STATES, P.ENTITY_CLAIM)}
+    if predicate == P.CURRENCY:   # a page's standing (cbd5f154 (1), 6514869f): a deliverable's, from its slate
+        if value not in P.CURRENCY_VALUES:
+            return (f"`{value}` is no standing ({', '.join(P.CURRENCY_VALUES)}); superseded is derived "
+                    "from a published successor's SUPERSEDES, never asserted")
+        node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=subject_id)
+        if node is None or F.label(node) != DevNodeKinds.NOTE:
+            return "a standing belongs to a deliverable Note"
+        return None
     if predicate in owned:
         what, slate, owner = owned[predicate]
         if value not in slate:

@@ -12,6 +12,8 @@ REQUIRES) land from it marked with the record, so a re-mint reconciles exactly i
 stage's TRANSITIONS name artifact kinds and are checked the same way. The six relations land by
 the journaled `relate` op (`record_relation`): endpoint kinds checked against the schema's
 RELATION_ENDPOINTS, the strength on REQUIRES / ASSUMES, one edge per (relation, source, target).
+The same op lands a page's DESTINATION (cbd5f154 (3)/(4)) -- a public successor's SUPERSEDES, a
+removed page's RELOCATED_TO its repo copy's web Reference -- which the walk never reads.
 An environment's versions are the `environment_versions` fact (checked in coverage).
 
 READS (`path_reads` and the `paths` verb) derive everything and store nothing: continues-from,
@@ -34,7 +36,7 @@ from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 from . import factlayer as F
 from .runtime import GraphHandle
 
-RELATIONS = tuple(P.RELATION_ENDPOINTS)
+RELATIONS = P.PATH_RELATIONS   # the walk's relations; the destination relations share only the relate verb
 # The record fields that name another Entity: field -> the kind(s) it names ("kind:key" when several)
 _REF_FIELDS = {
     P.ENTITY_ARTIFACT: {"artifact_kind": (P.ENTITY_ARTIFACT_KIND,), "task": (P.ENTITY_TASK,),
@@ -249,6 +251,8 @@ async def endpoint_kind(
         return P.NODE_DELIVERABLE
     if label == DevNodeKinds.SECTION:
         return P.NODE_SECTION
+    if label == DevNodeKinds.REFERENCE:
+        return P.NODE_REFERENCE
     if label == DevNodeKinds.ENTITY:
         return F.prop(node, "entity_kind")
     return label
@@ -290,7 +294,7 @@ async def record_relation(
     requirements are its record's. A pair holds one edge per relation, so a restatement replaces
     it (the journal keeps the history)."""
     if relation not in P.RELATION_ENDPOINTS:
-        return {"error": f"no relation `{relation}` ({', '.join(RELATIONS)})", "written": False}
+        return {"error": f"no relation `{relation}` ({', '.join(P.RELATION_ENDPOINTS)})", "written": False}
     sid, tid = await resolve_endpoint(gx, source), await resolve_endpoint(gx, target)
     if sid is None or tid is None:
         return {"error": f"no node `{source if sid is None else target}` (a node id, a post slug or `kind:key`)",
@@ -306,7 +310,12 @@ async def record_relation(
         return {"error": f"{relation} runs from {' | '.join(srcs)}, never from a {sk}", "written": False}
     if tk not in tgts:
         return {"error": f"{relation} runs to {' | '.join(tgts)}, never to a {tk}", "written": False}
-    if not retract and tk not in (P.NODE_DELIVERABLE, P.NODE_SECTION):
+    if relation == DevRelations.SUPERSEDES and not retract:   # supersession waits on the successor (cbd5f154 (3))
+        from .purenotes import public_deliverables
+        if sid not in await public_deliverables(gx):
+            return {"error": "a successor SUPERSEDES the page it replaces once it is public -- until then the "
+                             "intent rides the successor's work item (cbd5f154 (3))", "written": False}
+    if not retract and tk not in (P.NODE_DELIVERABLE, P.NODE_SECTION, P.NODE_REFERENCE):
         node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=tid)
         if F.prop(node, "retired"):
             return {"error": f"{tk} `{F.prop(node, 'key')}` is retired -- relate its successor", "written": False}

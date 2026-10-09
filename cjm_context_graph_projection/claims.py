@@ -13,11 +13,14 @@ knowledge) with a one-line note -- written by the journaled `supports` op.
 by kind, and the REFUSALS -- a claim with no state (`stateless`), two active states
 (`conflict`), and an offered claim with no PUBLIC support whose kind carries an offer
 (`unbacked`: the backing floor of 98e99fe5 (3); knowledge alone never carries one). The floor
-never promotes: a building claim that meets it stays building. `public_view` is the public
-profile's filter -- only offered claims, only public supports -- and every public surface reads
-through it (676bac8e (4))."""
+never promotes: a building claim that meets it stays building. Only CURRENT support counts
+(design amendment cbd5f154 (6)): a supporter that is archived, removed or retired has its support
+WITHDRAWN -- listed apart, never counted -- and a superseded supporter's support PASSES to its
+public successor (a row carrying `via`), each read off the supporter's standing (`standing`).
+`public_view` is the public profile's filter -- only offered claims, only public supports, never
+the withdrawn -- and every public surface reads through it (676bac8e (4))."""
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 from cjm_context_graph_layer.ops import extend_graph, graph_task
 from cjm_context_graph_primitives.query import EdgeQuery
@@ -102,26 +105,48 @@ def project_claims(
     claims: List[Dict[str, Any]],             # Claim entries (properties + id), by position
     states: Dict[str, List[str]],             # {claim id: active states}
     supports: List[Dict[str, Any]],           # SUPPORTS edges (source_id, target_id, properties)
-    deliverables: Dict[str, Dict[str, Any]],  # {note id: {title, slug, public}}
+    deliverables: Dict[str, Dict[str, Any]],  # {note id: {title, slug, public}} -- supporters and their successors
+    standing: Optional[Dict[str, Dict[str, Any]]] = None,  # {supporter id: standing.support_standing(...)}; None = every support counts
 ) -> Dict[str, Any]:  # {claims: [...], refusals: [...], ok}
     """The pure projection (no graph access): see the module docstring for the rules."""
-    by_claim: Dict[str, List[Dict[str, Any]]] = {}
+    by_claim: Dict[str, Dict[Tuple[str, str], Dict[str, Any]]] = {}
+    withdrawn: Dict[str, List[Dict[str, Any]]] = {}
+
+    def row_of(nid: str, kind: str, note: str) -> Dict[str, Any]:
+        d = deliverables.get(nid) or {}
+        return {"id": nid, "title": d.get("title", ""), "slug": d.get("slug", ""),
+                "public": bool(d.get("public")), "kind": kind, "note": note}
+
+    passed = []
     for e in supports:
         props = e.get("properties") or {}
-        d = deliverables.get(str(e["source_id"])) or {}
-        by_claim.setdefault(str(e["target_id"]), []).append(
-            {"id": str(e["source_id"]), "title": d.get("title", ""), "slug": d.get("slug", ""),
-             "public": bool(d.get("public")), "kind": props.get("kind", ""), "note": props.get("note", "")})
+        src, cid = str(e["source_id"]), str(e["target_id"])
+        row = row_of(src, props.get("kind", ""), props.get("note", ""))
+        ss = (standing or {}).get(src) or {}
+        if not ss.get("withdrawn"):
+            by_claim.setdefault(cid, {})[(src, row["kind"])] = row
+            continue
+        withdrawn.setdefault(cid, []).append({**row, "withdrawn": ss["withdrawn"],
+                                              "passes_to": list(ss.get("passes_to") or [])})
+        passed += [(cid, s["id"], row, src) for s in ss.get("passes_to") or []]
+    for cid, sid, row, src in passed:   # a superseded page's support passes to its successor; its own wins
+        mine = by_claim.setdefault(cid, {})
+        have = mine.get((sid, row["kind"]))
+        if have is None:
+            mine[(sid, row["kind"])] = {**row_of(sid, row["kind"], row["note"]), "via": [src]}
+        elif "via" in have and src not in have["via"]:
+            have["via"].append(src)
     out, refusals = [], []
     for c in claims:
         vals = states.get(c["id"], [])
         state = vals[0] if len(vals) == 1 else None
-        rows = sorted(by_claim.get(c["id"], []), key=lambda r: (r["slug"], r["id"]))
+        rows = sorted(by_claim.get(c["id"], {}).values(), key=lambda r: (r["slug"], r["id"]))
         grouped = {k: [r for r in rows if r["kind"] == k] for k in P.SUPPORT_KINDS}
         backed = any(r["public"] and r["kind"] in P.BACKING_KINDS for r in rows)
         entry = {"key": c.get("key"), "id": c["id"], "name": c.get("name", ""),
                  "statement": c.get("statement", ""), "position": c.get("position"),
-                 "state": state, "supports": grouped, "backed": backed}
+                 "state": state, "supports": grouped, "backed": backed,
+                 "withdrawn": sorted(withdrawn.get(c["id"], []), key=lambda r: (r["withdrawn"], r["slug"], r["id"]))}
         if not vals:
             refusals.append({"claim": c.get("key"), "reason": "stateless", "detail": "no claim_state fact"})
         elif len(vals) > 1:
@@ -144,26 +169,32 @@ def public_view(
     for c in report["claims"]:
         if c.get("state") != P.CLAIM_OFFERED:
             continue
-        out.append({**c, "supports": {k: [r for r in rows if r["public"]]
-                                      for k, rows in c["supports"].items()}})
+        out.append({**{k: v for k, v in c.items() if k != "withdrawn"},
+                    "supports": {k: [r for r in rows if r["public"]] for k, rows in c["supports"].items()}})
     return out
 
 
 async def claims_report(
     gx: GraphHandle,
     public: bool = False,  # True = the public view (offered claims, public supports only)
+    standing: Optional[Dict[str, Any]] = None,  # standing.load_standing's result, when the caller holds it
 ) -> Dict[str, Any]:  # project_claims' result (+ `public` = the filtered claims when asked)
-    """The claims over the live graph: every claim Entity with its state and backing."""
+    """The claims over the live graph: every claim Entity with its state and its CURRENT backing
+    (cbd5f154 (6)) -- each supporter's standing withdraws its support or passes it on."""
     from .purenotes import public_deliverables
     from .site import stated
+    from .standing import load_standing, support_standing
     supports = await load_supports(gx)
-    ids = sorted({str(e["source_id"]) for e in supports})
+    by_id = (standing or await load_standing(gx))["by_id"]
+    sources = sorted({str(e["source_id"]) for e in supports})
+    ss = {i: support_standing(by_id.get(i)) for i in sources}
+    ids = sorted(set(sources) | {s["id"] for v in ss.values() for s in v["passes_to"]})
     nodes = await F.load_nodes(gx, ids)
     pub = await public_deliverables(gx)
     deliverables = {i: {"title": stated(nodes.get(i), "title"),
                         "slug": str(F.prop(nodes.get(i), "slug") or ""), "public": i in pub}
                     for i in ids}
-    res = project_claims(await load_claims(gx), await load_claim_states(gx), supports, deliverables)
+    res = project_claims(await load_claims(gx), await load_claim_states(gx), supports, deliverables, ss)
     if public:
         res["public"] = public_view(res)
     return res

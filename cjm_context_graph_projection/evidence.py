@@ -782,9 +782,12 @@ async def traffic_report(
     since: Optional[str] = None,     # First month counted ('YYYY-MM'; None = every month on the graph)
     until: Optional[str] = None,     # Last month counted
     holder: Optional[str] = None,    # One holder (node id or unique prefix) in full
+    standing: Optional[str] = None,  # Only pages carrying this standing (standing.matches)
+    standings: Optional[Dict[str, Any]] = None,  # standing.load_standing's result, when the caller holds it
 ) -> Dict[str, Any]:  # {holders: [...], unresolved: [...], ambiguous: [...], months}
     """Each page's traffic DERIVED across every path it holds or held (the path ownership follows
-    transfers), per source over the months in range, and every web_path no page holds."""
+    transfers), per source over the months in range, and every web_path no page holds. Each page
+    carries its standing (cbd5f154), so the pass reads traffic beside the ruling."""
     from .site import stated
     from .sitelinks import site_path_holders
     holders, active = await site_path_holders(gx)
@@ -821,6 +824,12 @@ async def traffic_report(
                      "path": active.get(h, ""), "paths": sorted(keys), **_totals(merged)})
     rows.sort(key=lambda r: -(r.get("cloudflare") or {}).get("visits", {}).get("estimate", 0))
     unresolved.sort(key=lambda r: -(r.get("cloudflare") or {}).get("visits", {}).get("estimate", 0))
+    from .standing import load_standing, matches, standing_label
+    by_id = (standings or await load_standing(gx))["by_id"]
+    for r in rows:
+        r["standing"] = standing_label(by_id.get(r["id"]))
+    if standing:
+        rows = [r for r in rows if matches(by_id.get(r["id"]), standing)]
     if holder:
         rows = [r for r in rows if r["id"] == holder or r["id"].startswith(holder)]
         if len(rows) != 1:

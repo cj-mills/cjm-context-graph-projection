@@ -1282,13 +1282,14 @@ async def _dispatch(args) -> int:
             # The inbound links (ruling a3c02fb1): each page's linking pages, derived through the
             # path ownership, with what each observer last saw.
             from .inbound import inbound_report
-            res = await inbound_report(gx, holder=args.holder)
+            res = await inbound_report(gx, holder=args.holder, standing=args.standing)
             res["top"] = args.top
             print(render("inbound-links", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "traffic":
             from .evidence import traffic_report
-            res = await traffic_report(gx, since=args.since, until=args.until, holder=args.holder)
+            res = await traffic_report(gx, since=args.since, until=args.until, holder=args.holder,
+                                       standing=args.standing)
             res["top"] = args.top
             print(render("traffic", res, args.format))
             return 1 if res.get("error") else 0
@@ -1331,6 +1332,14 @@ async def _dispatch(args) -> int:
             res = await claims_report(gx, public=args.public)
             print(render("claims", res, args.format))
             return 0 if res.get("ok") else 1
+        elif args.command == "standing":
+            # Each page's standing (amendment cbd5f154, 6514869f) -- the disposition worklist as a
+            # read: derived, nothing stored.
+            from .standing import standing_report
+            res = await standing_report(gx, standing=args.standing, evidence=not args.bare, since=args.since)
+            res["top"] = args.top
+            print(render("standing", res, args.format))
+            return 1 if res.get("error") else 0
         elif args.command == "series-members":
             # The whole ordered membership (DEC 72d669c5 (4)): each slug follows the one before.
             slugs = list(args.slugs)
@@ -3581,10 +3590,13 @@ def main() -> int:
     p_sup.add_argument("--retract", action="store_true", help="Remove this (deliverable, claim) support")
     p_sup.add_argument("--actor", default=_DEFAULT_ACTOR)
     p_rel = sub.add_parser("relate",
-                           help="Record (or --retract) one path-model relation: PRODUCES | REQUIRES | TEACHES | "
-                                "ASSUMES | COVERS | EXPLAINS (journaled; endpoint kinds checked against the schema; "
-                                "one edge per relation + source + target; design ae698640 (5))")
-    p_rel.add_argument("relation", help="PRODUCES | REQUIRES | TEACHES | ASSUMES | COVERS | EXPLAINS")
+                           help="Record (or --retract) one authored relation: a path-model relation PRODUCES | "
+                                "REQUIRES | TEACHES | ASSUMES | COVERS | EXPLAINS (design ae698640 (5)), or a page's "
+                                "destination SUPERSEDES (from its public successor) | RELOCATED_TO (to its repo "
+                                "copy's web Reference; amendment cbd5f154) -- journaled; endpoint kinds checked "
+                                "against the schema; one edge per relation + source + target")
+    p_rel.add_argument("relation", help="PRODUCES | REQUIRES | TEACHES | ASSUMES | COVERS | EXPLAINS | SUPERSEDES | "
+                                        "RELOCATED_TO")
     p_rel.add_argument("source", help="A deliverable (id or post slug), a Section id, or kind:key (unit / work)")
     p_rel.add_argument("target", help="kind:key (artifact / environment / concept), or a deliverable for EXPLAINS")
     p_rel.add_argument("--strength", default="", help="REQUIRES / ASSUMES: required (default) | recommended")
@@ -3690,6 +3702,9 @@ def main() -> int:
                                "Google's own totals, the linked URLs no page holds and the pages no observer targets")
     p_il.add_argument("--holder", default=None, help="One page (node id or unique prefix) in full")
     p_il.add_argument("--top", type=int, default=40, help="Pages listed (default 40; 0 = all)")
+    p_il.add_argument("--standing", default=None,
+                      help="Only pages with this standing: current | archived | removed | retired | unruled | "
+                           "conflict | superseded | pending")
     p_tr = sub.add_parser("traffic",
                           help="Each page's traffic DERIVED across every path it holds or held (design 7f315830), "
                                "per source over the months in range, and the URLs no page holds")
@@ -3697,6 +3712,20 @@ def main() -> int:
     p_tr.add_argument("--until", default=None, help="Last month counted (YYYY-MM)")
     p_tr.add_argument("--holder", default=None, help="One page (node id or unique prefix) in full")
     p_tr.add_argument("--top", type=int, default=40, help="Pages listed (default 40; 0 = all)")
+    p_tr.add_argument("--standing", default=None,
+                      help="Only pages with this standing: current | archived | removed | retired | unruled | "
+                           "conflict | superseded | pending")
+    p_st = sub.add_parser("standing",
+                          help="Each page's STANDING (amendment cbd5f154, 6514869f; READ verb): the ruling (current "
+                               "| archived | removed), retired, unruled, superseded (derived from a public "
+                               "successor's SUPERSEDES), the destination and the relocation worklist, beside each "
+                               "page's traffic, inbound links and claims -- the disposition worklist")
+    p_st.add_argument("--standing", default=None,
+                      help="Only pages with this standing: current | archived | removed | retired | unruled | "
+                           "conflict | superseded | pending")
+    p_st.add_argument("--bare", action="store_true", help="The standings alone (no traffic, links or claims)")
+    p_st.add_argument("--since", default=None, help="The traffic's first month (YYYY-MM; default every month)")
+    p_st.add_argument("--top", type=int, default=0, help="Pages listed (default 0 = all)")
     p_rs = sub.add_parser("retire-source",
                           help="Retire an ARCHIVE source as a fact (journaled; design amendment e916a4b9): "
                                "publish_state retired + where its source lived, so a rebuild restores it "
