@@ -129,6 +129,8 @@ See [the next one](../gone2/) and [another](/posts/keep/#a).
 
 ![](./images/a.png){fig-align="center"}
 
+![The demo](./videos/demo.mp4)
+
 {{< include /_warn.qmd >}}
 
 {{< include /_cta.qmd >}}
@@ -148,6 +150,7 @@ def test_quarto_renders_the_copy():
     assert "[the next one](../gone2/README.md)" in body and "(https://example.com/posts/keep/#a)" in body
     assert "[![Watch on YouTube](https://img.youtube.com/vi/abc_DEF-123/hqdefault.jpg)](https://www.youtube.com/watch?v=abc_DEF-123)" in body
     assert "<iframe" not in body and "./images/a.png" in body and "**Warning:** workers." in body
+    assert "[▶ Video: The demo](./videos/demo.mp4)" in body and "<video" not in body
     assert "Old Post" not in body and "_cta" not in body
 
 

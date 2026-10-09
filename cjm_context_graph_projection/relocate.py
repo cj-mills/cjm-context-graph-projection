@@ -59,6 +59,7 @@ CONFIG_KEYS = ("retired_repo", "retired_dir", "companion_dir", "chrome_includes"
 _INCLUDE = re.compile(r"^[ \t]*\{\{<\s*include\s+(\S+)\s*>\}\}[ \t]*\r?$", re.M)
 _RAW_ATTR = re.compile(r"""\s(href|src)=(["'])(.*?)\2""")   # the Lua filter's attribute rule, mirrored
 _PAGE_EXT = re.compile(r"\.(md|qmd|ipynb)$")
+_VIDEO = re.compile(r"\.(mp4|webm|mov)$", re.I)   # the filter's video rule, mirrored: linked, never embedded
 _INDEX = re.compile(r"(^|/)index\.(md|qmd|ipynb)$")
 _GITHUB = re.compile(r"github\.com[:/]([^/\s]+)/([^/\s#?]+?)(?:\.git)?/?$")
 _BLOB = re.compile(r"^https://github\.com/([^/]+)/([^/]+)/blob/([^/]+)/(.+)/" + re.escape(COPY_FILE) + "$")
@@ -133,10 +134,26 @@ end
 local function image(el)
   local new = map.images[el.src]
   if new then el.src = new end
+  local name = el.src:match("([^/]+)%.[Mm][Pp]4$") or el.src:match("([^/]+)%.[Ww][Ee][Bb][Mm]$")
+      or el.src:match("([^/]+)%.[Mm][Oo][Vv]$")
+  if name then
+    -- GitHub plays a video in its file view, never in a README: the copy links the file
+    local label = pandoc.utils.stringify(el.caption)
+    return pandoc.Link({pandoc.Str("▶ Video: " .. (label ~= "" and label or name))}, el.src)
+  end
   return el
 end
 
-return {{Meta = load}, {RawBlock = raw_block, RawInline = raw_inline, Link = link, Image = image}}
+local function figure(el)
+  -- a captioned video is a figure holding only its link (images run first): unwrap it to a paragraph
+  local blocks = el.content
+  if #blocks == 1 and (blocks[1].t == "Plain" or blocks[1].t == "Para") and #blocks[1].content == 1
+      and blocks[1].content[1].t == "Link" and pandoc.utils.stringify(blocks[1].content[1]):match("^▶ Video: ") then
+    return pandoc.Para(blocks[1].content)
+  end
+end
+
+return {{Meta = load}, {RawBlock = raw_block, RawInline = raw_inline, Link = link, Image = image, Figure = figure}}
 '''
 
 
@@ -372,7 +389,8 @@ def link_map(
     out: Dict[str, Dict[str, str]] = {"links": {}, "images": {}, "raw": {}}
     for kind in ("links", "images", "raw"):
         for t in sorted(targets.get(kind) or ()):
-            new = resolve_target(t, image=(kind == "images"), **ctx)
+            # a video "image" becomes a link to its file (the filter), so it takes a link's target
+            new = resolve_target(t, image=(kind == "images" and not _VIDEO.search(t)), **ctx)
             if new is not None and new != t:
                 out[kind][t] = new
     return out
