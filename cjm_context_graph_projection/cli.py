@@ -1354,8 +1354,9 @@ async def _dispatch(args) -> int:
                 if not args.into:
                     print("error: relocate project needs --into (a clone of the destination)", file=sys.stderr)
                     return 1
+                planned = json.loads(Path(args.planned).read_text(encoding="utf-8")) if args.planned else None
                 res = await project_copies(gx, args.posts, website_root=args.website_root, into=args.into,
-                                           config=rc["config"], journal_path=args.journal_path)
+                                           config=rc["config"], journal_path=args.journal_path, planned=planned)
             else:
                 if not args.journal_path:
                     print("error: relocate land journals every write -- it needs --journal-path", file=sys.stderr)
@@ -3765,6 +3766,9 @@ def main() -> int:
     p_rl.add_argument("action", choices=("project", "land"))
     p_rl.add_argument("posts", nargs="+", help="The pages (slugs or ids)")
     p_rl.add_argument("--into", default=None, help="A local clone of the destination repository")
+    p_rl.add_argument("--planned", default=None,
+                      help="project: a JSON file {slug: owner/name[@branch]} -- the ruled destinations of pages not "
+                           "yet landed, so a copy links theirs directly")
     p_rl.add_argument("--website-root", default=None,
                       help="The website clone (default: the sibling config's website_root)")
     p_rl.add_argument("--actor", default=_DEFAULT_ACTOR)

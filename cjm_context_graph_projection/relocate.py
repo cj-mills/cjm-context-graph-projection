@@ -699,10 +699,13 @@ async def project_copies(
     config: Dict[str, Any],
     journal_path: Optional[str] = None,
     today: Optional[str] = None,        # The retire date of a page not yet retired (ISO; None = today)
+    planned: Optional[Dict[str, str]] = None,  # {slug: owner/name[@branch]} -- ruled destinations of pages not yet landed
     quarto: str = "quarto",
 ) -> Dict[str, Any]:  # {repo, branch, copies: [...], readme, errors}
     """Project each page's copy into the clone (design 3d5ee659 (1)-(4)) and regenerate the
-    README's pointer block over every copy the repository holds. Files only."""
+    README's pointer block over every copy the repository holds. Files only. A page not yet landed
+    whose destination is ruled (`planned`) is linked at its copy directly, so a copy never waits on
+    another's landing to link it; its README entry waits for its own projection."""
     from .comments import load_comments_config
     dest = clone_repo(into)
     if dest.get("error"):
@@ -718,7 +721,7 @@ async def project_copies(
     head = git_head(website_root) or ""
     site_repo = github_repo(_git(website_root, "remote", "get-url", "origin") or "") or ""
     comments_repo = (load_comments_config(website_root, required=("repo",)).get("config") or {}).get("repo") or ""
-    # Every known copy: this run's, and every landed one (its RELOCATED_TO URL)
+    # Every known copy: this run's, every landed one (its RELOCATED_TO URL), every planned one
     known: List[Dict[str, Any]] = []
     for nid, r in rows.items():
         keys = sorted({site_path_key(p) for p in r["paths"]} | {site_path_key("/" + posixpath.dirname(r["rel_path"]))})
@@ -730,6 +733,10 @@ async def project_copies(
                 c = parse_copy_url(url)
                 if c:
                     known.append({"id": nid, "keys": keys, **c})
+            if not r["relocated_to"] and not r["superseded_by"] and r["slug"] in (planned or {}):
+                prepo, _, pbranch = planned[r["slug"]].partition("@")
+                known.append({"id": nid, "keys": keys, "repo": prepo, "branch": pbranch or "main",
+                              "dir": copy_dir(r["slug"], prepo, config), "planned": True})
     copies = []
     today = today or date.today().isoformat()
     for nid in ids:
@@ -796,7 +803,7 @@ async def project_copies(
     if copies:
         held = {c["id"]: c for c in copies}
         for k in known:   # landed copies in this repository keep their place in the block
-            if k["repo"].lower() == repo.lower() and k["id"] not in held and k["id"] in rows:
+            if k["repo"].lower() == repo.lower() and k["id"] not in held and k["id"] in rows and not k.get("planned"):
                 held[k["id"]] = {"dir": k["dir"], "title": rows[k["id"]]["title"], "date": rows[k["id"]]["published"]}
         dedicated = repo.lower() == config["retired_repo"].lower()
         entries = [{"title": c["title"], "path": f"{c['dir']}/{COPY_FILE}", "date": c.get("date") or ""}

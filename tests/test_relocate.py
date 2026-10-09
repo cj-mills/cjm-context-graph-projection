@@ -229,6 +229,17 @@ def test_project_land_redirect_and_rebuild(tmp_path):
     assert "[old](../old/README.md)" in (clone / "posts" / "gone2" / "README.md").read_text()
     readme = (clone / "README.md").read_text()
     assert readme.startswith("# Retired posts\n") and "[Old Post](posts/old/README.md) (2021-03-04)" in readme
+    # a planned destination: a page not yet landed is linked at its copy, and stays out of the block
+    second = tmp_path / "second"
+    second.mkdir()
+    _git(second, "init", "-q", "-b", "main")
+    _git(second, "remote", "add", "origin", "https://github.com/o/Second.git")
+    (tmp_path / "planned.json").write_text(json.dumps({"old": "o/retired-posts", "gone2": "o/Second"}))
+    r = _run(*base, "relocate", "project", "gone2", "--into", str(second), "--planned", str(tmp_path / "planned.json"))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "[old](https://github.com/o/retired-posts/blob/main/posts/old/README.md)" in (
+        second / "retired-post" / "gone2" / "README.md").read_text()
+    assert "Old Post" not in (second / "README.md").read_text()
 
     def fetch(missing=()):
         def go(url):
