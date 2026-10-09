@@ -1332,6 +1332,41 @@ async def _dispatch(args) -> int:
             res = await claims_report(gx, public=args.public)
             print(render("claims", res, args.format))
             return 0 if res.get("ok") else 1
+        elif args.command in ("relocation-plan", "relocate"):
+            # The relocation (design 3d5ee659): the plan is a read; `relocate project` writes the
+            # copies into a clone and journals nothing; `relocate land` journals each retirement and
+            # each copy right after its write, once the copy on GitHub equals the clone's.
+            from .relocate import land_relocations, project_copies, relocation_config, relocation_plan
+            if not args.website_root:
+                print(f"error: {args.command} needs --website-root (or `website_root` in the "
+                      "graph-sibling graph.config.json)", file=sys.stderr)
+                return 1
+            rc = relocation_config(load_graph_config(args.graph_db_path) or {})
+            if rc["errors"]:
+                print("error: " + "; ".join(rc["errors"]) + " (the graph-sibling graph.config.json)", file=sys.stderr)
+                return 1
+            if args.command == "relocation-plan":
+                res = await relocation_plan(gx, website_root=args.website_root, config=rc["config"],
+                                            journal_path=args.journal_path)
+                print(render("relocation-plan", res, args.format))
+                return 1 if res["errors"] else 0
+            if args.action == "project":
+                if not args.into:
+                    print("error: relocate project needs --into (a clone of the destination)", file=sys.stderr)
+                    return 1
+                res = await project_copies(gx, args.posts, website_root=args.website_root, into=args.into,
+                                           config=rc["config"], journal_path=args.journal_path)
+            else:
+                if not args.journal_path:
+                    print("error: relocate land journals every write -- it needs --journal-path", file=sys.stderr)
+                    return 1
+                res = await land_relocations(gx, args.posts, website_root=args.website_root, config=rc["config"],
+                                             into=args.into, journal_path=args.journal_path,
+                                             journal=lambda verb, op: append_write(args.journal_path, verb, op),
+                                             actor=args.actor)
+            res["action"] = args.action
+            print(render("relocate", res, args.format))
+            return 1 if res.get("errors") else 0
         elif args.command == "standing":
             # Each page's standing (amendment cbd5f154, 6514869f) -- the disposition worklist as a
             # read: derived, nothing stored.
@@ -3715,6 +3750,24 @@ def main() -> int:
     p_tr.add_argument("--standing", default=None,
                       help="Only pages with this standing: current | archived | removed | retired | unruled | "
                            "conflict | superseded | pending")
+    p_rlp = sub.add_parser("relocation-plan",
+                          help="The relocation worklist (design 3d5ee659 (6)): every page pending relocation with "
+                               "the repository its own links name (one per series, the canonical name read from "
+                               "GitHub through gh), its copy's place, and every page already relocated")
+    p_rlp.add_argument("--website-root", default=None,
+                      help="The website clone (default: the sibling config's website_root)")
+    p_rl = sub.add_parser("relocate",
+                          help="Relocate removed pages (design 3d5ee659): `project` writes each page's repo copy "
+                               "(Quarto's gfm writer + the link map) and the README's pointer block into a local "
+                               "clone -- files only; `land` reads each pushed copy back from GitHub, and when it "
+                               "equals the clone's, journals the retirement and the RELOCATED_TO edge (a page a "
+                               "public successor supersedes retires to it, no copy)")
+    p_rl.add_argument("action", choices=("project", "land"))
+    p_rl.add_argument("posts", nargs="+", help="The pages (slugs or ids)")
+    p_rl.add_argument("--into", default=None, help="A local clone of the destination repository")
+    p_rl.add_argument("--website-root", default=None,
+                      help="The website clone (default: the sibling config's website_root)")
+    p_rl.add_argument("--actor", default=_DEFAULT_ACTOR)
     p_st = sub.add_parser("standing",
                           help="Each page's STANDING (amendment cbd5f154, 6514869f; READ verb): the ruling (current "
                                "| archived | removed), retired, unruled, superseded (derived from a public "

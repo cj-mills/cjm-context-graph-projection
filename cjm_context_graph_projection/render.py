@@ -370,6 +370,45 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         return (f"**{'re-verified' if obj.get('replaced') else 'verified'}** `{str(obj['deliverable_id'])[:8]}` "
                 f"on `{obj.get('hardware')}` · os {obj.get('os') or 'unknown'} · {obj.get('date')} · "
                 f"basis {obj.get('basis')} `{obj['edge_id']}`")
+    if kind == "relocation-plan":   # design 3d5ee659 (6): the worklist with each page's copy
+        lines = ["## Relocation plan — " + " · ".join(f"{k} {v}" for k, v in sorted(obj["counts"].items()))]
+        groups: dict = {}
+        for r in obj["rows"]:
+            groups.setdefault("relocated" if r["relocated_to"] else r.get("destination") or "—", []).append(r)
+        for dest in sorted(groups):
+            lines += ["", f"### {dest} ({len(groups[dest])})"]
+            for r in groups[dest]:
+                bits = [f"`{r['slug']}`"]
+                if r["relocated_to"]:
+                    bits.append("→ " + ", ".join(r["relocated_to"]))
+                elif r.get("copy_dir"):
+                    bits.append(f"→ {r['copy_dir']}")
+                if r.get("successor"):
+                    bits.append("successor " + ", ".join(r["successor"]))
+                links = ", ".join(f"{k.split('/')[-1]}×{v}" for k, v in (r.get("counts") or {}).items())
+                if links:
+                    bits.append(f"links {links}")
+                lines.append("- " + " · ".join(bits))
+        lines += [f"⚠ `{e.get('slug')}` {e['why']}" for e in obj.get("errors") or []]
+        return "\n".join(lines)
+    if kind == "relocate":   # design 3d5ee659 (6): a project run's copies, or a land run's retirements
+        lines = []
+        if obj.get("action") == "project":
+            if obj.get("repo"):
+                lines.append(f"## Projected into {obj['repo']}@{obj['branch']} — {len(obj['copies'])} copy(ies)")
+            for c in obj.get("copies") or []:
+                lines.append(f"- `{c['slug']}` → {c['dir']}/README.md · {c['files']} file(s) · {c['links']} link(s) "
+                             "mapped" + (f" · chrome dropped: {', '.join(c['dropped'])}" if c["dropped"] else ""))
+            if obj.get("readme"):
+                rd = obj["readme"]
+                lines.append(f"README: {'created' if rd['created'] else 'block regenerated'} · {rd['entries']} entry(ies)")
+        else:
+            lines.append(f"## Landed {len(obj.get('landed') or [])}")
+            lines += [f"- `{x['slug']}` retired → {x['to']}"
+                      + (f" · its source leaves the website clone: `git rm -r {x['source']}`" if x.get("source") else "")
+                      for x in obj.get("landed") or []]
+        lines += [f"⚠ {('`' + e['ref'] + '` ') if e.get('ref') else ''}{e['why']}" for e in obj.get("errors") or []]
+        return "\n".join(lines)
     if kind == "retire-source":
         if obj.get("error"):
             return f"⚠ {obj['error']}"

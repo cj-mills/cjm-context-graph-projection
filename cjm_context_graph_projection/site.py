@@ -10,7 +10,8 @@ plus the review affordances. The build owns the pipeline and Quarto is one stage
    STYLED_BY (`sitetheme`, design 0858bbd0);
 2. `quarto render --profile <p>`, then every projected page checked for its rendered page;
 3. the REDIRECT PROJECTION — a page's public path is a fact with history (ruling 96aff70e):
-   every superseded `site_path` gets a redirect page to its page's active path, written into
+   every superseded `site_path` gets a redirect page to its page's active path (a RETIRED
+   page's every path, to its successor or its repo copy -- design 3d5ee659 (7)), written into
    the output byte-identical to Quarto's own alias page. Quarto cannot be handed per-page
    aliases without editing the page's front matter (the source-identity DoD) or leaking
    directory metadata onto nested posts, so the build writes them itself; the front-matter
@@ -93,9 +94,11 @@ async def redirect_plan(
     """The redirect projection from the `site_path` facts: one stub per superseded path, to
     its page's ACTIVE path. A value belongs to the page its supersession chain ends at
     (`archive.path_owners`): the page's own prior paths, and every path TRANSFERRED to it
-    from another holder (design amendment e916a4b9 (4)). A page with no single active path, a
-    value reaching two pages, or two superseded paths landing on one stub, is an error row —
-    the build refuses, never guesses."""
+    from another holder (design amendment e916a4b9 (4)). A RETIRED page that still holds its
+    path redirects from every path it held to its DESTINATION (design 3d5ee659 (7)): its public
+    successor's page, else its repo copy's URL. A page with no single active path, a value
+    reaching two pages, two superseded paths landing on one stub, or a retired page holding a
+    path with no single destination, is an error row — the build refuses, never guesses."""
     assertions = await F.load_label_where(
         gx, DevNodeKinds.ASSERTION, [PropertyPredicate("predicate", "eq", P.SITE_PATH)])
     supers = await F.load_supersedes(gx) if assertions else []
@@ -119,11 +122,32 @@ async def redirect_plan(
         prior = sorted({str(F.prop(a, "value") or "") for a in group
                         if F.nid(a) not in standing_ids} - {active})
         pages[subject] = {"active": active, "superseded": prior}
-        target = output_href(active)
-        for alias in prior:
+    away: Dict[str, Dict[str, str]] = {}   # {retired page: {page: successor} | {url: repo copy}}
+    from .purenotes import note_publish_states
+    states = await note_publish_states(gx) if pages else {}
+    retired = sorted(s for s in pages if P.PUBLISH_RETIRED in (states.get(s) or []))
+    if retired:
+        from .standing import load_standing
+        rows = (await load_standing(gx))["by_id"]
+        for s in retired:
+            d = (rows.get(s) or {}).get("destination") or {}
+            to = d.get("to") or []
+            if d.get("kind") == "successor" and len(to) == 1 and to[0]["id"] in pages:
+                away[s] = {"page": to[0]["id"]}
+            elif d.get("kind") == "repo" and len(to) == 1:
+                away[s] = {"url": to[0]}
+            else:
+                errors.append({"kind": "retired-destination", "subject": s, "active": pages[s]["active"],
+                               "why": "a retired page holding a path needs one destination -- its public "
+                                      "successor's page or its repo copy (design 3d5ee659 (7))"})
+    for subject, page in sorted(pages.items()):
+        dest = away.get(subject)
+        target = output_href(pages[dest["page"]]["active"] if dest and dest.get("page") else page["active"])
+        for alias in page["superseded"] + ([page["active"]] if dest else []):
             stub = output_href(alias)
             stubs.append({"stub": stub, "alias": alias, "subject": subject,
-                          "target": posixpath.relpath(target, posixpath.dirname(stub) or ".")})
+                          "target": dest["url"] if dest and dest.get("url")
+                          else posixpath.relpath(target, posixpath.dirname(stub) or ".")})
     seen: Dict[str, str] = {}
     for s in stubs:
         if s["stub"] in seen and seen[s["stub"]] != s["subject"]:

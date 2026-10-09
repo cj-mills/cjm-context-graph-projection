@@ -95,6 +95,8 @@ M3_BASELINE_ACTOR = "import:m3-baseline"
 # Collection Reference's place in its work (PART_OF its unit or work), or its retraction.
 # `relate` = one path-model relation (design ae698640 (5): PRODUCES / REQUIRES / TEACHES / ASSUMES /
 # COVERS / EXPLAINS) between resolved node ids with its strength and note, or its retraction.
+# `relocate` = a removed page's repo copy (design 3d5ee659 (6)): its web Reference with what the
+# land check read, and the page's RELOCATED_TO edge to it.
 JOURNAL_VERBS = ("decide", "alias", "assert", "link", "unlink", "section", "new-note",
                  "add-section", "display-rule", "set-lens", "check", "session",
                  "retract-session", "pull-transcript", "mint-messages", "edit-message",
@@ -104,7 +106,7 @@ JOURNAL_VERBS = ("decide", "alias", "assert", "link", "unlink", "section", "new-
                  "series", "series-members", "place-in-series", "entity", "verified-on",
                  "supports", "retire-source", "transfer-path", "judge-related", "judge-facets", "review-facets",
                  "harvest-discussions", "ingest-evidence",
-                 "derived-from", "work-member", "relate")
+                 "derived-from", "work-member", "relate", "relocate")
 
 
 def m3_baseline_import(
@@ -475,6 +477,13 @@ async def _apply_op(
         from .archive import retire_source
         await retire_source(gx, a["note"], reason=a.get("reason", ""), successor=a.get("successor"),
                             commit=a["commit"], rel_path=a["path"], actor=a.get("actor", "agent:session"))
+    elif verb == "relocate":
+        # A removed page's repo copy (design 3d5ee659 (6)): the copy as the land check read it
+        # rides the op, so replay re-mints the same Reference and edge without asking GitHub.
+        from .relocate import apply_relocation
+        await apply_relocation(gx, a["note"], a["url"], observed_hash=a.get("observed_hash", ""),
+                               observed_at=a.get("observed_at"), title=a.get("title", ""),
+                               actor=a.get("actor", "agent:session"))
     elif verb == "transfer-path":
         # A page's active path moved to another holder (e916a4b9 (4)): the same cross-slot
         # supersession, re-landed in append order.
