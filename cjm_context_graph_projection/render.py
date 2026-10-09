@@ -462,6 +462,8 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         return "\n".join(lines)
     if kind == "harvest-discussions":
         return _render_harvest(obj)
+    if kind in ("import-export", "inbound-links") or (kind == "ingest-evidence" and obj.get("kind") == "links"):
+        return _render_inbound(kind, obj)
     if kind in ("pull-evidence", "ingest-evidence", "traffic", "evidence-timer"):
         return _render_evidence(kind, obj)
     if kind == "judge-facets":
@@ -1585,6 +1587,8 @@ def _render_evidence(kind: str, obj: Dict[str, Any]) -> str:
                 lines.append(f"⚠ {p['error']}")
             elif p.get("skipped"):
                 lines.append(f"**skipped** `{p['key']}` · {p['skipped']}")
+            elif not p.get("window"):   # a links pull (ruling a3c02fb1): pages, not a window of days
+                lines.append(f"**pulled** `{p['key']}` · {len(p['files'])} file(s), {p.get('pages', 0)} page table(s) / fetch(es)")
             else:
                 rows = sum(int(f.get("rows") or 0) for f in p.get("files") or [])
                 lines.append(f"**pulled** `{p['key']}` · {p['window'][0]} → {p['window'][1]} · "
@@ -1647,6 +1651,76 @@ def _render_evidence(kind: str, obj: Dict[str, Any]) -> str:
                          f" · GSC {(u.get('search_console') or {}).get('impressions', '–')} impressions")
     for a in obj.get("ambiguous") or []:
         lines.append(f"- ⚠ `{a['key']}` held by {len(a['holders'])} pages: " + ", ".join(x[:8] for x in a["holders"]))
+    return "\n".join(lines)
+
+
+def _render_inbound(kind: str, obj: Dict[str, Any]) -> str:
+    """The inbound links (ruling a3c02fb1): an export's import, a links ingest, the inbound-links read."""
+    if obj.get("error"):
+        return f"⚠ {obj['error']}"
+    if kind == "import-export":
+        return (f"**imported** `{obj['key']}` · {len(obj['files'])} file(s) incl. the envelope"
+                + (" · originals removed" if obj.get("moved") else " · originals kept")
+                + "\nnext, in a session: `ingest-evidence` (registers the snapshot and what it lists)")
+    if kind == "ingest-evidence":
+        r = obj.get("report") or {}
+        lines = [f"**{'ingested' if obj.get('written') else 'would ingest'}** `{obj['snapshot']}` · "
+                 f"{obj['references']} linking page(s) · {obj['edges']} inbound edge(s) · "
+                 f"{obj['observations']} observation(s) · {obj['counts']} Google total(s)"]
+        ap = obj.get("applied")
+        if ap:
+            lines.append(f"  new: {ap['observations']} observation(s), {ap['counts']} total(s) · "
+                         f"{ap['refreshed']} page(s) re-observed · nodes +{ap['nodes_added']} · edges +{ap['edges_added']}")
+        if r.get("outcomes"):
+            lines.append("  fetch: " + ", ".join(f"{k} {v}" for k, v in sorted(r["outcomes"].items()))
+                         + f" · {r.get('linking', 0)} page(s) still link the site · "
+                         f"{r.get('mentioned_unlinked', 0)} carry it with no parsed link")
+        for m in r.get("mismatches") or []:
+            lines.append(f"  ⚠ {m.get('target')}" + (f" / {m['site']}: {m['truncated']}" if m.get("truncated") else
+                         f" / {m['site']}: the page totals {m['total']} link(s), the sites table "
+                         f"{m['site_links']}" if "site_links" in m else
+                         f" / {m['site']}: {m['rows']} linking pages for {m['total']} link(s)" if "rows" in m else
+                         f": {m['missing']}" if m.get("missing") else
+                         f": Google says {m['links']} links from {m['sites']} sites; the sites table sums "
+                         f"{m['sites_summed']} from {m['sites_listed']}"))
+        if r.get("unkeyed"):
+            lines.append(f"  not the site's URL(s): {len(r['unkeyed'])}")
+        return "\n".join(lines)
+    top = obj.get("top") or 0
+    holders = obj.get("holders") or []
+    ob = obj.get("observers") or {}
+    lines = [f"## Inbound links · {ob.get('references', 0)} linking page(s) · {ob.get('edges', 0)} observation edge(s)"
+             + (" · fetch " + ", ".join(f"{k} {v}" for k, v in sorted(ob["fetch_outcomes"].items()))
+                if ob.get("fetch_outcomes") else ""), "",
+             "_per page: linking pages (their hosts) · Google's own link total (a page may link more than once) · "
+             "pages the verify fetch saw linking_", ""]
+    for h in holders[:top] if top else holders:
+        lines.append(f"- **{h['title'] or h['path']}** `{h['id'][:8]}` — {len(h['pages'])} page(s) on "
+                     f"{len(h['sites'])} host(s) · Google {h['google_links'] if h['google_links'] is not None else '–'} link(s)"
+                     f" · fetched {h['verified']}" + (f" · {len(h['paths'])} paths" if len(h["paths"]) > 1 else ""))
+        if len(holders) == 1 or (top and top <= 5):
+            for p in h["pages"]:
+                f = p.get("fetch") or {}
+                seen = ("fetch ✓" if p.get("fetched") else f"fetch {f.get('outcome')} ({f.get('reason') or f.get('status')})"
+                        if f else "not fetched")
+                lines.append(f"  - {p['url']} · Google {p.get('google') or '–'} · {seen}"
+                             + (f" · “{p['anchors'][0]}”" if p.get("anchors") else ""))
+    if top and len(holders) > top:
+        lines.append(f"- … {len(holders) - top} more page(s) (`--top 0` lists all)")
+    un = obj.get("unresolved") or []
+    if un:
+        lines += ["", f"**Linked URLs held by no page** ({len(un)}):"]
+        lines += [f"- `{u['key']}` ← {len(u['pages'])} page(s)" for u in un]
+    for a in obj.get("ambiguous") or []:
+        lines.append(f"- ⚠ `{a['key']}` held by {len(a['holders'])} pages: " + ", ".join(x[:8] for x in a["holders"]))
+    ut = obj.get("untargeted") or []
+    if ut:
+        lines += ["", f"**Linking pages no observer has targeted** ({len(ut)}) — listed by an export only, or the fetch found no link:"]
+        for u in ut[:top] if top else ut:
+            f = u.get("fetch") or {}
+            lines.append(f"- {u['url']}" + (f" · fetch {f.get('outcome')} ({f.get('reason') or f.get('status')})" if f else ""))
+        if top and len(ut) > top:
+            lines.append(f"- … {len(ut) - top} more")
     return "\n".join(lines)
 
 

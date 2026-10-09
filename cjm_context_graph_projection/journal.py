@@ -734,6 +734,10 @@ def touched_node_ids(
         if (run.get("snapshot") or {}).get("key"):
             out.append(snapshot_id(run["snapshot"]["key"]))
         out.extend(sorted({web_path_id(m["key"]) for m in run.get("measures") or []}))
+        if run.get("kind") == "links":   # a links run (ruling a3c02fb1): its web_paths and linking pages
+            from cjm_dev_graph_schema.identity import reference_node_id
+            out.extend(sorted({web_path_id(x["key"]) for x in (run.get("edges") or []) + (run.get("counts") or [])}))
+            out.extend(sorted({reference_node_id("web", r["url"]) for r in run.get("references") or []}))
     elif verb == "retire-source":
         out.extend(r for r in (a.get("note"), a.get("successor")) if r)
     elif verb == "transfer-path":

@@ -105,9 +105,10 @@ def write_snapshot(
     source: str,                          # A TRAFFIC_SOURCES entry (the directory under the root)
     pulled: str,                          # The pull date ('YYYY-MM-DD'; the snapshot's directory)
     envelopes: Dict[str, Dict[str, Any]],  # {file name: envelope}
+    blobs: Optional[Dict[str, bytes]] = None,   # {file name: bytes} kept verbatim beside the envelopes (a fetched body, a hand export)
 ) -> Dict[str, Any]:  # The manifest written
     """Write one snapshot's raw files and its manifest; an existing snapshot refuses (a pull never
-    overwrites the source it is)."""
+    overwrites the source it is). Envelopes are JSON; blobs are written byte for byte."""
     out = Path(root) / source / pulled
     if out.exists():
         raise FileExistsError(f"snapshot {source}/{pulled} already exists at {out}")
@@ -118,6 +119,9 @@ def write_snapshot(
         (out / name).write_bytes(blob)
         files.append({"file": name, "sha256": hashlib.sha256(blob).hexdigest(), "rows": env.get("row_count"),
                       "shape": env.get("shape"), "window": env.get("window")})
+    for name, blob in sorted((blobs or {}).items()):
+        (out / name).write_bytes(blob)
+        files.append({"file": name, "sha256": hashlib.sha256(blob).hexdigest()})
     manifest = {"snapshot": pulled, "source": source, "files": files}
     (out / MANIFEST).write_text(json.dumps(manifest, indent=1))
     return manifest
@@ -126,18 +130,19 @@ def write_snapshot(
 def read_snapshot(
     root: str,   # The evidence root
     key: str,    # '<source>/<pull date>'
-) -> Dict[str, Any]:  # {key, source, pulled_at, window, files, envelopes} or {error}
+) -> Dict[str, Any]:  # {key, source, pulled_at, window, files, envelopes, blobs} or {error}
     """Read one snapshot, every file checked against its manifest hash; any mismatch, missing file
-    or unknown source refuses the whole snapshot."""
+    or unknown source refuses the whole snapshot. A `.json` file is an envelope, read; any other
+    file is a blob, named by its path (its hash already checked)."""
     source, _, pulled = key.partition("/")
-    if source not in P.TRAFFIC_SOURCES or not pulled:
-        return {"error": f"a snapshot key is '<source>/<pull date>' with a source in {P.TRAFFIC_SOURCES}: {key!r}"}
+    if source not in P.EVIDENCE_SOURCES or not pulled:
+        return {"error": f"a snapshot key is '<source>/<pull date>' with a source in {P.EVIDENCE_SOURCES}: {key!r}"}
     d = Path(root) / key
     try:
         manifest = json.loads((d / MANIFEST).read_text())
     except (OSError, ValueError) as e:
         return {"error": f"snapshot {key}: no readable manifest ({e})"}
-    envelopes, files = {}, []
+    envelopes, files, blobs = {}, [], {}
     for f in manifest.get("files") or []:
         try:
             blob = (d / f["file"]).read_bytes()
@@ -146,13 +151,16 @@ def read_snapshot(
         digest = hashlib.sha256(blob).hexdigest()
         if digest != f.get("sha256"):
             return {"error": f"snapshot {key}: {f['file']} does not match its manifest hash"}
-        envelopes[f["file"]] = json.loads(blob)
+        if f["file"].endswith(".json"):
+            envelopes[f["file"]] = json.loads(blob)
+        else:
+            blobs[f["file"]] = str(d / f["file"])
         files.append({"file": f["file"], "sha256": digest})
     if not envelopes:
-        return {"error": f"snapshot {key}: the manifest lists no files"}
+        return {"error": f"snapshot {key}: the manifest lists no envelope"}
     windows = [e["window"] for e in envelopes.values() if e.get("window")]
-    return {"key": key, "source": source, "files": files, "envelopes": envelopes,
-            "pulled_at": min(str(e.get("pulled_at") or "") for e in envelopes.values()),
+    return {"key": key, "source": source, "files": files, "envelopes": envelopes, "blobs": blobs,
+            "pulled_at": min(str(e.get("pulled_at") or "") for e in envelopes.values() if e.get("pulled_at")),
             "window": [min(w[0] for w in windows), max(w[1] for w in windows)] if windows else None}
 
 
@@ -288,6 +296,7 @@ def pull_evidence(
     last: Optional[str] = None,    # 'YYYY-MM-DD' (default: today)
     today: Optional[dt.date] = None,
     ask: Optional[Callable] = None,
+    headed: bool = False,          # search-console-links only: show the browser window (to sign in)
 ) -> Dict[str, Any]:  # {key, files, window} or {error}
     """Pull one source into a new snapshot. By default it starts where the snapshots on disk end,
     re-reading a few days (Cloudflare holds a fresh day at full resolution for about a week;
@@ -295,9 +304,12 @@ def pull_evidence(
     A source already pulled today is skipped without asking it (a snapshot is never overwritten,
     and the timer's retry after a failed sibling source must not fail on the one that landed)."""
     today = today or dt.date.today()
+    if source in P.LINK_SOURCES:   # the inbound links (ruling a3c02fb1): a browser's drill-downs, the verify fetch
+        from .inbound import pull_links
+        return pull_links(conf, source, today=today, headed=headed)
     overlap = {"cloudflare": 1, "search-console": 4}.get(source)
     if overlap is None:
-        return {"error": f"unknown evidence source {source!r} (one of {P.TRAFFIC_SOURCES})"}
+        return {"error": f"unknown evidence source {source!r} (one of {P.TRAFFIC_SOURCES + P.LINK_SOURCES})"}
     sub = conf.get({"cloudflare": "cloudflare", "search-console": "search_console"}[source]) or {}
     if not sub:
         return {"error": f"evidence.{'search_console' if source == 'search-console' else source} is not configured"}
@@ -632,7 +644,11 @@ async def apply_evidence(
     """Land one run in ONE batch: the snapshot node, every web_path the run names, each measure's
     slot and Assertion with its EVIDENCED_BY edges, and the SUPERSEDES edge to each prior value of
     its window (resolved on the slot by value, so replay resolves it the same). Live and replay
-    share it; the Assertions are dated by the op's time."""
+    share it; the Assertions are dated by the op's time. A links run (ruling a3c02fb1) is
+    `inbound.apply_links`'."""
+    if run.get("kind") == "links":
+        from .inbound import apply_links
+        return await apply_links(gx, run, actor=actor)
     have = await _standing(gx)
     by_value = {(str(F.prop(a, "subject_id")), P.canonical_value(P.TRAFFIC, str(F.prop(a, "value")))): str(F.nid(a))
                 for a in have["rows"]}
@@ -699,11 +715,12 @@ def pending_snapshots(
     ingested: Iterable[str],  # The snapshot keys already on the graph
 ) -> List[str]:  # '<source>/<pull date>' keys on disk and not on the graph, each source in pull order
     """What the next ingest reads (ruling 56c17a80: the timer pulls, a session ingests every
-    snapshot written since the last one): each snapshot directory with a manifest under a traffic
-    source that no evidence_snapshot node holds."""
+    snapshot written since the last one): each snapshot directory with a manifest under an
+    evidence source that no evidence_snapshot node holds -- the exports first, then the traffic,
+    then the links (the fetch after the drill-downs it verifies)."""
     have = set(ingested)
     out = []
-    for source in P.TRAFFIC_SOURCES:
+    for source in P.EVIDENCE_SOURCES:
         d = Path(root) / source
         for m in sorted(d.glob(f"*/{MANIFEST}")) if d.exists() else []:
             key = f"{source}/{m.parent.name}"
@@ -726,6 +743,9 @@ async def ingest_evidence(
     snap = read_snapshot(conf["root"], key)
     if snap.get("error"):
         return {"error": snap["error"], "written": False}
+    if snap["source"] not in P.TRAFFIC_SOURCES:   # an export or a links snapshot (ruling a3c02fb1)
+        from .inbound import ingest_links
+        return await ingest_links(gx, conf, snap, dry_run=dry_run, actor=actor)
     keys = sorted({k for k in await ingested_snapshots(gx) if k.startswith(snap["source"] + "/")} | {key})
     snaps = []
     for k in keys:

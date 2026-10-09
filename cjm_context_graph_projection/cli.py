@@ -392,10 +392,10 @@ async def _dispatch(args) -> int:
                                  manifests_dir=args.manifests_dir)
         print(render_rebuild_diff(res, args.format))
         return 0 if res["clean"] else 3
-    if args.command in ("pull-evidence", "evidence-timer"):
+    if args.command in ("pull-evidence", "evidence-timer", "import-export"):
         # Files only (ruling 56c17a80): a pull asks the sources and writes snapshots, the timer
-        # verb writes systemd units -- neither opens the graph, so an unattended run never holds
-        # the db a session may be writing.
+        # verb writes systemd units, an import moves hand exports into a snapshot (a3c02fb1 (4))
+        # -- none opens the graph, so an unattended run never holds the db a session may be writing.
         from .evidence import evidence_config, evidence_timer, pull_evidence
         ev = evidence_config(load_graph_config(args.graph_db_path))
         if ev["errors"]:
@@ -405,7 +405,13 @@ async def _dispatch(args) -> int:
             res = evidence_timer(ev["config"], args.action, db_path=args.graph_db_path)
             print(render("evidence-timer", res, args.format))
             return 1 if res.get("error") else 0
-        pulls = [pull_evidence(ev["config"], s, first=args.first, last=args.last) for s in args.source]
+        if args.command == "import-export":
+            from .inbound import import_export
+            res = import_export(ev["config"], args.source, args.files, date=args.date, keep=args.keep)
+            print(render("import-export", res, args.format))
+            return 1 if res.get("error") else 0
+        pulls = [pull_evidence(ev["config"], s, first=args.first, last=args.last, headed=args.headed)
+                 for s in args.source]
         print(render("pull-evidence", {"pulls": pulls}, args.format))
         return 1 if any(p.get("error") for p in pulls) else 0
     # One live write window per invocation (design amendment 9ee4e346): the site-link step
@@ -1272,6 +1278,14 @@ async def _dispatch(args) -> int:
                 if res.get("error"):
                     return 1
             return 0
+        elif args.command == "inbound-links":
+            # The inbound links (ruling a3c02fb1): each page's linking pages, derived through the
+            # path ownership, with what each observer last saw.
+            from .inbound import inbound_report
+            res = await inbound_report(gx, holder=args.holder)
+            res["top"] = args.top
+            print(render("inbound-links", res, args.format))
+            return 1 if res.get("error") else 0
         elif args.command == "traffic":
             from .evidence import traffic_report
             res = await traffic_report(gx, since=args.since, until=args.until, holder=args.holder)
@@ -3639,7 +3653,12 @@ def main() -> int:
                                "root (design 7f315830; files only, never the graph -- it does not open the db): "
                                "by default from where the snapshots on disk end, re-reading the overlap; a "
                                "source already pulled today is skipped")
-    p_pe.add_argument("source", nargs="+", choices=["cloudflare", "search-console"])
+    p_pe.add_argument("source", nargs="+", choices=["cloudflare", "search-console", "search-console-links", "links-fetch"],
+                      help="search-console-links reads the Links drill-downs through the signed-in browser profile "
+                           "(evidence.search_console.browser_profile); links-fetch fetches every linking page the "
+                           "latest drill-downs and Links export name (robots.txt honored; ruling a3c02fb1)")
+    p_pe.add_argument("--headed", action="store_true",
+                      help="search-console-links: show the browser window (sign in there when asked)")
     p_pe.add_argument("--first", default=None, help="First day pulled (YYYY-MM-DD)")
     p_pe.add_argument("--last", default=None, help="Last day pulled (YYYY-MM-DD; default today)")
     p_et = sub.add_parser("evidence-timer",
@@ -3658,6 +3677,19 @@ def main() -> int:
                       help="Report what would land; write nothing (each pending snapshot planned against the "
                            "graph as it stands, without the ones before it)")
     p_ie.add_argument("--actor", default=_DEFAULT_ACTOR)
+    p_ix = sub.add_parser("import-export",
+                          help="Keep hand exports as a dated evidence snapshot (ruling a3c02fb1 (4); files only): "
+                               "copied byte for byte with an envelope and a manifest, then the originals removed")
+    p_ix.add_argument("source", choices=["search-console-export", "cloudflare-export"])
+    p_ix.add_argument("files", nargs="+", help="The exported files (CSVs, zips, PDFs) as downloaded")
+    p_ix.add_argument("--date", default=None, help="The export date (YYYY-MM-DD; default: the files' latest modification day)")
+    p_ix.add_argument("--keep", action="store_true", help="Leave the originals in place")
+    p_il = sub.add_parser("inbound-links",
+                          help="Each page's inbound links DERIVED across every path it holds or held (ruling a3c02fb1): "
+                               "the linking pages by site, what Google's report and the verify fetch last saw, "
+                               "Google's own totals, the linked URLs no page holds and the pages no observer targets")
+    p_il.add_argument("--holder", default=None, help="One page (node id or unique prefix) in full")
+    p_il.add_argument("--top", type=int, default=40, help="Pages listed (default 40; 0 = all)")
     p_tr = sub.add_parser("traffic",
                           help="Each page's traffic DERIVED across every path it holds or held (design 7f315830), "
                                "per source over the months in range, and the URLs no page holds")
