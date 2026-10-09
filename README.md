@@ -27,6 +27,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - **`cjm_context_graph_projection.derivedblocks`** — Derived blocks leave the RENDER; the post navigation replaces them (design 253ac996, amendment
 - **`cjm_context_graph_projection.devgraph`** — Build the dev graph's nodes + edges from its sources (the dev-graph DRIVER).
 - **`cjm_context_graph_projection.display`** — Graph-carried display rules: the presentation vocabulary (DEC `16bcd96e`).
+- **`cjm_context_graph_projection.evidence`** — The evidence (design 7f315830; build fbf7fc0e): traffic as dated, sourced observations on a URL
 - **`cjm_context_graph_projection.explorer_page`** — The graph EXPLORER client page — the first client of the `serve` data API.
 - **`cjm_context_graph_projection.facetjudge`** — The facet judge (design eefda2dd under the category model 0f7fcdcb and amendment 3c5cff97).
 - **`cjm_context_graph_projection.facetreview`** — The facet review and the public build's facet gate (design eefda2dd (5), (7)).
@@ -35,6 +36,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - **`cjm_context_graph_projection.gitfold`** — Ingested sources' times from git history (design amendment 19edbe97 to 8f6f2343; leg C 7ddcea72).
 - **`cjm_context_graph_projection.homepage`** — The HOME PAGE: a projected map of the site under its role and what it holds (design e55201e2,
 - **`cjm_context_graph_projection.hybrid_page`** — The HYBRID graph explorer client — GPU physics canvas + DOM overlay (check-in 1233ab46).
+- **`cjm_context_graph_projection.inbound`** — The inbound links (design 7f315830 (6), ruling a3c02fb1): who links the site, observed twice --
 - **`cjm_context_graph_projection.journal`** — The write journal: the durable, replayable source of truth for born-on-graph writes.
 - **`cjm_context_graph_projection.judgeengine`** — The judge verb family's shared engine (design eefda2dd (8), capture e0b6f945 condition 1).
 - **`cjm_context_graph_projection.judging`** — Judged related posts (design e09e262b, answering ruling 98d33f9e (1); the spike 245fb5b3).
@@ -294,6 +296,28 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `parse_template` _function_ — Parse a display template into literal / property / edge parts.
 - `set_display_rule` _function_ — Author/update the graph-carried DisplayRule for a kind (presentation vocabulary).
 
+### `cjm_context_graph_projection.evidence`
+
+- `apply_evidence` _function_ — Land one run in ONE batch: the snapshot node, every web_path the run names, each measure's
+- `cloudflare_measures` _function_ — Each day from the snapshot holding its best reading: a COMPLETE reading (taken after the UTC
+- `evidence_config` _function_ — The `evidence` block of the graph-sibling config: the evidence root, the site's host, each
+- `evidence_timer` _function_ — Install, report or remove the pull-only timer. The units are GENERATED here from the config
+- `ingest_evidence` _function_ — Ingest one snapshot: its source's months are recomputed over every snapshot of that source
+- `ingested_snapshots` _function_
+- `pending_snapshots` _function_ — What the next ingest reads (ruling 56c17a80: the timer pulls, a session ingests every
+- `plan_evidence` _function_ — What lands: each measure whose value differs from its window's active value (superseding
+- `pull_cloudflare` _function_ — One calendar month per query and shape (well inside the 13-week cap); bot rows kept (the
+- `pull_evidence` _function_ — Pull one source into a new snapshot. By default it starts where the snapshots on disk end,
+- `pull_search_console` _function_ — Each shape per calendar month, paged by startRow until a short page (dataState all: the
+- `read_snapshot` _function_ — Read one snapshot, every file checked against its manifest hash; any mismatch, missing file
+- `search_console_measures` _function_ — Each DAY from the latest snapshot whose window covers it (Search Console revises recent
+- `snapshot_id` _function_
+- `snapshot_record` _function_ — What the snapshot node records: its source, pull time, covered window and file hashes (the
+- `timer_units` _function_ — The pull-only timer as systemd user units (ruling 56c17a80; cadence 6e283d4b): the service
+- `traffic_report` _function_ — Each page's traffic DERIVED across every path it holds or held (the path ownership follows
+- `web_path_id` _function_
+- `write_snapshot` _function_ — Write one snapshot's raw files and its manifest; an existing snapshot refuses (a pull never
+
 ### `cjm_context_graph_projection.facetjudge`
 
 - `applies` _function_ — Task and stage entries are asked of non-tutorial posts only (eefda2dd (4)).
@@ -384,6 +408,25 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `plan_home_page` _function_ — Plan the home page: the identity, the map, the jump links, the band.
 - `post_line` _function_
 - `recent_posts` _function_
+
+### `cjm_context_graph_projection.inbound`
+
+- `Browser` _class_ — A Chrome under the dedicated Search Console profile, driven over the DevTools protocol (one
+- `apply_links` _function_ — Land one links run in ONE batch: the snapshot node; every web_path and web Reference it
+- `clean` _function_
+- `fetch_list` _function_
+- `fetch_outcome` _function_
+- `html_total` _function_ — The drill-down's total from the kept bytes (the snapshot is the source): the first bare
+- `import_export` _function_ — Keep hand exports as a dated snapshot, byte for byte (ruling a3c02fb1 (4)): each file copied
+- `inbound_report` _function_ — Each page's inbound links DERIVED across every path it holds or held: per linking site, the
+- `ingest_links` _function_
+- `normalize_url` _function_
+- `plan_links` _function_ — What one snapshot observed, computed from its files alone (the op carries it whole):
+- `pull_drilldowns` _function_ — Walk the Links drill-downs: the top linked pages, each page's linking sites, each (page,
+- `pull_fetch` _function_ — Fetch every page politely (ruling a3c02fb1 (3)): each host's robots.txt read once and kept,
+- `pull_links` _function_ — Pull one links source into a new snapshot (files only, never the graph); a source already
+- `read_drilldown` _function_ — Open one drill-down and read its table once it is stable: two consecutive reads agree and the
+- `site_key` _function_
 
 ### `cjm_context_graph_projection.journal`
 
@@ -983,5 +1026,5 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 
 ## Dependencies
 
-**Depends on:** `beautifulsoup4`, `cjm-context-graph-layer`, `cjm-context-graph-primitives`, `cjm-design-system`, `cjm-dev-graph-schema`, `cjm-harness-transcripts`, `cjm-markdown-decompose-core`, `cjm-notebook-decompose-core`, `cjm-python-decompose-core`, `cjm-substrate`, `pyyaml`
+**Depends on:** `beautifulsoup4`, `cjm-context-graph-layer`, `cjm-context-graph-primitives`, `cjm-design-system`, `cjm-dev-graph-schema`, `cjm-harness-transcripts`, `cjm-markdown-decompose-core`, `cjm-notebook-decompose-core`, `cjm-python-decompose-core`, `cjm-substrate`, `pypdf`, `pyyaml`, `websocket-client`
 **Used by:** `cjm-graph-workbench-qt`, `cjm-notebook-decompose-core`, `cjm-session-scratchpad-qt`, `cjm-substrate`
