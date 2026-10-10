@@ -813,8 +813,9 @@ def emit_note(
     fold: NotesFold,
     note: str,               # A cut-over Note id
 ) -> str:  # The file written
-    """Write the note's composition to its path in the website tree (the emit; the user's commit
-    and push of main is the publish gate)."""
+    """Write the note's composition to its path in the website tree (the emit). Commit + push main
+    as usual: main is the source of record, never the publish -- the public site deploys from
+    gh-pages."""
     n = fold.notes[note]
     p = Path(config["website_root"]) / n.path
     p.parent.mkdir(parents=True, exist_ok=True)

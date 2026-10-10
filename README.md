@@ -48,6 +48,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - **`cjm_context_graph_projection.module_ops`** — Module-edit ops — create / rename / delete / regroup a module as graph edge ops.
 - **`cjm_context_graph_projection.notes_outline`** — The OUTLINE PASS of the notes lane — the first of the standalone lecture resource's passes
 - **`cjm_context_graph_projection.notes_place`** — The PLACEMENT PASS of the notes lane — the second of the standalone lecture resource's
+- **`cjm_context_graph_projection.notesource`** — The archive's graph-sourced cutover: the notes source journal and its fold (work item 79703485;
 - **`cjm_context_graph_projection.onboarding`** — Project the MEMORY onboarding surface from the graph's ASSERTED lead structure.
 - **`cjm_context_graph_projection.oracle`** — The version oracle: a programmatic Procedure that keeps `version` slots fresh.
 - **`cjm_context_graph_projection.paths`** — The path model (design ae698640, the walk 57287d1b, the refactor leg ad9bef5a): artifacts,
@@ -541,6 +542,41 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `gx_note_missing` _function_ — Whether the draft exists — the one graph read the apply makes before its first op.
 - `plan_placement` _function_ — The pass's plan, mutating nothing: each row resolved to a point key and compared with what
 - `render_place_brief` _function_ — The brief of the PLACEMENT PASS (rulings 96be1528 (1)/(3)): the keyed points laid out
+
+### `cjm_context_graph_projection.notesource`
+
+- `Element` _class_ — A journaled element's state and placement.
+- `KeyedSection` _class_ — A Section whose id is its journaled id, not the one its derived anchor would mint, with
+- `NoteRec` _class_ — A journaled Note's state.
+- `NotesFold` _class_ — The notes source journal folded to state: notes, elements, the addresses ever used.
+- `NotesFoldError` _class_ — A note whose journaled state does not compose and re-decompose to the same elements.
+- `absorb_archive` _function_ — Absorb an outside edit (a typo-fix pull request merged into the website repo): HEAD's blob
+- `absorb_records` _function_ — Map an outside version's elements to ids by their derived anchors (an unheaded element's
+- `append_group` _function_ — Append one write's records under ONE ts (the op clock's), through the shared choke point.
+- `apply_notes_live` _function_ — THE LIVE STEP: the notes fold's step applied to the db for the records a live verb just
+- `archive_add_section` _function_
+- `archive_author` _function_ — `author` on a cut-over archive Section, journal-first (56b24fd5 (4)): title + body; a
+- `archive_command` _function_ — The archive cutover's verbs (work item 79703485; design amendment 56b24fd5): capture-archive,
+- `archive_source` _function_
+- `birth_records` _function_ — A new headed element: its address at birth (the anchor its heading slugs to), a generation
+- `capture_archive` _function_ — Capture every kept post at `commit` into the notes source journal: one group, each post's
+- `capture_records` _function_
+- `cutover_archive` _function_ — Cut captured notes over: the journal's composition, the graph's (the round trip), HEAD's
+- `cutover_freeze` _function_ — The git fold's freeze for the cut-over paths: each stops at its note's capture commit.
+- `derive_note` _function_ — Compose the note from its state, decompose the text as ingest would, and key every
+- `emit_note` _function_ — Write the note's composition to its path in the website tree (the emit). Commit + push main
+- `fold_records` _function_
+- `fold_source_records` _function_ — Continue the cut-over paths in the git fold's ElementFold: each journal step that touches a
+- `groups` _function_ — One write's records share a ts and fold as one step.
+- `journal_write` _function_ — The journal-first write path every authoring verb takes: build the records from the
+- `note_wires` _function_
+- `notes_source_check` _function_ — Each journaled note's file against its journal: CLEAN (working tree == HEAD == journal),
+- `place_records` _function_ — A move, re-parent or reorder: the element's own placement, plus the two siblings whose
+- `read_notes_journal` _function_
+- `replay_source` _function_ — The rebuild swap's source-journal fold (finding 6c121287): records appended to the SOURCE
+- `retire_records` _function_ — An element leaves the note; its follower closes the gap. One with children refuses (move or
+- `retired_section` _function_
+- `section_edit_records` _function_ — An edit of one element's text: a headed element keeps its level (level is placement --
 
 ### `cjm_context_graph_projection.onboarding`
 

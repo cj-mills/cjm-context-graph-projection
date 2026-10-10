@@ -2657,7 +2657,7 @@ def _render_archive_source(
         lines.append(f"## {kind} -- {len(recs)} record(s)" + (f" · `{obj['node_id'][:8]}`" if obj.get("node_id") else "")
                      + (" · unchanged" if obj.get("unchanged") else ""))
         if obj.get("file"):
-            lines.append(f"- emitted `{obj['file']}` (commit and push main to publish)")
+            lines.append(f"- emitted `{obj['file']}` (commit + push main; the public site deploys from gh-pages)")
     for r in obj.get("refused") or []:
         lines.append(f"- ⚠ refused `{r.get('path')}`: " + (r.get("error") or
                      f"line {r.get('line')}: {r.get('a')!r} vs {r.get('b')!r}"))
