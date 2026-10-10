@@ -178,3 +178,87 @@ def test_live_site_links_equal_their_rebuild_after_every_window(tmp_path):
     assert asyncio.run(refs()) == {(part2, section_node_id(part1, "setup")), (part2, d),
                                    (part1, part2), (note_node_id("s/e"), part1)}
     assert len(checks) == 9
+
+
+@pytest.mark.skipif(not _HAVE_GRAPH, reason="needs the graph capability")
+def test_an_anchor_resolves_through_the_live_sections_current_anchor(tmp_path):
+    """Finding 38f21630: a graph-sourced Section keeps its id across a renamed heading and a
+    retired one stays a node, so an anchor resolves through the holder's LIVE Sections' current
+    `anchor`, never by deriving an id -- a link to the new anchor finds the renamed Section, the
+    old anchor finds nothing, and a retired Section's anchor lands on the page. Live equals its
+    rebuild after every op: each archive edit after the cutover is a replay window that steps the
+    resolve, on the linking side and the linked side alike (design amendment fa61d93a)."""
+    site = tmp_path / "site"
+    for d in ("posts/a", "posts/c"):
+        (site / d).mkdir(parents=True)
+    (site / "posts/a/index.md").write_text(_post("A", "Lede.\n\n## One\n\nBody one.\n\n### Two\n\nBody two."))
+    (site / "posts/c/index.md").write_text(_post(
+        "C", "See [two](/posts/a/#two), [renamed](/posts/a/#two-renamed) and [four](/posts/a/#four)."))
+    commit_all(site, "site")
+    priv = tmp_path / "private"
+    priv.mkdir()
+    config = {"notes_corpus": str(site / "posts"), "notes_profile": "quarto_post", "website_root": str(site),
+              "journal_path": str(priv / "w.jsonl"), "source_journal_path": str(priv / "s.jsonl")}
+    live = tmp_path / "live"
+    live.mkdir()
+    (live / "graph.config.json").write_text(json.dumps(config))
+    db = str(live / "g.db")
+    rebuilds = []
+
+    def cli(*args):
+        r = _cli("--graph-db-path", db, "--journal-path", config["journal_path"], *args)
+        assert r.returncode == 0, f"{args[0]}: {r.stdout}{r.stderr}"
+        return r
+
+    def same(step):
+        d = tmp_path / f"rebuild{len(rebuilds)}"
+        d.mkdir()
+        (d / "graph.config.json").write_text(json.dumps(config))
+        r = _cli("--graph-db-path", str(d / "g.db"), "--journal-path", config["journal_path"], "ingest-notes")
+        assert r.returncode == 0, r.stdout + r.stderr
+        r = _cli("--graph-db-path", db, "rebuild-diff", "--against", str(d / "g.db"))
+        assert r.returncode == 0 and "CLEAN" in r.stdout, f"{step}: live != rebuild\n{r.stdout}{r.stderr}"
+        rebuilds.append(step)
+
+    def links():   # (source, target) -> anchor, for every site_link edge
+        import sqlite3
+        con = sqlite3.connect(db)
+        try:
+            rows = con.execute("select source_id, target_id, properties from edges "
+                               "where relation_type = 'REFERENCES'").fetchall()
+        finally:
+            con.close()
+        props = [(s, t, json.loads(p or "{}")) for s, t, p in rows]
+        return {(s, t): p.get("anchor") for s, t, p in props if p.get("site_link")}
+
+    a, c = note_node_id("a"), note_node_id("c")
+    two = section_node_id(a, "two")
+    cli("ingest-notes")
+    cli("assert", a, SITE_PATH, "/posts/a/")
+    cli("assert", c, SITE_PATH, "/posts/c/")
+    cli("capture-archive")
+    cli("cutover-archive")
+    same("cutover")
+    # #two names the Section; #two-renamed and #four name none, so they land on the page (one edge)
+    assert links() == {(c, two): "two", (c, a): "two-renamed"}
+
+    # the LINKING post gains a link: c's own edit is the window its new edge is born in
+    cli("author", section_node_id(c, "_preamble"), "--edit", " and [four]", ", [one](/posts/a/#one) and [four]")
+    same("link added")
+    one = section_node_id(a, "one")
+    assert links() == {(c, two): "two", (c, a): "two-renamed", (c, one): "one"}
+
+    cli("author", two, "--edit", "### Two", "### Two Renamed")       # the rename keeps the id
+    same("rename")
+    # the new anchor finds the renamed Section; the old one names no live Section any more
+    assert links() == {(c, a): "two", (c, two): "two-renamed", (c, one): "one"}
+
+    cli("add-section", "a", "--content", "### Four\n\nBody four.", "--parent", "one", "--after", two)
+    four = section_node_id(a, "four")
+    same("birth")
+    assert links() == {(c, a): "two", (c, two): "two-renamed", (c, one): "one", (c, four): "four"}
+
+    cli("retire-section", four)                                       # a retired Section stays a node
+    same("retire")
+    assert links() == {(c, a): "two", (c, two): "two-renamed", (c, one): "one"}
+    assert len(rebuilds) == 5

@@ -27,7 +27,6 @@ from urllib.parse import urljoin, urlsplit
 from cjm_context_graph_layer.ops import extend_graph, graph_task, observe_writes
 from cjm_context_graph_primitives.query import EdgeQuery, PropertyPredicate
 from cjm_dev_graph_schema import predicates as P
-from cjm_dev_graph_schema.identity import section_node_id
 from cjm_dev_graph_schema.nodes import site_link_edge
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 
@@ -111,6 +110,27 @@ async def _standing_site_links(
     return out
 
 
+async def _live_section_anchors(
+    gx: GraphHandle,
+    holders: Iterable[str],  # The pages anchored links land on
+) -> Dict[Tuple[str, str], str]:  # (note id, CURRENT anchor) -> Section id, live Sections only
+    """Each holder's live Sections keyed by their CURRENT anchor (finding 38f21630).
+
+    An anchor names a Section through the Section's `anchor` property, never by deriving its
+    id: a graph-sourced Section keeps the id its heading was born with across a rename, so a link
+    to the new anchor finds it there; and a retired Section stays a node, so a link naming its old
+    anchor finds nothing and is reported. One read for every holder, sized by the true count so
+    no holder set is ever truncated."""
+    held = sorted(set(holders))
+    if not held:
+        return {}
+    where = [PropertyPredicate("note_id", "in", held)]
+    total = await F.count_label(gx, DevNodeKinds.SECTION, where)
+    sections = await F.load_label_where(gx, DevNodeKinds.SECTION, where, limit=max(total, 1))
+    return {(str(F.prop(s, "note_id")), str(F.prop(s, "anchor"))): str(F.nid(s))
+            for s in sections if not F.prop(s, "retired")}
+
+
 async def resolve_site_links(
     gx: GraphHandle,
     note_ids: Optional[List[str]] = None,  # Scope to these notes (None = every Note on the graph)
@@ -128,12 +148,14 @@ async def resolve_site_links(
     dropped (a self-reference is not a cross-reference).
 
     ONE resolver for every in-body site link (ruling d31e9ba7): an ANCHORED link lands on the
-    Section its anchor names on the page's Note — the id that heading mints, the anchor slug
-    being the heading slug — and when that Section does not exist it lands on the page with the
-    anchor kept on the edge and is reported in `anchors`: never a dangling edge, never a silent
-    drop. A standing edge whose anchor changed is re-minted. An edge's id is its (note, target,
-    relation) triple, so a note's several links landing on one node are ONE edge: the first in
-    document order gives its properties, and every anchor naming no Section is still reported."""
+    live Section whose CURRENT anchor it names on the page's Note — read off the Section, never
+    derived into an id, since a graph-sourced Section keeps its id across a renamed heading and
+    a retired one stays a node (finding 38f21630) — and when no live Section holds that anchor
+    it lands on the page with the anchor kept on the edge and is reported in `anchors`: never a
+    dangling edge, never a silent drop. A standing edge whose anchor changed is re-minted. An
+    edge's id is its (note, target, relation) triple, so a note's several links landing on one
+    node are ONE edge: the first in document order gives its properties, and every anchor naming
+    no Section is still reported."""
     if note_ids is None:
         notes = await F.load_label(gx, DevNodeKinds.NOTE)
     else:
@@ -161,16 +183,15 @@ async def resolve_site_links(
                 unresolved.append(row)
             elif held[0] != nid:
                 placed.append((nid, held[0], urlsplit(str(target)).fragment, row))
-    # every Section an anchor names, in one read
-    named = sorted({section_node_id(h, a) for _, h, a, _ in placed if a})
-    present = set(await F.load_nodes(gx, named)) if named else set()
+    # every live Section of every page an anchor names, by its current anchor, in one read
+    live = await _live_section_anchors(gx, {h for _, h, a, _ in placed if a})
     desired: Dict[str, Dict[str, Any]] = {}
     anchors: List[Dict[str, Any]] = []
     for nid, holder, anchor, row in placed:
         target_id = holder
         if anchor:
-            section = section_node_id(holder, anchor)
-            if section in present:
+            section = live.get((holder, anchor))
+            if section:
                 target_id = section
             else:
                 anchors.append(dict(row, anchor=anchor))

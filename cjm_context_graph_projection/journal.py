@@ -32,6 +32,7 @@ from cjm_markdown_decompose_core.extract import note_from_file
 
 from .display import display_rule_node_id, set_display_rule
 from .lens import lens_node_id, set_lens
+from .notesource import apply_notes_groups, group_spans, read_notes_journal, replay_spans
 from .runtime import GraphHandle
 from .series import mint_series, place_in_series, set_series_members
 from .sitelinks import resolve_site_links, step_site_links
@@ -497,9 +498,11 @@ async def _apply_op(
 
 async def replay_journal(
     gx: GraphHandle,
-    path: str,       # Journal file path (JSONL)
+    path: Optional[str],  # Journal file path (JSONL); None = no writes ops (a source-only replay)
     offset: int = 0,  # Skip the first N ops — the swap-rebuild DELTA lane (DEC 638782c9)
     emit_root: Optional[str] = None,  # The notes graph's emit root (born posts' file locations derive from it)
+    notes: Optional[Dict[str, Any]] = None,  # The notes graph-sibling config: its source journal's groups replay as windows (fa61d93a)
+    source_offset: Optional[int] = None,     # None = the groups after each note's cutover (a full rebuild); N = every group after the N-th record (a delta)
 ) -> Dict[str, int]:  # Per-verb replay counts
     """Re-apply every journaled write through its core verb (idempotent).
 
@@ -530,14 +533,21 @@ async def replay_journal(
     left out of the step's sources until pass 2 reaches its journal position (its window
     steps then). A whole-graph pass closes the replay as the CHECK: every rebuild path
     (in-place, swap delta, heal) ends here, and anything it adds or removes is drift no
-    window justified — counted and printed loud. The counts carry the pass's tallies."""
+    window justified — counted and printed loud. The counts carry the pass's tallies.
+
+    THE NOTES SOURCE JOURNAL'S WINDOWS (design amendment fa61d93a): with `notes`, each cut-over
+    archive note's groups after its cutover -- or, with `source_offset`, every group after it --
+    merge into the windows by ts and apply through the live step (`apply_notes_groups`), so an
+    archive edit steps the resolve at its own window, on rebuild as live."""
     counts = {v: 0 for v in JOURNAL_VERBS}
     counts["skipped"] = 0
     # offset = the swap-rebuild delta lane: ops[:offset] are already in the target
     # projection; idempotent re-application makes a generous (over-inclusive) offset
     # safe, so callers may pass a PRE-build count and let the overlap verify-collide.
-    ops = read_journal(path)[offset:]
+    ops = read_journal(path)[offset:] if path else []
     genesis = [op for op in ops if op.get("verb") == "new-note"]
+    srecs, spans = _source_spans(notes, source_offset)
+    counts["source_groups"] = 0
 
     async def apply(op):
         verb = await _apply_op(gx, op, emit_root)
@@ -555,13 +565,18 @@ async def replay_journal(
         finally:
             PROVENANCE_TS.reset(token)
     unborn = {nid for nid in (_genesis_note_id(op) for op in genesis) if nid}
-    # Pass 2: every op in append order, window by window; a genesis op marks its note born.
+    # Pass 2: every op in append order, window by window; a genesis op marks its note born. The
+    # notes source journal's replay groups merge in by ts (fa61d93a (2)), each applied through
+    # the live step at its window, before the writes ops sharing its ts.
     steps = 0
-    for window in _op_windows(ops):
-        token = PROVENANCE_TS.set(window[0].get("ts"))
+    for ts, window, span in _merge_windows(_op_windows(ops), srecs, spans):
+        token = PROVENANCE_TS.set(ts)
         try:
             born = False
             with observe_writes() as writes:
+                if span is not None:
+                    await apply_notes_groups(gx, notes, srecs, *span)
+                    counts["source_groups"] += 1
                 for op in window:
                     if op.get("verb") == "new-note":
                         unborn.discard(_genesis_note_id(op))
@@ -598,6 +613,47 @@ def _op_windows(
         else:
             windows.append([op])
     return windows
+
+
+def _source_spans(
+    notes: Optional[Dict[str, Any]],  # The notes graph-sibling config (None, or no source journal: no source windows)
+    source_offset: Optional[int],     # None = a full rebuild: the groups after each note's cutover; N = a delta: every group after the N-th record
+) -> Tuple[List[Dict[str, Any]], List[Tuple[int, int]]]:  # (the source records, the [begin, end) spans the replay applies)
+    """The notes source journal's groups a replay applies as windows (design amendment fa61d93a):
+    a full rebuild replays the groups its ingest left out (`replay_spans`); a delta lane replays
+    every group after its offset (over-inclusion is safe -- the live step is idempotent)."""
+    if not (notes and notes.get("notes_corpus") and notes.get("source_journal_path")):
+        return [], []
+    records = read_notes_journal(notes)
+    if source_offset is None:
+        return records, replay_spans(records)
+    return records, group_spans(records, min(max(0, source_offset), len(records)))
+
+
+def _merge_windows(
+    windows: List[List[Dict[str, Any]]],  # The writes journal's op-clock windows, in append order
+    records: List[Dict[str, Any]],        # The notes source journal's records
+    spans: List[Tuple[int, int]],         # The source groups the replay applies, in order
+) -> List[Tuple[Optional[float], List[Dict[str, Any]], Optional[Tuple[int, int]]]]:  # (ts, writes ops, source span)
+    """Both journals' windows in ts order (design amendment fa61d93a (2)): a source group sharing
+    a writes window's ts joins that window and applies first (the content before any op that
+    names it); any other source group is a window of its own. A writes window with no ts (the
+    pre-ts era) keeps its place."""
+    out: List[Tuple[Optional[float], List[Dict[str, Any]], Optional[Tuple[int, int]]]] = []
+    i = 0
+    for w in windows:
+        ts = w[0].get("ts")
+        if ts is not None:
+            while i < len(spans) and records[spans[i][0]]["ts"] < ts:
+                out.append((records[spans[i][0]]["ts"], [], spans[i]))
+                i += 1
+            if i < len(spans) and records[spans[i][0]]["ts"] == ts:
+                out.append((ts, w, spans[i]))
+                i += 1
+                continue
+        out.append((ts, w, None))
+    out += [(records[s[0]]["ts"], [], s) for s in spans[i:]]
+    return out
 
 
 def _genesis_note_id(op: Dict[str, Any]) -> Optional[str]:  # The Note a `new-note` op mints

@@ -14,8 +14,10 @@ import pytest
 from cjm_dev_graph_schema.identity import note_node_id, section_node_id
 from cjm_markdown_decompose_core.extract import note_from_text
 
+from cjm_context_graph_projection.journal import _merge_windows
 from cjm_context_graph_projection.notesource import (birth_records, capture_records, CUTOVER,
-                                                    fold_records, place_records, retire_records,
+                                                    fold_records, ingest_records, NotesFoldError,
+                                                    place_records, replay_spans, retire_records,
                                                     section_edit_records)
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS
 
@@ -73,6 +75,36 @@ def test_an_edit_keeps_its_level_and_opens_no_section():
     rec = section_edit_records(fold, two, "### Two, Renamed\n\nBody two.\n\n", 3)
     assert rec == [("section", {"section": two, "title": "Two, Renamed", "text": "Body two.",
                                 "block_role": ""})]
+
+
+def test_the_groups_after_a_cutover_replay_and_merge_into_the_writes_windows():
+    # design amendment fa61d93a (1): a capture or a cutover folds at ingest; every later group of
+    # a cut-over note is a replay window; a group touching both kinds of note is refused
+    def post(slug):
+        return note_from_text(f"/site/posts/{slug}/index.md", _A, corpus_root="/site/posts",
+                              profile="quarto_post", lossless=True)
+
+    def at(ts, recs):
+        return [{"verb": v, "ts": ts, "args": a} for v, a in recs]
+
+    a, b = post("a"), post("b")
+    two = section_node_id(a.id, "two")
+    records = at(1.0, capture_records(a, "posts/a/index.md", "c0")) + at(2.0, [(CUTOVER, {"note": a.id})])
+    n = len(records)
+    records += at(3.0, section_edit_records(fold_records(records), two, "### Two\n\nEdited.\n", 3))
+    records += at(4.0, retire_records(fold_records(records), two))
+    records += at(5.0, capture_records(b, "posts/b/index.md", "c1"))   # another note's capture: ingest
+    spans = replay_spans(records)
+    assert spans == [(n, n + 1), (n + 1, n + 2)]
+    assert ingest_records(records, spans) == records[:n] + records[n + 2:]
+    mixed = records + at(6.0, [("section", {"section": two, "title": "Two", "text": "x", "block_role": ""}),
+                               ("note", {"note": b.id, "path": "posts/b/index.md", "frontmatter": ""})])
+    with pytest.raises(NotesFoldError, match="in one group"):
+        replay_spans(mixed)
+    # (2): merged by ts -- a group sharing a writes window's ts joins it; a pre-ts window keeps its place
+    windows = [[{"ts": 0.5}], [{"ts": 3.0}], [{}], [{"ts": 4.5}]]
+    merged = [(ts, len(w), span) for ts, w, span in _merge_windows(windows, records, spans)]
+    assert merged == [(0.5, 1, None), (3.0, 1, spans[0]), (None, 1, None), (4.0, 0, spans[1]), (4.5, 1, None)]
 
 
 def _run(*args):

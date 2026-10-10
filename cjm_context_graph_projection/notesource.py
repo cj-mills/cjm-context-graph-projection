@@ -228,6 +228,52 @@ def groups(
         yield cur[0].get("ts"), cur
 
 
+def group_spans(
+    records: List[Dict[str, Any]],  # Journal records in append order
+    start: int = 0,                 # The first record to group
+) -> List[Tuple[int, int]]:  # [begin, end) of each group from `start`, in order
+    """`groups` as index ranges: one write's records share a ts."""
+    spans: List[Tuple[int, int]] = []
+    begin = start
+    for i in range(start + 1, len(records) + 1):
+        if i == len(records) or records[i].get("ts") != records[begin].get("ts"):
+            spans.append((begin, i))
+            begin = i
+    return spans
+
+
+def replay_spans(
+    records: List[Dict[str, Any]],  # The notes source journal's records, in append order
+) -> List[Tuple[int, int]]:  # [begin, end) of every group the rebuild REPLAYS, in order
+    """The groups a rebuild replays as windows instead of folding at ingest (design amendment
+    fa61d93a (1)): each group whose every touched note was cut over BEFORE it -- an edit, a
+    placement, a birth, a retire, an absorb. A capture or a cutover folds at ingest: it changes
+    no element by construction, so the ingest holds each note as the live db held it at its
+    cutover. A group touching a cut-over note and one not yet cut over is refused."""
+    fold = NotesFold()
+    out: List[Tuple[int, int]] = []
+    for begin, end in group_spans(records):
+        cut = {nid for nid, n in fold.notes.items() if n.cut_over}
+        touched: Set[str] = set()
+        for rec in records[begin:end]:
+            touched |= fold.apply(rec)
+        if touched and touched <= cut:
+            out.append((begin, end))
+        elif touched & cut:
+            raise NotesFoldError(f"source records {begin}..{end - 1} touch cut-over notes "
+                                 f"{sorted(touched & cut)} and notes not yet cut over "
+                                 f"{sorted(touched - cut)} in one group")
+    return out
+
+
+def ingest_records(
+    records: List[Dict[str, Any]],      # The notes source journal's records
+    spans: List[Tuple[int, int]],       # replay_spans(records)
+) -> List[Dict[str, Any]]:  # The records the ingest folds: every one outside a replay group
+    replayed = {i for begin, end in spans for i in range(begin, end)}
+    return [r for i, r in enumerate(records) if i not in replayed]
+
+
 def fold_records(
     records: Iterable[Dict[str, Any]],  # Journal records
 ) -> NotesFold:
@@ -686,31 +732,31 @@ def _content(w: Dict[str, Any]) -> Dict[str, Any]:  # What a change of counts as
     return {k: v for k, v in w.items() if k not in _TIMELESS}
 
 
-async def apply_notes_live(
+async def apply_notes_groups(
     gx: GraphHandle,
     config: Dict[str, Any],              # The notes graph-sibling config
-    appended: List[Dict[str, Any]],      # The records this invocation appended, in order (the journal's tail)
+    records: List[Dict[str, Any]],       # The notes source journal's records (the whole journal)
+    start: int,                          # The first record to apply
+    end: Optional[int] = None,           # One past the last (None: the journal's end)
 ) -> Dict[str, Any]:  # The receipt: notes, node / edge counts, relation edges
-    """THE LIVE STEP: the notes fold's step applied to the db for the records a live verb just
-    appended -- group by group, each touched cut-over note derived exactly as the rebuild derives
-    it, changed and new nodes written whole (`import_graph` overwrite: properties, sources and
-    times), the outline edges diffed whole, the relation edges re-harvested against the prior
-    composition. Idempotent: a step whose records the db already carries changes nothing."""
+    """THE LIVE STEP at any journal position: records[start:end] applied to the db group by group,
+    onto the state the records before them make -- each touched cut-over note derived exactly as
+    the rebuild derives it, changed and new nodes written whole (`import_graph` overwrite:
+    properties, sources and times), the outline edges diffed whole, the relation edges
+    re-harvested against the prior composition. A live verb applies its own tail; the replay
+    applies a group at its window (design amendment fa61d93a (2)). Idempotent: a step whose
+    records the db already carries changes nothing."""
     from .authoring import reharvest_note_relations
     from .devgraph import stamp_note_profile
-    receipt: Dict[str, Any] = {"records": len(appended), "notes": [], "nodes_added": 0, "nodes_updated": 0,
-                               "edges_added": 0, "edges_removed": 0, "relations": {}}
-    if not appended:
+    end = len(records) if end is None else end
+    receipt: Dict[str, Any] = {"records": max(0, end - start), "notes": [], "nodes_added": 0,
+                               "nodes_updated": 0, "edges_added": 0, "edges_removed": 0, "relations": {}}
+    if start >= end:
         return receipt
-    records = read_notes_journal(config)
-    k = len(appended)
-    if records[-k:] != appended:
-        raise RuntimeError("live notes fold: the journal's tail is not this op's records "
-                           "(a concurrent writer?) -- the db is left for the next rebuild")
-    fold = fold_records(records[:-k])
+    fold = fold_records(records[:start])
     src = archive_source(config, records)
     profile = config.get("notes_profile") or "quarto_post"
-    for ts, group in groups(appended):
+    for ts, group in groups(records[start:end]):
         # The composition each note the group names had BEFORE it (the relation re-harvest's prior)
         prior: Dict[str, Optional[str]] = {}
         for nid in _named_notes(fold, group):
@@ -737,6 +783,23 @@ async def apply_notes_live(
                 receipt["relations"][nid] = await reharvest_note_relations(gx, after_note, prior[nid], text)
             receipt["notes"].append(n.path)
     return receipt
+
+
+async def apply_notes_live(
+    gx: GraphHandle,
+    config: Dict[str, Any],              # The notes graph-sibling config
+    appended: List[Dict[str, Any]],      # The records this invocation appended, in order (the journal's tail)
+) -> Dict[str, Any]:  # The receipt: notes, node / edge counts, relation edges
+    """THE LIVE STEP for the records a live verb just appended: `apply_notes_groups` over the
+    journal's tail, once the tail is proved to be exactly those records."""
+    if not appended:
+        return await apply_notes_groups(gx, config, [], 0)
+    records = read_notes_journal(config)
+    k = len(appended)
+    if records[-k:] != appended:
+        raise RuntimeError("live notes fold: the journal's tail is not this op's records "
+                           "(a concurrent writer?) -- the db is left for the next rebuild")
+    return await apply_notes_groups(gx, config, records, len(records) - k)
 
 
 def _named_notes(
@@ -1250,7 +1313,9 @@ async def replay_source(
 ) -> Dict[str, Any]:  # The live step's receipt over the tail
     """The rebuild swap's source-journal fold (finding 6c121287): records appended to the SOURCE
     journal family while the offline build ran fold into the new db before the swap (and after
-    it, the heal pass), exactly as their live step folded them into the old one. Idempotent."""
+    it, the heal pass), exactly as their live step folded them into the old one; on the notes
+    lane each group is a replay window, so the site-link step runs at its close (fa61d93a (3)).
+    cg-rebuild's notes lane merges both tails in one `replay --source-offset` instead. Idempotent."""
     path = config.get("source_journal_path") if config.get("notes_corpus") else args.source_journal_path
     if not path:
         return {"error": "replay-source needs the source journal (--source-journal-path or the config's)"}
@@ -1260,7 +1325,11 @@ async def replay_source(
     if not tail:
         return res
     if config.get("notes_corpus"):
-        res["notes_live"] = await apply_notes_live(gx, config, tail)
+        # The notes lane replays the tail as windows (design amendment fa61d93a (3)): each group
+        # under its own ts through the live step, the site-link step at its close
+        from .journal import replay_journal
+        res["notes_replay"] = await replay_journal(gx, None, notes=config,
+                                                   source_offset=max(0, int(args.offset)))
     else:
         from .relive import apply_live
         res["live"] = await apply_live(gx, path, args.repos_dir, tail)

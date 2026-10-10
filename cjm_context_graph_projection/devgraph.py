@@ -97,14 +97,17 @@ def notes_corpus_elements(
     # A CUT-OVER post (design amendment 56b24fd5 (2)) is frozen at its capture commit like a retired
     # source, then continued by the notes source journal's fold in the same ElementFold: each
     # journal step a new version of its path at the step's ts, so the capture changes nothing and
-    # its times continue.
-    from .notesource import cutover_freeze, fold_source_records
+    # its times continue. The fold stops at each note's cutover: every later group is a replay
+    # window, so the site-link step runs at it as it ran live (design amendment fa61d93a (1)); the
+    # freeze reads every record, so a path a note moves to later is never read from git.
+    from .notesource import cutover_freeze, fold_source_records, ingest_records, replay_spans
     records = list(source_records or [])
     src = ArchiveSource(corpus_root, profile, note_aliases, site_root=site_root, site_pages=site_pages,
                         retired=retired, cutover=cutover_freeze(records))
     hist = fold_history(src.top, src.keep, src.decompose,
                         freeze={**{p: r["commit"] for p, r in src.by_retired.items()}, **src.cut})
-    live_cut = set(fold_source_records(records, src, hist).values()) if src.cut else set()
+    folded = ingest_records(records, replay_spans(records))
+    live_cut = set(fold_source_records(folded, src, hist).values()) if src.cut else set()
     tree = head_tree(src.top)
     post_paths = sorted((p for p in set(tree) | live_cut if src.is_post(p) and p not in src.by_retired
                          and (p not in src.cut or p in live_cut)),

@@ -487,7 +487,12 @@ async def _dispatch(args) -> int:
             _report_git_sources(archive_report, "archive")
             await _record_ingest_sources(gx, archive_report.get("sources") or {})
             if args.journal_path:
-                rc = await replay_journal(gx, args.journal_path, emit_root=args.emit_root)
+                # Each cut-over note's groups after its cutover are windows of this replay, the
+                # ingest having folded it only through its cutover (design amendment fa61d93a)
+                notes = {**(load_graph_config(args.graph_db_path) or {}), "notes_corpus": args.notes_corpus,
+                         "notes_profile": args.profile or "quarto_post", "website_root": args.website_root,
+                         "source_journal_path": args.source_journal_path, "journal_path": args.journal_path}
+                rc = await replay_journal(gx, args.journal_path, emit_root=args.emit_root, notes=notes)
                 print(f"replayed journal: {rc}")
             return 0
         if args.command == "m3-baseline":
@@ -511,8 +516,16 @@ async def _dispatch(args) -> int:
             if not args.journal_path:
                 print("error: replay needs --journal-path", file=sys.stderr)
                 return 1
+            notes = None
+            if args.source_offset is not None:
+                notes = load_graph_config(args.graph_db_path) or {}
+                if not (notes.get("notes_corpus") and notes.get("source_journal_path")):
+                    print("error: --source-offset replays the notes source journal — the sibling "
+                          "graph.config.json names no notes_corpus / source_journal_path", file=sys.stderr)
+                    return 1
             rc = await replay_journal(gx, args.journal_path, offset=args.offset,
-                                      emit_root=args.emit_root)
+                                      emit_root=args.emit_root, notes=notes,
+                                      source_offset=args.source_offset)
             print(f"replayed journal: {rc}")
             return 0
         if args.command == "schema":
@@ -3255,6 +3268,10 @@ def main() -> int:
     p_rp.add_argument("--emit-root", default=None,
                       help="Where born posts live — replay derives each one's file location from it "
                            "(default: the sibling config's emit_root; DEC 98293e72)")
+    p_rp.add_argument("--source-offset", type=int, default=None,
+                      help="Also replay the notes SOURCE journal's groups after the N-th record, merged by ts "
+                           "into the writes windows (the notes lane's swap delta and heal; design amendment "
+                           "fa61d93a (3)); needs a notes sibling config")
 
     p_m3 = sub.add_parser("m3-baseline",
                           help="M3 genesis import: journal a per-note baseline `new-note` op "
