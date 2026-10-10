@@ -744,9 +744,24 @@ async def author(
             # pillar-3 unification owns merging the domains). The bare-path branch is
             # TRANSITIONAL scaffolding until every caller threads the journal.
             Path(artifact_path).write_text(emitted)
-        # Persist the slot change INTO the graph node too (a note section, a cell, or the
-        # unjournaled bare path), so sequential authors compose (emit reads the graph); a
-        # journaled code slot re-derives through the code fold's step above instead.
+        if artifact == "note" and container_id:
+            # The WHOLE note re-derives from the emitted text (finding 1d83a4d8), exactly as the
+            # replayed section op and the rebuild derive it: every Section's derived properties,
+            # the outline edges, the relations; a section whose heading changed re-keys. A no-op
+            # edit derives nothing and harvests nothing.
+            if new_text == current:
+                result["written"] = True
+                return result
+            from .structure import _apply_note_text
+            applied = await _apply_note_text(gx, container, str(F.prop(container, "slug") or ""), emitted,
+                                             str(artifact_path), write=True, write_md=False, prune=True)
+            result["relations"] = applied.get("relations")
+            result["derived"] = {k: applied.get(k) for k in ("added", "updated", "removed", "outline")}
+            result["written"] = True
+            return result
+        # Persist the slot change INTO the graph node too (a cell, or the unjournaled bare
+        # path), so sequential authors compose (emit reads the graph); a journaled code slot
+        # re-derives through the code fold's step above instead.
         merge: Dict[str, Any] = {slot: new_text}
         merge.update(rebind)
         if label == DevNodeKinds.CODE_SYMBOL:

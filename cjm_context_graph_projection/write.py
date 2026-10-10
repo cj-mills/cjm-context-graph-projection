@@ -654,24 +654,28 @@ async def author_section(
         return {"error": f"no section `{anchor}` on note `{slug}` (new-section authoring is deferred)",
                 "slug": slug, "anchor": anchor, "written": False}
     unchanged = str(F.prop(existing, "raw", "")) == raw
-    merge = {"raw": raw, "content_hash": SourceRef.compute_hash(raw.encode("utf-8"))}
-    await graph_task(gx.queue, gx.graph_id, "update_node", node_id=section_id, properties=merge)
     res: Dict[str, Any] = {"slug": slug, "anchor": anchor, "section_id": section_id,
                            "actor": actor, "unchanged": unchanged, "written": True}
-    if not unchanged:
-        note_node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=note_id)
-        if note_node is not None:
-            from cjm_markdown_decompose_core.project import note_text_from_graph_nodes
-            wires = await _note_section_wires(gx, note_id)   # post-update: the NEW state
-            note_wire = _as_wire(note_node, DevNodeKinds.NOTE)
-            # The prior text = the same wires with this section's OLD raw swapped back in.
-            prior_wires = [dict(w, properties=dict(w["properties"])) for w in wires]
-            for w in prior_wires:
-                if w["id"] == section_id:
-                    w["properties"]["raw"] = str(F.prop(existing, "raw", ""))
-            res["relations"] = await reharvest_note_relations(
-                gx, note_wire, note_text_from_graph_nodes(note_wire, prior_wires),
-                note_text_from_graph_nodes(note_wire, wires))
+    if unchanged:
+        return res
+    note_node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=note_id)
+    if note_node is None:
+        return {**res, "error": f"no note `{slug}` for section `{anchor}`", "written": False}
+    # The WHOLE note re-derives from its new text (finding 1d83a4d8): title, text, level, anchor,
+    # order and the outline edges as the rebuild derives them, the relations re-harvested, a
+    # section whose heading changed re-keyed -- never the raw alone.
+    from cjm_markdown_decompose_core.project import note_text_from_graph_nodes
+    from .structure import _apply_note_text
+    wires = await _note_section_wires(gx, note_id)
+    for w in wires:
+        if w["id"] == section_id:
+            w["properties"]["raw"] = raw
+    note_wire = _as_wire(note_node, DevNodeKinds.NOTE)
+    applied = await _apply_note_text(gx, note_node, slug, note_text_from_graph_nodes(note_wire, wires),
+                                     str(F.prop(note_node, "path") or ""), write=True, write_md=False,
+                                     prune=True)
+    res["relations"] = applied.get("relations")
+    res["derived"] = {k: applied.get(k) for k in ("added", "updated", "removed", "outline")}
     return res
 
 

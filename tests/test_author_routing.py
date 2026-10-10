@@ -92,12 +92,23 @@ def test_note_edit_routes_to_section(tmp_path, monkeypatch):
                          "raw": "## Beta\n\nthe beta body\n"}}
     fake = FakeGraph([note, s1, s2])
     _wire(fake, monkeypatch)
+    # The whole note re-derives from the emitted text (finding 1d83a4d8): stubbed here -- the
+    # routing is under test; test_notesource covers the re-derive against a real graph.
+    derived = []
+
+    async def _apply(gx, note_node, slug, text, path, **kw):
+        derived.append((slug, text, kw))
+        return {"relations": {}, "added": [], "updated": ["beta"], "removed": [], "outline": {}}
+
+    import cjm_context_graph_projection.structure as structure_mod
+    monkeypatch.setattr(structure_mod, "_apply_note_text", _apply)
     res = asyncio.run(author(GX, "note1", edit=("the beta body", "the BETA body"),
                              write=True))
     assert not res.get("error"), res.get("error")
     assert res["routed_from"] == "note1" and res["node_id"] == "sec2"
     assert "the BETA body" in note_path.read_text()
     assert "the alpha body" in note_path.read_text()
+    assert derived and "the BETA body" in derived[0][1] and derived[0][2]["prune"] is True
 
 
 def test_nearest_match_unit():

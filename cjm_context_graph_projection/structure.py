@@ -46,6 +46,7 @@ async def _apply_note_text(
     *,
     write: bool = True,    # Apply the diff to the graph (else a true dry-run — mutate nothing)
     write_md: Optional[bool] = None,  # Write the `.md` too (default: follow `write`; replay sets False)
+    prune: bool = False,   # Delete the Sections the new text no longer holds (a re-keyed heading), as a rebuild drops them
 ) -> Dict[str, Any]:  # {added, updated, removed, frontmatter_changed, written, ...}
     """Re-decompose `new_text` and apply the section/frontmatter DIFF to the graph.
 
@@ -58,8 +59,9 @@ async def _apply_note_text(
     via `write_md=False`, mirroring `reconstruct_note`/`author_section`'s graph-only posture."""
     # Identity PINNED to the known slug (a42c0f97): a born post under a nested permalink would
     # otherwise re-derive a flattened slug from the parent dir and mint every Section id afresh.
-    decomposed = note_from_text(path, new_text, corpus_root=str(Path(path).parent), lossless=True,
-                                slug=slug)
+    # Under the note's own profile (stamped at ingest / birth, cbde404c), as the rebuild decomposes it
+    decomposed = note_from_text(path, new_text, corpus_root=str(Path(path).parent),
+                                profile=F.prop(note_node, "profile") or None, lossless=True, slug=slug)
     desired = {s.anchor: s for s in decomposed.sections}
     wires = await _note_section_wires(gx, F.nid(note_node))
     graph = {str(F.props(w).get("anchor")): (str(F.props(w).get("raw") or ""),
@@ -113,6 +115,9 @@ async def _apply_note_text(
         if fm_changed:
             await graph_task(gx.queue, gx.graph_id, "update_node", node_id=F.nid(note_node),
                              properties={"frontmatter_raw": decomposed.frontmatter_raw})
+        if prune and removed:   # finding 1d83a4d8: a section whose heading changed re-keys, as at the rebuild
+            gone = [str(F.nid(w)) for w in wires if str(F.props(w).get("anchor")) in removed]
+            await graph_task(gx.queue, gx.graph_id, "delete_nodes", node_ids=gone, cascade=True)
         # Harvest-on-edit (cbde404c): diff the relation edges the PRIOR graph text implied
         # against the new text's, so an added/removed link lands/retracts its edge now.
         prior_text = (str(F.prop(note_node, "frontmatter_raw") or "")
