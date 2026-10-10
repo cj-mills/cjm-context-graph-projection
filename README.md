@@ -553,7 +553,8 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `absorb_archive` _function_ — Absorb an outside edit (a typo-fix pull request merged into the website repo): HEAD's blob
 - `absorb_records` _function_ — Map an outside version's elements to ids by their derived anchors (an unheaded element's
 - `append_group` _function_ — Append one write's records under ONE ts (the op clock's), through the shared choke point.
-- `apply_notes_live` _function_ — THE LIVE STEP: the notes fold's step applied to the db for the records a live verb just
+- `apply_notes_groups` _function_ — THE LIVE STEP at any journal position: records[start:end] applied to the db group by group,
+- `apply_notes_live` _function_ — THE LIVE STEP for the records a live verb just appended: `apply_notes_groups` over the
 - `archive_add_section` _function_
 - `archive_author` _function_ — `author` on a cut-over archive Section, journal-first (56b24fd5 (4)): title + body; a
 - `archive_command` _function_ — The archive cutover's verbs (work item 79703485; design amendment 56b24fd5): capture-archive,
@@ -567,13 +568,16 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `emit_note` _function_ — Write the note's composition to its path in the website tree (the emit). Commit + push main
 - `fold_records` _function_
 - `fold_source_records` _function_ — Continue the cut-over paths in the git fold's ElementFold: each journal step that touches a
+- `group_spans` _function_ — `groups` as index ranges: one write's records share a ts.
 - `groups` _function_ — One write's records share a ts and fold as one step.
+- `ingest_records` _function_
 - `journal_write` _function_ — The journal-first write path every authoring verb takes: build the records from the
 - `note_wires` _function_
 - `notes_source_check` _function_ — Each journaled note's file against its journal: CLEAN (working tree == HEAD == journal),
 - `place_records` _function_ — A move, re-parent or reorder: the element's own placement, plus the two siblings whose
 - `read_notes_journal` _function_
 - `replay_source` _function_ — The rebuild swap's source-journal fold (finding 6c121287): records appended to the SOURCE
+- `replay_spans` _function_ — The groups a rebuild replays as windows instead of folding at ingest (design amendment
 - `retire_records` _function_ — An element leaves the note; its follower closes the gap. One with children refuses (move or
 - `retired_section` _function_
 - `section_edit_records` _function_ — An edit of one element's text: a headed element keeps its level (level is placement --
