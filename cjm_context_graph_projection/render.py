@@ -513,6 +513,8 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         return _render_claims(obj)
     if kind == "standing":
         return _render_standing(obj)
+    if kind == "round-trip":
+        return _render_round_trip(obj)
     if kind == "series-order":
         if obj.get("error"):
             return f"⚠ {obj['error']}"
@@ -1655,6 +1657,27 @@ def _render_standing(obj: Dict[str, Any]) -> str:
     if top and len(rows) > top:
         lines.append(f"- … {len(rows) - top} more page(s) (`--top 0` lists all)")
     return "\n".join(lines).rstrip()
+
+
+def _render_round_trip(obj: Dict[str, Any]) -> str:
+    """The round-trip invariant's report (design 56c9c332): the count that holds, then each post
+    that does not, at its first differing line."""
+    if "commit" not in obj:
+        return "⚠ " + "; ".join(obj.get("errors") or ["round-trip failed"])
+    differ, missing = obj.get("differ") or [], obj.get("missing") or []
+    ok = not (differ or missing or obj.get("errors"))
+    lines = [f"## Round trip at `{obj['commit'][:12]}` — {obj['equal']} of {obj['kept']} kept posts compose "
+             f"to their blob {'✓' if ok else '✗'}"]
+    for d in differ[:40]:
+        lines.append(f"- `{d['path']}` line {d['line']}: blob {d['blob']!r} · composed {d['composed']!r}")
+    if len(differ) > 40:
+        lines.append(f"- … {len(differ) - 40} more")
+    lines += [f"- no Note for kept `{p}`" for p in missing]
+    lines += [f"- ⚠ {e}" for e in obj.get("errors") or []]
+    if obj.get("extra"):
+        lines.append(f"_{len(obj['extra'])} archive Note(s) not kept at this commit: "
+                     + ", ".join(f"`{p}`" for p in obj["extra"][:10]) + "_")
+    return "\n".join(lines)
 
 
 def _iv(m: Optional[Dict[str, Any]]) -> str:

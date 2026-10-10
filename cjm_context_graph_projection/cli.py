@@ -1376,6 +1376,13 @@ async def _dispatch(args) -> int:
             res["top"] = args.top
             print(render("standing", res, args.format))
             return 1 if res.get("error") else 0
+        elif args.command == "round-trip":
+            # The round-trip invariant, the archive cutover's gate (design 56c9c332; work item
+            # f86be52f): every kept post composed from the graph against its blob at a commit.
+            from .archive import archive_round_trip
+            res = await archive_round_trip(gx, load_graph_config(args.graph_db_path) or {}, commit=args.commit)
+            print(render("round-trip", res, args.format))
+            return 1 if (res.get("errors") or res.get("differ") or res.get("missing")) else 0
         elif args.command == "series-members":
             # The whole ordered membership (DEC 72d669c5 (4)): each slug follows the one before.
             slugs = list(args.slugs)
@@ -3783,6 +3790,12 @@ def main() -> int:
     p_st.add_argument("--bare", action="store_true", help="The standings alone (no traffic, links or claims)")
     p_st.add_argument("--since", default=None, help="The traffic's first month (YYYY-MM; default every month)")
     p_st.add_argument("--top", type=int, default=0, help="Pages listed (default 0 = all)")
+    p_rt = sub.add_parser("round-trip",
+                          help="The ROUND-TRIP INVARIANT (design 56c9c332; READ verb, the archive cutover's gate): "
+                               "every kept post composed FROM THE GRAPH (frontmatter + Sections walked by PART_OF / "
+                               "NEXT) against its git blob at a commit, never the working tree; exits 1 on any "
+                               "difference, a kept post with no Note, or a malformed outline")
+    p_rt.add_argument("--commit", default=None, help="The commit compared with (default: the website clone's HEAD)")
     p_rs = sub.add_parser("retire-source",
                           help="Retire an ARCHIVE source as a fact (journaled; design amendment e916a4b9): "
                                "publish_state retired + where its source lived, so a rebuild restores it "

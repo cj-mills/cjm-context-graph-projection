@@ -23,13 +23,16 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from cjm_context_graph_layer.grammar import make_edge
+from cjm_context_graph_layer.grammar import make_edge, SpineRelations
 from cjm_context_graph_layer.ops import extend_graph
 from cjm_context_graph_primitives.query import PropertyPredicate
 from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
+from cjm_markdown_decompose_core.project import compose_note_text
 
 from . import factlayer as F
+from .devgraph import ArchiveSource
+from .gitfold import blobs_at
 from .runtime import GraphHandle
 
 RETIRE_VERB = "retire-source"     # The journaled retire op (one per retired archive source)
@@ -273,3 +276,74 @@ async def transfer_site_path(
                        [make_edge(res["assertion_id"], str(F.nid(old)), DevRelations.SUPERSEDES)])
     return {"from_id": src, "to_id": dst, "value": value, "assertion_id": res["assertion_id"],
             "superseded": str(F.nid(old)), "written": True}
+
+
+async def archive_round_trip(
+    gx: GraphHandle,
+    config: Dict[str, Any],        # The notes graph-sibling config (notes_corpus, website_root, site_pages, journal_path)
+    commit: Optional[str] = None,  # The commit whose blobs the compositions are compared with (default: the clone's HEAD)
+) -> Dict[str, Any]:  # {commit, kept, equal, differ, missing, extra, errors}
+    """THE ROUND-TRIP INVARIANT, the archive cutover's gate (design 56c9c332; work item f86be52f).
+
+    Every kept post -- a post under the corpus root at `commit`, never a retired one, never a
+    site page -- is COMPOSED FROM THE GRAPH (its Note's frontmatter, its Sections' own state
+    walked by PART_OF + NEXT) and compared byte for byte with its git blob at that commit, never
+    the working tree (a checkout's line endings are not the archive's). A post that differs
+    reports its first differing line; a kept path with no Note, or an archive Note whose path the
+    commit does not keep, is listed apart. Read-only."""
+    errors: List[str] = []
+    root, top = config.get("notes_corpus"), config.get("website_root")
+    if not root or not top:
+        return {"errors": ["round-trip needs notes_corpus and website_root in the sibling config"]}
+    src = ArchiveSource(root, config.get("notes_profile") or "quarto_post", site_root=top,
+                        site_pages=config.get("site_pages"),
+                        retired=retired_sources(config.get("journal_path")))
+    r = subprocess.run(["git", "-C", src.top, "rev-parse", "--verify", f"{commit or 'HEAD'}^{{commit}}"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        return {"errors": [f"no commit {commit or 'HEAD'} in {src.top}"]}
+    sha = r.stdout.strip()
+    held = subprocess.run(["git", "-C", src.top, "ls-tree", "-r", "--name-only", sha],
+                          capture_output=True, text=True).stdout.split("\n")
+    kept = sorted(p for p in held if p and src.is_post(p) and p not in src.by_retired)
+    blobs = blobs_at(src.top, sha, kept)
+
+    by_path: Dict[str, Any] = {}
+    for n in await F.load_label(gx, DevNodeKinds.NOTE):
+        path = str(F.prop(n, "path") or "")
+        try:
+            rel = Path(path).resolve().relative_to(Path(src.top).resolve()).as_posix()
+        except ValueError:
+            continue
+        if src.is_post(rel) and rel not in src.by_retired:
+            by_path[rel] = n
+    sections: Dict[str, List[Any]] = {}
+    for s in await F.load_label(gx, DevNodeKinds.SECTION):
+        sections.setdefault(str(F.prop(s, "note_id")), []).append(s)
+    own = {F.nid(s) for ss in sections.values() for s in ss}
+    parent = {a: b for a, b in await F.load_edge_pairs(gx, SpineRelations.PART_OF) if a in own and b in own}
+    following = {a: b for a, b in await F.load_edge_pairs(gx, SpineRelations.NEXT) if a in own and b in own}
+
+    equal, differ, missing = 0, [], []
+    for rel in kept:
+        node = by_path.get(rel)
+        if node is None:
+            missing.append(rel)
+            continue
+        blob = blobs[rel].decode("utf-8")
+        try:
+            composed = compose_note_text(str(F.prop(node, "frontmatter_raw") or ""),
+                                         sections.get(F.nid(node), []), parent, following)
+        except ValueError as e:
+            errors.append(f"{rel}: {e}")
+            continue
+        if composed == blob:
+            equal += 1
+            continue
+        a, b = blob.split("\n"), composed.split("\n")
+        i = next((k for k, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b)))
+        differ.append({"path": rel, "slug": F.prop(node, "slug"), "line": i + 1,
+                       "blob": a[i] if i < len(a) else None, "composed": b[i] if i < len(b) else None})
+    extra = sorted(p for p in by_path if p not in blobs)
+    return {"commit": sha, "kept": len(kept), "equal": equal, "differ": differ, "missing": missing,
+            "extra": extra, "errors": errors}

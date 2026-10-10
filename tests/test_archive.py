@@ -167,3 +167,39 @@ def test_retire_restore_and_transfer_survive_a_rebuild(tmp_path):
     bad = _run("--graph-db-path", str(tmp_path / "bad" / "g.db"), "--journal-path", str(bad_journal),
                "ingest-notes")
     assert bad.returncode != 0 and "cannot restore it" in (bad.stdout + bad.stderr)
+
+
+@pytest.mark.skipif(not _HAVE_GRAPH, reason="needs the graph capability")
+def test_round_trip_composes_each_kept_post_from_the_graph_against_its_blob(tmp_path):
+    # The round-trip invariant (design 56c9c332; work item f86be52f): a post is composed FROM THE
+    # GRAPH and compared with its blob at a commit -- a non-canonical heading or separator differs
+    # until the composed form is committed, and an older commit is still checkable by name.
+    site = tmp_path / "site"
+    for d in ("posts/a", "posts/b"):
+        (site / d).mkdir(parents=True)
+    canonical = "---\ntitle: \"A\"\n---\n\nLede.\n\n## One\n\nBody.\n\n### Two\n\nMore.\n"
+    (site / "posts" / "a" / "index.md").write_text(canonical)
+    (site / "posts" / "b" / "index.md").write_text("---\ntitle: \"B\"\n---\n\n## One  \nBody.\n\n\n#### Deep\n\nx\n")
+    _git(site, "init", "-q")
+    _git(site, "add", "-A")
+    _git(site, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "site")
+    first = _git(site, "rev-parse", "HEAD")
+    config = {"notes_corpus": str(site / "posts"), "notes_profile": "quarto_post", "website_root": str(site)}
+
+    def check(sub, *extra):
+        (tmp_path / sub).mkdir()
+        (tmp_path / sub / "graph.config.json").write_text(json.dumps(config))
+        db = str(tmp_path / sub / "g.db")
+        r = _run("--graph-db-path", db, "--journal-path", str(tmp_path / f"{sub}.jsonl"), "ingest-notes")
+        assert r.returncode == 0, r.stdout + r.stderr
+        return _run("--graph-db-path", db, "round-trip", *extra)
+
+    before = check("before")
+    assert before.returncode == 1 and "1 of 2 kept posts" in before.stdout, before.stdout
+    assert "`posts/b/index.md` line 5: blob '## One  ' · composed '## One'" in before.stdout
+    (site / "posts" / "b" / "index.md").write_text("---\ntitle: \"B\"\n---\n\n## One\n\nBody.\n\n### Deep\n\nx\n")
+    _git(site, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "canonical")
+    after = check("after")
+    assert after.returncode == 0 and "2 of 2 kept posts compose to their blob ✓" in after.stdout, after.stdout
+    old = check("old", "--commit", first)  # the canonical graph against the earlier blobs
+    assert old.returncode == 1 and "1 of 2" in old.stdout and first[:12] in old.stdout

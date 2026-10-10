@@ -202,3 +202,38 @@ def test_journal_replay_after_an_edit_matches_archive_ingest_of_the_emitted_post
     for db in ("replay.db", "ingest.db"):
         r4 = _run("--graph-db-path", str(tmp_path / db), "site-links")
         assert r4.returncode == 2 and "unresolved: `born-post` -> /series/notes/education-notes.html" in r4.stdout
+
+
+def test_a_live_insert_keeps_the_outline_relations_an_ingest_derives(tmp_path):
+    # Order and nesting are relations (design 56c9c332 (3)): a section inserted mid-note re-points
+    # its preceding sibling's NEXT and re-parents the sub-section it now encloses -- live -- so the
+    # live graph carries exactly the PART_OF / NEXT edges an ingest of the emitted post derives.
+    emit = tmp_path / "emit"
+    journal = str(tmp_path / "notes.writes.jsonl")
+    (tmp_path / "graph.config.json").write_text(json.dumps(
+        {"notes_profile": "quarto_post", "emit_root": str(emit), "notes_corpus": str(emit)}))
+    live = str(tmp_path / "notes.db")
+    post = POST + "\n### Sub\n\nSub body.\n\n## Last\n\nEnd.\n"
+    r = _run("--graph-db-path", live, "--journal-path", journal, "new-note", "--slug", "born-post", "--content", post)
+    assert r.returncode == 0, r.stderr or r.stdout
+    r = _run("--graph-db-path", live, "--journal-path", journal, "add-section", "born-post",
+             "--after", "first", "--content", "## Middle\n\nMid.\n")
+    assert r.returncode == 0, r.stderr or r.stdout
+    commit_all(emit)   # the archive is HEAD (19edbe97)
+    r = _run("--graph-db-path", str(tmp_path / "ingest.db"), "ingest-notes")
+    assert r.returncode == 0, r.stderr or r.stdout
+    sid = lambda a: section_node_id(note_node_id("born-post"), a)
+
+    def outline(db):
+        con = sqlite3.connect(db)
+        try:
+            return sorted(con.execute("select source_id, relation_type, target_id from edges "
+                                      "where relation_type in ('PART_OF', 'NEXT')"))
+        finally:
+            con.close()
+
+    assert outline(live) == outline(str(tmp_path / "ingest.db"))
+    assert (sid("first"), "NEXT", sid("middle")) in outline(live)
+    assert (sid("middle"), "NEXT", sid("last")) in outline(live)
+    assert (sid("sub"), "PART_OF", sid("middle")) in outline(live)       # re-parented, live
+    assert (sid("sub"), "PART_OF", sid("first")) not in outline(live)    # the stale edge is gone

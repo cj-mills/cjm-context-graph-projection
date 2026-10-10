@@ -23,7 +23,9 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from cjm_context_graph_layer.grammar import SpineRelations
 from cjm_context_graph_layer.ops import extend_graph, graph_task
+from cjm_context_graph_primitives.query import EdgeQuery
 from cjm_dev_graph_schema.identity import note_node_id
 from cjm_markdown_decompose_core.extract import note_from_text
 from cjm_markdown_decompose_core.ingest import corpus_graph_elements
@@ -59,9 +61,10 @@ async def _apply_note_text(
     decomposed = note_from_text(path, new_text, corpus_root=str(Path(path).parent), lossless=True,
                                 slug=slug)
     desired = {s.anchor: s for s in decomposed.sections}
+    wires = await _note_section_wires(gx, F.nid(note_node))
     graph = {str(F.props(w).get("anchor")): (str(F.props(w).get("raw") or ""),
                                              int(F.props(w).get("order") or 0))
-             for w in await _note_section_wires(gx, F.nid(note_node))}
+             for w in wires}
 
     add_nodes: List[Dict[str, Any]] = []
     add_edges: List[Dict[str, Any]] = []
@@ -77,6 +80,19 @@ async def _apply_note_text(
             updates.append(s)
             updated.append(anchor)
     removed = sorted(a for a in graph if a not in desired)
+    # The outline relations (PART_OF, NEXT -- design 56c9c332 (3)) are diffed whole, the way
+    # ingest derives them: an inserted section re-points its preceding sibling's NEXT, a new
+    # heading re-parents the sections it now encloses, and a removed section's edges go.
+    outline = (SpineRelations.PART_OF, SpineRelations.NEXT)
+    own = {F.nid(w) for w in wires} | {s.id for s in decomposed.sections}
+    want = {e["id"]: e for s in decomposed.sections for e in s.structural_edges()
+            if e["relation_type"] in outline}
+    have = {str(e["id"]) for rel in outline
+            for e in await F.load_edges(gx, EdgeQuery(source_ids=sorted(own), relation_type=rel))
+            if str(e["target_id"]) in own}
+    stale_outline = sorted(i for i in have if i not in want)
+    queued = {e["id"] for e in add_edges}
+    add_edges.extend(e for i, e in want.items() if i not in have and i not in queued)
     fm_changed = decomposed.frontmatter_raw != str(F.prop(note_node, "frontmatter_raw") or "")
 
     # Apply to the graph + write the file ONLY on write=True; write=False is a true dry-run
@@ -86,10 +102,12 @@ async def _apply_note_text(
     do_file = write if write_md is None else write_md
     relations: Dict[str, Any] = {}
     if write:
-        for s in updates:
+        for s in updates:  # the whole derived wire (title, text, level, order, raw), as ingest writes it
             await graph_task(gx.queue, gx.graph_id, "update_node", node_id=s.id,
-                             properties={"raw": s.raw, "content_hash": s.content_hash,
-                                         "order": s.order})
+                             properties={**s.to_graph_node()["properties"],
+                                         "content_hash": s.content_hash})
+        if stale_outline:
+            await graph_task(gx.queue, gx.graph_id, "delete_edges", edge_ids=stale_outline)
         if add_nodes or add_edges:
             await extend_graph(gx.queue, gx.graph_id, add_nodes, add_edges)
         if fm_changed:
@@ -104,6 +122,7 @@ async def _apply_note_text(
             Path(path).write_text(new_text)
     return {"slug": slug, "path": path, "added": sorted(added), "updated": sorted(updated),
             "removed": removed, "frontmatter_changed": fm_changed, "relations": relations,
+            "outline": {"added": sorted(i for i in want if i not in have), "removed": stale_outline},
             "written": bool(do_file and path), "emitted_text": new_text}
 
 

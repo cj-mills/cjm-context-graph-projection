@@ -126,6 +126,16 @@ async def load_edge_pairs(
     return [(r["source_id"], r["target_id"]) for r in (res.rows or [])]
 
 
+async def load_edges(
+    gx: GraphHandle,
+    query: EdgeQuery,  # An unprojected edge query (endpoint filters, a relation type)
+) -> List[Dict[str, Any]]:  # Whole edges as plain dicts (id, source_id, target_id, relation_type, properties)
+    """The edges an `EdgeQuery` matches, whole -- for a caller that diffs edge ids."""
+    res = await graph_task(gx.queue, gx.graph_id, "query_edges", query=query.to_dict())
+    raw = getattr(res, "edges", None) or getattr(res, "rows", None) or []
+    return [e.to_dict() if hasattr(e, "to_dict") else dict(e) for e in raw]
+
+
 async def load_supersedes(gx: GraphHandle) -> List[Tuple[str, str]]:
     """All SUPERSEDES (superseder, superseded) pairs (the resolve_active input)."""
     return await load_edge_pairs(gx, DevRelations.SUPERSEDES)
