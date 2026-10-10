@@ -66,6 +66,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - **`cjm_context_graph_projection.refactor_ops`** — `move` — relocate a symbol between modules (the EXECUTE half of refactor-candidates).
 - **`cjm_context_graph_projection.registers`** — Register drift-check: each hub note's member-cache vs the active `role` assertions.
 - **`cjm_context_graph_projection.relive`** — The LIVE half of the code fold (design amendment 2cc81d3b, build B2 of leg B 0e3508fd).
+- **`cjm_context_graph_projection.relocate`** — The relocation of removed pages into repositories (design 3d5ee659 for the relocation item
 - **`cjm_context_graph_projection.rename_ops`** — Symbol `rename` — the Ext-B increment: scoped identifier substitution INTO bodies.
 - **`cjm_context_graph_projection.render`** — Render projection results for a consumer: agent (JSON) or human (markdown).
 - **`cjm_context_graph_projection.review`** — The review frontier: which APPROVED deliverables have stale upstream — derived, never stored.
@@ -128,6 +129,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 
 ### `cjm_context_graph_projection.archive`
 
+- `archive_round_trip` _function_ — THE ROUND-TRIP INVARIANT, the archive cutover's gate (design 56c9c332; work item f86be52f).
 - `git_blob` _function_
 - `git_head` _function_
 - `is_retired` _function_ — A retired node is never listed, linked to or rendered, under any profile.
@@ -365,6 +367,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `load_assertions` _function_ — All Assertion nodes.
 - `load_contradicts` _function_ — All CONTRADICTS pairs already recorded (for write idempotency / reporting).
 - `load_edge_pairs` _function_ — All (source, target) pairs for an edge relation type.
+- `load_edges` _function_ — The edges an `EdgeQuery` matches, whole -- for a caller that diffs edge ids.
 - `load_label` _function_ — All nodes of a label (bounded by `limit`).
 - `load_label_where` _function_ — Nodes of a label filtered by property predicates, SERVER-SIDE (`NodeQuery.where`).
 - `load_nodes` _function_ — Batch-fetch nodes by id in ONE worker round-trip (`NodeQuery.ids`).
@@ -791,6 +794,38 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 ### `cjm_context_graph_projection.relive`
 
 - `apply_live` _function_ — Apply the code fold's step to the db for the records a live verb just appended.
+
+### `cjm_context_graph_projection.relocate`
+
+- `apply_relocation` _function_ — The copy's web Reference (what was read at landing rides the op) and the page's
+- `ast_targets` _function_
+- `clone_repo` _function_ — The repository a clone pushes to (its origin) and the branch it holds.
+- `copy_dir` _function_ — posts/<slug> in the dedicated repository, retired-post/<slug> in a companion repository:
+- `copy_header` _function_ — The copy's head (design 3d5ee659 (4)): the title, a note naming where the page lived and
+- `copy_targets` _function_ — Where a link to a relocated page goes from this copy: relative inside one repository,
+- `copy_url` _function_
+- `front_matter` _function_
+- `gh_repos` _function_ — The owner's repositories, read from GitHub through `gh` (its own auth).
+- `github_repo` _function_
+- `http_fetch` _function_
+- `include_paths` _function_
+- `land_relocations` _function_ — Land each page's destination (design 3d5ee659 (6)): a page a public successor supersedes
+- `link_map` _function_ — The map the Lua filter applies. A raw-HTML attribute resolves as a link unless it names
+- `linked_repos` _function_ — The owner's repositories a page links, counted (a clone URL counts as its repository).
+- `load_pages` _function_ — Every page leaving or gone (the standing rows), with its paths, its source, its retire
+- `merge_readme` _function_ — The README with the block replaced in place, else appended; a new README is the title,
+- `parse_copy_url` _function_
+- `pointer_block` _function_ — The README's projected block: every copy the repository holds, by date.
+- `project_copies` _function_ — Project each page's copy into the clone (design 3d5ee659 (1)-(4)) and regenerate the
+- `relocation_config` _function_ — The relocation's settings (DATA beside the notes db, design 3d5ee659 (2)/(3)): the
+- `relocation_plan` _function_ — The worklist as a read (design 3d5ee659 (6)): every page pending relocation with its
+- `render_copy` _function_ — The page's body as GitHub markdown: Quarto renders it in a scratch project of its own,
+- `repo_candidates` _function_ — Each page's candidate companion repository: the one its SERIES links most (a series =
+- `resolve_target` _function_ — One link target in the copy (design 3d5ee659 (1)). A fragment, a mail link or another
+- `source_bundle` _function_ — The source and every file in its directory at the commit, nested pages left out (a
+- `source_targets` _function_ — Every link target the source writes, read by Pandoc (the same reader the render uses).
+- `strip_chrome` _function_
+- `with_lead` _function_ — The description opens the copy's body, so its links pass through the link map like any
 
 ### `cjm_context_graph_projection.rename_ops`
 
