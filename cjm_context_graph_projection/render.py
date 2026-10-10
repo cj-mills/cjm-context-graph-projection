@@ -515,6 +515,9 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         return _render_standing(obj)
     if kind == "round-trip":
         return _render_round_trip(obj)
+    if kind in ("capture-archive", "cutover-archive", "absorb-archive", "place", "retire-section",
+                "replay-source", "source-check-notes", "author-archive", "add-section-archive"):
+        return _render_archive_source(kind, obj)
     if kind == "series-order":
         if obj.get("error"):
             return f"⚠ {obj['error']}"
@@ -2607,3 +2610,60 @@ def _fmt_span(start: Any, end: Any) -> str:  # mm:ss–mm:ss for source-second s
         except (TypeError, ValueError):
             return "--:--"
     return f"{one(start)}–{one(end)}"
+
+
+def _render_archive_source(
+    kind: str,              # capture-archive | cutover-archive | absorb-archive | place | retire-section | replay-source | source-check-notes | author-archive | add-section-archive
+    obj: Dict[str, Any],    # The verb's result
+) -> str:  # The human report
+    """The archive cutover's verbs (work item 79703485; design amendment 56b24fd5): what was
+    journaled, the notes fold's live step, the file emitted, and every refusal with its reason."""
+    if obj.get("error"):
+        return f"⚠ {kind}: {obj['error']}"
+    lines: List[str] = []
+    if kind == "capture-archive":
+        lines.append(f"## Capture -- {len(obj.get('captured') or [])} of {obj.get('kept')} kept post(s) at "
+                     f"`{str(obj.get('commit'))[:12]}` · {obj.get('records', 0)} record(s)"
+                     + ("" if obj.get("written") else " · nothing appended"))
+        if obj.get("already"):
+            lines.append(f"- already captured: {len(obj['already'])}")
+    elif kind == "cutover-archive":
+        lines.append(f"## Cutover -- {len(obj.get('cut_over') or [])} post(s) now graph-sourced"
+                     + ("" if obj.get("written") else " · nothing appended"))
+    elif kind == "absorb-archive":
+        lines.append(f"## Absorb at `{str(obj.get('commit'))[:12]}` -- {len(obj.get('notes') or [])} note(s), "
+                     f"{obj.get('records', 0)} record(s)")
+        for n in obj.get("notes") or []:
+            lines.append(f"- `{n['path']}`: {len(n['changed'])} changed · {len(n['placed'])} placed · "
+                         f"{len(n['born'])} born · {len(n['retired'])} retired"
+                         + ("" if n.get("canonical") else " · non-canonical: re-emitted, commit it"))
+            for r in n.get("review") or []:
+                lines.append(f"  - review: heading “{r['title']}” `{r['retired'][:8]}` retired beside a birth "
+                             "-- a rename is never guessed")
+        for s in obj.get("skipped") or []:
+            lines.append(f"- skipped `{s['path']}` ({s['state']}): commit the outside edit, then absorb")
+    elif kind == "source-check-notes":
+        c = obj.get("counts") or {}
+        lines.append(f"## Notes source check -- {'CLEAN' if obj.get('clean') else 'NOT CLEAN'} · "
+                     + " · ".join(f"{k} {v}" for k, v in sorted(c.items())))
+        for r in obj.get("notes") or []:
+            if r["state"] not in ("clean", "shadow"):
+                lines.append(f"- {r['state']}: `{r['path']}`" + (f" (line {r['line']})" if r.get("line") else "")
+                             + (f" -- {r['error']}" if r.get("error") else ""))
+    elif kind == "replay-source":
+        lines.append(f"## Source-journal fold -- {obj.get('records', 0)} record(s) after offset {obj.get('offset')}")
+    else:   # place | retire-section | author-archive | add-section-archive
+        recs = obj.get("records") or []
+        lines.append(f"## {kind} -- {len(recs)} record(s)" + (f" · `{obj['node_id'][:8]}`" if obj.get("node_id") else "")
+                     + (" · unchanged" if obj.get("unchanged") else ""))
+        if obj.get("file"):
+            lines.append(f"- emitted `{obj['file']}` (commit and push main to publish)")
+    for r in obj.get("refused") or []:
+        lines.append(f"- ⚠ refused `{r.get('path')}`: " + (r.get("error") or
+                     f"line {r.get('line')}: {r.get('a')!r} vs {r.get('b')!r}"))
+    # The notes fold's step rides its own key: a `live` receipt is the CODE lane's (render appends its line)
+    live = obj.get("notes_live")
+    if isinstance(live, dict):
+        lines.append(f"🧬 notes live: {len(live['notes'])} note(s) — nodes +{live['nodes_added']} "
+                     f"~{live['nodes_updated']} · edges +{live['edges_added']} −{live['edges_removed']}")
+    return "\n".join(lines)

@@ -60,6 +60,7 @@ def notes_corpus_elements(
     site_pages: Optional[List[str]] = None,   # The site's own pages, relative to site_root (config DATA)
     retired: Optional[List[Dict[str, Any]]] = None,  # The journal's retire records (archive.retired_sources): restored from git, never read from the tree
     report: Optional[Dict[str, Any]] = None,  # Filled with what was read: {root, head, commits, versions, uncommitted, untracked, sources}
+    source_records: Optional[List[Dict[str, Any]]] = None,  # The notes source journal's records (the cut-over posts' source)
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:  # (nodes, edges), each carrying its created_at / updated_at
     """Decompose a git-held `<dir>/index.md` / `index.qmd` markdown corpus into graph elements.
 
@@ -93,12 +94,20 @@ def notes_corpus_elements(
     # times stop at that commit (19edbe97 (7)). The site's own pages (about, the front page, the
     # listing hubs …) ride the same ingest as archive Sources, so every public page is a node its
     # site_path fact can hold (ruling 96aff70e; user, 2026-09-28).
+    # A CUT-OVER post (design amendment 56b24fd5 (2)) is frozen at its capture commit like a retired
+    # source, then continued by the notes source journal's fold in the same ElementFold: each
+    # journal step a new version of its path at the step's ts, so the capture changes nothing and
+    # its times continue.
+    from .notesource import cutover_freeze, fold_source_records
+    records = list(source_records or [])
     src = ArchiveSource(corpus_root, profile, note_aliases, site_root=site_root, site_pages=site_pages,
-                        retired=retired)
+                        retired=retired, cutover=cutover_freeze(records))
     hist = fold_history(src.top, src.keep, src.decompose,
-                        freeze={p: r["commit"] for p, r in src.by_retired.items()})
+                        freeze={**{p: r["commit"] for p, r in src.by_retired.items()}, **src.cut})
+    live_cut = set(fold_source_records(records, src, hist).values()) if src.cut else set()
     tree = head_tree(src.top)
-    post_paths = sorted((p for p in tree if src.is_post(p) and p not in src.by_retired),
+    post_paths = sorted((p for p in set(tree) | live_cut if src.is_post(p) and p not in src.by_retired
+                         and (p not in src.cut or p in live_cut)),
                         key=lambda p: PurePosixPath(p).parts)
     by_dir: Dict[str, List[str]] = {}
     for p in post_paths:
@@ -107,7 +116,14 @@ def notes_corpus_elements(
     if both:
         raise ValueError("post directories holding more than one index file "
                          f"({', '.join(INDEX_FILENAMES)}): " + ", ".join(both))
-    notes = [hist.payloads[p] for p in post_paths]
+    notes, cut_retired = [], []
+    for p in post_paths:
+        payload = hist.payloads[p]
+        if isinstance(payload, tuple):   # a cut-over post: the source fold's NoteNode + its retired Sections
+            notes.append(payload[0])
+            cut_retired += payload[1]
+        else:
+            notes.append(payload)
     posts = {n.slug for n in notes}
     missing = sorted(p for p in src.pages if p not in tree and p not in hist.untracked)
     if missing:
@@ -132,6 +148,7 @@ def notes_corpus_elements(
         raise ValueError(f"retired sources still ingested from HEAD: {', '.join(dup)}")
     notes += back
     nodes, edges = corpus_graph_elements(notes, note_aliases)
+    nodes += cut_retired   # a retired Section stays a node (56b24fd5 (4)): out of the outline, its last state kept
     timeless = hist.fold.stamp(nodes, edges)
     if timeless:
         raise ValueError(f"{len(timeless)} archive element(s) the history fold holds no time for "
@@ -307,9 +324,11 @@ class ArchiveSource:
     (DEC a9176261), so the rows a moved path accounts for are exactly the rows it ingests to.
 
     Paths are relative to the archive's work tree (`top`): the posts under the corpus root
-    (`<prefix>.../index.md|qmd`), the site's own pages (identity = their path, 96aff70e) and
-    the retired sources (restored from the commit their retire op recorded, e916a4b9 (2) —
-    never kept from HEAD)."""
+    (`<prefix>.../index.md|qmd`), the site's own pages (identity = their path, 96aff70e), the
+    retired sources (restored from the commit their retire op recorded, e916a4b9 (2) — never
+    kept from HEAD) and the cut-over posts (frozen at their capture commit, then continued by the
+    notes source journal's fold — design amendment 56b24fd5 (2)), so a committed emit of a
+    cut-over post is never a source move."""
 
     def __init__(
         self,
@@ -320,6 +339,7 @@ class ArchiveSource:
         site_root: Optional[str] = None,          # The site project root the pages live under
         site_pages: Optional[List[str]] = None,   # The site's own pages, relative to site_root
         retired: Optional[List[Dict[str, Any]]] = None,  # The journal's retire records
+        cutover: Optional[Dict[str, str]] = None,        # The cut-over paths -> their capture commit (notesource.cutover_freeze): frozen in the git fold, continued by the notes source fold
     ):
         self.root = Path(corpus_root)
         top = git_toplevel(str(self.root))
@@ -337,13 +357,15 @@ class ArchiveSource:
         rel = self.root.resolve().relative_to(top).as_posix()
         self.prefix = "" if rel == "." else rel + "/"
         self.by_retired = {r["path"]: r for r in retired}
+        self.cut = dict(cutover or {})
         self.pages = {p: site_page_slug(p) for p in (site_pages or []) if p not in self.by_retired}
 
     def is_post(self, path: str) -> bool:  # A post's index file under the corpus root
         return path.startswith(self.prefix) and PurePosixPath(path).name in INDEX_FILENAMES
 
-    def keep(self, path: str) -> bool:  # What HEAD's walk ingests (a retired source is frozen instead)
-        return (self.is_post(path) or path in self.pages) and path not in self.by_retired
+    def keep(self, path: str) -> bool:  # What HEAD's walk ingests (a retired or cut-over source is frozen instead)
+        return ((self.is_post(path) or path in self.pages) and path not in self.by_retired
+                and path not in self.cut)
 
     def decompose(
         self,

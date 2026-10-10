@@ -222,7 +222,12 @@ def _sibling_journals(db_path: str) -> List[str]:  # Existing journal files besi
     `<stem>.source.jsonl`), each expanded to its rotated SEGMENT FAMILY (DEC bb1b9995)
     — the db is a projection OF these, so they are the honest data path for the
     journal-window (session lens) endpoint. Existence-checked: `journal_segments`
-    returns existing files only, so a journal-less graph simply serves no window."""
+    returns existing files only, so a journal-less graph simply serves no window. A graph whose
+    sibling config names its journals (the notes graph: both live in the private repo -- the
+    source journal since the archive cutover, 79703485) is read from those paths."""
+    from .config import load_graph_config
     stem = Path(db_path).with_suffix("")
-    return [seg for kind in ("writes", "source")
-            for seg in journal_segments(f"{stem}.{kind}.jsonl")]
+    cfg = load_graph_config(db_path) or {}
+    paths = [cfg.get("journal_path") or f"{stem}.writes.jsonl",
+             cfg.get("source_journal_path") or f"{stem}.source.jsonl"]
+    return [seg for p in paths for seg in journal_segments(p)]

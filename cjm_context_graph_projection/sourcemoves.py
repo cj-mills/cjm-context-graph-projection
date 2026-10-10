@@ -17,8 +17,8 @@ rewritten history) or whose lane cannot be rebuilt from the graph config is list
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-from .devgraph import (_pyproject_decomposer, ARCHIVE_SOURCE, ArchiveSource, parse_source_id,
-                       repo_entity, REPO_SOURCE)
+from .devgraph import (_pyproject_decomposer, ARCHIVE_SOURCE, parse_source_id, repo_entity,
+                       REPO_SOURCE)
 from .gitfold import blobs_at, commit_exists, paths_between
 
 
@@ -31,10 +31,10 @@ def source_lane(
     path decomposes to — the same objects the ingest folds with, so the attribution cannot
     disagree with the ingest about what a path produces."""
     if kind == ARCHIVE_SOURCE:
-        from .archive import retired_sources
-        src = ArchiveSource(root, config.get("notes_profile") or "quarto_post",
-                            site_root=config.get("website_root"), site_pages=config.get("site_pages"),
-                            retired=retired_sources(config.get("journal_path")))
+        # The ingest's own ArchiveSource: retired sources restored, cut-over posts frozen -- a
+        # cut-over post's committed emit is never a source move (design amendment 56b24fd5 (2))
+        from .notesource import archive_source
+        src = archive_source({**config, "notes_corpus": root})
         return src.top, src.keep, (lambda p, d: src.decompose(p, d)[1]), set()
     if kind == REPO_SOURCE:
         ent = repo_entity(root)

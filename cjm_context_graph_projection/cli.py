@@ -125,7 +125,7 @@ ID_REFS: Dict[str, tuple] = {
     "flip-module": ("repo_key",), "cutover": ("repo_key",),
     "emit-artifact": ("repo_key",), "emit-post": ("note_id",),
     "review-frontier": ("subject",), "propose": ("subject",), "confirm-proposal": ("proposal",),
-    "link-audit": ("note",),
+    "link-audit": ("note",), "place": ("section_id",), "retire-section": ("section_id",),
     "notes-retract": ("point",), "notes-check": ("point",), "notes-edit": ("point",),
 }
 
@@ -474,9 +474,13 @@ async def _dispatch(args) -> int:
             retired = retired_sources(args.journal_path) if args.journal_path else None
             # The archive is HEAD, timed from git history at the element grain (19edbe97)
             archive_report: Dict[str, Any] = {}
+            # The cut-over posts' source is the notes SOURCE journal (design amendment 56b24fd5 (2))
+            from .source_state import read_source_journal
+            source_records = read_source_journal(args.source_journal_path) if args.source_journal_path else []
             nodes, edges = notes_corpus_elements(args.notes_corpus, args.profile or "quarto_post",
                                                  site_root=args.website_root, site_pages=site_pages,
-                                                 retired=retired, report=archive_report)
+                                                 retired=retired, report=archive_report,
+                                                 source_records=source_records)
             res = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
             print(f"ingested notes: {res.nodes_added} nodes added / {res.nodes_verified} verified, "
                   f"{res.edges_added} edges added / {res.edges_existing} existing")
@@ -1383,6 +1387,14 @@ async def _dispatch(args) -> int:
             res = await archive_round_trip(gx, load_graph_config(args.graph_db_path) or {}, commit=args.commit)
             print(render("round-trip", res, args.format))
             return 1 if (res.get("errors") or res.get("differ") or res.get("missing")) else 0
+        elif args.command in ("capture-archive", "cutover-archive", "absorb-archive", "place",
+                              "retire-section", "replay-source"):
+            # The archive's graph-sourced cutover (work item 79703485; design amendment 56b24fd5):
+            # the notes source journal's verbs, journal-first, each with the notes fold's live step
+            from .notesource import archive_command
+            res = await archive_command(gx, args, load_graph_config(args.graph_db_path) or {})
+            print(render(args.command, res, args.format))
+            return 1 if (res.get("error") or res.get("refused")) else 0
         elif args.command == "series-members":
             # The whole ordered membership (DEC 72d669c5 (4)): each slug follows the one before.
             slugs = list(args.slugs)
@@ -1683,6 +1695,15 @@ async def _dispatch(args) -> int:
                 replace = args.replace
             elif args.edit:
                 edit = (args.edit[0], args.edit[1])
+            # A cut-over archive Section is authored journal-first in the notes source journal
+            # (design amendment 56b24fd5 (4)); every other node takes the slot path below
+            from .notesource import archive_author
+            arch = await archive_author(gx, load_graph_config(args.graph_db_path) or {}, args.node_id,
+                                        replace=replace, edit=edit, actor=args.actor,
+                                        write=not args.no_write)
+            if arch is not None:
+                print(render("author-archive", arch, args.format))
+                return 1 if arch.get("error") else 0
             res = await author(gx, args.node_id, replace=replace, edit=edit,
                                actor=args.actor, write=not args.no_write,
                                source_journal_path=args.source_journal_path,
@@ -1774,6 +1795,17 @@ async def _dispatch(args) -> int:
                               "note slug or Note id", file=sys.stderr)
                         return 1
                     slug = (rn.get("properties") or {}).get("slug") or slug
+            # A cut-over archive note births its element in the notes source journal (56b24fd5 (4))
+            from .notesource import archive_add_section
+            arch = await archive_add_section(gx, load_graph_config(args.graph_db_path) or {}, slug, raw,
+                                             parent=args.parent, after=args.after, actor=args.actor,
+                                             write=not args.no_write)
+            if arch is not None:
+                print(render("add-section-archive", arch, args.format))
+                return 1 if arch.get("error") else 0
+            if args.parent:
+                print("error: --parent places an element of a cut-over archive note only", file=sys.stderr)
+                return 1
             res = await add_section(gx, slug, raw, after=args.after, write=not args.no_write)
             print(render("structure", res, args.format))
             # M3 structural journaling: a live add-section is journal-sourced too — record the
@@ -2009,6 +2041,13 @@ async def _dispatch(args) -> int:
             print(render("flip-to-py", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "source-check":
+            cfg = load_graph_config(args.graph_db_path) or {}
+            if cfg.get("notes_corpus") and cfg.get("source_journal_path"):
+                # The notes lane: each journaled archive note's file against its journal (56b24fd5 (3))
+                from .notesource import notes_source_check
+                res = notes_source_check(cfg)
+                print(render("source-check-notes", res, args.format))
+                return 0 if res["clean"] else 1
             if not args.source_journal_path:
                 print("error: source-check needs --source-journal-path", file=sys.stderr)
                 return 1
@@ -2236,7 +2275,8 @@ def _apply_graph_config(args) -> None:
                              ("notes_corpus", "notes_corpus", None),
                              ("notes_profile", "profile", None),
                              ("emit_root", "emit_root", None),
-                             ("website_root", "website_root", None)):
+                             ("website_root", "website_root", None),
+                             ("source_journal_path", "source_journal_path", None)):
         if key in cfg and hasattr(args, attr):
             current = getattr(args, attr)
             if (not current) if baked is None else (current == baked):
@@ -3796,6 +3836,47 @@ def main() -> int:
                                "NEXT) against its git blob at a commit, never the working tree; exits 1 on any "
                                "difference, a kept post with no Note, or a malformed outline")
     p_rt.add_argument("--commit", default=None, help="The commit compared with (default: the website clone's HEAD)")
+    p_cap = sub.add_parser("capture-archive",
+                           help="THE ARCHIVE CUTOVER, capture (work item 79703485; design amendment 56b24fd5): "
+                                "every kept post at a commit into the notes SOURCE journal -- the note, each "
+                                "element's state and placement, keyed to the commit -- refusing a post whose "
+                                "records do not compose to its blob")
+    p_cap.add_argument("--commit", default=None, help="The commit captured (default: the website clone's HEAD)")
+    p_cap.add_argument("--no-write", action="store_true", help="Report what would be captured; append nothing")
+    p_cut = sub.add_parser("cutover-archive",
+                           help="THE ARCHIVE CUTOVER: make the notes source journal a captured post's source -- "
+                                "the journal's composition, the graph's (round-trip), HEAD and the working tree "
+                                "must agree")
+    p_cut.add_argument("paths", nargs="*", help="Post paths under the website clone (default: every captured post)")
+    p_cut.add_argument("--no-write", action="store_true", help="Report; append nothing")
+    p_abs = sub.add_parser("absorb-archive",
+                           help="Absorb an outside edit of a cut-over post (HEAD changed by another): elements "
+                                "mapped by anchor, a renamed heading a retire + a birth listed for review, a "
+                                "non-canonical edit re-emitted")
+    p_abs.add_argument("paths", nargs="*", help="Post paths (default: every post source-check calls DRIFT)")
+    p_abs.add_argument("--no-write", action="store_true", help="Report; append nothing")
+    p_pl = sub.add_parser("place",
+                          help="Move, re-parent or reorder an element of a cut-over archive note (journals "
+                               "placement only; level follows the placement)")
+    p_pl.add_argument("section_id", help="The Section (id or unique prefix)")
+    g_plp = p_pl.add_mutually_exclusive_group()
+    g_plp.add_argument("--parent", default=None, help="The heading it nests under (id, prefix or current anchor)")
+    g_plp.add_argument("--top", action="store_true", help="Move it to the note's top level")
+    g_pla = p_pl.add_mutually_exclusive_group(required=True)
+    g_pla.add_argument("--after", default=None, help="The sibling it follows (id, prefix or current anchor)")
+    g_pla.add_argument("--first", action="store_true", help="Make it the first of its siblings")
+    p_pl.add_argument("--no-write", action="store_true", help="Prove the move; append nothing")
+    p_pl.add_argument("--actor", default=_DEFAULT_ACTOR)
+    p_rsec = sub.add_parser("retire-section",
+                            help="Retire an element of a cut-over archive note: it stays a node, out of the "
+                                 "composition and the outline (RETIRE IS A FACT, a7617bd4)")
+    p_rsec.add_argument("section_id", help="The Section (id or unique prefix)")
+    p_rsec.add_argument("--no-write", action="store_true", help="Prove it; append nothing")
+    p_rsec.add_argument("--actor", default=_DEFAULT_ACTOR)
+    p_rps = sub.add_parser("replay-source",
+                           help="The rebuild swap's SOURCE-journal fold (finding 6c121287): fold the records after "
+                                "the N-th into this db through the live step (cg-rebuild runs it)")
+    p_rps.add_argument("--offset", type=int, required=True, help="Records already folded (the count before the build)")
     p_rs = sub.add_parser("retire-source",
                           help="Retire an ARCHIVE source as a fact (journaled; design amendment e916a4b9): "
                                "publish_state retired + where its source lived, so a rebuild restores it "
@@ -4110,7 +4191,11 @@ def main() -> int:
     g_asec = p_asec.add_mutually_exclusive_group(required=True)
     g_asec.add_argument("--content", help="The new section's heading-inclusive text (## H\\n\\n...)")
     g_asec.add_argument("--content-file", help="Read the new section's text from a file")
-    p_asec.add_argument("--after", default=None, help="Insert after this anchor (default: append at end)")
+    p_asec.add_argument("--after", default=None,
+                        help="Insert after this anchor (default: append at end); on a cut-over archive note, "
+                             "the SIBLING it follows -- an element id, prefix or current anchor (default: first)")
+    p_asec.add_argument("--parent", default=None,
+                        help="A cut-over archive note only: the heading it nests under (default: the top level)")
     p_asec.add_argument("--no-write", action="store_true", help="Dry run: apply to graph, don't write the .md")
     p_asec.add_argument("--actor", default=_DEFAULT_ACTOR)
 
