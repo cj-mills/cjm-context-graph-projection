@@ -73,6 +73,9 @@ ENTITY_FIELDS: Dict[str, Dict[str, type]] = {
     P.ENTITY_ENVIRONMENT: {"description": str, "parts": list, "requires": list, "variants": list,
                            "retired": bool},
     P.ENTITY_CONCEPT: {"description": str, "not_for": str, "subject": str, "retired": bool},
+    # The section roles (ruling 6a203252 (3)): the role judge's options, its criteria the
+    # description and not-for line, its position the order the review lists them in
+    P.ENTITY_SECTION_ROLE: {"description": str, "not_for": str, "position": int, "retired": bool},
 }
 _REQUIRED = {P.ENTITY_TASK: ("position",), P.ENTITY_STAGE: ("position",),
              P.ENTITY_HARDWARE: ("device_class",), P.ENTITY_CLAIM: ("statement", "position"),
@@ -80,7 +83,8 @@ _REQUIRED = {P.ENTITY_TASK: ("position",), P.ENTITY_STAGE: ("position",),
              P.ENTITY_OUTPUT_CLASS: ("position",),
              **{k: ("description", "not_for") for k in P.FACET_KINDS},
              P.ENTITY_ARTIFACT_KIND: ("description",), P.ENTITY_ARTIFACT: ("artifact_kind",),
-             P.ENTITY_ENVIRONMENT: ("description",), P.ENTITY_CONCEPT: ("description", "not_for", "subject")}
+             P.ENTITY_ENVIRONMENT: ("description",), P.ENTITY_CONCEPT: ("description", "not_for", "subject"),
+             P.ENTITY_SECTION_ROLE: ("description", "not_for", "position")}
 _ALLOWED = {(P.ENTITY_HARDWARE, "device_class"): P.DEVICE_CLASSES,   # closed slates on a field
             (P.ENTITY_WORK, "form"): P.WORK_FORMS}
 TUTORIAL_KIND = "tutorial"   # the navigation kind (predicates.DELIVERABLE_KINDS) the matrix reads
@@ -270,6 +274,7 @@ async def check_coverage_value(
     predicate: str,   # The predicate being asserted
     value: str,       # The claimed value
     subject_id: str,  # The resolved subject's node id
+    batch: Any = None,   # The write.FactBatch the assert lands in: its context read once per batch (finding da6cdab6)
 ) -> Optional[str]:  # An error, or None (also None for a predicate outside the coverage model)
     """A coverage value must name a live vocabulary entry of the predicate's kind, so a
     typo'd or retired key never lands (the projection refuses one that goes stale later);
@@ -306,12 +311,13 @@ async def check_coverage_value(
         if node is None or F.prop(node, "entity_kind") != P.ENTITY_ENVIRONMENT:
             return "environment versions belong to an environment Entity (`entity environment <key> ...`)"
         return None
+    if predicate == P.SECTION_ROLE:   # a Section's role (ruling 6a203252): a live role its post's type maps
+        return await _check_section_role(gx, value, subject_id, batch)
     kind = P.COVERAGE_KINDS.get(predicate) or P.FACET_PREDICATES.get(predicate)
     if kind is None:
         return None
     if predicate in P.NON_TUTORIAL_FACETS:
-        from .purenotes import note_types
-        if ((await note_types(gx)).get(subject_id) or {}).get("kind") == TUTORIAL_KIND:
+        if ((await _note_types(gx, batch)).get(subject_id) or {}).get("kind") == TUTORIAL_KIND:
             return (f"`{predicate}` belongs to a non-tutorial post -- a tutorial states it as "
                     f"`{predicate.replace('about_', 'teaches_')}`")
     node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=entity_node_id(kind, value))
@@ -323,6 +329,46 @@ async def check_coverage_value(
     if predicate in P.FACET_PREDICATES and kind == P.ENTITY_TASK and (
             F.prop(node, "cross_task") or F.prop(node, "off_grid")):
         return f"task `{value}` is a matrix row (cross-task or off-grid), never a post's facet"
+    return None
+
+
+async def _note_types(
+    gx: GraphHandle,
+    batch: Any = None,   # The write.FactBatch, if any: read once per batch, dropped when it lands a type
+) -> Dict[str, Dict[str, Any]]:  # purenotes.note_types output
+    """Every typed Note's type, kind and origin -- the batch's cached read when there is one."""
+    from .purenotes import note_types
+    if batch is None:
+        return await note_types(gx)
+    return await batch.memo("note_types", lambda: note_types(gx), predicates=(P.DELIVERABLE_TYPE,))
+
+
+async def _check_section_role(
+    gx: GraphHandle,
+    value: str,       # The claimed role key
+    subject_id: str,  # The resolved subject's node id
+    batch: Any = None,   # The write.FactBatch, if any: the types and role maps read once per batch
+) -> Optional[str]:  # An error, or None
+    """A section role (ruling 6a203252) belongs to a Section of a post whose type declares a
+    `section_roles` map, and names a live `section_role` entry that map places."""
+    from .sectionroles import ROLE_POLICY, role_types
+    node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=subject_id)
+    if node is None or F.label(node) != DevNodeKinds.SECTION:
+        return "a section role belongs to a Section"
+    t = ((await _note_types(gx, batch)).get(str(F.prop(node, "note_id") or "")) or {}).get("type")
+    maps = await (batch.memo("role_types", lambda: role_types(gx)) if batch is not None else role_types(gx))
+    rmap = maps.get(str(t or ""))
+    if rmap is None:
+        return f"the Section's post is typed `{t}`, whose type declares no `{ROLE_POLICY}` map"
+    role = await graph_task(gx.queue, gx.graph_id, "get_node",
+                            node_id=entity_node_id(P.ENTITY_SECTION_ROLE, value))
+    if role is None or F.prop(role, "entity_kind") != P.ENTITY_SECTION_ROLE:
+        return (f"`{value}` is no {P.ENTITY_SECTION_ROLE} in the vocabulary — mint it first "
+                f"(`entity {P.ENTITY_SECTION_ROLE} {value} --name ...`), or check the key")
+    if F.prop(role, "retired"):
+        return f"{P.ENTITY_SECTION_ROLE} `{value}` is retired — assert its successor instead"
+    if value not in rmap:
+        return f"type `{t}` places no `{value}` role (its {ROLE_POLICY}: {', '.join(sorted(rmap))})"
     return None
 
 

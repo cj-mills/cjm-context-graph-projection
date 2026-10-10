@@ -71,8 +71,10 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - **`cjm_context_graph_projection.rename_ops`** — Symbol `rename` — the Ext-B increment: scoped identifier substitution INTO bodies.
 - **`cjm_context_graph_projection.render`** — Render projection results for a consumer: agent (JSON) or human (markdown).
 - **`cjm_context_graph_projection.review`** — The review frontier: which APPROVED deliverables have stale upstream — derived, never stored.
+- **`cjm_context_graph_projection.rolereview`** — The role review (ruling 6a203252; design ad9bef5a (4), amendment 25a58e0e (3)-(4)).
 - **`cjm_context_graph_projection.runtime`** — Open a context graph for reading/writing (domain-neutral runtime wiring).
 - **`cjm_context_graph_projection.scratchpad_export`** — Scratchpad session .md exporter — the projection lens (increment iv of the
+- **`cjm_context_graph_projection.sectionroles`** — Section roles (design ad9bef5a (1), amendment 25a58e0e (2)-(4), ruling 6a203252).
 - **`cjm_context_graph_projection.seeds`** — Hand-seeded load-bearing slots + the rename-stable repo-key machinery.
 - **`cjm_context_graph_projection.series`** — Series born on-graph: the node, its membership and its ORDER as journaled intent
 - **`cjm_context_graph_projection.serve`** — A served, read-only graph EXPLORER data API over the read verbs — the richer-viz INSTRUMENT.
@@ -888,6 +890,15 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `review_frontier` _function_ — The derived review frontier: approved deliverables whose upstream changed since approval.
 - `walk_upstream` _function_ — Pure: BFS upstream from the deliverable's components along the dependency edges.
 
+### `cjm_context_graph_projection.rolereview`
+
+- `apply_review` _function_ — Land one review: assert each role (checked at write time like any vocabulary fact), then
+- `parse_review` _function_ — The document's rows; a repeated row is an error (the file is refused whole).
+- `plan_review` _function_ — Check every row against the graph (its basis current, its role live) and plan the batch.
+- `review_document` _function_ — The review document: the patterns, then each post's Sections, then the overrides.
+- `review_roles` _function_ — The review verb: the document (with its counts), or one landed review.
+- `review_state` _function_ — Every open row (module docstring), with the reads the plan reuses.
+
 ### `cjm_context_graph_projection.runtime`
 
 - `GraphHandle` _class_ — A live, started graph: the queue + the capability id to address it.
@@ -899,6 +910,30 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `export_session_markdown` _function_ — Gather the session's message graph and render the .md projection.
 - `read_session_messages` _function_ — A session spine's Message BODIES in chain order — the `read --session` verb.
 - `render_session_markdown` _function_ — The pure renderer: one portable markdown document from derived entries.
+
+### `cjm_context_graph_projection.sectionroles`
+
+- `apply_role_run` _function_ — Land one run: each asked Section's standing judgments are replaced by the run's, a review
+- `distribution` _function_ — A Section's judged distribution over the live roles and `none`.
+- `effective_roles` _function_ — Each Section's role as the page reads it: its own fact; else, below the candidate levels,
+- `heading` _function_
+- `judge_roles` _function_ — The role judge verb: find the stale Sections, ask one request each, land the run. All or
+- `load_role_facts` _function_ — The confirmed roles (supersession applied).
+- `load_role_judgments` _function_ — Every stored role judgment, keyed by the role's vocabulary key (retired roles included).
+- `load_role_views` _function_ — Every scoped Section's judged state, from the graph (never the file).
+- `load_role_vocab` _function_ — The live (unretired) `section_role` entries -- the Choice's options.
+- `pattern_key` _function_
+- `question_hash` _function_
+- `request_body` _function_
+- `review_basis` _function_ — A Section's basis: its judged state and the question, and for an override row the role it
+- `role_question` _function_ — One Choice over the live roles in position order and `none`: each role's description is
+- `role_scope` _function_ — The posts that carry roles: public (the audience rule, e1fd4d64 -- the judge sees only
+- `role_types` _function_ — The deliverable types whose presentation_policy declares a `section_roles` map.
+- `run_roles` _function_ — One request per Section; an answer missing a role's probability is a failure.
+- `scope_sections` _function_ — Each scoped post's content Sections -- derived blocks, the preamble and retired Sections
+- `section_roles` _function_ — The derived read: each scoped post's Sections with the role the page reads (own,
+- `section_view` _function_
+- `stale_sections` _function_ — A Section is stale when a live role has no judgment of it, or any judgment's state or
 
 ### `cjm_context_graph_projection.seeds`
 
@@ -1094,6 +1129,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 
 ### `cjm_context_graph_projection.write`
 
+- `FactBatch` _class_ — One batch's view of the fact layer (finding da6cdab6): every Assertion by slot and every
 - `add_check` _function_ — Attach a definition-of-done check to a work item (DoD-as-graph-objects).
 - `alias` _function_ — Confirm a drifted link slug as an alias OF a real note (the worklist payoff).
 - `assert_value` _function_ — Write one value to a `(subject, predicate)` slot, recording any conflict.

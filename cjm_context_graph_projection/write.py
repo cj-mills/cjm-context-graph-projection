@@ -117,6 +117,74 @@ async def content_hash_of(
     return SourceRef.compute_hash(str(val).encode("utf-8")) if val else None
 
 
+class FactBatch:
+    """One batch's view of the fact layer (finding da6cdab6): every Assertion by slot and every
+    SUPERSEDES pair by its target, read ONCE and kept current as the batch lands, beside a cache
+    the write-time checks read their context through (a post's type, the role maps) -- so a batch
+    of n facts costs n slot lookups, never n reads of the whole graph. A batch verb lands every
+    fact of its op through one FactBatch, live and on replay alike, so both write the same graph.
+    Only `assert_value` writes through it: a batch must be the only writer while it is open."""
+
+    def __init__(
+        self,
+        assertions: List[Any],   # Every Assertion node (F.load_assertions)
+        supersedes: List[Any],   # Every SUPERSEDES (superseder, superseded) pair (F.load_supersedes)
+    ):
+        self.by_slot: Dict[str, Dict[str, Any]] = {}
+        for a in assertions:
+            if F.prop(a, "slot_id"):
+                self.by_slot.setdefault(F.prop(a, "slot_id"), {})[F.nid(a)] = a
+        self.by_target: Dict[str, set] = {}
+        for s, t in supersedes:
+            self.by_target.setdefault(t, set()).add((s, t))
+        self.cache: Dict[str, Any] = {}
+        self.depends: Dict[str, set] = {}   # cache key -> the predicates whose facts it reads
+
+    @classmethod
+    async def load(cls, gx: GraphHandle) -> "FactBatch":  # The batch over the graph as it stands
+        return cls(await F.load_assertions(gx), await F.load_supersedes(gx))
+
+    def slot(self, slot_id: str) -> List[Any]:  # The slot's Assertion nodes
+        return list((self.by_slot.get(slot_id) or {}).values())
+
+    def slot_supersedes(self, slot_id: str) -> List[Any]:  # Every pair whose target stands on the slot
+        return [p for i in (self.by_slot.get(slot_id) or {}) for p in sorted(self.by_target.get(i, ()))]
+
+    def landed(
+        self,
+        nodes: List[Dict[str, Any]],   # The wire nodes a write landed
+        edges: List[Dict[str, Any]],   # The wire edges it landed
+    ) -> None:
+        """Fold a write into the index; a cached read over a predicate the write asserted is dropped."""
+        preds = set()
+        for n in nodes:
+            if n.get("label") == DevNodeKinds.ASSERTION and F.prop(n, "slot_id"):
+                self.by_slot.setdefault(F.prop(n, "slot_id"), {})[n["id"]] = n
+                preds.add(F.prop(n, "predicate"))
+        for e in edges:
+            if e.get("relation_type") == DevRelations.SUPERSEDES:
+                self.by_target.setdefault(e["target_id"], set()).add((e["source_id"], e["target_id"]))
+        for k in [k for k, ps in self.depends.items() if ps & preds]:
+            self.cache.pop(k, None)
+            self.depends.pop(k, None)
+
+    def dropped(self, pairs: List[Any]) -> None:  # Fold deleted SUPERSEDES pairs into the index
+        for s, t in pairs:
+            self.by_target.get(t, set()).discard((s, t))
+
+    async def memo(
+        self,
+        key: str,                 # The cached read's name
+        make: Any,                # A no-argument coroutine function computing it
+        predicates: Any = (),     # The predicates whose facts it reads (a landed one drops it)
+    ) -> Any:
+        """A write-time check's context, read once per batch."""
+        if key not in self.cache:
+            self.cache[key] = await make()
+            self.depends[key] = set(predicates)
+        return self.cache[key]
+
+
 def _match_supersede_targets(
     targets: List[str],            # Caller-named ids, unique id PREFIXES, or values to supersede
     slot_assertions: List[Any],    # Existing assertions in the slot
@@ -169,6 +237,7 @@ async def assert_value(
     asserted_at: Optional[float] = None,   # Override the timestamp (oracle uses last_verified semantics)
     method: Optional[str] = None,          # Derivation method (oracle/programmatic)
     subject_content_hash: Optional[str] = None,  # The subject's content hash this claim binds to (design 40622922); None = compute live for content-bearing subjects (replay passes the journaled one)
+    batch: Optional[FactBatch] = None,     # The batch this write lands in (finding da6cdab6): the slot state and the checks' context read from it, never the whole graph; None = read the graph
 ) -> Dict[str, Any]:  # The write result (incl. any conflict, warn-record-flag)
     """Write one value to a `(subject, predicate)` slot, recording any conflict.
 
@@ -195,7 +264,7 @@ async def assert_value(
     # The coverage model's values (design 8cbdc883): a teaches_* value names a live vocabulary
     # entry, a verification standing sits on a hardware Entity -- refused, never journaled.
     from .coverage import check_coverage_value
-    coverage_err = await check_coverage_value(gx, predicate, value, subject_id)
+    coverage_err = await check_coverage_value(gx, predicate, value, subject_id, batch=batch)
     if coverage_err:
         return {"error": coverage_err, "subject": subject, "predicate": predicate,
                 "value": value, "written": False}
@@ -211,9 +280,12 @@ async def assert_value(
                               subject_content_hash=subject_content_hash or None)
 
     # Existing state of the slot BEFORE this write.
-    all_assertions = await F.load_assertions(gx)
-    supers = await F.load_supersedes(gx)
-    slot_existing = [a for a in all_assertions if F.prop(a, "slot_id") == slot.id]
+    if batch is not None:
+        slot_existing, supers = batch.slot(slot.id), batch.slot_supersedes(slot.id)
+    else:
+        all_assertions = await F.load_assertions(gx)
+        supers = await F.load_supersedes(gx)
+        slot_existing = [a for a in all_assertions if F.prop(a, "slot_id") == slot.id]
     active_existing = F.active_assertions(slot_existing, supers)
 
     nodes: List[Dict[str, Any]] = []
@@ -259,6 +331,8 @@ async def assert_value(
                 await graph_task(gx.queue, gx.graph_id, "delete_edges",
                                  edge_ids=[make_edge(tid, assertion.id, DevRelations.SUPERSEDES)["id"] for tid in demoted_by])
                 supers = [p for p in supers if not (p[0] in demoted_by and p[1] == assertion.id)]
+                if batch is not None:
+                    batch.dropped([(tid, assertion.id) for tid in demoted_by])
                 active_existing = F.active_assertions(slot_existing, supers)
 
     # Back-fill targets (ruling 96aff70e): the assertions that supersede THIS claim, resolved
@@ -324,9 +398,13 @@ async def assert_value(
     res = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
 
     # Write-time conflict check (warn-record-flag): recompute the active set.
-    all_after = await F.load_assertions(gx)
-    supers_after = await F.load_supersedes(gx)
-    slot_after = [a for a in all_after if F.prop(a, "slot_id") == slot.id]
+    if batch is not None:
+        batch.landed(nodes, edges)
+        slot_after, supers_after = batch.slot(slot.id), batch.slot_supersedes(slot.id)
+    else:
+        all_after = await F.load_assertions(gx)
+        supers_after = await F.load_supersedes(gx)
+        slot_after = [a for a in all_after if F.prop(a, "slot_id") == slot.id]
     active_after = F.active_assertions(slot_after, supers_after)
 
     conflict: List[Dict[str, Any]] = []

@@ -1251,6 +1251,47 @@ async def _dispatch(args) -> int:
             if args.journal_path and res.get("written"):
                 append_write(args.journal_path, "review-facets", {"run": res["run"], "actor": args.actor})
             return 1 if res.get("error") else 0
+        elif args.command == "judge-roles":
+            # The role judge (ruling 6a203252 (2)): asked here and only here; the op carries the
+            # whole run, so replay re-lands it without calling the service.
+            from .judgeengine import JUDGE_MODEL, JUDGE_URL, JUDGE_WORKERS
+            from .sectionroles import judge_roles
+            res = await judge_roles(gx, all_sections=args.all, dry_run=args.dry_run,
+                                    model=args.model or JUDGE_MODEL, url=args.url or JUDGE_URL,
+                                    workers=args.workers or JUDGE_WORKERS, actor=args.actor)
+            print(render("judge-roles", res, args.format))
+            if args.journal_path and res.get("written"):
+                append_write(args.journal_path, "judge-roles", {"run": res["run"], "actor": args.actor})
+            return 1 if res.get("error") else 0
+        elif args.command == "review-roles":
+            # The role review (ruling 6a203252 (1)): --out writes the review document; --apply lands
+            # the edited document as ONE journaled batch (section_role facts + review marks), or nothing.
+            from .rolereview import review_roles
+            text = Path(args.apply).read_text() if args.apply else None
+            res = await review_roles(gx, apply_text=text, dry_run=args.dry_run, actor=args.actor)
+            if text is None and args.out:
+                Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.out).write_text(res["document"])
+                res["out"] = args.out
+            print(render("review-roles", res, args.format))
+            if args.journal_path and res.get("written"):
+                append_write(args.journal_path, "review-roles", {"run": res["run"], "actor": args.actor})
+            return 1 if res.get("error") else 0
+        elif args.command == "section-roles":
+            # The derived read (ruling 6a203252): each scoped post's roles -- own, inherited or
+            # unassigned -- and the judge's first answer; writes nothing.
+            from .sectionroles import section_roles
+            note = None
+            if args.note:
+                from . import factlayer as F
+                from .projection import resolve_node_ref
+                ref = await resolve_node_ref(gx, args.note)
+                if ref.get("node") is None:
+                    print(f"error: no single node matches {args.note!r}", file=sys.stderr)
+                    return 1
+                note = str(F.nid(ref["node"]))
+            print(render("section-roles", await section_roles(gx, note), args.format))
+            return 0
         elif args.command == "harvest-discussions":
             # The comment threads as facts (design 39c51c15 (1)): GitHub is asked here and only
             # here; the op carries the run, so replay re-lands it without asking.
@@ -3549,10 +3590,10 @@ def main() -> int:
     p_ent = sub.add_parser("entity",
                            help="Mint/update a typed Entity (task | stage | hardware | claim | work | unit | "
                                 "output_class | tool | subject | model | artifact_kind | artifact | environment | "
-                                "concept) from its WHOLE record (journaled upsert by "
+                                "concept | section_role) from its WHOLE record (journaled upsert by "
                                 "kind + key; a field or flag left off clears; designs 8cbdc883 / 4a4ef27e / 3c5cff97)")
     p_ent.add_argument("kind", help="The Entity sub-kind (task | stage | hardware | claim | work | unit | output_class "
-                                    "| tool | subject | model | artifact_kind | artifact | environment | concept)")
+                                    "| tool | subject | model | artifact_kind | artifact | environment | concept | section_role)")
     p_ent.add_argument("key", help="The durable key the teaches_* facts name (never renamed; --name is the display)")
     p_ent.add_argument("--name", required=True, help="The display name")
     p_ent.add_argument("--description", default="", help="One line on what the entry covers")
@@ -3748,6 +3789,31 @@ def main() -> int:
                       help="Land an edited review document as one batch (refused whole if any row went stale)")
     p_rf.add_argument("--dry-run", action="store_true", help="With --apply: check and plan only")
     p_rf.add_argument("--actor", default=_DEFAULT_ACTOR)
+    p_jr = sub.add_parser("judge-roles",
+                          help="Judge the section roles (journaled; ruling 6a203252 (2)): one request per stale "
+                               "Section of a post whose type maps roles, one Choice over the live roles and none; "
+                               "every role's probability lands as a JUDGED edge")
+    p_jr.add_argument("--all", action="store_true", help="Re-judge every scoped Section, not only the stale ones")
+    p_jr.add_argument("--dry-run", action="store_true",
+                      help="Report the stale Sections, the request count and a token estimate; ask nothing")
+    p_jr.add_argument("--model", default=None, help="The judge model (default jev-latest)")
+    p_jr.add_argument("--url", default=None, help="The judge endpoint (default TypeSafe's System One API)")
+    p_jr.add_argument("--workers", type=int, default=None, help="Concurrent requests (default 16)")
+    p_jr.add_argument("--actor", default=_DEFAULT_ACTOR)
+    p_rr = sub.add_parser("review-roles",
+                          help="Review the role judge's proposals (journaled with --apply; ruling 6a203252 (1)): "
+                               "write the review document -- heading patterns confirmed once, each post's other "
+                               "sections, the overrides of inherited roles -- or land an edited one")
+    p_rr.add_argument("--out", default=None, help="Write the review document here (else only the counts print)")
+    p_rr.add_argument("--apply", default=None, metavar="DOCUMENT",
+                      help="Land an edited review document as one batch (refused whole if any row went stale)")
+    p_rr.add_argument("--dry-run", action="store_true", help="With --apply: check and plan only")
+    p_rr.add_argument("--actor", default=_DEFAULT_ACTOR)
+    p_sr = sub.add_parser("section-roles",
+                          help="Read the section roles (ruling 6a203252): per scoped post the counts of own, "
+                               "inherited and unassigned roles; with a note, its outline with each role and the "
+                               "judge's first answer")
+    p_sr.add_argument("note", nargs="?", default=None, help="A post's id or unique prefix (else every scoped post)")
     p_hd = sub.add_parser("harvest-discussions",
                           help="Harvest the posts' comment threads as discussion facts (journaled; design "
                                "39c51c15 (1)): every utterances issue and comments-category discussion is "

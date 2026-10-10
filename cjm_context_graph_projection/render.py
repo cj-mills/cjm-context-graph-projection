@@ -509,6 +509,12 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         return _render_facets(obj)
     if kind == "review-facets":
         return _render_facet_review(obj)
+    if kind == "judge-roles":
+        return _render_role_judge(obj)
+    if kind == "review-roles":
+        return _render_role_review(obj)
+    if kind == "section-roles":
+        return _render_section_roles(obj)
     if kind == "claims":
         return _render_claims(obj)
     if kind == "standing":
@@ -1948,6 +1954,68 @@ def _render_facet_review(obj: Dict[str, Any]) -> str:
     if obj.get("written"):
         ap = obj.get("applied") or {}
         lines.append(f"  asserted {ap.get('asserted', 0)} fact(s) · marked {ap.get('marked', 0)} judgment(s) reviewed")
+    return "\n".join(lines)
+
+
+def _render_role_judge(obj: Dict[str, Any]) -> str:
+    """A role judge run or its dry run (ruling 6a203252 (2))."""
+    lines = []
+    if obj.get("error"):
+        lines.append(f"⚠ {obj['error']}")
+        lines += [f"  - `{str(f['section'])[:8]}`: {f['error']}" for f in obj.get("failures") or []]
+    head = (f"**judged** {obj['requests']} section(s)" if obj.get("written") else
+            f"**stale** {obj.get('requests', 0)} section(s)")
+    lines.append(head + f" of {obj['sections']} in {obj['posts']} post(s) · {obj['roles']} role(s) · "
+                 f"≈{obj.get('token_estimate', 0):,} input tokens (chars / 4)")
+    if obj.get("written"):
+        ap = obj.get("applied") or {}
+        lines.append(f"  stored {ap.get('landed', 0)} judgment(s) · replaced {ap.get('deleted', 0)} · models "
+                     f"{', '.join(obj['run'].get('models') or [])} · input tokens {obj.get('input_tokens', 0):,}")
+    return "\n".join(lines)
+
+
+def _render_role_review(obj: Dict[str, Any]) -> str:
+    """The role review: the document's counts, or one landed (or refused) review (ruling 6a203252 (1))."""
+    c = obj.get("counts") or {}
+    if "document" in obj:
+        return (f"**review** {c.get('patterns', 0)} pattern(s) over {c.get('pattern_sections', 0)} section(s) · "
+                f"{c.get('sections', 0)} section(s) · {c.get('overrides', 0)} override(s) · "
+                f"{c.get('waiting', 0)} waiting on an ancestor"
+                + (f" · ⚠ {c['stale']} stale section(s) left out -- run judge-roles" if c.get("stale") else "")
+                + (f"\n  document → `{obj['out']}`" if obj.get("out") else "\n  (pass --out PATH to write the document)"))
+    lines = []
+    if obj.get("error"):
+        lines.append(f"⚠ {obj['error']}")
+        lines += [f"  - {e}" for e in (obj.get("errors") or [])[:20]]
+    lines.append(f"**{'reviewed' if obj.get('written') else 'review plan'}** {obj.get('rows', 0)} row(s) · "
+                 f"confirmed {c.get('confirmed', 0)} · no role {c.get('no_role', 0)} · kept inherited "
+                 f"{c.get('kept_inherited', 0)} · left {c.get('left', 0)}")
+    if obj.get("written"):
+        ap = obj.get("applied") or {}
+        lines.append(f"  asserted {ap.get('asserted', 0)} · marked {ap.get('marked', 0)}")
+    return "\n".join(lines)
+
+
+def _render_section_roles(obj: Dict[str, Any]) -> str:
+    """The section roles read (ruling 6a203252): per-post counts, or one post's outline."""
+    t = obj["totals"]
+    lines = [f"**section roles** {obj['scoped']} post(s) · roles {', '.join(obj['roles']) or 'none minted'} · "
+             f"{t['candidates']} H2/H3 · own {t['own']} · inherited {t['inherited']} · unassigned "
+             f"{t['unassigned']} · overrides {t['overrides']} · stale {t['stale']}"]
+    if obj.get("unknown_placements"):
+        lines.append(f"⚠ a role map places a role where no render reads it: {', '.join(obj['unknown_placements'])}")
+    for p in obj["posts"]:
+        c = p["counts"]
+        if "rows" not in p:
+            lines.append(f"- {p['title']} `{p['id'][:8]}` _{p['type']}_ · own {c['own']} · inherited {c['inherited']} "
+                         f"· unassigned {c['unassigned']}" + (f" · stale {c['stale']}" if c["stale"] else ""))
+            continue
+        lines += ["", f"### {p['title']} `{p['id'][:8]}` _{p['type']}_", ""]
+        for r in p["rows"]:
+            judged = f" · judged `{r['judged'][0]}` {r['judged'][1]:.2f}" if r.get("judged") else ""
+            role = f"`{r['role']}` ({r['how']})" if r["role"] else "_unassigned_"
+            lines.append(f"{'  ' * max(0, r['level'] - 2)}- {'#' * r['level']} {r['heading']} · {role}{judged}"
+                         + (" · stale" if r["stale"] else ""))
     return "\n".join(lines)
 
 

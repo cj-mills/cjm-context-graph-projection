@@ -20,7 +20,7 @@ from .purenotes import (_fmt_ts, _sort_key, effective_roles, elided_point, GLOSS
                         group_points, place_point, points_as_proposals, points_index,
                         STRUCTURE_KINDS)
 from .runtime import GraphHandle
-from .write import assert_value
+from .write import assert_value, FactBatch
 
 ELIDED_TAG = "elided: no line on the page, its children stand in its place"   # the brief's tag on a point the type elides by kind (ruling 15657521 (2))
 
@@ -283,9 +283,10 @@ async def apply_placement_plan(
     def _fail(msg: str) -> Dict[str, Any]:
         out.update(error=msg, written=bool(ops))
         return out
+    batch = await FactBatch.load(gx) if plan.get("roles") else None   # one read for every role (finding da6cdab6)
     for r in plan.get("roles") or []:
         st = await assert_value(gx, r["id"] or r["key"], P.POINT_ROLE, r["new"], actor=actor,
-                                supersede=([r["old"]] if r.get("old") else None))
+                                supersede=([r["old"]] if r.get("old") else None), batch=batch)
         if st.get("error"):
             return _fail(st["error"])
         # `at` keeps a flip back (meta -> content -> meta -> content) a NEW record: the journal dedups an op

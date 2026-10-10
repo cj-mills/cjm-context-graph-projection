@@ -106,7 +106,7 @@ JOURNAL_VERBS = ("decide", "alias", "assert", "link", "unlink", "section", "new-
                  "render-work-page", "rehome-points", "place-point",
                  "series", "series-members", "place-in-series", "entity", "verified-on",
                  "supports", "retire-source", "transfer-path", "judge-related", "judge-facets", "review-facets",
-                 "harvest-discussions", "ingest-evidence",
+                 "judge-roles", "review-roles", "harvest-discussions", "ingest-evidence",
                  "derived-from", "work-member", "relate", "relocate")
 
 
@@ -461,6 +461,16 @@ async def _apply_op(
         # journaled content hashes bind the facts the same.
         from .facetreview import apply_review
         await apply_review(gx, a["run"], actor=a.get("actor", "agent:session"))
+    elif verb == "judge-roles":
+        # One role judge run (ruling 6a203252 (2)): every Choice distribution is an observation
+        # the op carries whole, so replay never calls the judge.
+        from .sectionroles import apply_role_run
+        await apply_role_run(gx, a["run"], actor=a.get("actor", "agent:session"))
+    elif verb == "review-roles":
+        # One role review (ruling 6a203252 (1)): the confirmed section_role facts and the review
+        # marks; the journaled content hashes bind the facts the same.
+        from .rolereview import apply_review as apply_role_review
+        await apply_role_review(gx, a["run"], actor=a.get("actor", "agent:session"))
     elif verb == "harvest-discussions":
         # One comment-thread harvest (design 39c51c15 (1)): the threads are observations the op
         # carries whole, so replay never asks GitHub; the journaled content hashes bind the facts.
@@ -789,6 +799,11 @@ def touched_node_ids(
     elif verb in ("judge-related", "judge-facets"):
         out.extend(sorted((a.get("run") or {}).get("posts") or {}))
     elif verb == "review-facets":
+        run = a.get("run") or {}
+        out.extend(sorted({r[0] for r in (run.get("confirm") or []) + (run.get("mark") or [])}))
+    elif verb == "judge-roles":   # the judged Sections (ruling 6a203252 (2))
+        out.extend(sorted((a.get("run") or {}).get("sections") or {}))
+    elif verb == "review-roles":
         run = a.get("run") or {}
         out.extend(sorted({r[0] for r in (run.get("confirm") or []) + (run.get("mark") or [])}))
     elif verb == "harvest-discussions":

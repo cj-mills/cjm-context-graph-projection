@@ -203,10 +203,12 @@ async def apply_review(
     """Land one review: assert each confirmation (checked at write time like any facet), then set
     each mark on its judged edge. Live and replay share it; replay passes the journaled content
     hashes so the facts re-land the same."""
-    from .write import assert_value
+    from .write import FactBatch, assert_value
     given, hashes = dict(run.get("content_hashes") or {}), {}
+    batch = await FactBatch.load(gx)   # one read of the fact layer for the whole review (finding da6cdab6)
     for n, pred, key in run["confirm"]:
-        res = await assert_value(gx, n, pred, key, actor=actor, subject_content_hash=given.get(f"{n}|{pred}|{key}"))
+        res = await assert_value(gx, n, pred, key, actor=actor, subject_content_hash=given.get(f"{n}|{pred}|{key}"),
+                                 batch=batch)
         if res.get("error"):
             raise RuntimeError(f"{pred} {key} on {n}: {res['error']}")
         hashes[f"{n}|{pred}|{key}"] = res.get("subject_content_hash")
