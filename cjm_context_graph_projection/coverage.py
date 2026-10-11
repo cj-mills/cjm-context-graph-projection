@@ -72,7 +72,7 @@ ENTITY_FIELDS: Dict[str, Dict[str, type]] = {
                         "derived_from": list, "retired": bool},
     P.ENTITY_ENVIRONMENT: {"description": str, "parts": list, "requires": list, "variants": list,
                            "retired": bool},
-    P.ENTITY_CONCEPT: {"description": str, "not_for": str, "subject": str, "retired": bool},
+    P.ENTITY_CONCEPT: {"description": str, "not_for": str, "area": str, "retired": bool},
     # The section roles (ruling 6a203252 (3)): the role judge's options, its criteria the
     # description and not-for line, its position the order the review lists them in
     P.ENTITY_SECTION_ROLE: {"description": str, "not_for": str, "position": int, "retired": bool},
@@ -83,7 +83,7 @@ _REQUIRED = {P.ENTITY_TASK: ("position",), P.ENTITY_STAGE: ("position",),
              P.ENTITY_OUTPUT_CLASS: ("position",),
              **{k: ("description", "not_for") for k in P.FACET_KINDS},
              P.ENTITY_ARTIFACT_KIND: ("description",), P.ENTITY_ARTIFACT: ("artifact_kind",),
-             P.ENTITY_ENVIRONMENT: ("description",), P.ENTITY_CONCEPT: ("description", "not_for", "subject"),
+             P.ENTITY_ENVIRONMENT: ("description",), P.ENTITY_CONCEPT: ("description", "not_for", "area"),
              P.ENTITY_SECTION_ROLE: ("description", "not_for", "position")}
 _ALLOWED = {(P.ENTITY_HARDWARE, "device_class"): P.DEVICE_CLASSES,   # closed slates on a field
             (P.ENTITY_WORK, "form"): P.WORK_FORMS}

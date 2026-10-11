@@ -5,7 +5,8 @@ and the paths DERIVED over them.
 WRITES. The four sub-kinds ride the journaled `entity` op (coverage.mint_entity, the whole record):
 an `artifact_kind` is vocabulary data; an `artifact` names its kind, task, base model, target and
 LINEAGE (`derived_from`); an `environment` names its parts, the environments it requires and its
-variants; a `concept` names its subject. The references a record makes are checked LIVE at write
+variants; a `concept` names its area -- one about-axis entry, `subject:` | `task:` | `stage:`
+(amendment 5c58d521). The references a record makes are checked LIVE at write
 time (a live, unretired Entity of the named kind), lineage and environment requirements are
 refused when they would close a cycle, and the edges a record implies (DERIVED_FROM, PART_OF,
 REQUIRES) land from it marked with the record, so a re-mint reconciles exactly its own edges. A
@@ -43,7 +44,7 @@ _REF_FIELDS = {
                         "base_model": (P.ENTITY_MODEL,), "target": (P.ENTITY_HARDWARE, P.ENTITY_ENVIRONMENT),
                         "derived_from": (P.ENTITY_ARTIFACT,)},
     P.ENTITY_ENVIRONMENT: {"parts": P.ENVIRONMENT_PART_KINDS, "requires": (P.ENTITY_ENVIRONMENT,)},
-    P.ENTITY_CONCEPT: {"subject": (P.ENTITY_SUBJECT,)},
+    P.ENTITY_CONCEPT: {"area": (P.ENTITY_SUBJECT, P.ENTITY_TASK, P.ENTITY_STAGE)},   # the about axes (5c58d521)
 }
 _LIST_FIELDS = {"derived_from", "parts", "requires", "variants", "transitions"}
 
@@ -200,7 +201,7 @@ def record_edges(
     fields: Dict[str, Any],  # Its record's fields
 ) -> List[Dict[str, Any]]:  # The edges the record implies, each marked with the record
     """The edges a record lands: an artifact's lineage, an environment's parts and requirements,
-    a concept's subject."""
+    a concept's area."""
     eid = entity_node_id(kind, key)
     out = []
     for field, rk, rkey in record_refs(kind, fields):
@@ -211,7 +212,7 @@ def record_edges(
             out.append(record_part_of_edge(rid, eid, eid))
         elif field == "requires":
             out.append(relation_edge(DevRelations.REQUIRES, eid, rid, record=eid))
-        elif field == "subject":
+        elif field == "area":
             out.append(record_part_of_edge(eid, rid, eid))
     return out
 

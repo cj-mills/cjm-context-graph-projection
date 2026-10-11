@@ -967,7 +967,7 @@ async def _dispatch(args) -> int:
                 if getattr(args, f):
                     fields[f] = getattr(args, f)
             # The path model (design ae698640): an artifact's record, an environment's, a concept's
-            for f in ("artifact_kind", "task", "base_model", "precision", "format", "target", "license", "subject"):
+            for f in ("artifact_kind", "task", "base_model", "precision", "format", "target", "license", "area"):
                 if getattr(args, f):
                     fields[f] = getattr(args, f)
             for f, flag in (("derived_from", "derived_from"), ("parts", "env_part"), ("requires", "requires"),
@@ -1277,6 +1277,68 @@ async def _dispatch(args) -> int:
             if args.journal_path and res.get("written"):
                 append_write(args.journal_path, "review-roles", {"run": res["run"], "actor": args.actor})
             return 1 if res.get("error") else 0
+        elif args.command == "judge-concepts":
+            # The concept judge (ruling ad37f62a (2)): asked here and only here; the op carries the
+            # whole run, so replay re-lands it without calling the service. --measure reads the
+            # stored judgments against the confirmed relations and asks nothing (ad37f62a (4)).
+            from .conceptjudge import THRESHOLD as CONCEPT_THRESHOLD, judge_concepts, measure as concept_measure
+            from .judgeengine import JUDGE_MODEL, JUDGE_URL, JUDGE_WORKERS
+            if args.measure:
+                res = await concept_measure(gx, only=args.only, series=args.series,
+                                            threshold=CONCEPT_THRESHOLD if args.threshold is None else args.threshold)
+                print(render("judge-concepts", {**res, "measure": True}, args.format))
+                return 0
+            res = await judge_concepts(gx, only=args.only, series=args.series, all_pairs=args.all,
+                                       dry_run=args.dry_run, model=args.model or JUDGE_MODEL,
+                                       url=args.url or JUDGE_URL, workers=args.workers or JUDGE_WORKERS,
+                                       actor=args.actor)
+            print(render("judge-concepts", res, args.format))
+            if args.journal_path and res.get("written"):
+                append_write(args.journal_path, "judge-concepts", {"run": res["run"], "actor": args.actor})
+            return 1 if res.get("error") else 0
+        elif args.command == "review-concepts":
+            # The concept reviews (ruling ad37f62a (1), (2)): --vocab reads the draft pass's files
+            # into the vocabulary document, or lands an edited one as one batch of whole entity
+            # records (one journaled `entity` op each); else the relation document, or one landed
+            # relation review as ONE journaled op -- or nothing.
+            from .conceptreview import review_concepts
+            text = Path(args.apply).read_text() if args.apply else None
+            drafts = None
+            if args.vocab and text is None:
+                if not args.drafts:
+                    print("error: --vocab without --apply needs --drafts (a draft file or a directory of them)",
+                          file=sys.stderr)
+                    return 1
+                src = Path(args.drafts)
+                files = sorted(src.glob("*.json")) if src.is_dir() else [src]
+                drafts = []
+                for f in files:
+                    d = json.loads(f.read_text())
+                    drafts += d if isinstance(d, list) else [d]
+            res = await review_concepts(gx, vocab=args.vocab, drafts=drafts, apply_text=text, dry_run=args.dry_run,
+                                        only=args.only, series=args.series, actor=args.actor)
+            if text is None and args.out:
+                Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.out).write_text(res["document"])
+                res["out"] = args.out
+            print(render("review-concepts", res, args.format))
+            if args.vocab and res.get("written"):
+                _journal_entities(args.journal_path, res["landed"], args.actor)
+                subjects = {f"{r['kind']}:{r['key']}" for r in res["landed"] if r["kind"] == "subject"}
+                if subjects:   # a landed subject's category URL lands with it (design a62f2499 (1))
+                    paths = await _category_paths_journaled(gx, args.journal_path, args.actor, apply=True,
+                                                            only=subjects)
+                    if paths["errors"]:
+                        return 1
+            elif args.journal_path and res.get("written"):
+                append_write(args.journal_path, "review-concepts", {"run": res["run"], "actor": args.actor})
+            return 1 if res.get("error") else 0
+        elif args.command == "concepts":
+            # The concept vocabulary read (ruling ad37f62a (1)): each live concept with its subject
+            # and confirmed relation counts -- what the drafting agents are handed; writes nothing.
+            from .conceptjudge import concepts_read
+            print(render("concepts", await concepts_read(gx), args.format))
+            return 0
         elif args.command == "section-roles":
             # The derived read (ruling 6a203252): each scoped post's roles -- own, inherited or
             # unassigned -- and the judge's first answer; writes nothing.
@@ -3641,7 +3703,9 @@ def main() -> int:
                        help="environment: an environment it requires (repeatable; kept acyclic)")
     p_ent.add_argument("--variant", action="append", default=None,
                        help="environment: one way to reach it, e.g. Mamba / Conda / Google Colab (repeatable)")
-    p_ent.add_argument("--subject", default="", help="concept: the subject it sits under (a subject key)")
+    p_ent.add_argument("--area", default="",
+                       help="concept: the area of knowledge it sits in -- subject:KEY | task:KEY | stage:KEY "
+                            "(design amendment 5c58d521)")
     p_ent.add_argument("--transitions", default="",
                        help='stage: its transitions as JSON, e.g. [{"in": ["dataset"], "optional": ["checkpoint"], '
                             '"out": "checkpoint"}] ("environment" as out = a setup step)')
@@ -3814,6 +3878,42 @@ def main() -> int:
                                "inherited and unassigned roles; with a note, its outline with each role and the "
                                "judge's first answer")
     p_sr.add_argument("note", nargs="?", default=None, help="A post's id or unique prefix (else every scoped post)")
+    p_jc = sub.add_parser("judge-concepts",
+                          help="Judge the concept relations (journaled; ruling ad37f62a (2)): per source in the "
+                               "types' concept scope, one Choice per stale concept (teaches / assumes / touches / "
+                               "unrelated) for a post, one COVERS Noul for a unit's notes; the judgments at or above "
+                               "the store floor land as JUDGED edges and each source records what it was judged against")
+    p_jc.add_argument("--only", action="append", default=None, metavar="REF",
+                      help="Restrict to a source: a post id / slug, a notes post (its unit), or unit:KEY / work:KEY "
+                           "(repeatable)")
+    p_jc.add_argument("--series", action="append", default=None, metavar="KEY",
+                      help="Restrict to every member of a series (repeatable)")
+    p_jc.add_argument("--all", action="store_true", help="Re-judge every pair of the selection, not only the stale ones")
+    p_jc.add_argument("--dry-run", action="store_true",
+                      help="Report the stale pairs, the request count and a token estimate; ask nothing")
+    p_jc.add_argument("--measure", action="store_true",
+                      help="The pilot's measure (ad37f62a (4)): proposals per source and the judge's agreement with "
+                           "the confirmed relations across thresholds; asks nothing, writes nothing")
+    p_jc.add_argument("--threshold", type=float, default=None, help="With --measure: the proposal threshold (default 0.5)")
+    p_jc.add_argument("--model", default=None, help="The judge model (default jev-latest)")
+    p_jc.add_argument("--url", default=None, help="The judge endpoint (default TypeSafe's System One API)")
+    p_jc.add_argument("--workers", type=int, default=None, help="Concurrent requests (default 16)")
+    p_jc.add_argument("--actor", default=_DEFAULT_ACTOR)
+    p_rc = sub.add_parser("review-concepts",
+                          help="Review concepts (journaled with --apply; ruling ad37f62a): --vocab --drafts D --out DOC "
+                               "writes the vocabulary document from the draft pass, --vocab --apply DOC mints the "
+                               "confirmed concepts; without --vocab, the relation document or one landed relation review")
+    p_rc.add_argument("--vocab", action="store_true", help="The vocabulary review (else the relation review)")
+    p_rc.add_argument("--drafts", default=None, help="With --vocab: a draft JSON file or a directory of them")
+    p_rc.add_argument("--out", default=None, help="Write the review document here (else only the counts print)")
+    p_rc.add_argument("--apply", default=None, metavar="DOCUMENT",
+                      help="Land an edited review document as one batch (refused whole on any error)")
+    p_rc.add_argument("--dry-run", action="store_true", help="With --apply: check and plan only")
+    p_rc.add_argument("--only", action="append", default=None, metavar="REF", help="Relation review: as judge-concepts")
+    p_rc.add_argument("--series", action="append", default=None, metavar="KEY", help="Relation review: as judge-concepts")
+    p_rc.add_argument("--actor", default=_DEFAULT_ACTOR)
+    sub.add_parser("concepts", help="Read the concept vocabulary (ruling ad37f62a): each live concept with its "
+                                    "subject and confirmed relation counts, and the live subjects")
     p_hd = sub.add_parser("harvest-discussions",
                           help="Harvest the posts' comment threads as discussion facts (journaled; design "
                                "39c51c15 (1)): every utterances issue and comments-category discussion is "

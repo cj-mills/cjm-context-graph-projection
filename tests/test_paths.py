@@ -51,7 +51,10 @@ def test_record_shapes_are_checked_before_the_graph():
     assert validate_entity("environment", "cuda", "CUDA", {"description": "d", "parts": ["tool:pytorch", "hardware:gpu"],
                                                          "variants": ["Mamba", "Conda"]}) is None
     assert "takes `kind:key`" in validate_entity("environment", "cuda", "C", {"description": "d", "parts": ["model:x"]})
-    assert "needs description, not_for, subject" in validate_entity("concept", "tracking", "T", {})
+    assert "needs description, not_for, area" in validate_entity("concept", "tracking", "T", {})
+    # the area is one about-axis entry, typed (5c58d521): a tool is never one
+    assert "subject | task | stage" in validate_entity("concept", "t", "T", {"description": "d", "not_for": "n",
+                                                                          "area": "tool:tensorrt"})
     assert validate_entity("stage", "training", "Training", {"position": 1, "transitions": [
         {"in": ["dataset"], "optional": ["checkpoint"], "out": "checkpoint"}]}) is None
     assert "both `in` and `optional`" in validate_entity("stage", "t", "T", {"position": 1, "transitions": [
@@ -94,7 +97,7 @@ _VOCAB = (
                                       "parts": ["hardware:jetson-orin-nano", "tool:tensorrt"]}),
        ("environment", "hailo-dfc-x86", {"description": "the Hailo DFC on x86 Linux", "parts": ["tool:hailo-dfc"]}),
        ("environment", "pi-hailo", {"description": "a Pi 5 with the AI Kit", "parts": ["hardware:raspberry-pi-5"]})]
-    + [("concept", c, {**_crit(c), "subject": "computer-vision"}) for c in ("object-tracking", "onnx-basics", "cuda-basics")]
+    + [("concept", c, {**_crit(c), "area": "subject:computer-vision"}) for c in ("object-tracking", "onnx-basics", "cuda-basics")]
     + [("work", "onnx-docs", {"form": "documentation"}), ("work", "cv-course", {"form": "course"}),
        ("unit", "cv-course/tracking", {"position": 1})]
 )
@@ -281,7 +284,7 @@ def test_write_time_checks_refuse_and_records_reconcile(tmp_path):
                                                fields={"description": "d", "requires": ["pytorch-cuda"]}),
                 "no_kind": await mint_entity(gx, "artifact", "x", name="x", fields={"artifact_kind": "weights"}),
                 "no_subject": await mint_entity(gx, "concept", "c", name="c",
-                                                fields={**_crit("c"), "subject": "nope"}),
+                                                fields={**_crit("c"), "area": "subject:nope"}),
                 "bad_target": await record_relation(gx, "TEACHES", "bytetrack", "artifact:pi-demo"),
                 "bad_source": await record_relation(gx, "COVERS", "bytetrack", "concept:onnx-basics"),
                 "env_source": await record_relation(gx, "REQUIRES", "environment:pytorch-cuda",
@@ -422,7 +425,7 @@ def test_a_rebuild_reproduces_the_path_model(tmp_path):
                 ["entity", "tool", "tensorrt", "--name", "TensorRT", "--description", "t", "--not-for", "x"],
                 ["entity", "hardware", "jetson-orin-nano", "--name", "Jetson", "--device-class", "board"],
                 ["entity", "concept", "onnx-basics", "--name", "ONNX", "--description", "o", "--not-for", "x",
-                 "--subject", "cv"],
+                 "--area", "subject:cv"],
                 ["entity", "environment", "jetson-driver", "--name", "Driver", "--description", "d"],
                 ["entity", "environment", "jetson", "--name", "Jetson JP6", "--description", "j",
                  "--part-of-env", "hardware:jetson-orin-nano", "--part-of-env", "tool:tensorrt",

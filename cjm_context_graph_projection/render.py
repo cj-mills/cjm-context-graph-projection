@@ -515,6 +515,12 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         return _render_role_review(obj)
     if kind == "section-roles":
         return _render_section_roles(obj)
+    if kind == "judge-concepts":
+        return _render_concept_judge(obj)
+    if kind == "review-concepts":
+        return _render_concept_review(obj)
+    if kind == "concepts":
+        return _render_concepts(obj)
     if kind == "claims":
         return _render_claims(obj)
     if kind == "standing":
@@ -2016,6 +2022,102 @@ def _render_section_roles(obj: Dict[str, Any]) -> str:
             role = f"`{r['role']}` ({r['how']})" if r["role"] else "_unassigned_"
             lines.append(f"{'  ' * max(0, r['level'] - 2)}- {'#' * r['level']} {r['heading']} · {role}{judged}"
                          + (" · stale" if r["stale"] else ""))
+    return "\n".join(lines)
+
+
+def _render_concept_judge(obj: Dict[str, Any]) -> str:
+    """A concept judge run, its dry run, or the pilot's measure (ruling ad37f62a (2), (4))."""
+    lines = []
+    if obj.get("measure"):
+        lines.append(f"**concept measure** threshold {obj['threshold']} · {obj['concepts']} concept(s) · "
+                     f"{obj['reviewed']} reviewed pair(s) · {obj['stale_pairs']} stale pair(s) left out")
+        for s in obj.get("sources") or []:
+            props = " · ".join(f"{r.lower()} {n}" for r, n in s["proposals"].items())
+            conf = " · ".join(f"{r.lower()} {n}" for r, n in s["confirmed"].items())
+            lines.append(f"- {s['title']} _{s['kind']}_ · proposed {props} · confirmed {conf}"
+                         + (f" · ⚠ {s['stale']} stale" if s.get("stale") else ""))
+        if obj.get("agreement"):
+            lines += ["", "| threshold | relation | proposed | confirmed | agreed | precision | recall |",
+                      "|---:|---|---:|---:|---:|---:|---:|"]
+            lines += [f"| {a['threshold']} | {a['relation']} | {a['proposed']} | {a['confirmed']} | {a['agreed']} | "
+                      f"{'—' if a['precision'] is None else a['precision']} | {'—' if a['recall'] is None else a['recall']} |"
+                      for a in obj["agreement"]]
+        if obj.get("confusions"):
+            lines.append("confusions at the threshold: " + " · ".join(f"{k} {v}" for k, v in obj["confusions"].items()))
+        return "\n".join(lines)
+    if obj.get("error"):
+        lines.append(f"⚠ {obj['error']}")
+        lines += [f"  - `{str(f.get('source'))[:8]}` ({f.get('concepts')} concept(s)): {f['error']}"
+                  for f in obj.get("failures") or []]
+    head = (f"**judged** {obj.get('pairs', 0)} pair(s)" if obj.get("written") else
+            f"**stale** {obj.get('pairs', 0)} pair(s)")
+    lines.append(head + f" in {obj.get('requests', 0)} request(s) · {obj.get('sources', 0)} source(s) selected of "
+                 f"{obj.get('scoped', 0)} in scope · {obj.get('concepts', 0)} concept(s) · "
+                 f"≈{obj.get('token_estimate', 0):,} input tokens (chars / 4)")
+    for s in (obj.get("stale") or [])[:20]:
+        lines.append(f"  - {s['title']} _{s['kind']}_ `{s['key']}` · {s['concepts']} concept(s)")
+    if len(obj.get("stale") or []) > 20:
+        lines.append(f"  - … {len(obj['stale']) - 20} more")
+    for r in obj.get("refusals") or []:
+        lines.append(f"  ⚠ refused: {r['title']} -- {r['why']}")
+    if obj.get("written"):
+        ap = obj.get("applied") or {}
+        lines.append(f"  stored {ap.get('landed', 0)} judgment(s) · replaced {ap.get('deleted', 0)} · recorded "
+                     f"{ap.get('recorded', 0)} source(s) · models {', '.join(obj['run'].get('models') or [])} · "
+                     f"input tokens {obj.get('input_tokens', 0):,}")
+    return "\n".join(lines)
+
+
+def _render_concept_review(obj: Dict[str, Any]) -> str:
+    """Either concept review: the document's counts, or one landed (or refused) review (ruling ad37f62a)."""
+    c = obj.get("counts") or {}
+    out = "\n  document → `{}`".format(obj["out"]) if obj.get("out") else "\n  (pass --out PATH to write the document)"
+    if obj.get("vocab") and "document" in obj:
+        warn = "".join(f"\n  ⚠ {e}" for e in (obj.get("errors") or [])[:20])
+        return (f"**vocabulary review** {c.get('new', 0)} new concept(s) · {c.get('reused', 0)} reuse(s) · "
+                f"{c.get('new_subjects', 0)} new subject(s) · {c.get('drafted', 0)} drafted in "
+                f"{c.get('drafts', 0)} draft(s)" + warn + out)
+    if "document" in obj:
+        return (f"**relation review** {c.get('proposal', 0)} proposal(s) · {c.get('challenged', 0)} challenged · "
+                f"{c.get('near', 0)} near miss(es) over {obj.get('sources', 0)} source(s)"
+                + (f" · ⚠ {obj['stale_pairs']} stale pair(s) left out -- run judge-concepts" if obj.get("stale_pairs") else "")
+                + out)
+    lines = []
+    if obj.get("error"):
+        lines.append(f"⚠ {obj['error']}")
+        lines += [f"  - {e}" for e in (obj.get("errors") or [])[:20]]
+    if obj.get("vocab"):
+        plan = obj.get("plan") or []
+        n = {a: sum(1 for p in plan if p["action"] == a) for a in ("new", "updated", "unchanged")}
+        lines.append(f"**{'minted' if obj.get('written') else 'vocabulary plan'}** {c.get('concepts', 0)} concept(s) · "
+                     f"{c.get('subjects', 0)} subject(s) · dropped {c.get('dropped', 0)} · new {n['new']} · "
+                     f"updated {n['updated']} · unchanged {n['unchanged']}")
+        return "\n".join(lines)
+    lines.append(f"**{'reviewed' if obj.get('written') else 'review plan'}** {obj.get('rows', 0)} row(s) · "
+                 f"confirmed {c.get('confirmed', 0)} · rejected {c.get('rejected', 0)} · kept {c.get('kept', 0)} · "
+                 f"retracted {c.get('retracted', 0)} · near misses left {c.get('near_unchecked', 0)}")
+    if obj.get("written"):
+        ap = obj.get("applied") or {}
+        lines.append(f"  related {ap.get('related', 0)} · retracted {ap.get('retracted', 0)} · marked "
+                     f"{ap.get('marked', 0)} judgment(s) reviewed")
+    return "\n".join(lines)
+
+
+def _render_concepts(obj: Dict[str, Any]) -> str:
+    """The concept vocabulary read (ruling ad37f62a (1)): each live concept under its area (5c58d521)."""
+    concepts = obj.get("concepts") or []
+    areas = obj.get("areas") or {}
+    lines = [f"## Concepts — {len(concepts)} live · {len(areas)} area(s) a concept may sit in"]
+    by: Dict[str, List[Dict[str, Any]]] = {}
+    for c in concepts:
+        by.setdefault(str(c.get("area") or ""), []).append(c)
+    for s in sorted(by, key=lambda s: str(areas.get(s) or s).lower()):
+        lines += ["", f"### {areas.get(s) or s} `{s}`"]
+        for c in by[s]:
+            rel = " · ".join(f"{r.lower()} {n}" for r, n in sorted((c.get("relations") or {}).items()))
+            lines.append(f"- **{c.get('name')}** `{c['key']}`" + (f" · {rel}" if rel else "")
+                         + f" — {c.get('description') or ''}" + (f" _Not: {c['not_for']}_" if c.get("not_for") else ""))
+    lines += ["", "_Areas:_ " + " · ".join(f"`{k}` {v}" for k, v in areas.items())]
     return "\n".join(lines)
 
 

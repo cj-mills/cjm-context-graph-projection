@@ -106,7 +106,8 @@ JOURNAL_VERBS = ("decide", "alias", "assert", "link", "unlink", "section", "new-
                  "render-work-page", "rehome-points", "place-point",
                  "series", "series-members", "place-in-series", "entity", "verified-on",
                  "supports", "retire-source", "transfer-path", "judge-related", "judge-facets", "review-facets",
-                 "judge-roles", "review-roles", "harvest-discussions", "ingest-evidence",
+                 "judge-roles", "review-roles", "judge-concepts", "review-concepts",
+                 "harvest-discussions", "ingest-evidence",
                  "derived-from", "work-member", "relate", "relocate")
 
 
@@ -471,6 +472,16 @@ async def _apply_op(
         # marks; the journaled content hashes bind the facts the same.
         from .rolereview import apply_review as apply_role_review
         await apply_role_review(gx, a["run"], actor=a.get("actor", "agent:session"))
+    elif verb == "judge-concepts":
+        # One concept judge run (ruling ad37f62a (2)): the judgments are observations the op
+        # carries whole, so replay never calls the judge; the content hashes bind the records.
+        from .conceptjudge import apply_concept_run
+        await apply_concept_run(gx, a["run"], actor=a.get("actor", "agent:session"))
+    elif verb == "review-concepts":
+        # One concept relation review (ruling ad37f62a (2)): the retractions, the confirmed
+        # relations through the relate write path, and the review marks.
+        from .conceptreview import apply_relations
+        await apply_relations(gx, a["run"], actor=a.get("actor", "agent:session"))
     elif verb == "harvest-discussions":
         # One comment-thread harvest (design 39c51c15 (1)): the threads are observations the op
         # carries whole, so replay never asks GitHub; the journaled content hashes bind the facts.
@@ -806,6 +817,11 @@ def touched_node_ids(
     elif verb == "review-roles":
         run = a.get("run") or {}
         out.extend(sorted({r[0] for r in (run.get("confirm") or []) + (run.get("mark") or [])}))
+    elif verb == "judge-concepts":   # the judged sources (ruling ad37f62a (2))
+        out.extend(sorted((a.get("run") or {}).get("sources") or {}))
+    elif verb == "review-concepts":
+        run = a.get("run") or {}
+        out.extend(sorted({r[0] for k in ("retract", "confirm", "mark") for r in (run.get(k) or [])}))
     elif verb == "harvest-discussions":
         out.extend(sorted((a.get("run") or {}).get("plan") or {}))
     elif verb == "ingest-evidence":   # the snapshot and every web_path its measures land on (7f315830)

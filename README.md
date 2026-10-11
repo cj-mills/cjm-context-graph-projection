@@ -20,6 +20,8 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - **`cjm_context_graph_projection.codefold`** — The code lane as a FOLD over the source journal (design amendment 2cc81d3b to 8f6f2343).
 - **`cjm_context_graph_projection.cohesion`** — Module cohesion audit over the code graph — the read-only cohesion ORACLE (N+1).
 - **`cjm_context_graph_projection.comments`** — The post page's comments (design 39c51c15 (1), rulings 98d33f9e (2) + 86f4a34d, under the
+- **`cjm_context_graph_projection.conceptjudge`** — The concept judge (ruling ad37f62a (2), under design amendment 25a58e0e (6) and the path model ae698640).
+- **`cjm_context_graph_projection.conceptreview`** — The concept reviews (ruling ad37f62a (1), (2)): the vocabulary the drafts propose, and the
 - **`cjm_context_graph_projection.config`** — Graph-sibling config discovery — the DEFAULT_* hardcodes retired to DATA
 - **`cjm_context_graph_projection.contradictions`** — The standing dedup query: slots whose ACTIVE assertions disagree.
 - **`cjm_context_graph_projection.conventions`** — Structural convention audit over the code/notebook graph (the enforcement nbdev lacks).
@@ -239,6 +241,53 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `plan_threads` _function_ — Per Note, the thread with the MOST comments stands; the others are earlier threads
 - `render_comments` _function_ — The comments block: the questions line, the earlier threads, and the giscus widget --
 - `thread_url` _function_ — A thread's page: comment threads are discussions once the publish converts them.
+
+### `cjm_context_graph_projection.conceptjudge`
+
+- `apply_concept_run` _function_ — Land one run: each asked pair's standing judgments are replaced by the run's (a source
+- `concept_question` _function_ — One concept's question for a source of the family.
+- `concept_scope` _function_ — The sources the judge asks (module docstring): each public post of a declaring type for
+- `concept_state` _function_ — The reads a run, a review and a measure share: the selected sources, their states, the
+- `concept_view` _function_ — What the concept judge sees of a post: every section's prose in order, each capped at
+- `concepts_read` _function_ — The live concept vocabulary with each concept's confirmed relation counts -- the read the
+- `criteria_hash` _function_
+- `definition` _function_
+- `family_of` _function_
+- `judge_concepts` _function_ — The concept judge verb: find the stale pairs, ask, land the run. All or nothing -- a run with
+- `load_concept_judgments` _function_ — Every stored concept-relation judgment (the JUDGED family proposing TEACHES / ASSUMES / COVERS).
+- `load_concept_records` _function_
+- `load_concept_views` _function_ — Every source's judged state, from its post's Sections in the graph.
+- `load_concept_vocab` _function_ — The live (unretired) concepts -- the questions' subjects.
+- `load_confirmed_relations` _function_ — Every confirmed TEACHES / ASSUMES / COVERS edge onto a concept, per pair.
+- `measure` _function_ — The pilot's measure (ruling ad37f62a (4)), from the stored judgments and the confirmed
+- `plan_requests` _function_ — A source's questions in as few requests as the budget allows -- each over the whole state.
+- `record_value` _function_ — The canonical JSON of a source's record (key-sorted, compact).
+- `relations_of` _function_
+- `request_body` _function_
+- `resolve_only` _function_ — A run's selection: each ref names a source, or a notes post whose source is its unit.
+- `review_basis` _function_ — A pair's basis: the source's judged state and the concept's criteria. A mark whose basis
+- `run_concepts` _function_ — Ask every request; an answer missing an asked concept (or one of a Choice's options) fails.
+- `section_prose` _function_
+- `source_criteria` _function_
+- `stale_pairs` _function_ — A pair is stale when its source has no record, the source's state moved, or the record
+- `tokens` _function_
+- `type_relations` _function_ — The deliverable types whose information_policy declares `concept_relations`.
+
+### `cjm_context_graph_projection.conceptreview`
+
+- `apply_relations` _function_ — Land one relation review: the retractions, the confirmations (record_relation, checked at
+- `apply_vocab` _function_ — Land the checked blocks as one entity batch (subjects first, so a concept may name a subject
+- `draft_area` _function_ — A draft names its area typed (`area: stage:export`), or -- as the pilot's first drafts did,
+- `live_entities` _function_
+- `merge_drafts` _function_ — The drafts by key: the first draft of a key gives its fields, a later differing description
+- `parse_relations` _function_
+- `parse_vocab` _function_ — The document's blocks: each head line with the field lines beneath it.
+- `plan_relations` _function_ — Check every row against the graph and plan the batch (module docstring); any error refuses.
+- `relation_document` _function_ — The relation review document, grouped by source, each source's rows by p.
+- `relation_state` _function_ — Every fresh pair's review row (module docstring), the stale pairs apart, and the reads the
+- `review_concepts` _function_ — The review verb: either review's document, or one landed (or refused) review.
+- `vocab_document` _function_ — The vocabulary review document (module docstring), grouped by area.
+- `word_of` _function_
 
 ### `cjm_context_graph_projection.config`
 
