@@ -676,6 +676,11 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         for r in obj.get("ambiguous") or []:
             lines.append(f"- ambiguous: `{r.get('slug')}` -> {r.get('target')} "
                          f"(held by {', '.join(h[:8] for h in r.get('holders') or [])})")
+        if obj.get("retired"):
+            lines.append(f"_{len(obj['retired'])} residue link(s) from RETIRED pages — rendered "
+                         "nowhere, so no live link is affected (finding 4a8d1fa0):_")
+            lines += [f"  - {r.get('kind')}: `{r.get('slug')}` -> {r.get('target')}"
+                      for r in obj["retired"]]
         return "\n".join(lines)
     if kind == "display-rule":
         if obj.get("error"):

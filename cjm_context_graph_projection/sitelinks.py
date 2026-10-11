@@ -131,13 +131,45 @@ async def _live_section_anchors(
             for s in sections if not F.prop(s, "retired")}
 
 
+async def _retired_sources(
+    gx: GraphHandle,
+    note_ids: Iterable[str],  # The link sources to test (only the ones with a problem row)
+) -> Set[str]:  # The ones whose active publish_state is retired
+    """Which of these notes are RETIRED (finding 4a8d1fa0): a retired page renders nowhere, so
+    its links are residue, never live link health. Read scoped to the given notes — their
+    publish_state assertions and the SUPERSEDES edges onto those — never the whole fact layer,
+    because the resolve runs as a step at every window's close (performance, ee35f222)."""
+    ids = sorted(set(note_ids))
+    if not ids:
+        return set()
+    where = [PropertyPredicate("predicate", "eq", P.PUBLISH_STATE),
+             PropertyPredicate("subject_id", "in", ids)]
+    total = await F.count_label(gx, DevNodeKinds.ASSERTION, where)
+    if not total:
+        return set()
+    facts = await F.load_label_where(gx, DevNodeKinds.ASSERTION, where, limit=total)
+    q = EdgeQuery(target_ids=sorted(str(F.nid(a)) for a in facts),
+                  relation_type=DevRelations.SUPERSEDES)
+    res = await graph_task(gx.queue, gx.graph_id, "query_edges", query=q.to_dict())
+    raw = getattr(res, "edges", None) or getattr(res, "rows", None) or []
+    pairs = []
+    for e in raw:
+        d = e.to_dict() if hasattr(e, "to_dict") else dict(e)
+        pairs.append((str(d["source_id"]), str(d["target_id"])))
+    by_note: Dict[str, List[Any]] = {}
+    for a in facts:
+        by_note.setdefault(str(F.prop(a, "subject_id")), []).append(a)
+    return {nid for nid, slot in by_note.items()
+            if any(F.prop(a, "value") == P.PUBLISH_RETIRED for a in F.active_assertions(slot, pairs))}
+
+
 async def resolve_site_links(
     gx: GraphHandle,
     note_ids: Optional[List[str]] = None,  # Scope to these notes (None = every Note on the graph)
     *,
     write: bool = True,                    # Apply the edge diff (False = report only)
     exclude: Optional[Iterable[str]] = None,  # Notes left out as link SOURCES (a replay's not-yet-born notes)
-) -> Dict[str, Any]:  # {notes, links, resolved, added, removed, unresolved: [...], ambiguous: [...], anchors: [...], written}
+) -> Dict[str, Any]:  # {notes, links, resolved, added, removed, unresolved: [...], ambiguous: [...], anchors: [...], retired: [...], written}
     """Reconcile the `site_link` REFERENCES edges of the scoped notes against the facts.
 
     Each note's verbatim `site_refs` target maps through `site_path_key` (a relative target
@@ -155,7 +187,9 @@ async def resolve_site_links(
     dangling edge, never a silent drop. A standing edge whose anchor changed is re-minted. An
     edge's id is its (note, target, relation) triple, so a note's several links landing on one
     node are ONE edge: the first in document order gives its properties, and every anchor naming
-    no Section is still reported."""
+    no Section is still reported. A problem row whose SOURCE note is retired is reported in
+    `retired` instead (finding 4a8d1fa0): a retired page renders nowhere, so its links are residue
+    apart from live link health — reported, never dropped, and its edges reconcile as any other."""
     if note_ids is None:
         notes = await F.load_label(gx, DevNodeKinds.NOTE)
     else:
@@ -206,9 +240,18 @@ async def resolve_site_links(
         await graph_task(gx.queue, gx.graph_id, "delete_edges", edge_ids=sorted(removed))
     if write and added:
         await extend_graph(gx.queue, gx.graph_id, [], added)
+    # A RETIRED source renders nowhere (finding 4a8d1fa0): its problem rows are residue,
+    # reported apart from live link health, never dropped. The edges above are untouched —
+    # a retired page's links stay on the graph exactly as a rebuild derives them.
+    gone = await _retired_sources(gx, {r["note_id"] for r in unresolved + ambiguous + anchors})
+    retired = [dict(r, kind=kind) for kind, rows in (("unresolved", unresolved),
+                                                     ("ambiguous", ambiguous), ("anchor", anchors))
+               for r in rows if r["note_id"] in gone]
+    live_only = lambda rows: [r for r in rows if r["note_id"] not in gone]
     return {"notes": len(notes), "links": links, "resolved": len(desired),
-            "added": len(added), "removed": len(removed), "unresolved": unresolved,
-            "ambiguous": ambiguous, "anchors": anchors, "written": bool(write and (added or removed))}
+            "added": len(added), "removed": len(removed), "unresolved": live_only(unresolved),
+            "ambiguous": live_only(ambiguous), "anchors": live_only(anchors), "retired": retired,
+            "written": bool(write and (added or removed))}
 
 
 def touches_inputs(

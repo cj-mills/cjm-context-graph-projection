@@ -613,6 +613,7 @@ async def replay_journal(
     counts["site_links_resolved"] = links["resolved"]
     counts["site_links_unresolved"] = len(links["unresolved"]) + len(links["ambiguous"])
     counts["site_links_unresolved_anchors"] = len(links["anchors"])
+    counts["site_links_retired_residue"] = len(links.get("retired") or [])  # from retired sources (4a8d1fa0)
     counts["site_links_drift"] = links["added"] + links["removed"]
     if counts["site_links_drift"]:
         print(f"⚠ site links: the closing check changed {links['added']} added / "

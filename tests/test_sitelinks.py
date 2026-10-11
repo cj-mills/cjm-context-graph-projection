@@ -89,6 +89,42 @@ def test_a_changed_anchor_re_mints_the_standing_edge(tmp_path):
     assert [r["anchor"] for r in second["anchors"]] == ["also-gone"]
 
 
+@pytest.mark.skipif(not _HAVE_GRAPH, reason="needs the graph capability")
+def test_a_retired_sources_links_are_residue_reported_apart(tmp_path):
+    # finding 4a8d1fa0: a retired page renders nowhere, so its unresolved / ambiguous /
+    # anchor-naming-no-Section rows leave live link health for `retired` -- reported, never
+    # dropped -- while its edges reconcile exactly as before; superseding the retirement
+    # brings the rows back to live health.
+    from cjm_dev_graph_schema.predicates import PUBLISH_PUBLISHED, PUBLISH_RETIRED, PUBLISH_STATE
+    root = tmp_path / "posts"
+
+    async def go():
+        async with open_graph(str(tmp_path / "g.db")) as gx:
+            notes = [note_from_text(str(root / "s" / p / "index.md"), text, corpus_root=str(root),
+                                    profile="quarto_post", lossless=True)
+                     for p, text in (("part-2", PART_2), ("part-1", PART_1))]
+            nodes, edges = corpus_graph_elements(notes)
+            await extend_graph(gx.queue, gx.graph_id, nodes, edges)
+            for p in ("part-1", "part-2"):
+                await assert_value(gx, note_node_id(f"s/{p}"), SITE_PATH, f"/posts/s/{p}/")
+            live = await resolve_site_links(gx)
+            await assert_value(gx, note_node_id("s/part-2"), PUBLISH_STATE, PUBLISH_RETIRED)
+            retired = await resolve_site_links(gx)
+            await assert_value(gx, note_node_id("s/part-2"), PUBLISH_STATE, PUBLISH_PUBLISHED,
+                               supersede=[PUBLISH_RETIRED])
+            back = await resolve_site_links(gx)
+            return live, retired, back
+
+    live, retired, back = asyncio.run(go())
+    assert live["retired"] == [] and len(live["unresolved"]) == 1 and len(live["anchors"]) == 1
+    assert retired["unresolved"] == [] and retired["anchors"] == []
+    assert sorted((r["kind"], r["target"]) for r in retired["retired"]) == [
+        ("anchor", "../part-1/#gone"), ("unresolved", "/posts/nowhere/")]
+    # the edges are untouched: same resolved set, no drift
+    assert retired["resolved"] == live["resolved"] and retired["added"] == retired["removed"] == 0
+    assert back["retired"] == [] and len(back["unresolved"]) == 1 and len(back["anchors"]) == 1
+
+
 def _cli(*args):
     return subprocess.run([sys.executable, "-m", "cjm_context_graph_projection.cli", *args],
                           capture_output=True, text=True)
