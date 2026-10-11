@@ -80,6 +80,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - **`cjm_context_graph_projection.seeds`** — Hand-seeded load-bearing slots + the rename-stable repo-key machinery.
 - **`cjm_context_graph_projection.series`** — Series born on-graph: the node, its membership and its ORDER as journaled intent
 - **`cjm_context_graph_projection.serve`** — A served, read-only graph EXPLORER data API over the read verbs — the richer-viz INSTRUMENT.
+- **`cjm_context_graph_projection.sessioncost`** — session-cost: what one session's graph work cost, DERIVED — never stored (work item
 - **`cjm_context_graph_projection.site`** — The public site's BUILD: one verb, run where the graph is (ruling 941f7f13; DEC 98293e72 (2)).
 - **`cjm_context_graph_projection.sitefeeds`** — The site's FEEDS, written by the build after the render (design 0efb5497 (3b) under the web
 - **`cjm_context_graph_projection.sitelinks`** — In-body site links, RESOLVED through site_path facts (DEC 72d669c5 (1); the step, 9ee4e346).
@@ -572,6 +573,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 
 ### `cjm_context_graph_projection.module_ops`
 
+- `add_module` _function_ — Birth a module WHOLE in ONE journaled op, graph-sourced from its first record (work
 - `delete_module` _function_ — Delete a module — retire its journal key, drop its file, and let the code fold's step
 - `flip_notebook_to_py` _function_ — The golden-reference flip, ONE LOUD VERB (DEC b2c5363d): notebook -> plain `.py`.
 - `new_module` _function_ — Mint an EMPTY module, graph-sourced from birth (the target add-text / add-symbol /
@@ -1008,6 +1010,14 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `graph_names` _function_ — Derive a stable short name per db (its file stem; collisions suffixed `-2`, `-3`, …).
 - `serve_graphs` _function_ — Open every graph once, hold the handles, and serve the API until interrupted.
 
+### `cjm_context_graph_projection.sessioncost`
+
+- `cg_invocations` _function_ — Every graph-tool invocation in a command: the tool, and for `cg-read` / `cg-write`
+- `find_session_transcript` _function_ — The session's transcript: its `pull-transcript` op's `cc_session_uuid` first (the
+- `is_refusal` _function_ — A call refused when it exited non-zero or printed the verbs' error form (see the
+- `session_cost` _function_ — The cost instrument: the transcript half (commands, refusals, wall, file edits) and
+- `transcript_cost` _function_ — Walk a transcript's main chain: pair each tool call with its result, classify the
+
 ### `cjm_context_graph_projection.site`
 
 - `check_rendered_site` _function_ — Every rendered page, read whole (findings c6befeb6 + d807a18f): each internal href / src
@@ -1100,6 +1110,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `append_source` _function_ — Append a `source` op, skipping a write identical to the module's current latest state.
 - `canonical_emit` _function_ — Decompose source text and re-emit it canonically — the exact graph→`.py` Phase 2 yields.
 - `canonical_emit_notebook` _function_ — The notebook analogue of `canonical_emit`: parse to cells, re-render canonically.
+- `canonicalization_report` _function_ — What a canonicalization CHANGES, and whether the change can alter runtime behaviour
 - `collect_appends` _function_ — Collect every source-journal record appended inside the block, as it landed on disk.
 - `cutover_module` _function_ — Phase 2: make the JOURNAL the module's source of truth (the persistence flip).
 - `emit_source_artifact` _function_ — (Re)generate a module's file artifact from its journaled source (the recovery /

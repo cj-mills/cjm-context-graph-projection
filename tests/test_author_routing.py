@@ -79,6 +79,31 @@ def test_slot_refusal_carries_nearest_match(tmp_path, monkeypatch):
     assert "closest slot match" in res["error"] and "return 101" in res["error"]
 
 
+def test_import_old_on_a_symbol_routes_to_the_import_region(tmp_path, monkeypatch):
+    # e526672a W2: an import-statement OLD names the module's import region whatever
+    # slot was given; one missing from the module refuses in one line that says so; an
+    # INDENTED (function-local) import stays the symbol's own not-found.
+    from cjm_python_decompose_core.emit import emit_module_from_nodes
+    fake, path = _module_graph(tmp_path)
+    imports = {"id": "txt1", "label": "CodeText",
+               "properties": {"module_id": "mod1", "region_key": "from os import path",
+                              "text": "from os import path\n", "order_index": -1,
+                              "kind": "imports"}}
+    fake.nodes[imports["id"]] = imports
+    path.write_text(emit_module_from_nodes([imports] + [fake.nodes[i] for i in ("symf", "symg")]))
+    _wire(fake, monkeypatch)
+    res = asyncio.run(author(GX, "symf", edit=("from os import path", "from os import path, sep"),
+                             write=True))
+    assert not res.get("error"), res.get("error")
+    assert res["node_id"] == "txt1" and res["routed_from"] == "symf"
+    assert "import region" in res["routed_note"]
+    assert "from os import path, sep" in path.read_text()
+    miss = asyncio.run(author(GX, "symf", edit=("from sys import argv", "X"), write=True))
+    assert miss.get("error", "").startswith("OLD is an import statement")
+    local = asyncio.run(author(GX, "symf", edit=("    import json", "X"), write=True))
+    assert "OLD not found" in local.get("error", "") and "import statement" not in local["error"]
+
+
 def test_note_edit_routes_to_section(tmp_path, monkeypatch):
     note_path = tmp_path / "notes/craft.md"
     note_path.parent.mkdir(parents=True, exist_ok=True)

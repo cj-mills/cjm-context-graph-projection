@@ -1205,7 +1205,7 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             line = f"⚠ {obj['error']}"
             if obj.get("symbols"):
                 line += "\n  symbols: " + ", ".join(obj["symbols"])
-            return line
+            return "\n".join([line] + _canonicalization_block(obj))
         done = obj.get("written")
         # new-module: has module_path; rename-module: has to_path; delete-module: has node_count.
         if "node_count" in obj:
@@ -1222,8 +1222,9 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                 f"  importers rewritten: {', '.join(ci) if ci else '(none)'}",
                 f"  _{obj.get('note', '')}_"])
         verb = "created" if done else "would create (dry run)"
-        return (f"**{verb}** module `{obj.get('import_name')}` ({obj.get('module_path')})"
-                f"\n  {obj.get('note', '')}")
+        return "\n".join([f"**{verb}** module `{obj.get('import_name')}` ({obj.get('module_path')})"
+                          + (f" — {obj['body_bytes']} bytes" if obj.get("body_bytes") else ""),
+                          f"  {obj.get('note', '')}"] + _canonicalization_block(obj))
     if kind == "rename":
         if obj.get("error"):
             return f"⚠ {obj['error']}"
@@ -1266,7 +1267,7 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                 f"{'on-graph' if obj.get('has_purpose') else 'MISSING'}")
     if kind == "flip":
         if obj.get("error"):
-            return f"⚠ {obj['error']}"
+            return "\n".join([f"⚠ {obj['error']}"] + _canonicalization_block(obj))
         if obj.get("previewed"):
             verb = "PREVIEW — would " + ("absorb (graph-sourced)" if obj.get("graph_sourced")
                                          else "capture (shadow)")
@@ -1275,10 +1276,10 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                      else "captured (shadow)")
                     if obj.get("captured") else "already current (no-op)")
         canon = ("file is already canonical" if obj.get("file_already_canonical")
-                 else "⚠ flip implies a one-time canonicalization (e.g. import reorder)")
+                 else "⚠ a one-time canonicalization — the change:")
         return "\n".join([
             f"**{verb}** `{obj.get('import_name')}` ({obj.get('canonical_bytes')} bytes)",
-            f"  {canon}",
+            f"  {canon}"] + _canonicalization_block(obj) + [
             f"  _{obj.get('note', '')}_"])
     if kind == "capture-artifact":   # design 9a7224a7: one version of an observed file, or its retirement
         where = f"{obj.get('repo_key')}/{obj.get('artifact_path')}"
@@ -1395,14 +1396,18 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             f"the journal is now this module's source of truth{art}",
             f"  {obj.get('file_path')}",
             f"  _{obj.get('note', '')}_"])
+    if kind == "session-cost":
+        return _render_session_cost(obj)
     if kind == "emit-artifact":
         if obj.get("error"):
-            return f"⚠ {obj['error']}"
+            return "\n".join([f"⚠ {obj['error']}"] + _canonicalization_block(obj))
         if obj.get("written"):
-            return (f"**regenerated** `{obj.get('module_path')}` from the journaled source "
-                    f"({obj.get('artifact_bytes')} bytes) → {obj.get('file_path')}")
+            return "\n".join([f"**regenerated** `{obj.get('module_path')}` from the journaled source "
+                              f"({obj.get('artifact_bytes')} bytes) → {obj.get('file_path')}"]
+                             + _canonicalization_block(obj))
         state = "would change (drifted)" if obj.get("changed") else "already in sync"
-        return f"**artifact** `{obj.get('module_path')}`: {state} ({obj.get('artifact_bytes')} bytes)"
+        return "\n".join([f"**artifact** `{obj.get('module_path')}`: {state} "
+                          f"({obj.get('artifact_bytes')} bytes)"] + _canonicalization_block(obj))
     if kind == "emit":
         if obj.get("error"):
             return f"⚠ {obj['error']}"
@@ -2836,4 +2841,47 @@ def _render_archive_source(
     if isinstance(live, dict):
         lines.append(f"🧬 notes live: {len(live['notes'])} note(s) — nodes +{live['nodes_added']} "
                      f"~{live['nodes_updated']} · edges +{live['edges_added']} −{live['edges_removed']}")
+    return "\n".join(lines)
+
+
+def _canonicalization_block(obj: Dict[str, Any], cap: int = 60) -> List[str]:
+    """The hazards and the unified diff a flip / emit-artifact result carries (work item
+    e526672a W4), as indented lines: each hazard first, then the diff, capped at `cap`
+    lines with the remainder counted — the reorder shown, never a bare warning."""
+    lines = [f"  ⛔ hazard: {h}" for h in obj.get("hazards") or []]
+    diff = (obj.get("canonicalization_diff") or "").splitlines()
+    if diff:
+        lines += ["  ```diff"] + [f"  {d}" for d in diff[:cap]]
+        if len(diff) > cap:
+            lines.append(f"  … {len(diff) - cap} more diff line(s)")
+        lines.append("  ```")
+    return lines
+
+
+def _render_session_cost(obj: Dict[str, Any]) -> str:
+    """The cost instrument (e526672a W6) as a compact report: the session's wall, the
+    graph-tool calls by verb with their refusals, the journaled ops by verb, and the
+    file-tool `.py` edits beside the graph-native ones."""
+    if obj.get("error") and "transcript_path" not in obj:
+        j = obj.get("journaled") or {}
+        return f"⚠ {obj['error']}\n  journaled ops: {j.get('entries', 0)}"
+    fmt = lambda d: " · ".join(f"{k or '(no verb)'} {v}" for k, v in (d or {}).items()) or "—"
+    wall = obj.get("wall_seconds")
+    j = obj.get("journaled") or {}
+    graph_edits = sum((obj.get("writes") or {}).get(v, 0)
+                      for v in ("author", "add-symbol", "add-text", "add-module", "new-module"))
+    lines = [f"## Session cost — `{obj.get('session_key')}`",
+             f"_derived from the transcript + journals, never stored — {obj.get('transcript_path')}_", "",
+             f"- **wall**: {wall / 60:.0f} min" if wall else "- **wall**: —",
+             f"- **graph-tool calls**: {obj.get('cg_calls', 0)} ({obj.get('cg_wall_seconds', 0) / 60:.1f} min "
+             f"waiting on them) · rebuilds {obj.get('rebuilds', 0)} · backups {obj.get('backups', 0)}",
+             f"- **reads**: {fmt(obj.get('reads'))}",
+             f"- **writes**: {fmt(obj.get('writes'))}",
+             f"- **refusals**: {obj.get('refusals', 0)} — {fmt(obj.get('refused_by_verb'))}",
+             f"- **journaled ops**: {j.get('entries', 0)} — {fmt(j.get('by_verb'))}",
+             f"- **code edits**: {graph_edits} graph-native (author / add-*) · "
+             f"{obj.get('py_file_edits', 0)} file-tool edits of .py / .ipynb",
+             f"- **all tool calls**: {fmt(obj.get('tool_calls'))}"]
+    if obj.get("refusal_examples"):
+        lines += ["", "**Refusals (first lines):**"] + [f"- {e}" for e in obj["refusal_examples"]]
     return "\n".join(lines)

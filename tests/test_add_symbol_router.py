@@ -323,3 +323,57 @@ def test_add_symbol_refuses_a_never_rebuilt_module_with_a_nonempty_file(tmp_path
     path.unlink()  # a BORN module (no file yet) is not stale — its first symbol lands
     res2 = asyncio.run(add_symbol(GX, "mod1", "def g():\n    return 1", write=False))
     assert not res2.get("error") and res2["qualname"] == "g"
+
+
+def test_add_symbol_import_rider_lands_with_the_body(tmp_path, monkeypatch):
+    # 55f96b45: the body and its new import land in ONE op — the import region gains the
+    # rider, the new symbol binds it, the emit carries it; a module with no import region
+    # gets one; a rider the body never uses is refused and nothing is written.
+    fake = _py_module_graph(tmp_path)
+    _wire(fake, monkeypatch)
+    res = asyncio.run(add_symbol(GX, "mod1", "def h():\n    return json.dumps(os.sep)\n",
+                                 imports=["import json"]))
+    assert not res.get("error"), res.get("error")
+    assert res["import_riders"] == 1
+    emitted = (tmp_path / "cjm_demo/m.py").read_text()
+    assert "import json" in emitted and "import os" in emitted
+    assert any(b.get("name") == "json" for b in fake.nodes[res["symbol_id"]]["properties"]["import_bindings"])
+    assert "import json" in fake.nodes["txt1"]["properties"]["text"]
+    unused = asyncio.run(add_symbol(GX, "mod1", "def k():\n    return 1\n", imports=["import re"]))
+    assert "never references" in unused["error"] and "re" in unused["error"]
+    assert "def k" not in (tmp_path / "cjm_demo/m.py").read_text()
+    notimport = asyncio.run(add_symbol(GX, "mod1", "def k():\n    return 1\n", imports=["x = 1"]))
+    assert "not a module-level import" in notimport["error"]
+
+
+def test_import_rider_mints_a_region_in_a_verbatim_test_module(tmp_path, monkeypatch):
+    # A tests/ module keeps its import block verbatim, so the rider must land as region
+    # text; with no import region yet, one is minted after the module docstring.
+    mod = _module_node(tmp_path, "tests/test_m.py")
+    doc = {"id": "txt0", "label": "CodeText",
+           "properties": {"module_id": "mod1", "region_key": '"""Tests."""',
+                          "text": '"""Tests."""', "order_index": 0, "kind": "docstring"}}
+    fake = FakeGraph([mod, doc])
+    _wire(fake, monkeypatch)
+    res = asyncio.run(add_symbol(GX, "mod1", "def test_x():\n    assert Path('.').exists()\n",
+                                 imports=["from pathlib import Path"]))
+    assert not res.get("error"), res.get("error")
+    text = (tmp_path / "tests/test_m.py").read_text()
+    assert text.index('"""Tests."""') < text.index("from pathlib import Path") < text.index("def test_x")
+    minted = [n for n in fake.nodes.values() if n["label"] == "CodeText" and n["id"] != "txt0"]
+    assert len(minted) == 1 and minted[0]["properties"]["text"] == "from pathlib import Path\n"
+
+
+def test_author_import_rider_lands_with_the_edit(tmp_path, monkeypatch):
+    # 55f96b45 on author: the edited body's new import rides the same op.
+    fake = _py_module_graph(tmp_path)
+    _wire(fake, monkeypatch)
+    (tmp_path / "cjm_demo/m.py").write_text("import os\n\n\ndef f():\n    return os.getcwd()\n")
+    res = asyncio.run(author(GX, "sym1", edit=("return os.getcwd()", "return json.dumps(os.getcwd())"),
+                             imports=["import json"]))
+    assert not res.get("error"), res.get("error")
+    assert res["import_riders"] == 1
+    emitted = (tmp_path / "cjm_demo/m.py").read_text()
+    assert "import json" in emitted and "json.dumps(os.getcwd())" in emitted
+    bad = asyncio.run(author(GX, "sym1", edit=("json.dumps", "str"), imports=["import re"]))
+    assert "never references" in bad["error"]

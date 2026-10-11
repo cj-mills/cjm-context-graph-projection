@@ -39,9 +39,9 @@ from .refactor_ops import _emission_for, _get, _relocate
 from .relive import apply_live
 from .runtime import GraphHandle
 from .seeds import repo_dir_name
-from .source_state import (canonical_emit, collect_appends, graph_sourced_modules,
-                           is_test_module_path, journaled_emit, latest_source_ops,
-                           notebook_to_py_source)
+from .source_state import (canonical_emit, canonicalization_report, collect_appends,
+                           graph_sourced_modules, is_test_module_path, journaled_emit,
+                           latest_source_ops, notebook_to_py_source)
 from .write import link
 
 
@@ -110,6 +110,88 @@ async def _module_subtree_ids(gx: GraphHandle, module_id: str) -> List[str]:
     return ids
 
 
+async def add_module(
+    gx: GraphHandle,
+    repo_key: str,            # The repo's durable conceptual slug (the rename-stable Entity key)
+    module_path: str,         # Repo-relative path of the new module (e.g. "pkg/sub.py", "tests/test_x.py")
+    body: str,                # The module's whole text ("" = an empty module, the new-module birth)
+    *,
+    import_name: Optional[str] = None,  # Dotted import name (derived from module_path if omitted)
+    repo_root: Optional[str] = None,    # Absolute repo root — anchors the FIRST module of a fresh repo (no sibling to derive from)
+    write: bool = True,       # Journal + write + derive (else dry run)
+    source_journal_path: Optional[str] = None,  # The source journal (the module's first record + cutover, and the repo REGISTER, land here)
+    repos_dir: Optional[str] = None,  # The repos root (the live fold step derives node paths under it)
+    allow_reorder: bool = False,      # Birth the canonical form even when it carries a hazard
+) -> Dict[str, Any]:  # The add-module result (or error)
+    """Birth a module WHOLE in ONE journaled op, graph-sourced from its first record (work
+    item 177dcb07, ruling 865ba564): the body's canonical text is journaled as the module's
+    first `source` record with its `cutover` (and the repo's REGISTER), the file is written
+    from it, and the code fold's step derives the CodeModule, every region and symbol, and
+    their edges — no add-text / add-symbol per region, no flip-module / cutover after.
+    Test modules too (their import block stays verbatim). Nothing exists before the op, so
+    nothing re-keys: a module the graph already holds, or a path with a file already on
+    disk (a file-born module takes flip-module + cutover), REFUSES. The canonicalization
+    is shown as a diff and a HAZARD refuses unless `allow_reorder` (e526672a W4). An
+    empty body is the empty-module birth `new_module` delegates to."""
+    mid = code_module_node_id(repo_key, module_path)
+    if await _get(gx, mid) is not None:
+        return {"error": f"module `{module_path}` already exists in {repo_key}",
+                "module_id": mid, "written": False}
+    root = await _repo_root(gx, repo_key)
+    if root is None and repo_root:
+        root = repo_root if repo_root.endswith("/") else repo_root + "/"
+    if root is None:
+        return {"error": f"no existing module in repo `{repo_key}` to anchor the path "
+                         "— pass --repo-root for a fresh repo's first module",
+                "written": False}
+    path = root + module_path
+    if body and Path(path).exists():
+        return {"error": f"a file already exists at {path} — a file-born module is captured "
+                         "with flip-module + cutover, never re-born", "written": False}
+    imp = import_name or _derive_import_name(module_path)
+    text, report = "", {"diff": "", "hazards": []}
+    if body:
+        try:
+            text = canonical_emit(repo_dir_name(repo_key), module_path, path, body, imp)
+        except (SyntaxError, ValueError) as e:
+            return {"error": f"body does not decompose: {e}", "written": False}
+        report = canonicalization_report(body, text, module_path)
+    result = {"module_id": mid, "repo_key": repo_key, "module_path": module_path,
+              "import_name": imp, "path": path, "written": False,
+              "body_bytes": len(text.encode("utf-8")),
+              "file_already_canonical": text == body,
+              "canonicalization_diff": report["diff"], "hazards": report["hazards"],
+              "note": ("born graph-sourced: the whole module is journaled and cut over in one op"
+                       if body else
+                       "born graph-sourced: the empty module is journaled and cut over — "
+                       "populate it with add-text / add-symbol (no flip-module / cutover)")}
+    if report["hazards"] and not allow_reorder:
+        return {**result, "error": f"the canonical form of {module_path} can change its "
+                                   "behaviour — " + "; ".join(report["hazards"])
+                                   + " (restructure the body, or pass --allow-reorder)"}
+    if write and not source_journal_path:
+        return {**result, "error": "add-module needs the source journal — a module is on the "
+                                   "graph because the journal holds it (2cc81d3b)"}
+    # The module's first record + its cutover, and the repo REGISTER event (DEC c47912f6).
+    with collect_appends() as appended:
+        rec = journaled_emit(source_journal_path,
+                             emissions=[{"repo_key": repo_dir_name(repo_key),
+                                         "module_path": module_path, "import_name": imp,
+                                         "text": text, "path": path, "cutover": True}],
+                             registers=[{"repo_key": repo_dir_name(repo_key),
+                                         "repo_root": root.rstrip("/"),
+                                         "source_kind": "code"}],
+                             op={"op": "add-module" if body else "new-module",
+                                 "module_path": module_path}, write=write)
+    if rec.get("error"):
+        return {**result, "error": rec["error"]}
+    result["journal"] = rec
+    if write:
+        result["live"] = await apply_live(gx, source_journal_path, repos_dir, appended)
+        result["written"] = True
+    return result
+
+
 async def new_module(
     gx: GraphHandle,
     repo_key: str,            # The repo's durable conceptual slug (the rename-stable Entity key)
@@ -130,44 +212,10 @@ async def new_module(
     so no flip-module / cutover follows the birth, and the module survives every rebuild. A
     repo with no modules yet (born-on-graph greenfield) has no sibling to derive the on-disk
     root from — pass `repo_root` explicitly there; an existing sibling-derived root always
-    wins."""
-    mid = code_module_node_id(repo_key, module_path)
-    if await _get(gx, mid) is not None:
-        return {"error": f"module `{module_path}` already exists in {repo_key}",
-                "module_id": mid, "written": False}
-    root = await _repo_root(gx, repo_key)
-    if root is None and repo_root:
-        root = repo_root if repo_root.endswith("/") else repo_root + "/"
-    if root is None:
-        return {"error": f"no existing module in repo `{repo_key}` to anchor the path "
-                         "— pass --repo-root for a fresh repo's first module",
-                "written": False}
-    imp = import_name or _derive_import_name(module_path)
-    result = {"module_id": mid, "repo_key": repo_key, "module_path": module_path,
-              "import_name": imp, "path": root + module_path, "written": False,
-              "note": "born graph-sourced: the empty module is journaled and cut over — "
-                      "populate it with add-text / add-symbol (no flip-module / cutover)"}
-    if write and not source_journal_path:
-        return {**result, "error": "new-module needs the source journal — a module is on the "
-                                   "graph because the journal holds it (2cc81d3b)"}
-    # The module's first record + its cutover, and the repo REGISTER event (DEC c47912f6).
-    with collect_appends() as appended:
-        rec = journaled_emit(source_journal_path,
-                             emissions=[{"repo_key": repo_dir_name(repo_key),
-                                         "module_path": module_path, "import_name": imp,
-                                         "text": "", "path": root + module_path,
-                                         "cutover": True}],
-                             registers=[{"repo_key": repo_dir_name(repo_key),
-                                         "repo_root": root.rstrip("/"),
-                                         "source_kind": "code"}],
-                             op={"op": "new-module", "module_path": module_path}, write=write)
-    if rec.get("error"):
-        return {**result, "error": rec["error"]}
-    result["journal"] = rec
-    if write:
-        result["live"] = await apply_live(gx, source_journal_path, repos_dir, appended)
-        result["written"] = True
-    return result
+    wins. The empty-body case of `add_module` (177dcb07): one birth path, two verbs."""
+    return await add_module(gx, repo_key, module_path, "", import_name=import_name,
+                            repo_root=repo_root, write=write,
+                            source_journal_path=source_journal_path, repos_dir=repos_dir)
 
 
 async def regroup(

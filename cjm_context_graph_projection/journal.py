@@ -892,6 +892,7 @@ def journal_window(
     keep_verbs = set(verbs or [])
     drop_verbs = set(exclude_verbs or [])
     per: Dict[str, Dict[str, Any]] = {}
+    by_verb: Dict[str, int] = {}  # ops per verb — the cost instrument's journaled half (e526672a W6)
     entries = 0
     for path in paths:
         if not path:
@@ -912,6 +913,7 @@ def journal_window(
             if (keep_verbs and verb not in keep_verbs) or verb in drop_verbs:
                 continue
             entries += 1
+            by_verb[verb] = by_verb.get(verb, 0) + 1
             for ref in row["refs"]:
                 rec = per.setdefault(ref, {"ref": ref, "verbs": {}, "touches": 0,
                                            "first_ts": ts, "last_ts": ts})
@@ -923,7 +925,7 @@ def journal_window(
     out: Dict[str, Any] = {"window": {"start": start, "end": end, "session": session,
                                       "verbs": sorted(keep_verbs),
                                       "exclude_verbs": sorted(drop_verbs)},
-                           "entries": entries, "touched": touched}
+                           "entries": entries, "by_verb": by_verb, "touched": touched}
     if win_start is not None:
         out["session_window"] = {"start": win_start, "end": win_end}
     return out

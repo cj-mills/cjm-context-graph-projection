@@ -37,6 +37,7 @@ same key would revive it (generic supersession, not a special case).
 """
 
 import ast
+import difflib
 import json
 import os
 import re
@@ -183,6 +184,72 @@ def _canonical(
     if _is_notebook(module_path):
         return canonical_emit_notebook(text)
     return canonical_emit(repo_key, module_path, path, text, import_name)
+
+
+def canonicalization_report(
+    file_text: str,       # The module's text as the file holds it
+    canonical: str,       # The canonical text a flip / emit would journal or write
+    module_path: str = "",  # Repo-relative path (a notebook is never checked — its cells are not Python statements)
+) -> Dict[str, Any]:  # {"diff": unified diff ("" when byte-equal), "hazards": [one line per semantic risk]}
+    """What a canonicalization CHANGES, and whether the change can alter runtime behaviour
+    (work item e526672a W4; ruling 865ba564; the second sighting 0fca6536).
+
+    The diff is the unified diff file -> canonical, so the caller sees the reorder
+    instead of a bare warning. A HAZARD is a change the canonical emitter can make that
+    is not cosmetic: (1) the first statement changes KIND (a module docstring that stops
+    being one when the import block lands above it — 53be4b98); (2) an import moves
+    ABOVE a module-level non-import statement it followed in the file (a `sys.path`
+    insert, an `os.environ` setting, `matplotlib.use(...)`: setup the import may depend
+    on). Statements are matched by their AST, imports by the names they bind, so a
+    merged or re-wrapped import line is still the same import. A `.ipynb` module or
+    text that does not parse reports its diff and no hazards."""
+    diff = "".join(difflib.unified_diff(file_text.splitlines(keepends=True),
+                                        canonical.splitlines(keepends=True),
+                                        fromfile="file", tofile="canonical"))
+    if not diff or _is_notebook(module_path):
+        return {"diff": diff, "hazards": []}
+    try:
+        before, after = ast.parse(file_text).body, ast.parse(canonical).body
+    except SyntaxError:
+        return {"diff": diff, "hazards": []}
+
+    def kind(stmt: ast.stmt) -> str:
+        if isinstance(stmt, ast.ImportFrom) and stmt.module == "__future__":
+            return "__future__ import"
+        if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            return "import"
+        if (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant)
+                and isinstance(stmt.value.value, str)):
+            return "docstring"
+        return type(stmt).__name__
+
+    def bound(stmt: ast.stmt) -> List[str]:
+        if not isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            return []
+        return [a.asname or (a.name.split(".")[0] if isinstance(stmt, ast.Import) else a.name)
+                for a in stmt.names]
+
+    hazards: List[str] = []
+    if before and after and kind(before[0]) != kind(after[0]):
+        hazards.append(f"the first statement changes kind: {kind(before[0])} -> {kind(after[0])}")
+    dumps_after = [ast.dump(s) for s in after]
+    for i, stmt in enumerate(before):
+        if kind(stmt) in ("import", "__future__ import") or (i == 0 and kind(stmt) == "docstring"):
+            continue
+        earlier = {n for s in before[:i] for n in bound(s)}
+        later = {n for s in before[i + 1:] for n in bound(s)} - earlier
+        if not later:
+            continue
+        try:
+            j = dumps_after.index(ast.dump(stmt))
+        except ValueError:
+            continue
+        moved = sorted(later & {n for s in after[:j] for n in bound(s)})
+        if moved:
+            line = ast.unparse(stmt).splitlines()[0]
+            hazards.append(f"import of {', '.join(moved)} moves above `{line[:80]}` "
+                           f"(line {stmt.lineno} of the file)")
+    return {"diff": diff, "hazards": hazards}
 
 
 def _derive_import_name(
@@ -460,14 +527,18 @@ def flip_module(
     module_path: str,                    # Repo-relative module path to flip into shadow source
     import_name: Optional[str] = None,   # Override the derived dotted import name
     write: bool = True,                  # False = preview the capture, journal nothing
+    allow_reorder: bool = False,         # Journal a canonicalization even when it carries a hazard
 ) -> Dict[str, Any]:  # The flip result (captured?, whether the file is already canonical, or error)
     """Capture a module's CANONICAL source into the shadow source journal (Phase 1).
 
     Reads the current file, computes the canonical emit (what the graph-sourced module would
     produce), and records it as the module's source state. The file remains the real ingest
     input — this only starts the shadow soak. Reports whether the file is ALREADY canonical
-    (byte-exact) or whether the flip implies a one-time canonicalization (e.g. a reordered
-    import block) that Phase 2's first emit would apply."""
+    (byte-exact) or what the one-time canonicalization changes: its unified diff, and any
+    HAZARD (`canonicalization_report`: the first statement changing kind, an import moved
+    above a module-level statement it followed). A hazard REFUSES the flip unless
+    `allow_reorder` (work item e526672a W4) — restructure the file so its canonical form
+    keeps its behaviour, or accept the reorder knowingly."""
     file_path = _resolve_path(repos_dir, repo_key, module_path)
     if not Path(file_path).exists():
         return {"error": f"no file at {file_path}", "captured": False}
@@ -476,6 +547,13 @@ def flip_module(
         canonical = _canonical(repo_key, module_path, file_path, file_text, import_name)
     except (SyntaxError, ValueError) as e:
         return {"error": f"cannot decompose {module_path}: {e}", "captured": False}
+    report = canonicalization_report(file_text, canonical, module_path)
+    if report["hazards"] and not allow_reorder:
+        return {"error": f"the canonical form of {module_path} can change its behaviour — "
+                         + "; ".join(report["hazards"])
+                         + " (restructure the file, or pass --allow-reorder to journal it anyway)",
+                "captured": False, "repo_key": repo_key, "module_path": module_path,
+                "canonicalization_diff": report["diff"], "hazards": report["hazards"]}
     imp = import_name or _derive_import_name(repo_key, module_path, canonical)
     appended = (append_source(source_journal_path, repo_key, module_path, imp, canonical)
                 if write else False)
@@ -491,6 +569,7 @@ def flip_module(
             "file_path": file_path, "captured": appended, "previewed": not write,
             "graph_sourced": sourced,
             "file_already_canonical": canonical == file_text,
+            "canonicalization_diff": report["diff"], "hazards": report["hazards"],
             "canonical_bytes": len(canonical.encode("utf-8")),
             "note": note}
 
@@ -562,10 +641,13 @@ def emit_source_artifact(
     repo_key: str,             # The repo's durable conceptual slug
     module_path: str,          # Repo-relative module path
     write: bool = True,        # False = report what would change without touching disk
+    allow_reorder: bool = False,  # Overwrite even when the change carries a hazard
 ) -> Dict[str, Any]:  # The regen result
     """(Re)generate a module's file artifact from its journaled source (the recovery /
     post-authoring emit). The journal is authoritative — this OVERWRITES the file; to
-    keep an out-of-band file edit instead, absorb it with `flip-module`."""
+    keep an out-of-band file edit instead, absorb it with `flip-module`. The result
+    carries the unified diff file -> journal; a HAZARD in it (`canonicalization_report`)
+    refuses the overwrite unless `allow_reorder` (work item e526672a W4)."""
     a = latest_source_ops(source_journal_path).get((repo_key, module_path))
     if a is None:
         return {"error": f"no journaled source state for {repo_key}/{module_path}", "written": False}
@@ -573,12 +655,21 @@ def emit_source_artifact(
     file_path = _resolve_path(repos_dir, repo_key, module_path)
     existing = Path(file_path).read_text() if Path(file_path).exists() else None
     changed = existing != journaled
+    report = (canonicalization_report(existing, journaled, module_path)
+              if existing is not None and changed else {"diff": "", "hazards": []})
+    res = {"repo_key": repo_key, "module_path": module_path, "file_path": file_path,
+           "changed": changed, "written": False,
+           "artifact_bytes": len(journaled.encode("utf-8")),
+           "canonicalization_diff": report["diff"], "hazards": report["hazards"]}
+    if report["hazards"] and not allow_reorder:
+        return {**res, "error": f"overwriting {module_path} can change its behaviour — "
+                                + "; ".join(report["hazards"])
+                                + " (absorb the file with flip-module, or pass --allow-reorder)"}
     if write and changed:
         Path(file_path).parent.mkdir(parents=True, exist_ok=True)
         Path(file_path).write_text(journaled)
-    return {"repo_key": repo_key, "module_path": module_path, "file_path": file_path,
-            "changed": changed, "written": write and changed,
-            "artifact_bytes": len(journaled.encode("utf-8"))}
+        res["written"] = True
+    return res
 
 
 def absorb_authored_text(

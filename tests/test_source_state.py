@@ -5,7 +5,8 @@ import tempfile
 from pathlib import Path
 
 from cjm_context_graph_projection.source_state import (absorb_authored_text, append_source,
-                                                       canonical_emit, cutover_module,
+                                                       canonical_emit, canonicalization_report,
+                                                       cutover_module,
                                                        emit_source_artifact, flip_module,
                                                        graph_sourced_modules, journaled_emit,
                                                        latest_source_ops, read_source_journal,
@@ -139,6 +140,44 @@ def test_emit_source_artifact_restores_the_file_from_the_journal():
         res = emit_source_artifact(j, repos, "demo", "demo/m.py")
         assert res["written"] and f.read_text() == canonical
         assert source_check(j, repos)["regen_clean"]
+
+
+def test_canonicalization_report_names_the_hazards_and_shows_the_diff():
+    # e526672a W4: an import hoisted above the setup it followed, and a docstring that
+    # stops being the first statement, are hazards; a plain import reorder is only a diff.
+    setup = 'import sys\nsys.path.insert(0, "x")\nimport foo  # noqa: E402\n'
+    hoisted = 'import foo\nimport sys\n\nsys.path.insert(0, "x")\n'
+    rep = canonicalization_report(setup, hoisted, "pkg/m.py")
+    assert rep["hazards"] == ["import of foo moves above `sys.path.insert(0, 'x')` (line 2 of the file)"]
+    assert rep["diff"].startswith("--- file\n+++ canonical\n")
+    doc = canonicalization_report('"""Doc."""\nimport os\n', 'import os\n"""Doc."""\n', "pkg/m.py")
+    assert doc["hazards"] == ["the first statement changes kind: docstring -> import"]
+    plain = canonicalization_report("import b\nimport a\nX = 1\n", "import a\nimport b\nX = 1\n", "pkg/m.py")
+    assert plain["hazards"] == [] and "+import a" in plain["diff"]
+    assert canonicalization_report("X = 1\n", "X = 1\n", "pkg/m.py") == {"diff": "", "hazards": []}
+
+
+def test_flip_and_emit_refuse_a_hazardous_canonicalization_unless_allowed():
+    # e526672a W4: the flip journals nothing and the emit overwrites nothing while the
+    # canonical form would hoist an import above the sys.path line it depends on.
+    with tempfile.TemporaryDirectory() as d:
+        repos = Path(d) / "repos"
+        f = repos / "demo" / "demo" / "m.py"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        text = ('import sys\n\nsys.path.insert(0, "x")\nimport json\n\n\n'
+                'def f():\n    return json.dumps(sys.argv)\n')
+        f.write_text(text)
+        j = str(Path(d) / "source.jsonl")
+        res = flip_module(j, str(repos), "demo", "demo/m.py")
+        assert not res["captured"] and "--allow-reorder" in res["error"]
+        assert res["hazards"] and res["canonicalization_diff"]
+        assert latest_source_ops(j) == {}
+        ok = flip_module(j, str(repos), "demo", "demo/m.py", allow_reorder=True)
+        assert ok["captured"] and ok["hazards"] and not ok["file_already_canonical"]
+        emit = emit_source_artifact(j, str(repos), "demo", "demo/m.py")
+        assert emit["error"] and not emit["written"] and f.read_text() == text
+        forced = emit_source_artifact(j, str(repos), "demo", "demo/m.py", allow_reorder=True)
+        assert forced["written"] and f.read_text() != text
 
 
 def test_absorb_authored_text_canonicalizes_and_keeps_file_in_sync():

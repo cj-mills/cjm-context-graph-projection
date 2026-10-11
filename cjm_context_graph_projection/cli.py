@@ -39,7 +39,8 @@ from .journal import (journal_sourced_note_paths, journal_window_view, M3_BASELI
 from .lens import apply_lens, set_lens
 from .linkaudit import link_audit
 from .listing import list_graph
-from .module_ops import delete_module, flip_notebook_to_py, new_module, regroup, rename_module
+from .module_ops import (add_module, delete_module, flip_notebook_to_py, new_module, regroup,
+                         rename_module)
 from .onboarding import project_onboarding
 from .oracle import run_version_oracle
 from .projection import (explore, full_graph_view, get_schema, grep, locate, relevant, show, state,
@@ -62,6 +63,7 @@ from .runtime import DEFAULT_MANIFESTS, open_graph
 from .seeds import repo_dir_name
 from .series import mint_series, place_in_series, series_order, set_series_members
 from .serve import serve_graphs
+from .sessioncost import session_cost
 from .site import site_build
 from .sitelinks import resolve_site_links, site_link_window
 from .source_state import (absorb_authored_text, collect_appends, cutover_module,
@@ -100,7 +102,7 @@ _DEFAULT_ACTOR = os.environ.get("CJM_ACTOR") or "agent:session"
 MUTATES_SOURCE: Dict[str, bool] = {
     "author": True, "add-symbol": True, "add-text": True, "emit": True,
     "flip-module": True, "flip-to-py": True, "cutover": True, "emit-artifact": True,
-    "move": True, "regroup": True, "new-module": True, "rename-module": True,
+    "move": True, "regroup": True, "new-module": True, "add-module": True, "rename-module": True,
     "delete-module": True, "rename-symbol": True, "capture-artifact": True,
 }
 
@@ -660,6 +662,23 @@ async def _dispatch(args) -> int:
                                             verbs=args.verb, exclude_verbs=args.exclude_verb,
                                             labels=args.label)
             print(render("journal-window", res, args.format))
+        elif args.command == "session-cost":
+            paths = [p for p in (args.journal_path, args.source_journal_path) if p]
+            session = args.session
+            if session is None:
+                pointer = Path(args.graph_db_path).parent / "current-session"
+                session = pointer.read_text().strip() if pointer.exists() else None
+            if not session:
+                print("error: session-cost needs --session (no current-session pointer)",
+                      file=sys.stderr)
+                return 1
+            dirs = args.transcript_dir or [str(Path.home() / ".claude" / "projects"),
+                                           str(Path(args.graph_db_path).parent / "archives"
+                                               / "claude-code-transcripts")]
+            res = session_cost(session, paths, dirs, code_root=args.code_root,
+                               transcript=args.transcript)
+            print(render("session-cost", res, args.format))
+            return 1 if res.get("error") else 0
         elif args.command == "subgraph":
             res = await subgraph_view(gx, args.refs, hops=args.hops,
                                       relations=args.relation, cap=args.cap)
@@ -1823,7 +1842,7 @@ async def _dispatch(args) -> int:
             res = await author(gx, args.node_id, replace=replace, edit=edit,
                                actor=args.actor, write=not args.no_write,
                                source_journal_path=args.source_journal_path,
-                               repos_dir=args.repos_dir)
+                               repos_dir=args.repos_dir, imports=args.imports)
             print(render("author", res, args.format))
             _cli_import_smoke(res)
             # M2b shadow: a memory-section author also journals its raw STATE (the .md stays the
@@ -1841,7 +1860,8 @@ async def _dispatch(args) -> int:
             res = await add_symbol(gx, args.module, body, actor=args.actor,
                                    write=not args.no_write,
                                    source_journal_path=args.source_journal_path,
-                                   repos_dir=args.repos_dir, after=args.after)
+                                   repos_dir=args.repos_dir, after=args.after,
+                                   imports=args.imports)
             print(render("add-symbol", res, args.format))
             _cli_import_smoke(res)
             return 1 if res.get("error") else 0
@@ -2049,6 +2069,16 @@ async def _dispatch(args) -> int:
                                    repos_dir=args.repos_dir)
             print(render("module", res, args.format))
             return 1 if res.get("error") else 0
+        elif args.command == "add-module":
+            res = await add_module(gx, args.repo_key, args.module_path,
+                                   Path(args.body_file).read_text(),
+                                   import_name=args.import_name, repo_root=args.repo_root,
+                                   write=not args.no_write,
+                                   source_journal_path=args.source_journal_path,
+                                   repos_dir=args.repos_dir, allow_reorder=args.allow_reorder)
+            print(render("module", res, args.format))
+            _cli_import_smoke(res)
+            return 1 if res.get("error") else 0
         elif args.command == "regroup":
             res = await regroup(gx, args.repo_key, args.target_module_path, args.symbol_ids,
                                 import_name=args.import_name, write=not args.no_write,
@@ -2134,7 +2164,7 @@ async def _dispatch(args) -> int:
             with collect_appends() as appended:
                 res = flip_module(args.source_journal_path, args.repos_dir, repo_key,
                                   module_path, import_name=args.import_name,
-                                  write=not args.no_write)
+                                  write=not args.no_write, allow_reorder=args.allow_reorder)
             if appended:
                 # An absorb (or a first capture) is a source record like any other: the code
                 # fold's step derives it into the db now (2cc81d3b, B2).
@@ -2207,7 +2237,7 @@ async def _dispatch(args) -> int:
                 repo_key, module_path = spec["repo_key"], spec["module_path"]
             res = emit_source_artifact(args.source_journal_path, args.repos_dir,
                                        repo_key, module_path,
-                                       write=not args.no_write)
+                                       write=not args.no_write, allow_reorder=args.allow_reorder)
             print(render("emit-artifact", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "readme":
@@ -3552,6 +3582,21 @@ def main() -> int:
     p_fi.add_argument("--top-k", type=int, default=3,
                       help="Proposals kept per unfiled item (default 3)")
 
+    p_sco = sub.add_parser("session-cost",
+                           help="What a session's graph work cost, derived from its transcript + the "
+                                "journals (calls and refusals by verb, wall, journaled ops, .py file "
+                                "edits beside graph-native ones) — never stored")
+    p_sco.add_argument("--session", default=None,
+                       help="Session key (default: the current-session pointer beside the db)")
+    p_sco.add_argument("--transcript", default=None,
+                       help="An explicit transcript .jsonl (default: found through the session's "
+                            "pull-transcript op, else its boot prompt)")
+    p_sco.add_argument("--transcript-dir", action="append", default=None,
+                       help="Where transcripts live (repeatable; default: ~/.claude/projects + the "
+                            "cc-archive copy beside the db)")
+    p_sco.add_argument("--code-root", default=DEFAULT_REPOS,
+                       help="Checkouts root: a file-tool edit of a .py / .ipynb under it counts")
+
     p_jw = sub.add_parser("journal-window",
                           help="The session lens: touched-node set for a time window or session "
                                "key (journal-derived — TOUCHES, not creations; open end = live)")
@@ -4330,6 +4375,10 @@ def main() -> int:
                       help="Open $EDITOR on the current slot text (the minimal human authoring UI)")
     p_au.add_argument("--no-write", action="store_true",
                       help="Dry run: emit + print the artifact, don't touch disk")
+    p_au.add_argument("--import", dest="imports", action="append", default=None, metavar="STMT",
+                      help="Import rider (repeatable): a module-level import the edited body uses, "
+                           "landed in the module's import region in the SAME op; refused when the "
+                           "body never references what it binds")
     p_au.add_argument("--actor", default=_DEFAULT_ACTOR)
     p_au.add_argument("--repos-dir", default=DEFAULT_REPOS,
                       help="Repos root — derives a notebook's repo-relative source-journal key")
@@ -4348,6 +4397,10 @@ def main() -> int:
     g_asym.add_argument("--body-file", help="Read the symbol's verbatim source from a file")
     p_asym.add_argument("--no-write", action="store_true",
                         help="Dry run: emit + print the artifact, don't touch graph or disk")
+    p_asym.add_argument("--import", dest="imports", action="append", default=None, metavar="STMT",
+                        help="Import rider (repeatable): a module-level import the body uses, "
+                             "landed in the module's import region in the SAME op; refused when "
+                             "the body never references what it binds")
     p_asym.add_argument("--actor", default=_DEFAULT_ACTOR)
     p_asym.add_argument("--repos-dir", default=DEFAULT_REPOS,
                         help="Repos root (parity with author; the absorb gate reads it)")
@@ -4460,6 +4513,24 @@ def main() -> int:
     p_nm.add_argument("--repos-dir", default=DEFAULT_REPOS,
                       help="Repos root — the live code fold step derives node paths under it (as ingest does)")
 
+    p_am = sub.add_parser("add-module",
+                          help="Birth a module WHOLE in one journaled op (regions + symbols + "
+                               "imports + cutover; graph-sourced from its first record — tests too)")
+    p_am.add_argument("repo_key", help="The repo's durable conceptual slug")
+    p_am.add_argument("module_path", help="Repo-relative path of the new module (e.g. pkg/sub.py, tests/test_x.py)")
+    p_am.add_argument("--body-file", required=True, help="The module's whole text")
+    p_am.add_argument("--import-name", help="Dotted import name (derived from module_path if omitted)")
+    p_am.add_argument("--repo-root", default=None,
+                      help="Absolute repo root — anchors the FIRST module of a fresh repo "
+                           "(otherwise derived from an existing sibling module)")
+    p_am.add_argument("--allow-reorder", action="store_true",
+                      help="Birth the canonical form even when it carries a hazard (an import "
+                           "moved above a statement it followed, a docstring displaced)")
+    p_am.add_argument("--no-write", action="store_true",
+                      help="Dry run: show the canonical form's diff, journal and write nothing")
+    p_am.add_argument("--repos-dir", default=DEFAULT_REPOS,
+                      help="Repos root — the live code fold step derives node paths under it (as ingest does)")
+
     p_rg = sub.add_parser("regroup",
                           help="Gather symbols into a module (create if absent) — the under/over-split executor")
     p_rg.add_argument("repo_key", help="The repo the symbols + target live in (same-repo)")
@@ -4522,6 +4593,9 @@ def main() -> int:
     p_fl.add_argument("--import-name", help="Dotted import name (derived from module_path if omitted)")
     p_fl.add_argument("--no-write", action="store_true",
                       help="Dry run: report what a flip would capture, journal nothing")
+    p_fl.add_argument("--allow-reorder", action="store_true",
+                      help="Journal the canonical form even when it carries a hazard (the first "
+                           "statement changing kind, an import moved above a statement it followed)")
     p_fl.add_argument("--repos-dir", default=DEFAULT_REPOS)
 
     p_fp = sub.add_parser("flip-to-py",
@@ -4565,6 +4639,8 @@ def main() -> int:
                            "when the first positional is a CodeModule id/prefix")
     p_ea.add_argument("--repos-dir", default=DEFAULT_REPOS)
     p_ea.add_argument("--no-write", action="store_true", help="Dry run: report drift, don't touch the file")
+    p_ea.add_argument("--allow-reorder", action="store_true",
+                      help="Overwrite the file even when the change carries a hazard")
 
     p_rm = sub.add_parser("readme",
                           help="Project a repo's README from the graph (structural v1; read-only)")

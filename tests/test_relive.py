@@ -232,3 +232,57 @@ def test_live_code_verbs_equal_their_rebuild(tmp_path):
     test_beta = code_symbol_node_id(code_module_node_id(LIB, TST), "test_beta")
     assert beta in rel(test_beta, "TESTS")
     assert rel(code_module_node_id(LIB, TST), "IMPORTS") == {core}
+
+
+@needs_capability
+def test_add_module_births_a_whole_module_equal_to_its_rebuild(tmp_path):
+    # 177dcb07: one add-module journals a whole module (regions + symbols + imports + the
+    # cutover) and the live db equals the same journal folded fresh; a test module too;
+    # a re-birth on a held path and a birth over a file already on disk both refuse.
+    repos = tmp_path / "repos"
+    for rel, text in FILES.items():
+        (repos / LIB / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repos / LIB / rel).write_text(text)
+    live, sj = str(tmp_path / "live.db"), str(tmp_path / "source.jsonl")
+    R = ("--repos-dir", str(repos))
+    memory = tmp_path / "memory"
+    memory.mkdir()
+
+    def run(*args):
+        return _cli("--graph-db-path", live, "--source-journal-path", sj, *args)
+
+    for rel in FILES:
+        for verb in ("flip-module", "emit-artifact", "cutover"):
+            assert run(verb, LIB, rel, *R).returncode == 0
+    born, born_test = "cjm_demo_lib/born.py", "tests/test_born.py"
+    body = tmp_path / "born.py"
+    body.write_text('"""Born whole."""\n\nfrom cjm_demo_lib.core import alpha\n\n\n'
+                    "def twice(x):\n    return alpha(x) * 2\n\n\nclass Pair:\n"
+                    "    def left(self):\n        return twice(1)\n")
+    tbody = tmp_path / "test_born.py"
+    tbody.write_text("from cjm_demo_lib.born import twice\n\n\ndef test_twice():\n"
+                     "    assert twice(1) == 4\n")
+    r = run("add-module", LIB, born, "--body-file", str(body), *R)
+    assert r.returncode == 0, r.stderr or r.stdout
+    r = run("add-module", LIB, born_test, "--body-file", str(tbody), *R)
+    assert r.returncode == 0, r.stderr or r.stdout
+    assert (repos / LIB / born).read_text() == body.read_text()  # already canonical: born byte-identical
+    assert (repos / LIB / born_test).read_text() == tbody.read_text()
+    rebuilt = str(tmp_path / "rebuilt.db")
+    r = _cli("--graph-db-path", rebuilt, "--source-journal-path", sj, "ingest",
+             "--memory-dir", str(memory), "--no-repo-map", "--no-seed", *R)
+    assert r.returncode == 0, r.stderr or r.stdout
+    r = _cli("--graph-db-path", live, "rebuild-diff", "--against", rebuilt)
+    assert r.returncode == 0 and "CLEAN" in r.stdout, r.stdout + r.stderr
+    import sqlite3
+    con = sqlite3.connect(live)
+    mid = code_module_node_id(LIB, born)
+    names = {n for (n,) in con.execute(
+        "select json_extract(properties,'$.qualname') from nodes where label='CodeSymbol' "
+        "and json_extract(properties,'$.module_id')=?", (mid,))}
+    assert {"twice", "Pair", "Pair.left"} <= names
+    again = run("add-module", LIB, born, "--body-file", str(body), *R)
+    assert again.returncode == 1 and "already exists" in again.stdout
+    (repos / LIB / "cjm_demo_lib/filed.py").write_text("X = 1\n")
+    over = run("add-module", LIB, "cjm_demo_lib/filed.py", "--body-file", str(body), *R)
+    assert over.returncode == 1 and "flip-module + cutover" in over.stdout

@@ -525,6 +525,7 @@ async def _route_nested_symbol(
     write: bool,
     source_journal_path: Optional[str] = None,  # Forwarded to the owning author call (journal-first)
     repos_dir: Optional[str] = None,
+    imports: Optional[List[str]] = None,  # Import riders, carried to the owning slot (55f96b45)
 ) -> Optional[Dict[str, Any]]:  # The routed author result, or None when this node doesn't route
     """Route an author call on a NESTED CodeSymbol through its OWNING verbatim slot.
 
@@ -549,7 +550,8 @@ async def _route_nested_symbol(
                          f"OLD/NEW, or author the owning slot `{owner['id']}` directly",
                 "node_id": F.nid(node), "written": False}
     res = await author(gx, owner["id"], edit=edit, actor=actor, write=write,
-                       source_journal_path=source_journal_path, repos_dir=repos_dir)
+                       source_journal_path=source_journal_path, repos_dir=repos_dir,
+                       imports=imports)
     if not res.get("error"):
         res["routed_from"] = F.nid(node)
         res["routed_note"] = (f"nested `{qualname}` routed through owning slot "
@@ -567,6 +569,7 @@ async def author(
     write: bool = True,                    # Emit the canonical artifact to disk (Fork-1(a)); False = dry run
     source_journal_path: Optional[str] = None,  # The source journal (code artifacts route journal-first)
     repos_dir: Optional[str] = None,       # The repos root (a notebook's journal key derives under it)
+    imports: Optional[List[str]] = None,   # Import riders: statements the edited body uses, landed in the same op (55f96b45)
 ) -> Dict[str, Any]:  # The write result (incl. error, the emitted artifact path + text)
     """Author a node's verbatim-text slot, then emit its canonical artifact to disk.
 
@@ -588,14 +591,14 @@ async def author(
         routed_c = await _route_container_edit(gx, node, edit=edit, actor=actor,
                                                write=write,
                                                source_journal_path=source_journal_path,
-                                               repos_dir=repos_dir)
+                                               repos_dir=repos_dir, imports=imports)
         if routed_c is not None:
             return routed_c
         # A nested CodeSymbol ROUTES through its owning slot (the 3e13d95a hint, executed).
         routed = await _route_nested_symbol(gx, node, replace=replace, edit=edit,
                                             actor=actor, write=write,
                                             source_journal_path=source_journal_path,
-                                            repos_dir=repos_dir)
+                                            repos_dir=repos_dir, imports=imports)
         if routed is not None:
             return routed
         err = ("node has no authorable verbatim slot (not a top-level CodeSymbol / "
@@ -606,6 +609,24 @@ async def author(
     slot, artifact, label = resolved
     current = str(F.prop(node, slot, ""))
     new_text, err = _apply(current, replace, edit)
+    if (err is not None and edit is not None and "OLD not found" in err and artifact == "module"
+            and _is_import_text(edit[0])):
+        # An import-statement OLD belongs to the module's import region whatever slot was
+        # named (work item e526672a W2): route it there through the container.
+        owner = await _module_node(gx, F.prop(node, "module_id"))
+        if owner is not None:
+            res = await _route_container_edit(gx, owner, edit=edit, actor=actor, write=write,
+                                              source_journal_path=source_journal_path,
+                                              repos_dir=repos_dir)
+            if res is not None and not res.get("error"):
+                res["routed_from"] = node_id
+                res["routed_note"] = ("an import-statement OLD routed to the module's import "
+                                      f"region (module `{F.nid(owner)[:8]}`)")
+                return res
+            if res is not None:
+                return {**res, "node_id": node_id, "error": (
+                    "OLD is an import statement — imports live in the module, not in this "
+                    f"{label}; routed to module `{F.nid(owner)[:8]}`: {res['error']}")}
     if err is not None:
         if edit is not None and "OLD not found" in err:
             near = _nearest_match(current, edit[0])
@@ -643,6 +664,15 @@ async def author(
     for w in wires:
         if w["id"] == node_id:
             w["properties"][slot] = new_text
+    rider_region: Optional[Dict[str, Any]] = None
+    if imports:
+        if artifact != "module" or label != DevNodeKinds.CODE_SYMBOL:
+            return {"error": "import riders ride a top-level symbol body in a .py module",
+                    "node_id": node_id, "label": label, "written": False}
+        rider_region, rerr = _land_import_riders(wires, str(container_id), list(imports), new_text)
+        if rerr:
+            return {"error": rerr, "node_id": node_id, "label": label, "slot": slot,
+                    "written": False}
     if artifact == "notebook":
         emitted = render_notebook(wires)
     elif artifact == "note":
@@ -704,6 +734,8 @@ async def author(
         result["rebound_bindings"] = len(rebind["import_bindings"])
     if minted:
         result["new_import_bindings"] = minted
+    if rider_region is not None:
+        result["import_riders"] = len(imports or [])
     if artifact == "note":
         # The durable section identity (slug, anchor) the journal records for M2b's shadow.
         result["note_slug"] = F.prop(container, "slug")
@@ -773,6 +805,8 @@ async def author(
         if module_bindings_merged is not None:
             await graph_task(gx.queue, gx.graph_id, "update_node", node_id=container_id,
                              properties={"import_bindings": module_bindings_merged})
+        if rider_region is not None:
+            await _persist_rider_region(gx, rider_region)
         if artifact == "note" and prior_note_text is not None and new_text != current:
             # Harvest-on-edit (cbde404c): a link the edit added/removed lands/retracts its
             # REFERENCES / TAGGED / IN_SERIES edge NOW, not at the next rebuild.
@@ -792,6 +826,7 @@ async def add_symbol(
     source_journal_path: Optional[str] = None,  # The source journal (journal-first routing)
     repos_dir: Optional[str] = None,  # The repos root (notebook journal keys derive under it)
     after: Optional[str] = None,  # Placement anchor: insert after this top-level qualname/region id
+    imports: Optional[List[str]] = None,  # Import riders: statements the body uses, landed in the same op (55f96b45)
 ) -> Dict[str, Any]:  # The add result (incl. the emitted artifact path + text), or error
     """Mint a NEW top-level CodeSymbol into a module, then emit its canonical artifact.
 
@@ -854,6 +889,13 @@ async def add_symbol(
     order, oerr = _insertion_order(wires, after)
     if oerr:
         return {"error": oerr, "written": False}
+    # Import riders (55f96b45): the body's new imports join the import region in THIS op,
+    # so the bindings below see them and the emit carries them.
+    rider_region: Optional[Dict[str, Any]] = None
+    if imports:
+        rider_region, rerr = _land_import_riders(wires, module_id, list(imports), text)
+        if rerr:
+            return {"error": rerr, "written": False}
 
     # Bind the new symbol's refs — nested defs INCLUDED (a minted class binds what
     # its methods reference, 2b6090dc) — against everything the module carries,
@@ -890,6 +932,8 @@ async def add_symbol(
         "emitted_bytes": len(emitted.encode("utf-8")), "emitted_text": emitted,
         "unchanged": False, "written": False,
     }
+    if rider_region is not None:
+        result["import_riders"] = len(imports or [])
     if artifact_path and source_journal_path is not None:
         emission = _source_emission(F.prop(module, "repo_key"), module_path,
                                     artifact_path, emitted, repos_dir,
@@ -918,6 +962,8 @@ async def add_symbol(
         await graph_task(gx.queue, gx.graph_id, "add_edges", edges=[
             make_edge(module_id, sym.id, DevRelations.DEFINES),
             make_edge(module_id, sym.id, DevRelations.CONTAINS)])
+        if rider_region is not None:
+            await _persist_rider_region(gx, rider_region)
         result["written"] = True
     return result
 
@@ -1396,6 +1442,96 @@ def _nearest_match(
                         f"lines {best_at + 1}-{best_at + w}):\n{snippet}")
 
 
+def _is_import_text(text: str) -> bool:
+    """Whether a text is nothing but MODULE-LEVEL import statements (`import x` / `from y
+    import z`, one or several, unindented) — the OLD of an edit that belongs in a module's
+    import region, never in a symbol's body (work item e526672a W2). An indented import is
+    a function-local one and stays the symbol's business."""
+    try:
+        body = ast.parse(text.strip("\n")).body
+    except SyntaxError:
+        return False
+    return bool(body) and all(isinstance(s, (ast.Import, ast.ImportFrom)) for s in body)
+
+
+def _land_import_riders(
+    wires: List[Dict[str, Any]],   # The module's region wires (mutated: the import region gains the riders)
+    module_id: str,                # The CodeModule the riders land in
+    imports: List[str],            # The rider statements (`from x import y`, repeatable)
+    body: str,                     # The symbol body the riders serve (every bound name must be used)
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:  # (the import-region wire that changed or was minted, error)
+    """Land IMPORT RIDERS beside a body in the SAME op (work item 55f96b45, ruling 865ba564):
+    each rider line is appended to the module's import region (a CodeText of kind
+    `imports`; minted after a leading docstring when the module has none) in the wires the
+    verb is about to emit, so the body and its import can never land in two ops with a
+    broken module between them. `_available_bindings` parses region text, so the body
+    binds against the rider at once, in derived and verbatim (test) modules alike. A
+    rider that is not an import statement, or that binds a name the body never
+    references, is REFUSED (no dead imports minted); a line the region already holds is
+    not repeated."""
+    lines: List[str] = []
+    for rider in imports:
+        if not _is_import_text(rider):
+            return None, f"import rider is not a module-level import statement: {rider!r}"
+        lines += [ln for ln in rider.strip("\n").splitlines() if ln.strip()]
+    try:
+        refs = set(_flat_refs(parse_module(body.rstrip("\n")).symbols[0]))
+        bound = set(parse_module("\n".join(lines)).import_bindings)
+    except (SyntaxError, IndexError):
+        return None, "import riders ride a body that parses as one def/class"
+    unused = sorted(bound - refs)
+    if unused:
+        return None, (f"import rider binds {', '.join(unused)}, which the body never references "
+                      "— a rider lands only the imports its body uses")
+    texts = sorted((w for w in wires if w["label"] == DevNodeKinds.CODE_TEXT),
+                   key=lambda w: w["properties"].get("order_index") or 0)
+    region = next((w for w in texts if w["properties"].get("kind") == "imports"
+                   or (not w["properties"].get("kind") and str(w["properties"].get("text") or "")
+                       .lstrip().startswith(("import ", "from ")))), None)
+    if region is not None:
+        have = set(str(region["properties"].get("text") or "").splitlines())
+        new = [ln for ln in lines if ln not in have]
+        if new:
+            region["properties"]["text"] = (str(region["properties"]["text"]).rstrip("\n")
+                                            + "\n" + "\n".join(new) + "\n")
+        return region, None
+    orders = [w["properties"].get("order_index") or 0 for w in wires]
+    first = texts[0] if texts and (texts[0]["properties"].get("order_index") or 0) == min(orders) else None
+    lead_doc = first is not None and first["properties"].get("kind") == "docstring"
+    region = {"id": f"rider-imports:{module_id}", "label": DevNodeKinds.CODE_TEXT,
+              "properties": {"module_id": module_id, "region_key": lines[0],
+                             "text": "\n".join(lines) + "\n", "kind": "imports",
+                             "order_index": ((first["properties"].get("order_index") or 0) + 0.5
+                                             if lead_doc else (min(orders) if orders else 0) - 1)}}
+    wires.append(region)
+    return region, None
+
+
+async def _persist_rider_region(
+    gx: GraphHandle,
+    region: Dict[str, Any],  # The import-region wire `_land_import_riders` changed or minted
+) -> None:
+    """The unjournaled (bare-path) persistence of an import rider: an existing import
+    region takes its new text; a minted one lands as a CodeText node with the identity
+    ingest derives, CONTAINed by its module. A journaled write needs none of this — the
+    code fold's step re-derives the module from the emitted text."""
+    from cjm_dev_graph_schema.nodes import CodeTextNode
+
+    p = region["properties"]
+    text = str(p.get("text") or "")
+    if not str(region["id"]).startswith("rider-imports:"):
+        await graph_task(gx.queue, gx.graph_id, "update_node", node_id=region["id"],
+                         properties={"text": text,
+                                     "content_hash": SourceRef.compute_hash(text.encode("utf-8"))})
+        return
+    ct = CodeTextNode(module_id=p["module_id"], region_key=p["region_key"], text=text,
+                      content_hash=SourceRef.compute_hash(text.encode("utf-8")),
+                      order_index=p["order_index"], path="", kind="imports")
+    await graph_task(gx.queue, gx.graph_id, "add_nodes", nodes=[ct.to_graph_node()])
+    await graph_task(gx.queue, gx.graph_id, "add_edges",
+                     edges=[make_edge(p["module_id"], ct.id, DevRelations.CONTAINS)])
+
+
 async def _route_container_edit(
     gx: GraphHandle,
     node: Any,                              # The CodeModule / Note an edit was addressed to
@@ -1405,6 +1541,7 @@ async def _route_container_edit(
     write: bool,
     source_journal_path: Optional[str],
     repos_dir: Optional[str],
+    imports: Optional[List[str]] = None,    # Import riders, carried to the routed slot (55f96b45)
 ) -> Optional[Dict[str, Any]]:  # The routed author result, a pointing error, or None (not ours)
     """Route an `--edit` addressed to a CONTAINER to the one child slot holding OLD.
 
@@ -1438,7 +1575,8 @@ async def _route_container_edit(
             if old in str(w["properties"].get(slot_of.get(w["label"], ""), "") or "")]
     if len(hits) == 1:
         res = await author(gx, hits[0]["id"], edit=edit, actor=actor, write=write,
-                           source_journal_path=source_journal_path, repos_dir=repos_dir)
+                           source_journal_path=source_journal_path, repos_dir=repos_dir,
+                           imports=imports)
         if not res.get("error"):
             res["routed_from"] = nid
         return res
