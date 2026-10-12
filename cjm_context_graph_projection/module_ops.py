@@ -35,11 +35,12 @@ from cjm_python_decompose_core.emit import emit_module_from_nodes
 from . import factlayer as F
 from .authoring import (_label_of, _module_node, _module_region_wires, _notebook_cell_wires,
                         _resolve_node)
+from .codesource import CodeSourceError
 from .refactor_ops import _emission_for, _get, _relocate
 from .relive import apply_live
 from .runtime import GraphHandle
 from .seeds import repo_dir_name
-from .source_state import (canonical_emit, canonicalization_report, collect_appends,
+from .source_state import (birth_form, canonical_emit, canonicalization_report, collect_appends,
                            graph_sourced_modules, is_test_module_path, journaled_emit,
                            latest_source_ops, notebook_to_py_source)
 from .write import link
@@ -149,19 +150,28 @@ async def add_module(
         return {"error": f"a file already exists at {path} — a file-born module is captured "
                          "with flip-module + cutover, never re-born", "written": False}
     imp = import_name or _derive_import_name(module_path)
-    text, report = "", {"diff": "", "hazards": []}
-    if body:
-        try:
+    text, report, captured = "", {"diff": "", "hazards": []}, None
+    try:
+        if body:
             text = canonical_emit(repo_dir_name(repo_key), module_path, path, body, imp)
-        except (SyntaxError, ValueError) as e:
-            return {"error": f"body does not decompose: {e}", "written": False}
+        # Born into a captured phase, the module is born captured (bef8e6b8): its text is the
+        # composition of its element records, the form shown and guarded here
+        captured = birth_form(source_journal_path, repo_dir_name(repo_key), module_path, imp, text)
+    except (SyntaxError, ValueError, CodeSourceError) as e:
+        return {"error": f"body does not decompose: {e}", "written": False}
+    if captured is not None:
+        text = captured
+    if body:
         report = canonicalization_report(body, text, module_path)
     result = {"module_id": mid, "repo_key": repo_key, "module_path": module_path,
               "import_name": imp, "path": path, "written": False,
               "body_bytes": len(text.encode("utf-8")),
               "file_already_canonical": text == body,
               "canonicalization_diff": report["diff"], "hazards": report["hazards"],
-              "note": ("born graph-sourced: the whole module is journaled and cut over in one op"
+              "born_captured": captured is not None,
+              "note": ("born captured: its element records are its source, journaled as one group "
+                       "(the ruling bef8e6b8)" if captured is not None else
+                       "born graph-sourced: the whole module is journaled and cut over in one op"
                        if body else
                        "born graph-sourced: the empty module is journaled and cut over — "
                        "populate it with add-text / add-symbol (no flip-module / cutover)")}

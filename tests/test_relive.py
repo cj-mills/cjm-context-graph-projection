@@ -286,3 +286,69 @@ def test_add_module_births_a_whole_module_equal_to_its_rebuild(tmp_path):
     (repos / LIB / "cjm_demo_lib/filed.py").write_text("X = 1\n")
     over = run("add-module", LIB, "cjm_demo_lib/filed.py", "--body-file", str(body), *R)
     assert over.returncode == 1 and "flip-module + cutover" in over.stdout
+
+
+@needs_capability
+def test_the_tests_capture_and_writes_on_captured_modules_equal_their_rebuild(tmp_path):
+    # The capture verb (abfc2829 (6), bef8e6b8): `capture tests` journals each test module's
+    # elements as one group and the live db equals the same journal folded fresh; so does every
+    # later write to a captured module -- author, add-symbol, an absorbed file edit, a module born
+    # captured whole and empty -- and a second capture refuses.
+    files = {**FILES, "tests/test_util.py": "import sys\nfrom cjm_demo_lib.util import helper\nimport os\n\n\n"
+                                            "def test_helper():\n    assert helper(os.sep) and sys\n"}
+    repos = tmp_path / "repos"
+    for rel, text in files.items():
+        (repos / LIB / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repos / LIB / rel).write_text(text)
+    live, sj = str(tmp_path / "live.db"), str(tmp_path / "source.jsonl")
+    R = ("--repos-dir", str(repos))
+    memory = tmp_path / "memory"
+    memory.mkdir()
+    checks = []
+
+    def run(*args):
+        return _cli("--graph-db-path", live, "--source-journal-path", sj, *args)
+
+    def step(*args):
+        r = run(*args)
+        assert r.returncode == 0, f"{args[0]} failed: {r.stderr or r.stdout}"
+        out = r.stdout
+        rebuilt = str(tmp_path / f"rebuilt{len(checks)}.db")
+        r = _cli("--graph-db-path", rebuilt, "--source-journal-path", sj, "ingest",
+                 "--memory-dir", str(memory), "--no-repo-map", "--no-seed", *R)
+        assert r.returncode == 0, r.stderr or r.stdout
+        r = _cli("--graph-db-path", live, "rebuild-diff", "--against", rebuilt)
+        assert r.returncode == 0 and "CLEAN" in r.stdout, (
+            f"after {args[0]}: the live db differs from its rebuild:\n{r.stdout}\n{r.stderr}")
+        checks.append(args[0])
+        return out
+
+    for rel in files:
+        for verb in ("flip-module", "emit-artifact", "cutover"):
+            assert run(verb, LIB, rel, *R).returncode == 0
+    n = len(open(sj).read().splitlines())
+    diff = tmp_path / "layout.diff"
+    r = run("capture", "tests", "--no-write", "--diff-file", str(diff), *R)
+    assert r.returncode == 0 and "PREVIEW" in r.stdout, r.stderr or r.stdout
+    assert len(open(sj).read().splitlines()) == n and "+import os" in diff.read_text()
+    step("capture", "tests", *R)
+    assert (repos / LIB / "tests/test_util.py").read_text().startswith(
+        "import os\nimport sys\n\nfrom cjm_demo_lib.util import helper\n")  # the derived layout
+    tst = code_module_node_id(LIB, TST)
+    step("author", code_symbol_node_id(tst, "test_alpha"), "--edit", "== 2", "== 2, alpha", *R)
+    step("add-symbol", tst, "--body", "def test_twice():\n    assert alpha(2) == 3", *R)
+    (repos / LIB / TST).write_text((repos / LIB / TST).read_text() + "\n\ndef test_three():\n    assert alpha(3)\n")
+    step("flip-module", LIB, TST, *R)
+    body = tmp_path / "test_born.py"
+    body.write_text("import sys\nimport os\n\n\ndef test_born():\n    assert os and sys\n")
+    out = step("add-module", LIB, "tests/test_born.py", "--body-file", str(body), *R)
+    assert "born captured" in out and "+import os" in out  # the birth shows the form it lands
+    assert (repos / LIB / "tests/test_born.py").read_text().startswith("import os\nimport sys\n")
+    step("new-module", LIB, "tests/test_empty.py", *R)
+    born = code_module_node_id(LIB, "tests/test_empty.py")
+    step("add-symbol", born, "--body", "def test_empty():\n    assert True", *R)
+    assert len(checks) == 7
+    again = run("capture", "tests", *R)
+    assert again.returncode == 1 and "already captured" in again.stdout
+    tail = [json.loads(ln) for ln in open(sj).read().splitlines()][n:]
+    assert "source" not in {r["verb"] for r in tail if r["args"].get("module_path", "tests/").startswith("tests/")}

@@ -10,7 +10,8 @@ from cjm_context_graph_projection.codefold import CodeFold
 from cjm_context_graph_projection.codesource import (absorb_records, capture_records, CodeSourceError,
                                                      ELEMENT, ELEMENT_RETIRE, PLACE, SourceState)
 from cjm_context_graph_projection.relive import _touched_keys
-from cjm_context_graph_projection.source_state import (append_source, element_plan, flip_module,
+from cjm_context_graph_projection.source_state import (append_source, birth_form, capture_phase,
+                                                       element_plan, flip_module,
                                                        graph_sourced_modules, IdentityWalk,
                                                        journaled_emit, latest_source_ops)
 from cjm_dev_graph_schema.identity import code_module_node_id, code_symbol_node_id
@@ -637,3 +638,93 @@ def test_the_live_step_re_derives_the_module_a_move_leaves():
     fake = _id(state, "class FakeDeps")
     keys = _touched_keys([_rec(PLACE, 300.0, {"element": fake, "module": MID2, "parent": None, "after": None})], state)
     assert set(keys) == {(LIB, TST), (LIB, OTHER)}
+
+
+# -- the capture verb: a phase captured whole, one group per module (abfc2829 (6), bef8e6b8) -------
+UNSORTED = "tests/test_unsorted.py"
+UNSORTED_TEXT = "import sys\nimport os\n\n\ndef test_paths():\n    assert os and sys\n"
+
+
+def _phase(tmp_path, cut_conf=True):
+    """A tests phase of four cut-over modules (CONF a shadow unless `cut_conf`), their files on disk."""
+    recs = PREFIX + ([_rec("cutover", 102.5, {"repo_key": LIB, "module_path": CONF})] if cut_conf else []) + [
+        _src(103.0, OTHER, OTHER_TEXT), _rec("cutover", 104.0, {"repo_key": LIB, "module_path": OTHER}),
+        _src(105.0, UNSORTED, UNSORTED_TEXT), _rec("cutover", 106.0, {"repo_key": LIB, "module_path": UNSORTED})]
+    journal = _journal(tmp_path, recs)
+    repos = tmp_path / "repos"
+    for (rk, mp), a in latest_source_ops(journal).items():
+        (repos / rk / mp).parent.mkdir(parents=True, exist_ok=True)
+        (repos / rk / mp).write_text(a["text"])
+    return journal, repos, recs
+
+
+def test_the_capture_verb_captures_the_phase_whole_one_group_per_module(tmp_path):
+    journal, repos, prior = _phase(tmp_path)
+    preview = capture_phase(journal, str(repos), write=False, diffs=True)
+    assert not preview.get("error") and preview["previewed"] and preview["modules"] == 4
+    assert len(_records(journal)) == len(prior)  # a preview journals nothing
+    rows = {r["module_path"]: r for r in preview["rows"]}
+    assert [mp for mp, r in rows.items() if r["layout_changed"]] == [UNSORTED]
+    assert "+import os\n import sys\n-import os\n" in rows[UNSORTED]["diff"]
+    assert rows[TST]["unclaimed"] == ["sys"] and rows[TST]["leaving"]
+    res = capture_phase(journal, str(repos))
+    assert res["captured"] and not res["refused"]
+    assert res["files_written"] == [str(repos / LIB / UNSORTED)]  # only the module whose layout changed
+    tail = _records(journal)[len(prior):]
+    groups = {}
+    for r in tail:
+        groups.setdefault(r["ts"], []).append(r)
+    assert len(groups) == 4 and all(g[0]["verb"] == "module" and g[-1]["verb"] == "capture"
+                                    for g in groups.values())
+    assert {r["op"]["op"] for r in tail} == {"capture"}
+    composed = latest_source_ops(journal)
+    for mp in (CONF, TST, OTHER, UNSORTED):
+        assert (repos / LIB / mp).read_text() == composed[(LIB, mp)]["text"]
+    state = SourceState.over(_records(journal))
+    assert all(state.elements.captured((LIB, mp)) for mp in (CONF, TST, OTHER, UNSORTED))
+    _, before, _ = _fold(prior, tmp_path)
+    fold, after, _ = _fold(_records(journal), tmp_path)
+    assert not fold.failures
+    sym = lambda ns: {i for i, n in ns.items() if n["label"] == "CodeSymbol"}
+    assert sym(before) == sym(after)  # every symbol keeps its id
+    assert "already captured" in capture_phase(journal, str(repos))["error"]
+
+
+def test_the_capture_verb_refuses_a_drifted_file_or_a_shadow_and_journals_nothing(tmp_path):
+    journal, repos, prior = _phase(tmp_path)
+    (repos / LIB / OTHER).write_text(OTHER_TEXT + "\n# an edit\n")
+    res = capture_phase(journal, str(repos))
+    assert "refused the capture" in res["error"] and not res["captured"]
+    assert [(f["module_path"], f["faults"][0][:16]) for f in res["refused"]] == [(OTHER, "the file drifted")]
+    assert len(_records(journal)) == len(prior)
+    assert (repos / LIB / UNSORTED).read_text() == UNSORTED_TEXT  # no file rewritten either
+    (tmp_path / "shadow").mkdir()
+    shadow, _, _ = _phase(tmp_path / "shadow", cut_conf=False)
+    res = capture_phase(shadow, str(tmp_path / "shadow" / "repos"))
+    assert "shadows, never cut over" in res["error"] and CONF in res["error"]
+    assert "no phase" in capture_phase(journal, str(repos), phase="packages")["error"]
+
+
+def test_a_module_born_into_the_captured_phase_is_born_captured(tmp_path):
+    journal, repos, _ = _phase(tmp_path)
+    born, empty = "tests/test_born.py", "tests/test_empty.py"
+    assert birth_form(journal, LIB, born, "tests.test_born", UNSORTED_TEXT) is None  # no phase captured yet
+    capture_phase(journal, str(repos))
+    form = birth_form(journal, LIB, born, "tests.test_born", UNSORTED_TEXT)
+    assert form == "import os\nimport sys\n\n\ndef test_paths():\n    assert os and sys\n"
+    assert birth_form(journal, LIB, "pkg/core.py", "pkg.core", UNSORTED_TEXT) is None  # another phase
+    n = len(_records(journal))
+    for mp, text in ((born, UNSORTED_TEXT), (empty, "")):
+        with op_clock():
+            receipt = journaled_emit(journal, emissions=[_emit(mp, text, cutover=True,
+                                                               path=str(repos / LIB / mp))],
+                                     op={"op": "add-module" if text else "new-module"})
+        assert not receipt.get("error"), receipt["error"]
+        assert receipt["events"][0]["verb"] == "elements" and receipt["events"][0]["restated"] == "born"
+    tail = _records(journal)[n:]
+    assert "source" not in {r["verb"] for r in tail} and [r["verb"] for r in tail].count("capture") == 2
+    composed = latest_source_ops(journal)
+    assert composed[(LIB, born)]["text"] == form == (repos / LIB / born).read_text()
+    assert composed[(LIB, empty)]["text"] == "" == (repos / LIB / empty).read_text()
+    fold, _, _ = _fold(_records(journal), tmp_path)
+    assert not fold.failures

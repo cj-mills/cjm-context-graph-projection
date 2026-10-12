@@ -1386,6 +1386,31 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         if obj.get("note"):
             lines.append(f"  _{obj['note']}_")
         return "\n".join(lines)
+    if kind == "capture":   # design abfc2829: a phase of the code lane into the element regime
+        if obj.get("error") and not obj.get("rows"):
+            return f"⚠ {obj['error']}"
+        head = ("⚠ " + obj["error"] if obj.get("error") else
+                f"**PREVIEW — would capture the {obj.get('phase')} phase**" if obj.get("previewed") else
+                f"**CAPTURED the {obj.get('phase')} phase** — each module's elements are its source")
+        repos: Dict[str, int] = {}
+        for r in obj.get("rows", []):
+            if r.get("layout_changed"):
+                repos[r["repo_key"]] = repos.get(r["repo_key"], 0) + 1
+        lines = [head,
+                 f"  {obj.get('modules')} modules · {obj.get('records')} records (one group per module) · "
+                 f"{obj.get('layout_changes')} layout changes · {obj.get('leaving')} import-region ids "
+                 f"leave · {obj.get('born')} born · {obj.get('unclaimed_modules')} modules with "
+                 "unclaimed bindings"]
+        lines += [f"  layout changes in {rk}: {n}" for rk, n in sorted(repos.items())]
+        for f in obj.get("refused", []):
+            lines.append(f"  ✗ {f['repo_key']}/{f['module_path']}: " + "; ".join(f["faults"]))
+        hz = [r for r in obj.get("rows", []) if r.get("hazards")]
+        lines += [f"  ⚠ hazard {r['repo_key']}/{r['module_path']}: " + "; ".join(r["hazards"]) for r in hz]
+        if obj.get("diff_file"):
+            lines.append(f"  layout diff: {obj['diff_file']}")
+        if obj.get("files_written"):
+            lines.append(f"  files rewritten to their capture form: {len(obj['files_written'])}")
+        return "\n".join(lines)
     if kind == "cutover":
         if obj.get("error"):
             return f"⚠ {obj['error']}"

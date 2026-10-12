@@ -66,7 +66,7 @@ from .serve import serve_graphs
 from .sessioncost import session_cost
 from .site import site_build
 from .sitelinks import resolve_site_links, site_link_window
-from .source_state import (absorb_authored_text, collect_appends, cutover_module,
+from .source_state import (absorb_authored_text, capture_phase, collect_appends, cutover_module,
                            emit_source_artifact, flip_module, graph_sourced_modules, source_check)
 from .structure import add_section, new_note
 from .viz import project_viz
@@ -103,7 +103,7 @@ MUTATES_SOURCE: Dict[str, bool] = {
     "author": True, "add-symbol": True, "add-text": True, "emit": True,
     "flip-module": True, "flip-to-py": True, "cutover": True, "emit-artifact": True,
     "move": True, "regroup": True, "new-module": True, "add-module": True, "rename-module": True,
-    "delete-module": True, "rename-symbol": True, "capture-artifact": True,
+    "delete-module": True, "rename-symbol": True, "capture-artifact": True, "capture": True,
 }
 
 # Id-ref registry (work item b73e7688): every POSITIONAL that accepts a node id —
@@ -2277,6 +2277,26 @@ async def _dispatch(args) -> int:
                                  repo_key, module_path,
                                  write=not args.no_write)
             print(render("cutover", res, args.format))
+            return 1 if res.get("error") else 0
+        elif args.command == "capture":
+            if not args.source_journal_path:
+                print("error: capture needs --source-journal-path", file=sys.stderr)
+                return 1
+            with collect_appends() as appended:
+                res = capture_phase(args.source_journal_path, args.repos_dir, args.phase,
+                                    write=not args.no_write, allow_reorder=args.allow_reorder,
+                                    diffs=bool(args.diff_file))
+            if args.diff_file:
+                Path(args.diff_file).write_text("".join(r.pop("diff", "") for r in res.get("rows", [])))
+                res["diff_file"] = args.diff_file
+            if args.report:
+                Path(args.report).write_text(json.dumps(res, indent=1))
+            if appended:
+                # The capture groups are source records like any other: the code fold's step
+                # derives them into the db now (2cc81d3b, B2)
+                res["live"] = await apply_live(gx, args.source_journal_path, args.repos_dir,
+                                               appended)
+            print(render("capture", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "emit-artifact":
             if not args.source_journal_path:
@@ -4695,6 +4715,19 @@ def main() -> int:
     p_co.add_argument("--no-write", action="store_true",
                       help="Dry run: run every cutover guard, flip nothing")
     p_co.add_argument("--repos-dir", default=DEFAULT_REPOS)
+
+    p_cap = sub.add_parser("capture",
+                           help="Capture a phase of the code lane into the element regime, whole: each "
+                                "live module's elements journaled as one group, then the files rewritten "
+                                "to their capture form (design abfc2829; guarded -- one refusal refuses all)")
+    p_cap.add_argument("phase", choices=["tests"], help="The phase to capture (the tests pilot first)")
+    p_cap.add_argument("--no-write", action="store_true",
+                       help="Dry run: run every guard and report the capture, journal nothing")
+    p_cap.add_argument("--allow-reorder", action="store_true",
+                       help="Capture even when a module's capture form carries a hazard")
+    p_cap.add_argument("--diff-file", help="Write every module's layout diff (snapshot -> capture form) here")
+    p_cap.add_argument("--report", help="Write the full receipt (per-module rows: leaving / born / unclaimed) here as JSON")
+    p_cap.add_argument("--repos-dir", default=DEFAULT_REPOS)
 
     p_ea = sub.add_parser("emit-artifact",
                           help="(Re)generate a module's file from its journaled source (the journal is authoritative)")

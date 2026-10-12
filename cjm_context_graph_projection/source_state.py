@@ -700,10 +700,12 @@ def captured_phase(
     state: SourceState,  # The source state
     module_path: str,    # A module path
 ) -> bool:  # Whether a module born at this path is born captured (the user's ruling bef8e6b8)
-    """A phase is captured whole, so it is captured once any of its modules is: today the tests
-    phase (the tests pilot); the package phase joins when its capture lands."""
-    return is_test_module_path(module_path) and any(
-        m.captured and is_test_module_path(m.module_path) for m in state.elements.modules.values())
+    """A phase is captured whole (`capture_phase`), so it is captured once any of its modules is:
+    today the tests phase (the tests pilot); the package phase joins `CAPTURE_PHASES` when its
+    capture lands."""
+    return any(member(module_path) and any(m.captured and member(m.module_path)
+                                           for m in state.elements.modules.values())
+               for member in CAPTURE_PHASES.values())
 
 
 def _absolute(
@@ -1057,6 +1059,131 @@ def cutover_module(
                     "is a generated committed artifact — source-check gates its regen"}
 
 
+CAPTURE_PHASES = {"tests": is_test_module_path}  # A phase of the code lane -> its module-path predicate
+
+
+def capture_phase(
+    source_journal_path: str,  # The source journal
+    repos_dir: str,            # The repos root (the files the capture checks and rewrites)
+    phase: str = "tests",      # The phase to capture whole (`CAPTURE_PHASES`)
+    write: bool = True,        # False = run every guard and report the capture, journal nothing
+    allow_reorder: bool = False,  # Capture even when a module's capture form carries a hazard
+    diffs: bool = False,       # Carry each module's unified diff (snapshot -> capture form) in its row
+) -> Dict[str, Any]:  # The capture's receipt (or {'error': ..., 'refused': [rows]})
+    """Capture a phase of the code lane into the element regime (design abfc2829 (6), design detail
+    6d35c07d; the tests pilot's leg 2, work item 8caa95e1): every live module of the phase becomes
+    its element records, ONE journaled group per module (module, element and place records, then
+    capture -- `capture_records`). The phase is captured whole -- the ruling bef8e6b8 holds one
+    regime per phase -- so a phase holding a shadow module (journaled, never cut over) or an
+    already captured one is refused. Every module is guarded before anything lands (one refusal
+    refuses the phase): its file byte-equals its snapshot (a drifted file is an edit to absorb
+    first), its capture form composes back to itself, it introduces no name the snapshot left
+    bound (the binding check, abfc2829 (2)), and a HAZARD in the layout change refuses unless
+    `allow_reorder`. Journal first, then the files whose capture form differs. The receipt names
+    each module's layout change, the import-region ids that leave the graph, the births and the
+    unclaimed bindings -- what the user reviews before the capture lands."""
+    from .codesource import capture_records
+    from .seeds import conceptual_key
+    from cjm_python_decompose_core.elements import compose_module, lift_imports, unresolved_names
+    member = CAPTURE_PHASES.get(phase)
+    if member is None:
+        return {"error": f"no phase `{phase}` -- one of {', '.join(sorted(CAPTURE_PHASES))}"}
+    records = read_source_journal(source_journal_path)
+    state = SourceState.over(records)
+    latest = state.latest_ops()
+    keys = sorted(k for k in latest if member(k[1]) and k[1].endswith(".py"))
+    done = [k for k in keys if state.elements.captured(k) is not None]
+    if done:
+        return {"error": f"the {phase} phase is already captured ({len(done)} of {len(keys)} "
+                         "modules) -- a module born into it is born captured (bef8e6b8)"}
+    shadow = [f"{rk}/{mp}" for rk, mp in keys if (rk, mp) not in state.sourced]
+    if shadow:
+        return {"error": f"{len(shadow)} {phase} module(s) are shadows, never cut over -- cut each "
+                         "over (or retire it) first, so the phase captures whole: "
+                         + ", ".join(shadow[:10])}
+    identity = _identity_over(records, conceptual_key)
+    ever = set(state.elements.ever)
+    groups: List[List[Dict[str, Any]]] = []
+    rows: List[Dict[str, Any]] = []
+    for rk, mp in keys:
+        a = latest[(rk, mp)]
+        ck = conceptual_key(rk)
+        recs, rep = capture_records(rk, ck, mp, a.get("import_name") or "", a["text"],
+                                    symbol_identity=identity.for_module(ck, mp), ever=ever)
+        ever |= {r["args"]["element"] for r in recs if r["args"].get("element")}
+        groups.append(recs)
+        rows.append({**rep, "file_path": _resolve_path(repos_dir, rk, mp)})
+    after = SourceState.over(records + [{**r, "ts": 0.0} for g in groups for r in g])
+    composed = after.latest_ops()
+    refused: List[Dict[str, Any]] = []
+    for (rk, mp), row in zip(keys, rows):
+        before, text = latest[(rk, mp)]["text"], composed[(rk, mp)]["text"]
+        faults: List[str] = []
+        fp = Path(row["file_path"])
+        if fp.exists() and fp.read_text() != before:
+            faults.append("the file drifted from its snapshot -- absorb it (flip-module) first")
+        if compose_module(lift_imports(text).elements, after.siblings((rk, mp))) != text:
+            faults.append("the capture form does not compose back to itself")
+        unbound = unresolved_names(text)
+        if unbound:
+            unbound -= unresolved_names(before) or set()
+            if unbound:
+                faults.append(f"the capture form reads {', '.join(sorted(unbound))}, which nothing binds")
+        report = canonicalization_report(before, text, mp)
+        row.update(layout_changed=bool(report["diff"]), hazards=report["hazards"])
+        if diffs:
+            row["diff"] = report["diff"]
+        if report["hazards"] and not allow_reorder:
+            faults.append("a hazard: " + "; ".join(report["hazards"]))
+        if faults:
+            refused.append({"repo_key": rk, "module_path": mp, "faults": faults})
+        row["_text"] = text
+    receipt: Dict[str, Any] = {
+        "phase": phase, "modules": len(keys), "records": sum(len(g) for g in groups),
+        "layout_changes": sum(1 for r in rows if r["layout_changed"]),
+        "leaving": sum(len(r["leaving"]) for r in rows), "born": sum(len(r["born"]) for r in rows),
+        "unclaimed_modules": sum(1 for r in rows if r["unclaimed"]),
+        "captured": False, "previewed": not write, "files_written": [], "refused": refused}
+    rows_out = [_capture_row(r) for r in rows]
+    if refused:
+        return {**receipt, "rows": rows_out,
+                "error": f"{len(refused)} {phase} module(s) refused the capture -- NOTHING journaled"}
+    # Through the seam: every group lands before any file is rewritten to its capture form
+    journal = journaled_emit(source_journal_path, op={"op": "capture", "phase": phase}, write=write,
+                             element_groups=[{"repo_key": k[0], "module_path": k[1], "records": g,
+                                              "text": r["_text"], "path": r["file_path"]}
+                                             for k, g, r in zip(keys, groups, rows)])
+    if journal.get("error"):
+        return {**receipt, "rows": rows_out, "error": journal["error"]}
+    receipt.update(captured=write, files_written=journal["files_written"] if write else [])
+    return {**receipt, "rows": rows_out}
+
+
+def _capture_row(row: Dict[str, Any]) -> Dict[str, Any]:  # A capture receipt row, its composed text dropped
+    return {k: v for k, v in row.items() if k != "_text"}
+
+
+def birth_form(
+    source_journal_path: Optional[str],  # The source journal (None: no state to read, no captured phase)
+    repo_key: str,       # Journal-space repo key
+    module_path: str,    # The path a module is born at
+    import_name: str,    # Its dotted import name
+    text: str,           # Its canonical snapshot text
+) -> Optional[str]:  # The text the birth lands in a captured phase (its capture form), else None
+    """What a module born at this path lands as its text: born into a captured phase (the ruling
+    bef8e6b8) it is born captured, so its text is the composition of its element records -- the
+    form `element_plan` gives the birth, which `add-module` shows and guards before it journals.
+    Raises `CodeSourceError` for a birth the element regime refuses (an unbound name)."""
+    if not source_journal_path:
+        return None
+    state = SourceState.over(read_source_journal(source_journal_path))
+    if (repo_key, module_path) in state.latest_ops() or not captured_phase(state, module_path):
+        return None
+    plans, _ = element_plan(state, [{"repo_key": repo_key, "module_path": module_path,
+                                     "import_name": import_name, "text": text, "cutover": True}])
+    return plans[0][1]["text"]
+
+
 def emit_source_artifact(
     source_journal_path: str,  # The source journal (the authoritative text)
     repos_dir: str,            # The repos root (where the artifact file lives)
@@ -1259,6 +1386,7 @@ def journaled_emit(
     registers: Optional[List[Dict[str, Any]]] = None,  # [{repo_key, repo_root?, source_kind?}]
     op: Optional[Dict[str, Any]] = None,               # Op provenance ({'op': 'move', ...}); replay-ignored
     write: bool = True,                                # False = full preview, ZERO side effects
+    element_groups: Optional[List[Dict[str, Any]]] = None,  # [{repo_key, module_path, records, text, path}] — element records the caller planned and guarded (a capture), one op-clock group each
 ) -> Dict[str, Any]:  # The uniform receipt every mutating verb carries (or {'error': ...})
     """The ops seam (pillar 1 of DEC 6ee4b4f2): events BEFORE files — THE file-write path.
 
@@ -1276,14 +1404,16 @@ def journaled_emit(
     so file == journal by construction (the absorb-rewrite folded in). The element regime's part of
     the write (`element_plan`) lands as element records: an emission to a captured module, a module
     born into a captured phase, a captured module's re-stated path (its retire absorbed); a move
-    across the two regimes or a notebook flip of a captured module is refused whole."""
+    across the two regimes or a notebook flip of a captured module is refused whole. Element groups
+    the caller planned whole (`capture_phase`) land as one op-clock group each, then their files."""
     emissions, retires = emissions or [], retires or []
+    element_groups = element_groups or []
     deletes, registers = deletes or [], registers or []
     receipt: Dict[str, Any] = {"op": (op or {}).get("op"), "journal_first": True,
                                "written": False, "events": [], "files_written": [],
                                "files_deleted": [], "unjournaled_files": [],
                                "canonicalized": []}
-    if write and not source_journal_path and (emissions or retires or registers):
+    if write and not source_journal_path and (emissions or retires or registers or element_groups):
         return {"error": "journaled_emit refuses: no source-journal path — journal-first "
                          "means events land before files (pass source_journal_path; "
                          "cg-write bakes it)", **receipt}
@@ -1346,6 +1476,11 @@ def journaled_emit(
                                 op_meta=op)
             receipt["events"].append({"verb": "cutover", "repo_key": p["repo_key"],
                                       "module_path": p["module_path"], "appended": write})
+    for g in element_groups:
+        appended = write and append_elements(source_journal_path, g["records"], op_meta=op)
+        receipt["events"].append({"verb": "elements", "repo_key": g["repo_key"],
+                                  "module_path": g["module_path"], "appended": bool(appended),
+                                  "records": len(g["records"])})
     for r in retires:
         if (r["repo_key"], r["module_path"]) in absorbed:
             continue  # a re-stated captured module: its module record moved the key
@@ -1367,6 +1502,15 @@ def journaled_emit(
         if write:
             Path(path).parent.mkdir(parents=True, exist_ok=True)
             Path(path).write_text(out_text)
+        receipt["files_written"].append(path)
+    for g in element_groups:
+        path = g.get("path")
+        if not path or (Path(path).exists() and Path(path).read_text() == g["text"]):
+            continue
+        if write:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_text(g["text"])
+        receipt["canonicalized"].append(g["module_path"])
         receipt["files_written"].append(path)
     for d in deletes:
         if not d:
