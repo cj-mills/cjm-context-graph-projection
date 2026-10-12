@@ -46,6 +46,7 @@ ARTIFACT_VERBS = (ARTIFACT, ARTIFACT_RETIRE)
 class ArtifactKind:
     """One kind of observed artifact: where its files sit, how a file reads canonically (and
     is refused when malformed), and the node a captured version derives."""
+
     name: str                                       # The kind's slug (the record's artifact_kind)
     entity_kind: str                                # The Entity sub-kind its node carries
     pattern: str                                    # Glob under a repo root the uncaptured audit walks

@@ -255,6 +255,7 @@ class ElementFold:
 @dataclass
 class FoldedHistory:
     """One work tree's kept paths folded to HEAD: the HEAD-state per-path payloads + the times."""
+
     root: str                                                     # The work tree
     head: Optional[str]                                           # HEAD's commit (None: no commit)
     payloads: Dict[str, Any] = field(default_factory=dict)        # path -> the decomposer's payload at its last walked version

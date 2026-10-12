@@ -39,6 +39,7 @@ MEMORY_PROFILE = "memory"    # The memory notes' harvest profile, fixed by the l
 class MemorySource:
     """The memory lane's decomposition: the memory profile, identity from the frontmatter name,
     no file location (fed38997: the path is empty, as an unplaced born post's is)."""
+
     profile = MEMORY_PROFILE
     note_aliases = None   # as the writes-journal genesis built the notes (reconstruct_note harvests none)
 

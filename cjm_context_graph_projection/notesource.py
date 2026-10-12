@@ -71,6 +71,7 @@ class NotesFoldError(ValueError):
 @dataclass
 class NoteRec:
     """A journaled Note's state."""
+
     note: str                       # The Note id
     path: str                       # Its file, relative to the website clone
     frontmatter: str                # Its verbatim frontmatter
@@ -81,6 +82,7 @@ class NoteRec:
 @dataclass
 class Element:
     """A journaled element's state and placement."""
+
     section: str                    # The Section id
     note: Optional[str] = None      # The note it is placed in
     title: Optional[str] = None     # Its heading text (None: unheaded)
@@ -306,6 +308,7 @@ def append_group(
 class KeyedSection(SectionNode):
     """A Section whose id is its journaled id, not the one its derived anchor would mint, with
     its outline relations named by id (a renamed heading keeps its id and its edges)."""
+
     node_id: str = ""                  # The journaled id
     parent_id: Optional[str] = None    # The enclosing Section's id
     next_id: Optional[str] = None      # The following sibling's id

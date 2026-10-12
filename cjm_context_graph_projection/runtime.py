@@ -25,6 +25,7 @@ DEFAULT_MANIFESTS = ("/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills/"
 @dataclass
 class GraphHandle:
     """A live, started graph: the queue + the capability id to address it."""
+
     queue: JobQueue   # Started job queue (the task channel)
     graph_id: str     # Graph-storage capability instance id
 
