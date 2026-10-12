@@ -48,14 +48,15 @@ from typing import Any, Dict, Iterator, List, Mapping, Optional, Set, Tuple
 
 from cjm_context_graph_primitives.journal import (journal_segments, maybe_rotate, op_clock, op_now,
                                                   read_segment)
-from cjm_dev_graph_schema.identity import code_module_node_id
+from cjm_dev_graph_schema.identity import code_module_node_id, code_symbol_node_id
 from cjm_notebook_decompose_core.project import render_notebook
 from cjm_notebook_decompose_core.read import parse_notebook
 from cjm_python_decompose_core.emit import emit_module_from_nodes
 from cjm_python_decompose_core.extract import decompose_text
 from cjm_python_decompose_core.ingest import corpus_graph_elements
 
-from .codesource import absorb_records, CodeSourceError, element_canonical, SourceState
+from .codesource import (absorb_records, CodeSourceError, element_canonical, ELEMENT_RETIRE,
+                         SourceState)
 
 
 def is_test_module_path(module_path: str) -> bool:
@@ -372,6 +373,12 @@ class SymbolIdentity:
         return lambda qualname: self.birth(repo_key, module_path, qualname)
 
 
+def _birth_id(
+    birth: Tuple[str, str, str, int],  # A birth (repo key, module path, qualname, generation)
+) -> str:  # The CodeSymbol id it derives
+    return code_symbol_node_id(code_module_node_id(birth[0], birth[1]), birth[2], birth[3])
+
+
 def _top_level_names(
     text: str,  # A module's source text
 ) -> set:  # The top-level def/class names it defines (empty when it does not parse)
@@ -401,8 +408,16 @@ def symbol_identity_map(
     without the marker replay exactly as before the scheme: a pre-scheme move re-keyed,
     and the edges journaled after it name the NEW id — retroactive identity would orphan
     those instead of healing anything, so the op names the choice (the 9170669e pattern)."""
+    return _identity_over(read_source_journal(path), normalize)
+
+
+def _identity_over(
+    records: List[Dict[str, Any]],  # Source-journal records, in append order
+    normalize: Any = None,          # Optional repo-key normalizer (as `symbol_identity_map`'s)
+) -> "SymbolIdentity":  # The identity map after every record
+    """`symbol_identity_map` over records already read."""
     walk = IdentityWalk(normalize)
-    for rec in read_source_journal(path):
+    for rec in records:
         walk.apply(rec)
     walk.flush()
     return walk.ident
@@ -419,18 +434,92 @@ class IdentityWalk:
     `SourceState` too. A captured module's symbols are elements whose records name their ids, so
     they need no inference -- but a def nested in a function is no element and derives its id from
     its address, so at each group's close (`flush`) a symbol element whose qualname or module changed
-    registers the move and a retired one vacates its address, and the closure follows its parent."""
+    registers the move and a retired one vacates its address, and the closure follows its parent.
+
+    Every symbol element's BIRTH is derived at its first sighting and held (`_birth`): the address
+    whose derivation gives its id -- the identity map's answer where it was captured, its module's
+    birth address where the element regime gave it birth, the snapshot birth it arrived with. A move
+    registers that birth, never a guess from the address it leaves.
+
+    A MOVE ACROSS THE REGIMES hands the birth over inside the op's group (design detail aba8ec79 (5)):
+    a captured symbol retiring under a keep-identity move goes in flight at its retire, with the births
+    of its members the ancestor rule would not give, so the snapshot target's record re-homes it under
+    the same id; a symbol leaving a snapshot module goes in flight as the snapshot regime's own move
+    puts it, and the captured element arriving under that id takes it at the group's close."""
 
     def __init__(self, normalize: Any = None):
         self.ident = SymbolIdentity()
         self.latest_text: Dict[Tuple[str, str], str] = {}
         self.in_flight: Dict[str, Tuple[str, str, str, int]] = {}  # moved symbol -> its birth (source landed, target pending)
+        self.members_in_flight: Dict[str, Dict[str, Tuple[str, str, str, int]]] = {}  # moved captured symbol -> {member suffix: its birth}, where the ancestor rule would not give it
         self.norm = normalize or (lambda k: k)
         self.state = SourceState()
         self._addr: Dict[str, Tuple[str, str, str]] = {}  # symbol element id -> its address as of the last flush
         self._addr_mod: Dict[str, str] = {}                # symbol element id -> its module id as of the last flush
+        self._birth: Dict[str, Tuple[str, str, str, int]] = {}  # symbol element id -> its birth (derived at its first sighting)
+        self._module_birth: Dict[str, Tuple[str, str]] = {}  # captured module id -> the (repo key, path) its id derives from
+        self._handed: Set[str] = set()                     # symbol element ids handed to a snapshot target in the open group
         self._pending: Set[str] = set()                    # module ids the open group touched
         self._ts: Any = None
+
+    def _first_birth(
+        self,
+        eid: str,                    # A symbol element id, sighted for the first time
+        mid: str,                    # Its module id
+        addr: Tuple[str, str, str],  # Its address now
+    ) -> Optional[Tuple[str, str, str, int]]:  # The birth whose derivation gives `eid`, or None when none is known
+        """An element's birth: arrived from a snapshot module in flight, else the identity map's answer
+        at its address (a capture keeps the snapshot id), else a birth in its module (`absorb_records`
+        gives a newcomer the first generation no record named). A birth the map would not derive is
+        registered, so a closure under it follows."""
+        q = addr[2]
+        hit = self.in_flight.get(q) if "." not in q else None
+        if hit is not None and _birth_id(hit) == eid:  # a snapshot symbol adopted by a captured module
+            del self.in_flight[q]
+            self.ident.living[addr] = hit
+            return hit
+        f = self.ident.birth(*addr) or {}
+        b = (f.get("birth_repo_key") or addr[0], f.get("birth_module_path") or addr[1],
+             f.get("birth_qualname") or q, f.get("generation", 0))
+        if _birth_id(b) == eid:
+            return b
+        home = self._module_birth.get(mid)
+        if home is None:
+            return None
+        ever, gen = self.state.elements.ever, 0
+        while True:
+            cand = code_symbol_node_id(mid, q, gen)
+            if cand == eid:
+                b = (home[0], home[1], q, gen)
+                self.ident.living[addr] = b
+                return b
+            if cand not in ever:
+                return None
+            gen += 1
+
+    def _hand_off(
+        self,
+        eid: str,  # A symbol element retiring under a keep-identity move
+        op: Dict[str, Any],  # The op's provenance
+    ) -> None:
+        """A captured symbol leaving for a snapshot module: its birth goes in flight by name, as the
+        snapshot regime's own move puts a source's, with each member's birth the ancestor rule would
+        not derive from it; its address is vacated now (its retire is not vacated again at the close)."""
+        addr = self._addr.get(eid)
+        if addr is None or "." in addr[2] or addr[2] not in (op.get("symbols") or []):
+            return
+        top = self._birth.get(eid) or self.ident.birth_of(addr)
+        members: Dict[str, Tuple[str, str, str, int]] = {}
+        for x, xa in self._addr.items():
+            if xa[:2] == addr[:2] and xa[2].startswith(addr[2] + "."):
+                suffix = xa[2][len(addr[2]):]
+                mb = self._birth.get(x)
+                if mb is not None and mb != (top[0], top[1], top[2] + suffix, top[3]):
+                    members[suffix] = mb
+        self.in_flight[addr[2]] = top
+        self.members_in_flight[addr[2]] = members
+        self.ident.vacate(addr)
+        self._handed.add(eid)
 
     def flush(self) -> None:
         """Settle the open group's element-regime address changes into the identity map."""
@@ -442,20 +531,36 @@ class IdentityWalk:
             m = els.modules.get(mid)
             if m is None or not m.captured:
                 continue
+            if mid not in self._module_birth:
+                home = (self.norm(m.repo_key), m.module_path)
+                if code_module_node_id(*home) == mid:
+                    self._module_birth[mid] = home
             try:
                 addrs = els.addresses(mid)
             except (CodeSourceError, SyntaxError):
                 continue  # the code fold reports a module that does not compose
             for eid, q in addrs.items():
                 new[eid] = (self.norm(m.repo_key), m.module_path, q)
-        affected = {eid for eid, mid in self._addr_mod.items() if mid in self._pending} | set(new)
-        for eid in affected:
+        gone = {eid for eid, mid in self._addr_mod.items() if mid in self._pending} - set(new)
+        for eid in [*new, *sorted(gone)]:  # pre-order: a class's birth settles before its members'
             old, now = self._addr.get(eid), new.get(eid)
+            if now is not None and eid not in self._birth:
+                b = self._first_birth(eid, els.elements[eid].module, now)
+                if b is not None:
+                    self._birth[eid] = b
             if old is not None and now is not None and old != now:
-                self.ident.register(old, now)
+                b = self._birth.get(eid)
+                if b is None:
+                    self.ident.register(old, now)
+                else:
+                    self.ident.vacate(old)
+                    self.ident.living[now] = b
             elif old is not None and now is None and els.elements.get(eid) is not None \
                     and els.elements[eid].retired:
-                self.ident.vacate(old)
+                if eid in self._handed:
+                    self._handed.discard(eid)  # vacated at its hand-off
+                else:
+                    self.ident.vacate(old)
             if now is None:
                 self._addr.pop(eid, None)
                 self._addr_mod.pop(eid, None)
@@ -479,13 +584,16 @@ class IdentityWalk:
         self._pending |= touched
         key = (self.norm(a.get("repo_key")), a.get("module_path"))
         verb = rec.get("verb")
+        op = rec.get("op") or {}
+        if verb == ELEMENT_RETIRE and op.get("identity") == "keep" and op.get("op") in ("move", "regroup"):
+            self._hand_off(a.get("element"), op)
+            return touched
         if verb == "retire":
             self.latest_text.pop(key, None)
             return touched
         if verb != "source" or conflict:
             return touched
         text = a.get("text", "")
-        op = rec.get("op") or {}
         ident, in_flight = self.ident, self.in_flight
         if op.get("identity") == "keep":
             prev, new = _top_level_names(self.latest_text.get(key, "")), _top_level_names(text)
@@ -499,9 +607,12 @@ class IdentityWalk:
                 for s in op.get("symbols") or []:
                     if s in prev and s not in new:      # this record is a SOURCE: the symbol left
                         in_flight[s] = ident.birth_of((key[0], key[1], s))
+                        self.members_in_flight.pop(s, None)
                         ident.vacate((key[0], key[1], s))
                     elif s in new and s not in prev and s in in_flight:  # the TARGET: it arrived
                         ident.living[(key[0], key[1], s)] = in_flight.pop(s)
+                        for suffix, mb in self.members_in_flight.pop(s, {}).items():  # from a captured module
+                            ident.living[(key[0], key[1], s + suffix)] = mb
             elif kind == "rename-module" and op.get("from") and key[1] == op.get("to"):
                 for s in sorted(new):
                     ident.register((key[0], op["from"], s), (key[0], key[1], s))
@@ -570,8 +681,6 @@ def append_source(
 
 # Verbs whose writes to a captured module are refused: a notebook flip has no element regime.
 ELEMENT_REFUSED_OPS = ("flip-to-py",)
-CROSS_REGIME = ("a move between a captured module and a snapshot module is designed (aba8ec79 (5)) and "
-                "not built yet")
 
 
 def _op_hints(
@@ -597,19 +706,73 @@ def captured_phase(
         m.captured and is_test_module_path(m.module_path) for m in state.elements.modules.values())
 
 
+def _absolute(
+    binding: Dict[str, Any],  # An import-binding descriptor read in some module
+    import_name: str,         # That module's dotted import name
+    module_path: str,         # Its path (a package's __init__ is its package)
+) -> Dict[str, Any]:  # The descriptor with a relative module resolved against that module's package
+    """A binding travelling out of its package keeps naming what it named: `from .x import y` read in
+    `pkg.sub.mod` lands as `from pkg.sub.x import y`."""
+    level = binding.get("level") or 0
+    if not level:
+        return binding
+    parts = import_name.split(".") if import_name else []
+    package = parts if module_path.endswith("__init__.py") else parts[:-1]
+    base = package[:len(package) - (level - 1)]
+    mod = ".".join(base + ([binding["module"]] if binding.get("module") else []))
+    return {**binding, "module": mod, "level": 0}
+
+
+def _adoptions(
+    state: SourceState,  # The source state as the write finds it
+    by_source: Dict[Tuple[str, str], Set[str]],  # snapshot module key -> the op's symbols it gives up to a captured module
+    identity: SymbolIdentity,  # The identity map as the write finds it (conceptual keys)
+) -> Dict[str, Dict[str, Any]]:  # symbol -> {"ids": {qualname: id}, "bindings": [descriptor]} for each adopted subtree
+    """What a captured module adopts from a snapshot module (design detail aba8ec79 (5)): every symbol
+    of the subtree keeps the id the identity map gives it at its source address, and the subtree's
+    import bindings in the source's derivation travel with it, a relative one resolved."""
+    from .seeds import conceptual_key
+    latest = state.latest_ops()
+    out: Dict[str, Dict[str, Any]] = {}
+    for key, names in by_source.items():
+        prev = latest[key]
+        ck = conceptual_key(key[0])
+        dm = decompose_text(ck, key[1], "", prev["text"], import_name=prev.get("import_name") or None,
+                            symbol_identity=identity.for_module(ck, key[1]))
+        imp = dm.module.import_name
+        for n in names:
+            sub = [s for s in dm.symbols if s.qualname == n or s.qualname.startswith(n + ".")]
+            seen: Set[str] = set()
+            bindings = []
+            for s in sub:
+                for b in s.import_bindings:
+                    b = _absolute(b, imp, key[1])
+                    k = json.dumps(b, sort_keys=True)
+                    if k not in seen:
+                        seen.add(k)
+                        bindings.append(b)
+            out[n] = {"ids": {s.qualname: s.id for s in sub}, "bindings": bindings}
+    return out
+
+
 def element_plan(
     state: SourceState,  # The source state as the write finds it
     emissions: List[Dict[str, Any]],  # The write's module texts [{repo_key, module_path, import_name, text, cutover?}]
     retires: Optional[List[Dict[str, Any]]] = None,  # The write's module retires [{repo_key, module_path, superseded_by?}]
     op: Optional[Dict[str, Any]] = None,  # The verb's op provenance
+    identity: Any = None,  # A callable giving the identity map as the write finds it (asked only when a captured module adopts a snapshot symbol)
 ) -> Tuple[Dict[int, Tuple[List[Dict[str, Any]], Dict[str, Any]]], Set[Tuple[str, str]]]:  # (emission index -> its element records + report, the retired keys a re-stated module absorbs)
     """The element regime's part of one write (abfc2829 (7), design detail aba8ec79): every emission
     to a captured module, to a module the write gives birth to in a captured phase, or re-stating a
     captured module's path becomes element records for what changed. A module's part in a move is
     read from its text: the op's symbols it held and lost depart (their ids kept, their members and
     bindings with them), the ones it gains arrive; a module with neither is a caller and its write
-    an ordinary edit. Raises `CodeSourceError` -- the whole write refused -- for an ambiguous edit,
-    an unbound name, a notebook flip of a captured module, and a move across the two regimes."""
+    an ordinary edit. ACROSS THE REGIMES ((5)): a captured symbol a snapshot module gains retires
+    from the element regime (the identity walk hands its birth to the target's record); a snapshot
+    symbol a captured module gains arrives under the ids the identity map gives it at its source,
+    its bindings travelling. Raises `CodeSourceError` -- the whole write refused -- for an ambiguous
+    edit, an unbound name, a notebook flip of a captured module, and a symbol the write moves that
+    no module in it gives up or takes."""
     op = op or {}
     kind = op.get("op")
     els = state.elements
@@ -635,7 +798,8 @@ def element_plan(
         absorbed.add(key)
     symbols = set(op.get("symbols") or []) if kind in ("move", "regroup") else set()
     latest = state.latest_ops()
-    departures: Dict[str, Tuple[str, str, int]] = {}  # name -> (module id, element id, emission index)
+    departures: Dict[str, Tuple[str, str, int]] = {}  # name -> (module id, element id, emission index): leaving a captured module
+    snap_departures: Dict[str, Tuple[str, str]] = {}  # name -> the snapshot module key it leaves
     gains: Dict[int, Set[str]] = {}
     for i, e in enumerate(emissions):
         key = (e["repo_key"], e["module_path"])
@@ -650,9 +814,11 @@ def element_plan(
             gains[i] = (symbols & new_names) - set(held)
         else:
             prev = latest.get(key)
-            gains[i] = (symbols & new_names) - (_top_level_names(prev["text"]) if prev else set())
-    plans: Dict[int, Tuple[List[Dict[str, Any]], Dict[str, Any]]] = {}
-    renames, authored = _op_hints(op)
+            before = _top_level_names(prev["text"]) if prev else set()
+            for n in (symbols & before) - new_names:
+                snap_departures[n] = key
+            gains[i] = (symbols & new_names) - before
+    targets: Dict[int, Tuple[str, Optional[Dict[str, str]]]] = {}  # the emissions the element regime plans
     for i, e in enumerate(emissions):
         key = (e["repo_key"], e["module_path"])
         mid, restate = els.captured(key), None
@@ -660,22 +826,41 @@ def element_plan(
             mid, restate = restates[i]
         elif mid is None:
             if not (key not in latest and e.get("cutover") and captured_phase(state, key[1])):
-                if gains[i] & set(departures):
-                    raise CodeSourceError(f"{key[0]}/{key[1]}: {CROSS_REGIME}")
                 continue  # the snapshot regime's write
             from .seeds import conceptual_key
             mid = code_module_node_id(conceptual_key(key[0]), key[1])  # born captured (bef8e6b8)
             restate = {"repo_key": key[0], "module_path": key[1],
                        "import_name": e.get("import_name") or ""}
-        stray = gains[i] - set(departures)
+        stray = gains[i] - set(departures) - set(snap_departures)
         if stray:
-            raise CodeSourceError(f"{key[0]}/{key[1]} gains {', '.join(sorted(stray))}: {CROSS_REGIME}")
-        plans[i] = absorb_records(state, mid, e["text"], renames=renames, authored=authored,
-                                  departing={d[1] for d in departures.values() if d[2] == i},
-                                  arrivals={n: departures[n][1] for n in gains[i]}, restate=restate)
-    lost = [n for n in departures if not any(n in gains[j] for j in plans)]
+            raise CodeSourceError(f"{key[0]}/{key[1]} gains {', '.join(sorted(stray))}, which no module "
+                                  "in the write gives up")
+        targets[i] = (mid, restate)
+    lost = [n for n in departures if not any(n in g for g in gains.values())]
     if lost:
-        raise CodeSourceError(f"{', '.join(sorted(lost))} leaves a captured module: {CROSS_REGIME}")
+        raise CodeSourceError(f"{', '.join(sorted(lost))} leaves a captured module for no module in the write")
+    exiting = {n for n in departures if not any(n in gains[j] for j in targets)}  # into a snapshot module
+    by_source: Dict[Tuple[str, str], Set[str]] = {}
+    for j in targets:
+        for n in gains[j] & set(snap_departures) - set(departures):
+            by_source.setdefault(snap_departures[n], set()).add(n)
+    adopted: Dict[str, Dict[str, Any]] = {}
+    if by_source:
+        ident = identity() if identity is not None else None
+        if ident is None:
+            raise CodeSourceError(f"{', '.join(sorted(set().union(*by_source.values())))} arrives from a "
+                                  "snapshot module, and the write was given no identity map to keep its ids")
+        adopted = _adoptions(state, by_source, ident)
+    plans: Dict[int, Tuple[List[Dict[str, Any]], Dict[str, Any]]] = {}
+    renames, authored = _op_hints(op)
+    for i, (mid, restate) in targets.items():
+        mine = {n: d for n, d in departures.items() if d[2] == i}
+        plans[i] = absorb_records(state, mid, emissions[i]["text"], renames=renames, authored=authored,
+                                  departing={d[1] for n, d in mine.items() if n not in exiting},
+                                  exiting={d[1] for n, d in mine.items() if n in exiting},
+                                  arrivals={n: departures[n][1] for n in gains[i] if n in departures},
+                                  adopted={n: adopted[n] for n in gains[i] if n in adopted},
+                                  restate=restate)
     return plans, absorbed
 
 
@@ -1102,12 +1287,15 @@ def journaled_emit(
         return {"error": "journaled_emit refuses: no source-journal path — journal-first "
                          "means events land before files (pass source_journal_path; "
                          "cg-write bakes it)", **receipt}
-    state = SourceState.over(read_source_journal(source_journal_path)) if source_journal_path else SourceState()
+    from .seeds import conceptual_key
+    records = read_source_journal(source_journal_path) if source_journal_path else []
+    state = SourceState.over(records)
     latest, sourced = state.latest_ops(), state.sourced
     # Phase 1: validate/canonicalize everything — no side effects yet.
     plans: List[Dict[str, Any]] = []
     try:
-        eplans, absorbed = element_plan(state, emissions, retires, op)
+        eplans, absorbed = element_plan(state, emissions, retires, op,
+                                        identity=lambda: _identity_over(records, conceptual_key))
     except (CodeSourceError, SyntaxError, ValueError) as err:
         return {"error": f"{err} — NOTHING journaled or written", **receipt}
     for i, e in enumerate(emissions):
@@ -1142,7 +1330,7 @@ def journaled_emit(
                                       "module_path": p["module_path"], "appended": bool(appended),
                                       **{k: p["_report"][k] for k in ("records", "changed", "placed",
                                                                       "born", "retired", "renamed",
-                                                                      "arrived", "departed",
+                                                                      "arrived", "departed", "exited",
                                                                       "restated")}})
             continue
         if not p["_journaled"]:

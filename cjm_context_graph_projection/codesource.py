@@ -505,6 +505,8 @@ def absorb_records(
     departing: Optional[Set[str]] = None,  # Symbol elements leaving this module in this write (a move's; their members go with them)
     arrivals: Optional[Dict[str, str]] = None,  # Top-level qualname -> the element arriving from another captured module in this write
     restate: Optional[Dict[str, str]] = None,  # The module's own state as the write states it ({repo_key, module_path, import_name}): a rename-module, or a birth when `mid` is not journaled
+    exiting: Optional[Set[str]] = None,  # Symbol elements leaving for a snapshot module in this write (retired with their members)
+    adopted: Optional[Dict[str, Dict[str, Any]]] = None,  # Top-level qualname -> {"ids": {qualname: id}, "bindings": [...]}: a subtree arriving from a snapshot module
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:  # (the element records for what changed, the report)
     """A write to a captured module, at element grain (abfc2829 (7)): the new text is lifted into
     elements and each is matched to the element it continues -- a symbol by its qualname (through the
@@ -525,7 +527,11 @@ def absorb_records(
     the bindings it owned leave with it rather than falling to this module's imports element. A
     `restate` re-states the module's own path under its kept id (a rename-module, (4)) or, for a
     module not yet journaled, gives birth to it captured: module record first, capture last (the
-    user's ruling bef8e6b8). Pure -- the caller appends; the records applied to the state must
+    user's ruling bef8e6b8). ACROSS THE REGIMES ((5)): an exiting element retires with its members,
+    the bindings it owned leaving with it as a departure's do; an adopted subtree takes the ids its
+    snapshot source gave it (a text member of an adopted class is born), and the bindings its source
+    derived travel to the elements that read them. A travelling binding lands only for a name the
+    text binds nowhere else. Pure -- the caller appends; the records applied to the state must
     compose the canonical text, or the write is refused."""
     fold = state.elements
     cur = fold.modules.get(mid)
@@ -552,6 +558,7 @@ def absorb_records(
     for eid, parent in outline:
         old_kids.setdefault(parent, []).append(eid)
     arrived: Set[str] = set()
+    carried: Dict[str, list] = {}  # arriving element -> the bindings that travel with it
     for q, eid in (arrivals or {}).items():  # an arrival and its members, as their source holds them
         src = fold.elements[eid].module
         s_addr, s_out = fold.addresses(src), fold.outline(src)
@@ -563,14 +570,24 @@ def absorb_records(
         for x in sub:
             if x in s_addr:
                 by_qual[q + s_addr[x][len(s_addr[eid]):]] = x
+            carried[x] = fold.elements[x].bindings
         arrived |= sub
+    adopted_ids: Set[str] = set()
+    for q, a in (adopted or {}).items():  # a subtree from a snapshot module, under its snapshot ids
+        for qq, sid in a["ids"].items():
+            by_qual[qq] = sid
+            carried[sid] = a["bindings"]
+            adopted_ids.add(sid)
     departed: Set[str] = set()
-    for eid in departing or ():
-        departed.add(eid)
-        for x, p in outline:
-            if p in departed:
-                departed.add(x)
-    taken = set(fold.ever) | set(old_ids) | arrived
+    exited: Set[str] = set()
+    for roots, into in ((departing, departed), (exiting, exited)):
+        for eid in roots or ():
+            into.add(eid)
+            for x, p in outline:
+                if p in into:
+                    into.add(x)
+    departed |= exited
+    taken = set(fold.ever) | set(old_ids) | arrived | adopted_ids
     renames = list(renames or [])
     hint = _authored_rename(addr, new, renames, authored)
     if hint:
@@ -658,14 +675,17 @@ def absorb_records(
             key = _text_region_key(e.text)
             ids[i] = _text_id(mid, f"{owner}: {key}" if owner else key, taken)
             taken.add(ids[i])
-    if arrived or departed:  # bindings travel with their element (aba8ec79 (2))
+    arrived |= adopted_ids & used
+    if arrived or departed:  # bindings travel with their element (aba8ec79 (2), (5))
         bkey = lambda b: tuple(sorted(b.items()))
+        bound = {b.get("name") for e in new for b in e.bindings}
         for i, e in enumerate(new):
             if ids[i] in arrived:
                 names = element_names(e.text)
                 have = {bkey(b) for b in e.bindings}
-                e.bindings = e.bindings + [b for b in old_el[ids[i]].bindings
-                                           if b.get("name") in names and bkey(b) not in have]
+                e.bindings = e.bindings + [b for b in carried.get(ids[i], [])
+                                           if b.get("name") in names and b.get("name") not in bound
+                                           and bkey(b) not in have]
             elif e.kind == IMPORTS and departed:
                 owned = {bkey(b) for x in departed for b in old_el[x].bindings}
                 kept = {bkey(b) for b in old_el[old_imports].bindings} if old_imports else set()
@@ -703,7 +723,10 @@ def absorb_records(
         if old is None or (old.kind, old.text, _bindings_key(old.bindings)) != (e.kind, own_text, _bindings_key(e.bindings)):
             recs.append({"verb": ELEMENT, "args": {"element": eid, "kind": e.kind, "text": own_text,
                                                    "bindings": list(e.bindings)}})
-            (changed if old is not None else born).append(eid)
+            if old is not None:
+                changed.append(eid)
+            elif eid not in arrived:
+                born.append(eid)
         if e.kind == IMPORTS:
             parent, after = None, None
         else:
@@ -715,7 +738,7 @@ def absorb_records(
                                                  "after": after}})
             if old is not None:
                 placed.append(eid)
-    retired = [eid for eid in old_ids if eid not in used and eid not in departed]
+    retired = [eid for eid in old_ids if eid not in used and (eid not in departed or eid in exited)]
     recs.extend({"verb": ELEMENT_RETIRE, "args": {"element": eid}} for eid in retired)
     if born_module:
         recs.append({"verb": CAPTURE, "args": {"module": mid}})
@@ -735,7 +758,7 @@ def absorb_records(
     report = {"module": mid, "repo_key": m.repo_key, "module_path": m.module_path, "text": canonical,
               "records": len(recs), "changed": changed, "placed": placed, "born": born,
               "retired": retired, "renamed": [list(hint)] if hint else [],
-              "arrived": sorted(arrived), "departed": sorted(departed),
+              "arrived": sorted(arrived), "departed": sorted(departed), "exited": sorted(exited),
               "restated": "born" if born_module else ("path" if restated else ""),
               "unclaimed": [b.get("name") for b in imports.bindings],
               "binding_check": "unchecked (a star import)" if unresolved is None else "clean"}
