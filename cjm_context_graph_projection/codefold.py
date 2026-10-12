@@ -36,6 +36,11 @@ The rebuild folds every record and commits `elements()`; the live verbs (build B
 (identity + inventory, no derivation), `seed_corpus` / `seed_module` load the resolution
 indexes and the touched modules as the db holds them, and `apply` runs over the records the
 verb appended (`relive.apply_live`).
+
+THE ELEMENT REGIME (design detail 6d35c07d; `codesource`): a captured module's records are element
+records, and one write's records fold as one step -- so they re-derive their modules at the GROUP's
+close (`settle`), never per record, through `codesource.derive_captured` (every node keyed by its
+element id). A snapshot record naming a captured key is reported in `failures`, never applied.
 """
 
 import json
@@ -47,6 +52,7 @@ from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 from cjm_python_decompose_core.extract import decompose_text
 from cjm_python_decompose_core.ingest import resolve_import
 
+from .codesource import CAPTURE, CodeSourceError, derive_captured, ELEMENT_VERBS
 from .seeds import conceptual_key, repo_dir_name
 from .source_state import IdentityWalk, is_test_module_path, read_source_journal
 
@@ -219,6 +225,8 @@ class CodeFold:
         self.edges: Dict[str, Dict[str, Any]] = {}   # id -> {wire, created_at, updated_at, n}
         self._pending_nodes: Set[str] = set()
         self._pending_edges: Set[str] = set()
+        self._pending_derive: Set[Tuple[str, str]] = set()  # element-regime modules the open group touched
+        self._group_ts: Any = None
         self._prev: Optional[Dict[str, Any]] = None
         self._seq = 0
         self.failures: List[Dict[str, Any]] = []  # records whose text did not decompose
@@ -287,7 +295,12 @@ class CodeFold:
             self._pending_edges.add(eid)
 
     def settle(self) -> None:
-        """End of a group: whatever lost its last holder inside it is gone."""
+        """End of a group: its element-regime modules re-derive (the identity walk settled first, so
+        a closure follows its renamed parent), then whatever lost its last holder inside it is gone."""
+        self.walk.flush()
+        for key in sorted(self._pending_derive):
+            self._rederive(key, self._group_ts)
+        self._pending_derive.clear()
         for nid in self._pending_nodes:
             rec = self.nodes.get(nid)
             if rec is not None and not rec["by"]:
@@ -308,30 +321,49 @@ class CodeFold:
         if self._prev is not None and not _same_group(self._prev, rec):
             self.settle()
         self._prev = rec
-        key = self.advance(rec)
+        key, deferred = self.advance(rec)
         if key is not None:
             self._rederive(key, rec.get("ts"))
+        if deferred:
+            self._pending_derive |= deferred
+            self._group_ts = rec.get("ts")
 
     def advance(
         self,
         rec: Dict[str, Any],  # One source-journal record, in append order
-    ) -> Optional[Tuple[str, str]]:  # The conceptual module key the record re-derives, or None
+    ) -> Tuple[Optional[Tuple[str, str]], Set[Tuple[str, str]]]:  # (the conceptual key a snapshot record re-derives now, or None; the element-regime keys its group re-derives at its close)
         """Advance the identity walk and the inventory past one record WITHOUT deriving — half of
         `apply`, and alone the walk over a journal prefix a live step seeds from."""
         self.records += 1
-        self.walk.apply(rec)
         verb, a = rec.get("verb"), rec.get("args", {})
         raw = (a.get("repo_key"), a.get("module_path"))
+        state = self.walk.state
+        if verb == "source" and state.elements.captured(raw) is not None:
+            self.walk.apply(rec)
+            self.failures.append({"repo_key": raw[0], "module_path": raw[1], "ts": rec.get("ts"),
+                                  "error": "a snapshot record names a captured module (not applied)"})
+            return None, set()
+        touched = self.walk.apply(rec)
+        if verb in ELEMENT_VERBS:
+            keys = set()
+            for mid in touched:
+                m = state.elements.modules.get(mid)
+                if m is not None:
+                    keys.add((conceptual_key(m.repo_key), m.module_path))
+            if verb == CAPTURE:  # the snapshot is superseded: the key's state is its elements now
+                m = state.elements.modules[a["module"]]
+                self.live.pop((m.repo_key, m.module_path), None)
+            return None, keys
         if verb == "source":
             self._seq += 1
             self.live[raw] = (self._seq, a)
         elif verb == "retire":
             self.live.pop(raw, None)
         else:
-            return None  # cutover / register: phase and inventory events, no code state
+            return None, set()  # cutover / register: phase and inventory events, no code state
         if not str(raw[1]).endswith(".py"):
-            return None  # a notebook record: identity only (no notebook lane)
-        return (conceptual_key(raw[0]), raw[1])
+            return None, set()  # a notebook record: identity only (no notebook lane)
+        return (conceptual_key(raw[0]), raw[1]), set()
 
     def seed_corpus(
         self,
@@ -392,10 +424,32 @@ class CodeFold:
                     best = (seq, a)
         return best[1] if best else None
 
+    def _captured(self, key) -> Optional[str]:
+        """The captured module holding a conceptual key, or None (the snapshot regime holds it)."""
+        els = self.walk.state.elements
+        for raw, mid in els.by_key.items():
+            if raw[1] == key[1] and els.modules[mid].captured and conceptual_key(raw[0]) == key[0]:
+                return mid
+        return None
+
     def _rederive(self, key, ts) -> None:
         a = self._current_args(key)
         old = self.modules.get(key) or {"nodes": {}, "local": {}}
-        if a is None:
+        mid = self._captured(key)
+        if mid is not None:
+            path = str(self.repos_dir / repo_dir_name(key[0]) / key[1])
+            try:
+                wires, local, _text = derive_captured(self.walk.state, mid, key[0], path,
+                                                      self.walk.ident.for_module(*key))
+            except (CodeSourceError, SyntaxError, ValueError) as e:
+                self.failures.append({"repo_key": key[0], "module_path": key[1], "ts": ts,
+                                      "error": str(e)})
+                return  # the previous derivation stands; reported
+            if self.normalize:
+                wires, local = json.loads(json.dumps(wires)), json.loads(json.dumps(local))
+            new = {"nodes": {w["id"]: w for w in wires}, "local": {e["id"]: e for e in local}}
+            self.module_test[mid] = is_test_module_path(key[1])
+        elif a is None:
             new = {"nodes": {}, "local": {}}
         else:
             path = str(self.repos_dir / repo_dir_name(key[0]) / key[1])

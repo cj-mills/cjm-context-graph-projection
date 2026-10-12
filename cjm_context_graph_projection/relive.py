@@ -30,6 +30,7 @@ from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 
 from . import factlayer as F
 from .codefold import CodeFold
+from .codesource import ELEMENT_VERBS, MODULE, SourceState
 from .runtime import GraphHandle
 from .seeds import conceptual_key
 from .source_state import read_source_journal
@@ -114,13 +115,34 @@ async def _held_modules(
 
 def _touched_keys(
     records: List[Dict[str, Any]],  # The group's records
+    state: Optional[SourceState] = None,  # The source state BEFORE them (needed for element-regime records)
 ) -> List[Tuple[str, str]]:  # Conceptual keys of the .py modules they re-derive, in order
-    """The modules a group re-derives (source / retire records of .py keys)."""
+    """The modules a group re-derives: source / retire records of .py keys, and the modules an
+    element-regime record names -- directly (module / capture / place) or through the element's
+    module as the state before the group holds it (element / element-retire)."""
     out: Dict[Tuple[str, str], None] = {}
+    named: Dict[str, Tuple[str, str]] = {}  # module id -> its key, from the group's own module records
+    mids: Dict[str, None] = {}
     for rec in records:
         a = rec.get("args", {})
-        if rec.get("verb") in ("source", "retire") and str(a.get("module_path", "")).endswith(".py"):
+        verb = rec.get("verb")
+        if verb in ("source", "retire") and str(a.get("module_path", "")).endswith(".py"):
             out[(conceptual_key(a.get("repo_key")), a.get("module_path"))] = None
+        elif verb in ELEMENT_VERBS:
+            if verb == MODULE:
+                named[a["module"]] = (conceptual_key(a["repo_key"]), a["module_path"])
+            if a.get("module"):
+                mids[a["module"]] = None
+            elif state is not None:
+                e = state.elements.elements.get(a.get("element"))
+                if e is not None and e.module:
+                    mids[e.module] = None
+    for mid in mids:
+        m = state.elements.modules.get(mid) if state is not None else None
+        if m is not None:
+            out[(conceptual_key(m.repo_key), m.module_path)] = None
+        if mid in named:
+            out[named[mid]] = None
     return list(out)
 
 
@@ -136,7 +158,8 @@ async def apply_live(
                                "edges_removed": 0, "edges_skipped": 0, "healed_edges": 0,
                                "collisions": []}
     keys = _touched_keys(appended)
-    if not keys:
+    element = any(rec.get("verb") in ELEMENT_VERBS for rec in appended)
+    if not keys and not element:
         return receipt
     if not (source_journal_path and repos_dir):
         raise RuntimeError("live code fold: needs the source journal and the repos root")
@@ -148,6 +171,9 @@ async def apply_live(
     fold = CodeFold(repos_dir, normalize=True)
     for rec in records[:-k]:
         fold.advance(rec)
+    fold.walk.flush()
+    if element:
+        keys = _touched_keys(appended, fold.walk.state)
 
     # The state, read from the db: the resolution indexes over the whole corpus, then the
     # touched modules in full (their index wires replaced by the full ones).

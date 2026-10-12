@@ -44,7 +44,7 @@ import re
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Set, Tuple
 
 from cjm_context_graph_primitives.journal import (journal_segments, maybe_rotate, op_now,
                                                   read_segment)
@@ -53,6 +53,8 @@ from cjm_notebook_decompose_core.read import parse_notebook
 from cjm_python_decompose_core.emit import emit_module_from_nodes
 from cjm_python_decompose_core.extract import decompose_text
 from cjm_python_decompose_core.ingest import corpus_graph_elements
+
+from .codesource import CodeSourceError, SourceState
 
 
 def is_test_module_path(module_path: str) -> bool:
@@ -283,20 +285,13 @@ def read_source_journal(
 
 def latest_source_ops(
     path: str,  # Source-journal file path (JSONL)
-) -> Dict[Tuple[str, str], Dict[str, Any]]:  # (repo_key, module_path) -> latest op args
-    """The LATEST source state per module (last write wins — the 'journal STATE, not diff'
-    semantics: re-flipping a module supersedes its prior text, replay-idempotent).
-    A `retire` op ends the key (dropped from the map) until a later `source` revives it."""
-    latest: Dict[Tuple[str, str], Dict[str, Any]] = {}
-    for op in read_source_journal(path):
-        a = op.get("args", {})
-        key = (a.get("repo_key"), a.get("module_path"))
-        if op.get("verb") == "source":
-            latest[key] = a
-        elif op.get("verb") == "retire":
-            latest.pop(key, None)
-        # `cutover` ops carry no text — they flag phase, not state
-    return latest
+) -> Mapping[Tuple[str, str], Dict[str, Any]]:  # (repo_key, module_path) -> latest op args
+    """The LATEST source state per module, over both regimes (`codesource.SourceState`): before a
+    module's capture the last `source` snapshot (last write wins — the 'journal STATE, not diff'
+    semantics: re-flipping a module supersedes its prior text, replay-idempotent), after it the text
+    composed from its element records (design detail 6d35c07d (2)). A `retire` op ends the key
+    (dropped from the map) until a later `source` revives it."""
+    return SourceState.over(read_source_journal(path)).latest_ops()
 
 
 def graph_sourced_modules(
@@ -308,15 +303,7 @@ def graph_sourced_modules(
     the ingest input, the journal soaks); a `cutover` op flips it — the journal becomes
     the source of truth and the file a generated, committed artifact. A `retire` op
     removes the key (its content lives on under a successor key, e.g. `.ipynb` -> `.py`)."""
-    flipped = set()
-    for op in read_source_journal(path):
-        a = op.get("args", {})
-        key = (a.get("repo_key"), a.get("module_path"))
-        if op.get("verb") == "cutover":
-            flipped.add(key)
-        elif op.get("verb") == "retire":
-            flipped.discard(key)
-    return flipped
+    return SourceState.over(read_source_journal(path)).sourced
 
 
 class SymbolIdentity:
@@ -361,10 +348,14 @@ class SymbolIdentity:
         addr = (repo_key, module_path, qualname)
         top = qualname.split(".", 1)[0]
         hit = self.living.get(addr)
-        if hit is None and top != qualname:
-            parent = self.living.get((repo_key, module_path, top))
-            if parent is not None:  # nested under a re-homed/renamed parent: its birth module, prefixed name
-                hit = (parent[0], parent[1], parent[2] + qualname[len(top):], parent[3])
+        parts = qualname.split(".")
+        for n in range(len(parts) - 1, 0, -1):  # the NEAREST re-homed / renamed ancestor (a method renamed in the element regime, 6d35c07d (4); a top-level one in the snapshot regime)
+            if hit is not None:
+                break
+            anc = ".".join(parts[:n])
+            parent = self.living.get((repo_key, module_path, anc))
+            if parent is not None:  # nested under it: its birth module, prefixed name
+                hit = (parent[0], parent[1], parent[2] + qualname[len(anc):], parent[3])
         if hit is not None:
             if hit == (repo_key, module_path, qualname, 0):
                 return None  # back home at its birth address: the plain derivation
@@ -412,6 +403,7 @@ def symbol_identity_map(
     walk = IdentityWalk(normalize)
     for rec in read_source_journal(path):
         walk.apply(rec)
+    walk.flush()
     return walk.ident
 
 
@@ -420,27 +412,77 @@ class IdentityWalk:
     over the whole journal, shared with the code fold (design amendment 2cc81d3b), which
     decomposes each record under the map AS OF that record: a symbol renamed or moved with
     identity: keep lived at another address before the record that re-homed it, so the
-    final map would hand its earlier generations the wrong ids."""
+    final map would hand its earlier generations the wrong ids.
+
+    THE ELEMENT REGIME (design detail 6d35c07d (4)): the walk folds the whole journal into a
+    `SourceState` too. A captured module's symbols are elements whose records name their ids, so
+    they need no inference -- but a def nested in a function is no element and derives its id from
+    its address, so at each group's close (`flush`) a symbol element whose qualname or module changed
+    registers the move and a retired one vacates its address, and the closure follows its parent."""
 
     def __init__(self, normalize: Any = None):
         self.ident = SymbolIdentity()
         self.latest_text: Dict[Tuple[str, str], str] = {}
         self.in_flight: Dict[str, Tuple[str, str, str, int]] = {}  # moved symbol -> its birth (source landed, target pending)
         self.norm = normalize or (lambda k: k)
+        self.state = SourceState()
+        self._addr: Dict[str, Tuple[str, str, str]] = {}  # symbol element id -> its address as of the last flush
+        self._addr_mod: Dict[str, str] = {}                # symbol element id -> its module id as of the last flush
+        self._pending: Set[str] = set()                    # module ids the open group touched
+        self._ts: Any = None
+
+    def flush(self) -> None:
+        """Settle the open group's element-regime address changes into the identity map."""
+        if not self._pending:
+            return
+        els = self.state.elements
+        new: Dict[str, Tuple[str, str, str]] = {}
+        for mid in self._pending:
+            m = els.modules.get(mid)
+            if m is None or not m.captured:
+                continue
+            try:
+                addrs = els.addresses(mid)
+            except (CodeSourceError, SyntaxError):
+                continue  # the code fold reports a module that does not compose
+            for eid, q in addrs.items():
+                new[eid] = (self.norm(m.repo_key), m.module_path, q)
+        affected = {eid for eid, mid in self._addr_mod.items() if mid in self._pending} | set(new)
+        for eid in affected:
+            old, now = self._addr.get(eid), new.get(eid)
+            if old is not None and now is not None and old != now:
+                self.ident.register(old, now)
+            elif old is not None and now is None and els.elements.get(eid) is not None \
+                    and els.elements[eid].retired:
+                self.ident.vacate(old)
+            if now is None:
+                self._addr.pop(eid, None)
+                self._addr_mod.pop(eid, None)
+            else:
+                self._addr[eid] = now
+                self._addr_mod[eid] = els.elements[eid].module
+        self._pending.clear()
 
     def apply(
         self,
         rec: Dict[str, Any],  # One source-journal record
-    ) -> None:
+    ) -> Set[str]:  # The element-regime module ids the record touches
         """Advance the identity map past one record (see `symbol_identity_map` for the rules)."""
+        if rec.get("ts") != self._ts:
+            self.flush()
+            self._ts = rec.get("ts")
         a = rec.get("args", {})
+        raw = (a.get("repo_key"), a.get("module_path"))
+        conflict = rec.get("verb") == "source" and self.state.elements.captured(raw) is not None
+        touched = self.state.apply(rec)
+        self._pending |= touched
         key = (self.norm(a.get("repo_key")), a.get("module_path"))
         verb = rec.get("verb")
         if verb == "retire":
             self.latest_text.pop(key, None)
-            return
-        if verb != "source":
-            return
+            return touched
+        if verb != "source" or conflict:
+            return touched
         text = a.get("text", "")
         op = rec.get("op") or {}
         ident, in_flight = self.ident, self.in_flight
@@ -463,6 +505,7 @@ class IdentityWalk:
                 for s in sorted(new):
                     ident.register((key[0], op["from"], s), (key[0], key[1], s))
         self.latest_text[key] = text
+        return touched
 
 
 def append_retire(
@@ -503,8 +546,16 @@ def append_source(
     generations when the symbol-granular endpoint lands — DEC 6ee4b4f2 pillar 2) and,
     when given, an `op` envelope naming the mutating verb that produced the state — pure
     provenance for the session lens / orphaned-edges remap, NEVER replay input (replay is
-    STATE-based, verb+args only; intent replay would bake verb bugs into history)."""
-    cur = latest_source_ops(path).get((repo_key, module_path))
+    STATE-based, verb+args only; intent replay would bake verb bugs into history).
+
+    A CAPTURED module (the element regime, design detail 6d35c07d (2)) is refused: its source is its
+    element records, and a snapshot would end that regime silently -- its writes land at element
+    grain (abfc2829 (7))."""
+    state = SourceState.over(read_source_journal(path))
+    if state.elements.captured((repo_key, module_path)) is not None:
+        raise CodeSourceError(f"{repo_key}/{module_path} is captured: its source is its element "
+                              "records, and a full-module snapshot is refused")
+    cur = state.latest_ops().get((repo_key, module_path))
     if cur is not None and cur.get("text") == text:
         return False
     record: Dict[str, Any] = {"verb": "source", "ts": op_now(), "generation": 1,
@@ -845,12 +896,16 @@ def journaled_emit(
         return {"error": "journaled_emit refuses: no source-journal path — journal-first "
                          "means events land before files (pass source_journal_path; "
                          "cg-write bakes it)", **receipt}
-    latest = latest_source_ops(source_journal_path) if source_journal_path else {}
-    sourced = graph_sourced_modules(source_journal_path) if source_journal_path else set()
+    state = SourceState.over(read_source_journal(source_journal_path)) if source_journal_path else SourceState()
+    latest, sourced = state.latest_ops(), state.sourced
     # Phase 1: validate/canonicalize everything — no side effects yet.
     plans: List[Dict[str, Any]] = []
     for e in emissions:
         key = (e["repo_key"], e["module_path"])
+        if state.elements.captured(key) is not None:
+            return {"error": f"{key[0]}/{key[1]} is captured: its source is its element records "
+                             "(design detail 6d35c07d (2)) and a full-module write is refused until "
+                             "the element-grain absorb lands — NOTHING journaled or written", **receipt}
         journaled = key in latest or bool(e.get("cutover"))
         canonical = e["text"]
         if journaled:
