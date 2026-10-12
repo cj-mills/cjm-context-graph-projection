@@ -45,10 +45,10 @@ recipe; nothing here writes.
 import json
 import re
 from contextlib import AsyncExitStack
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from cjm_context_graph_layer.ops import graph_task
+from cjm_context_graph_primitives.journal import read_segment
 from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.nodes import foreign_content_hash
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
@@ -206,7 +206,7 @@ def _journal_op(seg: str, line_no: int) -> Dict[str, Any]:
     """Fetch ONE journaled op's payload by (segment, line) — the touch rows drop payloads
     (module snapshots are large); a baseline compare re-reads exactly the line it needs."""
     try:
-        lines = Path(seg).read_text().splitlines()
+        lines = read_segment(seg).splitlines()
         return json.loads(lines[line_no])
     except (OSError, IndexError, json.JSONDecodeError):
         return {}

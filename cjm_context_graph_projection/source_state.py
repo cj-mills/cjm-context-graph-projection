@@ -46,7 +46,8 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
-from cjm_context_graph_primitives.journal import journal_segments, maybe_rotate, op_now
+from cjm_context_graph_primitives.journal import (journal_segments, maybe_rotate, op_now,
+                                                  read_segment)
 from cjm_notebook_decompose_core.project import render_notebook
 from cjm_notebook_decompose_core.read import parse_notebook
 from cjm_python_decompose_core.emit import emit_module_from_nodes
@@ -273,7 +274,7 @@ def read_source_journal(
     line; missing files = []) — cold segments first, live tail last: append order."""
     ops: List[Dict[str, Any]] = []
     for seg in journal_segments(path):
-        for line in Path(seg).read_text().splitlines():
+        for line in read_segment(seg).splitlines():
             line = line.strip()
             if line:
                 ops.append(json.loads(line))

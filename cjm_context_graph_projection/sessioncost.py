@@ -23,6 +23,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from cjm_context_graph_primitives.journal import journal_segments, read_segment
+
 from .journal import journal_window
 
 CG_TOOLS = ("cg-read", "cg-write", "cg-rebuild", "cg-backup")
@@ -208,22 +210,20 @@ def _uuid_from_journal(
     """Scan the raw journal records for the session's pull-transcript op (the touch-row
     cache does not carry op args)."""
     for path in journal_paths:
-        p = Path(path) if path else None
-        if p is None or not p.exists():
+        if not path:
             continue
-        for seg in sorted(p.parent.glob(p.stem + "*.jsonl")):
-            with open(seg, errors="replace") as fh:
-                for line in fh:
-                    if '"pull-transcript"' not in line or session_key not in line:
-                        continue
-                    try:
-                        rec = json.loads(line)
-                    except ValueError:
-                        continue
-                    args = rec.get("args") or {}
-                    if rec.get("verb") == "pull-transcript" and args.get("cc_session_uuid"):
-                        if args.get("session_key", session_key) == session_key:
-                            return str(args["cc_session_uuid"])
+        for seg in journal_segments(path):     # the family, compressed cold segments included
+            for line in read_segment(seg).splitlines():
+                if '"pull-transcript"' not in line or session_key not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                args = rec.get("args") or {}
+                if rec.get("verb") == "pull-transcript" and args.get("cc_session_uuid"):
+                    if args.get("session_key", session_key) == session_key:
+                        return str(args["cc_session_uuid"])
     return None
 
 

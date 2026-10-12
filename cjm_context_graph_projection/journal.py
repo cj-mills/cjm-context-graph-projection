@@ -24,7 +24,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from cjm_context_graph_layer.identity import derive_node_id
 from cjm_context_graph_layer.ops import observe_writes, PROVENANCE_TS
-from cjm_context_graph_primitives.journal import append_write, journal_segments, read_journal
+from cjm_context_graph_primitives.journal import (append_write, journal_segments, read_journal,
+                                                  read_segment)
 from cjm_dev_graph_schema.identity import (code_module_node_id, entity_node_id, note_node_id,
                                            section_node_id, series_node_id, session_node_id)
 from cjm_dev_graph_schema.nodes import DecisionNode
@@ -1051,7 +1052,7 @@ def _segment_touch_rows(seg: str) -> List[Dict[str, Any]]:
     if hit and hit[0] == key:
         return hit[1]
     rows: List[Dict[str, Any]] = []
-    for i, line in enumerate(p.read_text().splitlines()):
+    for i, line in enumerate(read_segment(seg).splitlines()):
         line = line.strip()
         if not line:
             continue
