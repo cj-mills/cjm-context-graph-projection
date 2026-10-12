@@ -46,7 +46,7 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Set, Tuple
 
-from cjm_context_graph_primitives.journal import (journal_segments, maybe_rotate, op_now,
+from cjm_context_graph_primitives.journal import (journal_segments, maybe_rotate, op_clock, op_now,
                                                   read_segment)
 from cjm_notebook_decompose_core.project import render_notebook
 from cjm_notebook_decompose_core.read import parse_notebook
@@ -54,7 +54,7 @@ from cjm_python_decompose_core.emit import emit_module_from_nodes
 from cjm_python_decompose_core.extract import decompose_text
 from cjm_python_decompose_core.ingest import corpus_graph_elements
 
-from .codesource import CodeSourceError, SourceState
+from .codesource import absorb_records, CodeSourceError, element_canonical, SourceState
 
 
 def is_test_module_path(module_path: str) -> bool:
@@ -550,7 +550,7 @@ def append_source(
 
     A CAPTURED module (the element regime, design detail 6d35c07d (2)) is refused: its source is its
     element records, and a snapshot would end that regime silently -- its writes land at element
-    grain (abfc2829 (7))."""
+    grain through `element_absorb` + `append_elements` (abfc2829 (7))."""
     state = SourceState.over(read_source_journal(path))
     if state.elements.captured((repo_key, module_path)) is not None:
         raise CodeSourceError(f"{repo_key}/{module_path} is captured: its source is its element "
@@ -565,6 +565,62 @@ def append_source(
         record["op"] = op_meta
     _append_record(path, record)
     return True
+
+
+# Verbs whose writes to a captured module are refused until the element regime carries them: a move
+# or regroup re-homes an element across modules (place records into another module, its bindings
+# travelling with it), and a rename-module re-states the module's own path under its kept id.
+ELEMENT_REFUSED_OPS = ("move", "regroup", "rename-module", "flip-to-py")
+
+
+def _op_hints(
+    op: Optional[Dict[str, Any]],  # The verb's op provenance
+) -> Tuple[List[Tuple[str, str]], Optional[str]]:  # (keep-identity renames, the element the verb edited)
+    """What a verb's op names about identity: a rename-symbol's (old, new) qualnames, author's node."""
+    op = op or {}
+    renames: List[Tuple[str, str]] = []
+    if op.get("op") == "rename-symbol" and op.get("identity") == "keep":
+        for r in op.get("renames") or [{"from": op.get("from"), "to": op.get("to")}]:
+            if r.get("from") and r.get("to"):
+                renames.append((r["from"], r["to"]))
+    return renames, (op.get("node_id") if op.get("op") == "author" else None)
+
+
+def element_absorb(
+    state: SourceState,  # The source state as the write finds it
+    repo_key: str,       # Journal-space repo key
+    module_path: str,    # Repo-relative module path (a captured module)
+    text: str,           # The module's new text
+    op: Optional[Dict[str, Any]] = None,  # The verb's op provenance (identity hints)
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:  # (the element records for what changed, the report)
+    """A write to a CAPTURED module at element grain (abfc2829 (7), `codesource.absorb_records`):
+    the text becomes element records for what changed only. Raises `CodeSourceError` for a verb the
+    element regime does not carry yet (`ELEMENT_REFUSED_OPS`) and for an ambiguous edit."""
+    kind = (op or {}).get("op")
+    if kind in ELEMENT_REFUSED_OPS:
+        raise CodeSourceError(f"{repo_key}/{module_path} is captured: `{kind}` does not carry the "
+                              "element regime yet (an element re-homed across modules, a module's "
+                              "own path re-stated)")
+    mid = state.elements.captured((repo_key, module_path))
+    renames, authored = _op_hints(op)
+    return absorb_records(state, mid, text, renames=renames, authored=authored)
+
+
+def append_elements(
+    path: str,                      # Source-journal file path (JSONL)
+    records: List[Dict[str, Any]],  # Element-regime records ({verb, args}) from `element_absorb`
+    op_meta: Optional[Dict[str, Any]] = None,  # Replay-ignored op provenance
+) -> int:  # How many records landed
+    """Append one write's element records under ONE op-clock time: they fold as one group (the
+    placement chain is whole only at the group's close)."""
+    with op_clock():
+        for r in records:
+            record: Dict[str, Any] = {"verb": r["verb"], "ts": op_now(), "generation": 1,
+                                      "args": r["args"]}
+            if op_meta:
+                record["op"] = op_meta
+            _append_record(path, record)
+    return len(records)
 
 
 def _resolve_path(repos_dir: str, repo_key: str, module_path: str) -> str:
@@ -595,6 +651,10 @@ def flip_module(
     if not Path(file_path).exists():
         return {"error": f"no file at {file_path}", "captured": False}
     file_text = Path(file_path).read_text()
+    state = SourceState.over(read_source_journal(source_journal_path))
+    if state.elements.captured((repo_key, module_path)) is not None:
+        return _flip_captured(source_journal_path, state, repo_key, module_path, file_path,
+                              file_text, write, allow_reorder)
     try:
         canonical = _canonical(repo_key, module_path, file_path, file_text, import_name)
     except (SyntaxError, ValueError) as e:
@@ -624,6 +684,44 @@ def flip_module(
             "canonicalization_diff": report["diff"], "hazards": report["hazards"],
             "canonical_bytes": len(canonical.encode("utf-8")),
             "note": note}
+
+
+def _flip_captured(
+    source_journal_path: str,  # The source journal
+    state: SourceState,        # Its state (the module is captured)
+    repo_key: str,             # Journal-space repo key
+    module_path: str,          # Repo-relative module path
+    file_path: str,            # The file read
+    file_text: str,            # Its text (the out-of-band edit to absorb)
+    write: bool,               # False = preview, journal nothing
+    allow_reorder: bool,       # Journal even when the canonical form carries a hazard
+) -> Dict[str, Any]:  # flip_module's result, with the element grain's report
+    """flip-module on a CAPTURED module: the file's edit lands as element records for what changed
+    only (abfc2829 (7)) -- the tool an agent reaches for after a file edit stays a safe graph path."""
+    op = {"op": "flip-module"}
+    try:
+        recs, rep = element_absorb(state, repo_key, module_path, file_text, op=op)
+    except (CodeSourceError, SyntaxError, ValueError) as e:
+        return {"error": f"cannot absorb {module_path} at element grain: {e}", "captured": False,
+                "repo_key": repo_key, "module_path": module_path}
+    canonical = rep.pop("text")
+    report = canonicalization_report(file_text, canonical, module_path)
+    base = {"repo_key": repo_key, "module_path": module_path, "file_path": file_path,
+            "canonicalization_diff": report["diff"], "hazards": report["hazards"]}
+    if report["hazards"] and not allow_reorder:
+        return {**base, "captured": False,
+                "error": f"the canonical form of {module_path} can change its behaviour — "
+                         + "; ".join(report["hazards"])
+                         + " (restructure the file, or pass --allow-reorder to journal it anyway)"}
+    appended = append_elements(source_journal_path, recs, op_meta=op) if write and recs else 0
+    note = ("CAPTURED: the edit landed as element records (this module's source is its elements); "
+            "if the file was not already canonical, regenerate it via emit-artifact")
+    if not write:
+        note = "PREVIEW (--no-write): nothing journaled — a real flip would land these element records"
+    return {**base, "import_name": state.elements.modules[rep["module"]].import_name,
+            "captured": bool(appended), "previewed": not write, "graph_sourced": True,
+            "element_grain": rep, "file_already_canonical": canonical == file_text,
+            "canonical_bytes": len(canonical.encode("utf-8")), "note": note}
 
 
 def cutover_module(
@@ -738,7 +836,21 @@ def absorb_authored_text(
     the journaled state is CANONICAL (imports-as-projection). So: canonicalize the
     emitted text, journal it as the module's new source state, and — if
     canonicalization changed anything (e.g. a now-dead import pruned) — rewrite the
-    file so artifact == journal and the regen gate stays clean by construction."""
+    file so artifact == journal and the regen gate stays clean by construction. A CAPTURED
+    module's edit lands at element grain (`element_absorb`)."""
+    state = SourceState.over(read_source_journal(source_journal_path))
+    if state.elements.captured((repo_key, module_path)) is not None:
+        try:
+            recs, rep = element_absorb(state, repo_key, module_path, emitted_text,
+                                       op={"op": "author"})
+        except (CodeSourceError, SyntaxError, ValueError) as e:
+            return {"error": f"authored text for {repo_key}/{module_path}: {e}", "absorbed": False}
+        appended = append_elements(source_journal_path, recs, op_meta={"op": "author"}) if recs else 0
+        if rep["text"] != emitted_text:
+            Path(file_path).write_text(rep["text"])
+        return {"repo_key": repo_key, "module_path": module_path, "absorbed": bool(appended),
+                "canonicalized": rep["text"] != emitted_text,
+                "note": "authored state journaled as element records (the module is captured)"}
     try:
         canonical = _canonical(repo_key, module_path, file_path, emitted_text, import_name)
     except (SyntaxError, ValueError) as e:
@@ -771,17 +883,21 @@ def source_check(
     meaning: the journal is the source, so a file mismatch is a stale/dirtied ARTIFACT
     (the regen gate — nbdev-style `emit(graph)==file`), absorbed via `flip-module` or
     regenerated via `emit-artifact`. `regen_clean` reports that gate alone."""
-    flipped = graph_sourced_modules(source_journal_path)
+    state = SourceState.over(read_source_journal(source_journal_path))
+    flipped = state.sourced
     modules = []
     drifted = stable = 0
     regen_clean = True
-    for (repo_key, module_path), a in sorted(latest_source_ops(source_journal_path).items()):
+    for (repo_key, module_path), a in sorted(state.latest_ops().items()):
         journaled = a.get("text", "")
         file_path = _resolve_path(repos_dir, repo_key, module_path)
         file_text = Path(file_path).read_text() if Path(file_path).exists() else None
         file_matches = file_text == journaled
         try:
-            reemit = _canonical(repo_key, module_path, file_path, journaled, a.get("import_name"))
+            if state.elements.captured((repo_key, module_path)) is not None:  # the element regime's fixpoint
+                reemit = element_canonical(journaled, state.siblings((repo_key, module_path)))
+            else:
+                reemit = _canonical(repo_key, module_path, file_path, journaled, a.get("import_name"))
             fixpoint = reemit == journaled
         except (SyntaxError, ValueError):
             fixpoint = False
@@ -885,7 +1001,9 @@ def journaled_emit(
     `unjournaled_files` (auto-capturing would flip phase discipline silently —
     `flip-module` is the deliberate capture verb); write=True with events to land and no
     journal path REFUSES outright. Journaled emissions land their CANONICAL text on disk,
-    so file == journal by construction (the absorb-rewrite folded in)."""
+    so file == journal by construction (the absorb-rewrite folded in). An emission to a CAPTURED
+    module lands at element grain (`element_absorb`: element records for what changed only, the
+    op's identity hints honoured); a verb the element regime does not carry yet is refused whole."""
     emissions, retires = emissions or [], retires or []
     deletes, registers = deletes or [], registers or []
     receipt: Dict[str, Any] = {"op": (op or {}).get("op"), "journal_first": True,
@@ -900,12 +1018,22 @@ def journaled_emit(
     latest, sourced = state.latest_ops(), state.sourced
     # Phase 1: validate/canonicalize everything — no side effects yet.
     plans: List[Dict[str, Any]] = []
+    for r in retires:
+        if state.elements.captured((r["repo_key"], r["module_path"])) is not None \
+                and (op or {}).get("op") in ELEMENT_REFUSED_OPS:
+            return {"error": f"{r['repo_key']}/{r['module_path']} is captured: `{op['op']}` does not "
+                             "carry the element regime yet — NOTHING journaled or written", **receipt}
     for e in emissions:
         key = (e["repo_key"], e["module_path"])
         if state.elements.captured(key) is not None:
-            return {"error": f"{key[0]}/{key[1]} is captured: its source is its element records "
-                             "(design detail 6d35c07d (2)) and a full-module write is refused until "
-                             "the element-grain absorb lands — NOTHING journaled or written", **receipt}
+            try:
+                recs, rep = element_absorb(state, key[0], key[1], e["text"], op=op)
+            except (CodeSourceError, SyntaxError, ValueError) as err:
+                return {"error": f"{key[0]}/{key[1]} (captured): {err} — NOTHING journaled or "
+                                 "written", **receipt}
+            plans.append({**e, "_journaled": True, "_canonical": rep.pop("text"),
+                          "_elements": recs, "_report": rep})
+            continue
         journaled = key in latest or bool(e.get("cutover"))
         canonical = e["text"]
         if journaled:
@@ -925,6 +1053,13 @@ def journaled_emit(
         receipt["events"].append({"verb": "register", "repo_key": r["repo_key"],
                                   "appended": bool(appended)})
     for p in plans:
+        if "_elements" in p:
+            appended = write and append_elements(source_journal_path, p["_elements"], op_meta=op)
+            receipt["events"].append({"verb": "elements", "repo_key": p["repo_key"],
+                                      "module_path": p["module_path"], "appended": bool(appended),
+                                      **{k: p["_report"][k] for k in ("records", "changed", "placed",
+                                                                      "born", "retired", "renamed")}})
+            continue
         if not p["_journaled"]:
             continue
         appended = write and append_source(source_journal_path, p["repo_key"],

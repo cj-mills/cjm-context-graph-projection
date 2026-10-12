@@ -6,12 +6,12 @@ import json
 import pytest
 
 from cjm_context_graph_projection.codefold import CodeFold
-from cjm_context_graph_projection.codesource import (capture_records, CodeSourceError, ELEMENT,
-                                                     ELEMENT_RETIRE, PLACE, SourceState)
+from cjm_context_graph_projection.codesource import (absorb_records, capture_records, CodeSourceError,
+                                                     ELEMENT, ELEMENT_RETIRE, PLACE, SourceState)
 from cjm_context_graph_projection.relive import _touched_keys
-from cjm_context_graph_projection.source_state import (append_source, IdentityWalk, journaled_emit,
-                                                       latest_source_ops)
-from cjm_dev_graph_schema.identity import code_module_node_id
+from cjm_context_graph_projection.source_state import (append_source, flip_module, IdentityWalk,
+                                                       journaled_emit, latest_source_ops)
+from cjm_dev_graph_schema.identity import code_module_node_id, code_symbol_node_id
 from cjm_python_decompose_core.elements import compose_module, lift_imports
 
 LIB = "cjm-demo-lib"
@@ -158,10 +158,162 @@ def test_a_snapshot_write_to_a_captured_module_is_refused(tmp_path):
     assert latest_source_ops(str(journal))[(LIB, TST)]["text"] == TEXT
     with pytest.raises(CodeSourceError):
         append_source(str(journal), LIB, TST, "tests.test_store", TEXT + "\n# edited\n")
+
+
+# -- the element-grain absorb (abfc2829 (7)) ---------------------------------------------------------
+def _captured_state():
+    cap, _ = _capture(PREFIX)
+    return PREFIX + cap, SourceState.over(PREFIX + cap)
+
+
+def _id(state, prefix):
+    return next(e.element for e in state.elements.elements.values()
+                if e.text.startswith(prefix) and not e.retired)
+
+
+def _absorb(state, text, **kw):
+    recs, rep = absorb_records(state, MID, text, **kw)
+    return [_rec(r["verb"], 300.0, r["args"]) for r in recs], rep
+
+
+def test_absorbing_the_held_text_or_another_layout_of_it_lands_nothing():
+    _, state = _captured_state()
+    assert _absorb(state, TEXT)[0] == []
+    shuffled = TEXT.replace("import os\nimport sys\n\nimport pytest\n\nfrom conftest import tmp_store",
+                            "from conftest import tmp_store\nimport pytest\nimport sys, os")
+    recs, rep = _absorb(state, shuffled)
+    assert recs == [] and rep["text"] == TEXT
+
+
+def test_an_edit_lands_the_changed_element_only(tmp_path):
+    prior, state = _captured_state()
+    recs, rep = _absorb(state, TEXT.replace("assert tmp_store\n", "assert tmp_store == 1\n"))
+    assert [(r["verb"], r["args"]["element"]) for r in recs] == [(ELEMENT, _id(state, "def test_open"))]
+    assert rep["changed"] == [_id(state, "def test_open")] and not rep["born"] and not rep["retired"]
+    fold, after, _ = _fold(prior + recs, tmp_path)
+    assert not fold.failures
+    assert "== 1" in after[_id(state, "def test_open")]["properties"]["body"]
+
+
+def test_a_new_def_is_born_at_its_address_with_the_bindings_it_names(tmp_path):
+    prior, state = _captured_state()
+    text = TEXT.replace("import os\n", "import json\nimport os\n") + \
+        "\n\ndef test_dump():\n    assert json.dumps(1)\n"
+    recs, rep = _absorb(state, text)
+    born = code_symbol_node_id(MID, "test_dump")
+    assert rep["born"] == [born] and not rep["changed"]
+    el = next(r["args"] for r in recs if r["verb"] == ELEMENT)
+    assert [b["name"] for b in el["bindings"]] == ["json"]
+    place = next(r["args"] for r in recs if r["verb"] == PLACE)
+    assert place == {"element": born, "module": MID, "parent": None, "after": _id(state, "def test_open")}
+    fold, after, _ = _fold(prior + recs, tmp_path)
+    assert not fold.failures and after[born]["properties"]["qualname"] == "test_dump"
+    assert SourceState.over(prior + recs).latest_ops()[(LIB, TST)]["text"] == rep["text"]
+
+
+def test_the_binding_check_refuses_a_name_the_write_leaves_unbound():
+    prior, state = _captured_state()
+    with pytest.raises(CodeSourceError, match="reads json"):
+        _absorb(state, TEXT + "\n\ndef test_dump():\n    assert json.dumps(1)\n")
+    recs, rep = _absorb(state, TEXT.replace("import os\n", "import json\nimport os\n"))  # the import first
+    assert rep["unclaimed"] == ["json", "sys"] and rep["binding_check"] == "clean"
+    state2 = SourceState.over(prior + recs)
+    recs2, rep2 = absorb_records(state2, MID, TEXT.replace("import os\n", "import json\nimport os\n")
+                                 + "\n\ndef test_dump():\n    assert json.dumps(1)\n")
+    assert rep2["unclaimed"] == ["sys"]  # the new def claims it
+
+
+def test_a_removed_def_retires_and_its_follower_is_replaced():
+    _, state = _captured_state()
+    fake = _id(state, "class FakeDeps")
+    text = TEXT.replace(TEXT[TEXT.index("class FakeDeps"):TEXT.index("def test_open")], "")
+    recs, rep = _absorb(state, text)
+    gone = {r["args"]["element"] for r in recs if r["verb"] == ELEMENT_RETIRE}
+    assert fake in gone and len(gone) == 3  # the class, its text member and its method
+    moved = [r["args"] for r in recs if r["verb"] == PLACE]
+    assert [m["element"] for m in moved] == [_id(state, "def test_open")]
+    assert moved[0]["after"] == _id(state, "pytestmark")
+
+
+def test_a_rename_keeps_the_id_only_when_the_verb_names_it():
+    _, state = _captured_state()
+    old = _id(state, "def test_open")
+    text = TEXT.replace("def test_open(", "def test_opens(")
+    recs, rep = _absorb(state, text, renames=[("test_open", "test_opens")])
+    assert [r["args"]["element"] for r in recs] == [old] and not rep["born"]
+    recs, rep = _absorb(state, text, authored=old)  # author's one edit renamed the def it edited
+    assert [r["args"]["element"] for r in recs] == [old] and rep["renamed"] == [["test_open", "test_opens"]]
+    recs, rep = _absorb(state, text)  # a file edit names nothing: a birth and a retire
+    assert rep["retired"] == [old] and rep["born"] == [code_symbol_node_id(MID, "test_opens")]
+
+
+def test_a_class_rename_carries_its_members():
+    _, state = _captured_state()
+    path = _id(state, "def path")
+    recs, rep = _absorb(state, TEXT.replace("class FakeDeps:", "class FakeDep:"),
+                        renames=[("FakeDeps", "FakeDep")])
+    assert [r["verb"] for r in recs] == [ELEMENT] and not rep["born"] and not rep["retired"]
+    assert path not in {r["args"]["element"] for r in recs}  # a member's own text never changed
+
+
+def test_a_text_element_keeps_its_id_through_an_edit_and_an_ambiguous_gap_is_refused():
+    _, state = _captured_state()
+    mark = _id(state, "pytestmark")
+    recs, _ = _absorb(state, TEXT.replace("pytest.mark.slow", "pytest.mark.fast"))
+    assert [(r["verb"], r["args"]["element"]) for r in recs] == [(ELEMENT, mark)]
+    split = TEXT.replace("pytestmark = pytest.mark.slow", "A = 1\n\nB = 2")
+    with pytest.raises(CodeSourceError, match="ambiguous"):
+        _absorb(state, split.replace("A = 1\n\nB = 2", "A = 1\n\nB = 2\n\nC = 3")
+                .replace("class FakeDeps:\n    name", "X = 0\n\n\nclass FakeDeps:\n    name"))
+    recs, rep = _absorb(state, TEXT.replace("pytestmark = pytest.mark.slow",
+                                            "pytestmark = pytest.mark.slow\n\nLIMIT = 3"))
+    assert not rep["changed"] and len(rep["born"]) == 1  # the region kept by its leading line, one born
+    doc = _id(state, '"""Tests of the store')
+    recs, rep = _absorb(state, TEXT.replace('"""Tests of the store."""', '"""The store, tested."""')
+                        .replace("pytestmark =", "LIMIT = 3\n\npytestmark ="))
+    assert rep["changed"] == [doc] and len(rep["born"]) == 1  # the module docstring continues itself
+
+
+def test_a_reborn_name_never_reuses_a_retired_id():
+    prior, state = _captured_state()
+    old = _id(state, "def test_open")
+    without = TEXT[:TEXT.index("def test_open")].rstrip("\n") + "\n"
+    recs, _ = _absorb(state, without)
+    state2 = SourceState.over(prior + recs)
+    recs2, rep = absorb_records(state2, MID, TEXT)
+    assert rep["born"] == [code_symbol_node_id(MID, "test_open", 1)] != [old]
+
+
+def test_journaled_emit_and_flip_module_land_element_records(tmp_path):
+    journal = tmp_path / "source.jsonl"
+    prior, _ = _captured_state()
+    journal.write_text("".join(json.dumps(r) + "\n" for r in prior))
+    edited = TEXT.replace("assert tmp_store\n", "assert tmp_store is not None\n")
+    out = tmp_path / "repos" / LIB / TST
     receipt = journaled_emit(str(journal), emissions=[{"repo_key": LIB, "module_path": TST,
                                                        "import_name": "tests.test_store",
-                                                       "text": TEXT, "path": str(tmp_path / "x.py")}])
-    assert "captured" in receipt["error"] and not (tmp_path / "x.py").exists()
+                                                       "text": edited, "path": str(out)}],
+                             op={"op": "author"})
+    assert not receipt.get("error") and receipt["events"][0]["verb"] == "elements"
+    assert out.read_text() == edited == latest_source_ops(str(journal))[(LIB, TST)]["text"]
+    tail = [json.loads(ln) for ln in journal.read_text().splitlines()][len(prior):]
+    assert [r["verb"] for r in tail] == [ELEMENT] and len({r["ts"] for r in tail}) == 1
+    out.write_text(edited.replace("is not None", "!= 0"))
+    res = flip_module(str(journal), str(tmp_path / "repos"), LIB, TST)
+    assert res["captured"] and res["element_grain"]["changed"] and not res["element_grain"]["born"]
+    assert "!= 0" in latest_source_ops(str(journal))[(LIB, TST)]["text"]
+    refused = journaled_emit(str(journal), emissions=[{"repo_key": LIB, "module_path": TST,
+                                                       "import_name": "tests.test_store",
+                                                       "text": edited, "path": str(out)}],
+                             op={"op": "move", "symbols": ["test_open"], "identity": "keep"})
+    assert "does not carry" in refused["error"] and "!= 0" in out.read_text()
+
+
+def test_a_retired_captured_module_takes_its_elements_with_it():
+    prior, state = _captured_state()
+    gone = SourceState.over(prior + [_rec("retire", 300.0, {"repo_key": LIB, "module_path": TST})])
+    assert (LIB, TST) not in gone.latest_ops()
+    assert all(e.retired for e in gone.elements.elements.values() if e.module == MID)
 
 
 def _state(fold):
@@ -170,10 +322,16 @@ def _state(fold):
     return nodes, set(fold.edges)
 
 
-@pytest.mark.parametrize("step", ["capture", "rename"])
+@pytest.mark.parametrize("step", ["capture", "rename", "absorb"])
 def test_a_seeded_step_lands_where_the_whole_fold_lands(tmp_path, step):
     cap, _ = _capture(PREFIX)
     prefix, group = PREFIX, cap
+    if step == "absorb":  # a birth, a retire and a re-placed follower in one write
+        prefix = PREFIX + cap
+        text = TEXT.replace(TEXT[TEXT.index("    def path"):TEXT.index("def test_open")], "\n\n") + \
+            "\n\ndef test_two():\n    assert os.sep\n"
+        recs, _ = absorb_records(SourceState.over(prefix), MID, text)
+        group = [_rec(r["verb"], 300.0, r["args"]) for r in recs]
     if step == "rename":
         state = SourceState.over(PREFIX + cap)
         pid = next(e.element for e in state.elements.elements.values() if e.text.startswith("def path"))
