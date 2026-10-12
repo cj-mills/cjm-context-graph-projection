@@ -11,7 +11,7 @@ from cjm_context_graph_projection.codesource import (absorb_records, capture_rec
                                                      PLACE, SourceState)
 from cjm_context_graph_projection.relive import _touched_keys
 from cjm_context_graph_projection.source_state import (append_source, birth_form, capture_phase,
-                                                       element_plan, flip_module,
+                                                       cutover_module, element_plan, flip_module,
                                                        graph_sourced_modules, IdentityWalk,
                                                        journaled_emit, latest_source_ops)
 from cjm_dev_graph_schema.identity import code_module_node_id, code_symbol_node_id
@@ -728,3 +728,23 @@ def test_a_module_born_into_the_captured_phase_is_born_captured(tmp_path):
     assert composed[(LIB, empty)]["text"] == "" == (repos / LIB / empty).read_text()
     fold, _, _ = _fold(_records(journal), tmp_path)
     assert not fold.failures
+
+
+def test_flip_module_captures_a_file_born_module_into_a_captured_phase_born_captured(tmp_path):
+    journal, repos, _ = _phase(tmp_path)
+    capture_phase(journal, str(repos))
+    filed, pkg = "tests/test_filed.py", "cjm_demo_lib/filed.py"
+    for mp in (filed, pkg):
+        (repos / LIB / mp).parent.mkdir(parents=True, exist_ok=True)
+        (repos / LIB / mp).write_text(UNSORTED_TEXT)
+    n = len(_records(journal))
+    res = flip_module(journal, str(repos), LIB, filed)
+    assert res["captured"] and res["graph_sourced"] and "BORN CAPTURED" in res["note"]
+    tail = _records(journal)[n:]
+    assert [r["verb"] for r in tail][0] == "module" and tail[-1]["verb"] == "capture"
+    assert "source" not in {r["verb"] for r in tail}  # the phase never holds a snapshot module
+    assert latest_source_ops(journal)[(LIB, filed)]["text"].startswith("import os\nimport sys\n")
+    assert cutover_module(journal, str(repos), LIB, filed)["already_graph_sourced"]
+    res = flip_module(journal, str(repos), LIB, pkg)  # another phase: the snapshot regime's shadow
+    assert res["captured"] and not res["graph_sourced"]
+    assert _records(journal)[-1]["verb"] == "source"

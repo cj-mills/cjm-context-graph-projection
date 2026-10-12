@@ -926,9 +926,12 @@ def flip_module(
         return {"error": f"no file at {file_path}", "captured": False}
     file_text = Path(file_path).read_text()
     state = SourceState.over(read_source_journal(source_journal_path))
-    if state.elements.captured((repo_key, module_path)) is not None:
+    born = ((repo_key, module_path) not in state.latest_ops()
+            and not _is_notebook(module_path) and captured_phase(state, module_path))
+    if born or state.elements.captured((repo_key, module_path)) is not None:
         return _flip_captured(source_journal_path, state, repo_key, module_path, file_path,
-                              file_text, write, allow_reorder)
+                              file_text, write, allow_reorder, born=born,
+                              import_name=import_name)
     try:
         canonical = _canonical(repo_key, module_path, file_path, file_text, import_name)
     except (SyntaxError, ValueError) as e:
@@ -969,12 +972,24 @@ def _flip_captured(
     file_text: str,            # Its text (the out-of-band edit to absorb)
     write: bool,               # False = preview, journal nothing
     allow_reorder: bool,       # Journal even when the canonical form carries a hazard
+    born: bool = False,        # A file-born module captured into a captured phase: born captured
+    import_name: Optional[str] = None,  # Override the derived dotted import name (a birth)
 ) -> Dict[str, Any]:  # flip_module's result, with the element grain's report
     """flip-module on a CAPTURED module: the file's edit lands as element records for what changed
-    only (abfc2829 (7)) -- the tool an agent reaches for after a file edit stays a safe graph path."""
+    only (abfc2829 (7)) -- the tool an agent reaches for after a file edit stays a safe graph path.
+    A file-born module first captured where its phase is captured is BORN CAPTURED (the ruling
+    bef8e6b8): its capture group lands, graph-sourced at once, so no cutover follows and the phase
+    never holds a snapshot module."""
     op = {"op": "flip-module"}
     try:
-        recs, rep = element_absorb(state, repo_key, module_path, file_text, op=op)
+        if born:
+            imp = import_name or _derive_import_name(repo_key, module_path, file_text)
+            plans, _ = element_plan(state, [{"repo_key": repo_key, "module_path": module_path,
+                                             "import_name": imp, "text": file_text, "cutover": True}],
+                                    op=op)
+            recs, rep = plans[0]
+        else:
+            recs, rep = element_absorb(state, repo_key, module_path, file_text, op=op)
     except (CodeSourceError, SyntaxError, ValueError) as e:
         return {"error": f"cannot absorb {module_path} at element grain: {e}", "captured": False,
                 "repo_key": repo_key, "module_path": module_path}
@@ -988,11 +1003,14 @@ def _flip_captured(
                          + "; ".join(report["hazards"])
                          + " (restructure the file, or pass --allow-reorder to journal it anyway)"}
     appended = append_elements(source_journal_path, recs, op_meta=op) if write and recs else 0
-    note = ("CAPTURED: the edit landed as element records (this module's source is its elements); "
-            "if the file was not already canonical, regenerate it via emit-artifact")
+    note = (("BORN CAPTURED: its phase is captured, so the module's capture group landed -- its source is "
+             "its elements, graph-sourced now (no cutover follows)" if born else
+             "CAPTURED: the edit landed as element records (this module's source is its elements)")
+            + "; if the file was not already canonical, regenerate it via emit-artifact")
     if not write:
         note = "PREVIEW (--no-write): nothing journaled — a real flip would land these element records"
-    return {**base, "import_name": state.elements.modules[rep["module"]].import_name,
+    m = state.elements.modules.get(rep["module"])
+    return {**base, "import_name": m.import_name if m else imp,
             "captured": bool(appended), "previewed": not write, "graph_sourced": True,
             "element_grain": rep, "file_already_canonical": canonical == file_text,
             "canonical_bytes": len(canonical.encode("utf-8")), "note": note}
