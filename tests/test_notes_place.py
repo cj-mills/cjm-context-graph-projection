@@ -3,6 +3,7 @@ the shared point read through the type's role map at render (meta -> the front s
 -> omitted, inherited down the subtree), moves are the deliverable's PLACED overlay (a root and
 its subtree after the key it names, "" = the section's end), the plan is deltas against what
 stands, and the apply lands journaled `assert` + `place-point` ops that replay to the same page."""
+
 import json
 
 import pytest
@@ -11,8 +12,9 @@ from cjm_context_graph_projection.notes_place import plan_placement, render_plac
 from cjm_context_graph_projection.purenotes import effective_roles, group_points, render_points
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID
 from cjm_dev_graph_schema.identity import note_node_id
+
 from test_notes_outline import _pt
-from test_purenotes import _HAVE_GRAPH, _build_sibling, _run
+from test_purenotes import _build_sibling, _HAVE_GRAPH, _run
 
 ROLE_MAP = {"content": "body", "meta": "front-section", "aside": "omit", "front_section_title": "About this lecture"}
 

@@ -12,18 +12,18 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
-
+from cjm_context_graph_projection.coverage import mint_entity
+from cjm_context_graph_projection.facetjudge import (judge_facets, load_facet_judgments,
+                                                     load_facet_vocab)
+from cjm_context_graph_projection.facetreview import (facet_gate, load_confirmed, parse_review,
+                                                      review_facets, review_state)
+from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
+from cjm_context_graph_projection.write import assert_value
 from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.identity import note_node_id
 
-from cjm_context_graph_projection.coverage import mint_entity
-from cjm_context_graph_projection.facetjudge import judge_facets, load_facet_judgments, load_facet_vocab
-from cjm_context_graph_projection.facetreview import (facet_gate, load_confirmed, parse_review, review_facets,
-                                                      review_state)
-from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
-from cjm_context_graph_projection.write import assert_value
 from conftest import commit_all
-from test_facetjudge import _VOCAB, _Judge, _ask, _corpus, _post, _run
+from test_facetjudge import _ask, _corpus, _Judge, _post, _run, _VOCAB
 
 _HAVE_GRAPH = (Path(DEFAULT_MANIFESTS) / f"{DEFAULT_GRAPH_ID}.json").exists()
 pytestmark = pytest.mark.skipif(not _HAVE_GRAPH, reason="needs the graph capability")

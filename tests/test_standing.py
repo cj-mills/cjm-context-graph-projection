@@ -13,14 +13,7 @@ import sys
 from pathlib import Path
 
 import pytest
-
 from cjm_context_graph_layer.ops import extend_graph
-from cjm_dev_graph_schema import predicates as P
-from cjm_dev_graph_schema.identity import note_node_id, reference_node_id
-from cjm_dev_graph_schema.nodes import ReferenceNode
-from cjm_markdown_decompose_core.extract import note_from_text
-from cjm_markdown_decompose_core.ingest import corpus_graph_elements
-
 from cjm_context_graph_projection.claims import project_claims, public_view
 from cjm_context_graph_projection.paths import record_relation
 from cjm_context_graph_projection.purenotes import mint_deliverable_type
@@ -28,6 +21,12 @@ from cjm_context_graph_projection.render import render
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
 from cjm_context_graph_projection.standing import load_standing, project_standing, support_standing
 from cjm_context_graph_projection.write import assert_value
+from cjm_dev_graph_schema import predicates as P
+from cjm_dev_graph_schema.identity import note_node_id, reference_node_id
+from cjm_dev_graph_schema.nodes import ReferenceNode
+from cjm_markdown_decompose_core.extract import note_from_text
+from cjm_markdown_decompose_core.ingest import corpus_graph_elements
+
 from conftest import commit_all
 
 _HAVE_GRAPH = (Path(DEFAULT_MANIFESTS) / f"{DEFAULT_GRAPH_ID}.json").exists()

@@ -4,6 +4,7 @@ The pure half pins what `diff_graphs` reports (a time drift, a property drift, a
 path moved on disk). The end-to-end half drives real CLI writes into a live db, replays their
 journal into a fresh db, and requires the two to be EQUAL on every property and both time
 columns — the property the op clock exists to hold."""
+
 import json
 import re
 import subprocess
@@ -11,7 +12,6 @@ import sys
 from pathlib import Path
 
 import pytest
-
 from cjm_context_graph_projection.rebuilddiff import diff_graphs, parse_path_map
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS
 

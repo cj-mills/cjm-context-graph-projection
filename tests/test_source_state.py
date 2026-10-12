@@ -6,11 +6,10 @@ from pathlib import Path
 
 from cjm_context_graph_projection.source_state import (absorb_authored_text, append_source,
                                                        canonical_emit, canonicalization_report,
-                                                       cutover_module,
-                                                       emit_source_artifact, flip_module,
-                                                       graph_sourced_modules, journaled_emit,
-                                                       latest_source_ops, read_source_journal,
-                                                       source_check)
+                                                       cutover_module, emit_source_artifact,
+                                                       flip_module, graph_sourced_modules,
+                                                       journaled_emit, latest_source_ops,
+                                                       read_source_journal, source_check)
 
 MODULE = ('"""A tiny module."""\nimport os\n\n\n'
           'def helper(x):\n    return os.path.join(x, "y")\n\n\n'

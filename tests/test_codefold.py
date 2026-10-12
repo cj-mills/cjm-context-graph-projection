@@ -2,11 +2,10 @@
 the inventory and the only source, ids follow the identity map as of each record, and every
 node / edge time is the ts of the record that produced it."""
 
-from cjm_dev_graph_schema.identity import code_module_node_id, code_symbol_node_id
-from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
-
 from cjm_context_graph_projection.codefold import CodeFold, fold_source_journal
 from cjm_context_graph_projection.source_state import cutover_module, flip_module
+from cjm_dev_graph_schema.identity import code_module_node_id, code_symbol_node_id
+from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 
 REPO = "cjm-demo-lib"
 

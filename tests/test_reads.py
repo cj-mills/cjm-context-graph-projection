@@ -1,10 +1,9 @@
 """The content-access reads ledger: id extraction, arm/disarm, stamping, fail-open (no graph)."""
 
 import json
-import pytest
 
-from cjm_context_graph_projection.reads import (_IDS_CAP, configure_reads, delivered_ids,
-                                                record_read)
+import pytest
+from cjm_context_graph_projection.reads import _IDS_CAP, configure_reads, delivered_ids, record_read
 
 
 @pytest.fixture(autouse=True)

@@ -3,10 +3,10 @@ Entity nodes / DEPENDS_ON edges) and the site pages, each read from HEAD (19edbe
 times: tests/test_gitfold.py). The code lane is the source journal's fold —
 tests/test_codefold.py."""
 
-from cjm_dev_graph_schema.identity import entity_node_id, note_node_id, topic_node_id
-from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 from cjm_context_graph_projection.devgraph import notes_corpus_elements, repo_map_elements
 from cjm_context_graph_projection.gitfold import cjm_dep_names
+from cjm_dev_graph_schema.identity import entity_node_id, note_node_id, topic_node_id
+from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 
 from conftest import commit_all
 

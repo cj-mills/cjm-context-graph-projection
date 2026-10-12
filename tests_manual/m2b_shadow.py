@@ -18,21 +18,20 @@ Validates the born-on-graph memory-authoring SHADOW end-to-end on scratch dbs + 
     conda run -n cjm-transcript-correction-core --no-capture-output python \
         cjm-context-graph-projection/tests_manual/m2b_shadow.py
 """
+
 import asyncio
 import sys
 import tempfile
 from pathlib import Path
 
 from cjm_context_graph_layer.ops import extend_graph
-from cjm_dev_graph_schema.identity import note_node_id, section_node_id
-
+from cjm_context_graph_primitives.journal import append_write, read_journal
 from cjm_context_graph_projection.authoring import author, read_slot, section_divergence
 from cjm_context_graph_projection.journal import replay_journal
-from cjm_context_graph_primitives.journal import append_write, read_journal
 from cjm_context_graph_projection.reconcile import reconcile_memory
 from cjm_context_graph_projection.runtime import open_graph
 from cjm_context_graph_projection.write import author_section
-
+from cjm_dev_graph_schema.identity import note_node_id, section_node_id
 from cjm_markdown_decompose_core.extract import note_from_file
 from cjm_markdown_decompose_core.ingest import corpus_graph_elements
 

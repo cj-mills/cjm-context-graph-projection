@@ -10,17 +10,16 @@ from pathlib import Path
 
 import pytest
 from cjm_context_graph_primitives.journal import append_write
-from cjm_dev_graph_schema import predicates as P
-from cjm_dev_graph_schema.identity import reference_node_id
-from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
-
-from cjm_context_graph_projection import factlayer as F
-from cjm_context_graph_projection import inbound as I
-from cjm_context_graph_projection.evidence import (ingest_evidence, ingested_snapshots, pending_snapshots,
-                                                   read_snapshot, web_path_id, write_snapshot)
+from cjm_context_graph_projection import factlayer as F, inbound as I
+from cjm_context_graph_projection.evidence import (ingest_evidence, ingested_snapshots,
+                                                   pending_snapshots, read_snapshot, web_path_id,
+                                                   write_snapshot)
 from cjm_context_graph_projection.journal import replay_journal
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
 from cjm_context_graph_projection.write import assert_value
+from cjm_dev_graph_schema import predicates as P
+from cjm_dev_graph_schema.identity import reference_node_id
+from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 
 _HAVE_GRAPH = (Path(DEFAULT_MANIFESTS) / f"{DEFAULT_GRAPH_ID}.json").exists()
 HOST = "example.com"

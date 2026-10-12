@@ -4,11 +4,11 @@ ruling 21b8fcca, design detail 6d35c07d; the tests pilot's leg 2)."""
 import json
 
 import pytest
-
 from cjm_context_graph_primitives.journal import op_clock
 from cjm_context_graph_projection.codefold import CodeFold
-from cjm_context_graph_projection.codesource import (absorb_records, capture_records, CodeSourceError,
-                                                     ELEMENT, ELEMENT_RETIRE, PLACE, SourceState)
+from cjm_context_graph_projection.codesource import (absorb_records, capture_records,
+                                                     CodeSourceError, ELEMENT, ELEMENT_RETIRE,
+                                                     PLACE, SourceState)
 from cjm_context_graph_projection.relive import _touched_keys
 from cjm_context_graph_projection.source_state import (append_source, birth_form, capture_phase,
                                                        element_plan, flip_module,

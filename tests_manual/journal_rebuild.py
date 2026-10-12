@@ -17,21 +17,22 @@ journaled decision + an aliased note are present. Run with the real journal:
 SCRATCH dbs only; the real db is never touched. (Omit --journal-path to prove the
 pure-projection case — a no-write rebuild is still deterministic.)
 """
+
 import argparse
 import asyncio
 import sys
 import tempfile
 from pathlib import Path
 
+from cjm_context_graph_layer.ops import extend_graph
+from cjm_context_graph_primitives.journal import read_journal
 from cjm_context_graph_projection.contradictions import contradictions
 from cjm_context_graph_projection.devgraph import build_dev_graph_elements
 from cjm_context_graph_projection.factlayer import note_alias_map
 from cjm_context_graph_projection.journal import replay_journal
-from cjm_context_graph_primitives.journal import read_journal
 from cjm_context_graph_projection.projection import get_schema
 from cjm_context_graph_projection.runtime import open_graph
 from cjm_context_graph_projection.worklist import worklist
-from cjm_context_graph_layer.ops import extend_graph
 
 DEFAULT_MEMORY = ("/home/innom-dt/.claude/projects/"
                   "-mnt-SN850X-8TB-EXT4-Projects-GitHub-cj-mills-cjm-substrate/memory")

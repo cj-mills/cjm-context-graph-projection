@@ -14,15 +14,13 @@ import asyncio
 import re
 from pathlib import Path
 
-import pytest
-
 import cjm_context_graph_projection.cli as cli_mod
-from cjm_context_graph_projection.cli import ID_REFS, _resolve_module_ref
+import pytest
+from cjm_context_graph_layer.ops import extend_graph
+from cjm_context_graph_projection.cli import _resolve_module_ref, ID_REFS
 from cjm_context_graph_projection.projection import resolve_node_ref
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
 from cjm_context_graph_projection.write import resolve_subject
-
-from cjm_context_graph_layer.ops import extend_graph
 
 # Positional names that mean "this takes a node id (or accepts one)". A positional
 # with one of these names — or any name ending `_id`/`_ids` — must be declared in

@@ -5,6 +5,7 @@ authored intent (`after` on each IN_SERIES edge, never dates); a post's link to 
 topic page is a verbatim `site_ref` the post-replay resolve pass maps through site_path
 facts to a `site_link` REFERENCES edge. The rebuild standard holds across all of it: a
 fresh ingest + replay of the journal reproduces the live graph's node and edge id sets."""
+
 import asyncio
 import json
 import sqlite3
@@ -13,22 +14,21 @@ import sys
 from pathlib import Path
 
 import pytest
-
 from cjm_context_graph_layer.ops import extend_graph, graph_task
 from cjm_context_graph_primitives.query import EdgeQuery
+from cjm_context_graph_projection.journal import _op_windows
+from cjm_context_graph_projection.lens import lens_node_id, set_lens
+from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
+from cjm_context_graph_projection.series import (mint_series, order_members, place_in_series,
+                                                 series_order, set_series_members)
+from cjm_context_graph_projection.sitelinks import (resolve_site_links, site_link_window,
+                                                    site_path_key, touches_inputs)
+from cjm_context_graph_projection.write import assert_value
 from cjm_dev_graph_schema.identity import note_node_id, series_node_id, topic_node_id
 from cjm_dev_graph_schema.predicates import SITE_PATH
 from cjm_markdown_decompose_core.extract import note_from_text
 from cjm_markdown_decompose_core.ingest import corpus_graph_elements
 
-from cjm_context_graph_projection.lens import lens_node_id, set_lens
-from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
-from cjm_context_graph_projection.series import (mint_series, order_members, place_in_series,
-                                                 series_order, set_series_members)
-from cjm_context_graph_projection.journal import _op_windows
-from cjm_context_graph_projection.sitelinks import (resolve_site_links, site_link_window,
-                                                    site_path_key, touches_inputs)
-from cjm_context_graph_projection.write import assert_value
 from conftest import commit_all
 
 

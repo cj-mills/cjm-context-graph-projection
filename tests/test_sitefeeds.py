@@ -7,8 +7,9 @@ import json
 import struct
 import zlib
 
-from cjm_context_graph_projection.sitefeeds import (HIGHLIGHT_THEME, absolute_url, feed_image_size, feed_order,
-                                                    item_image, math_image_url, write_feeds)
+from cjm_context_graph_projection.sitefeeds import (absolute_url, feed_image_size, feed_order,
+                                                    HIGHLIGHT_THEME, item_image, math_image_url,
+                                                    write_feeds)
 
 SITE = {"url": "https://example.com", "title": "Ex & Co", "description": "The site's own words.",
         "image": "images/logo.png"}

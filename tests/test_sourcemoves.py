@@ -10,14 +10,13 @@ import sys
 from pathlib import Path
 
 import pytest
-
-from cjm_dev_graph_schema.identity import note_node_id
-
-from cjm_context_graph_projection.devgraph import (ARCHIVE_SOURCE, REPO_SOURCE, notes_corpus_elements,
-                                                   repo_entity, repo_map_elements, source_id)
+from cjm_context_graph_projection.devgraph import (ARCHIVE_SOURCE, notes_corpus_elements,
+                                                   repo_entity, repo_map_elements, REPO_SOURCE,
+                                                   source_id)
 from cjm_context_graph_projection.rebuilddiff import diff_graphs
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS
 from cjm_context_graph_projection.sourcemoves import attribute_moved_sources
+from cjm_dev_graph_schema.identity import note_node_id
 
 T1, T2, T3 = 1700000000, 1700100000, 1700200000
 

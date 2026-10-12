@@ -5,11 +5,11 @@ import html
 import json
 import re
 
+from cjm_context_graph_projection.sitelisting import (chip_hrefs, CHIP_LIMIT, date_text,
+                                                      listing_kinds, listing_script, output_href,
+                                                      PAGE_SIZE, render_listing, SCRIPT_FILE,
+                                                      sort_rows, WORDS)
 from cjm_dev_graph_schema import predicates as P
-
-from cjm_context_graph_projection.sitelisting import (CHIP_LIMIT, PAGE_SIZE, SCRIPT_FILE, WORDS, chip_hrefs,
-                                                      date_text, listing_kinds, listing_script, output_href,
-                                                      render_listing, sort_rows)
 
 
 def _item(title, day="", cats=(), desc="", href=None, updated=""):

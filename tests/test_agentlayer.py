@@ -3,16 +3,16 @@ llms.txt from the graph's structure, links kept in the markdown layer."""
 
 import inspect
 
-from cjm_dev_graph_schema import predicates as P
-
-from cjm_context_graph_projection.agentlayer import (_line, ANCHOR_TOKEN, based_on, build_lines, check_jsonld,
-                                                     check_llms_fragments, directory_author, JSONLD_KEYS,
-                                                     jsonld_script, llms_index, load_index_copy, plain,
+from cjm_context_graph_projection.agentlayer import (_line, ANCHOR_TOKEN, based_on, build_lines,
+                                                     check_jsonld, check_llms_fragments,
+                                                     directory_author, JSONLD_KEYS, jsonld_script,
+                                                     llms_index, load_index_copy, plain,
                                                      post_jsonld, read_jsonld, restore_llms_anchors,
-                                                     rewrite_llms_links, rewrite_markdown_links, write_llms_txt,
-                                                     WORK_JSONLD_TYPES)
+                                                     rewrite_llms_links, rewrite_markdown_links,
+                                                     WORK_JSONLD_TYPES, write_llms_txt)
 from cjm_context_graph_projection.derivedblocks import LUA_FILTER
 from cjm_context_graph_projection.site import _DRAFTS_REF
+from cjm_dev_graph_schema import predicates as P
 
 DATES = {"published": "2024-05-01", "updated": "2024-06-02"}
 

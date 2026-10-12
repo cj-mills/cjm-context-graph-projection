@@ -6,11 +6,10 @@ import shutil
 from pathlib import Path
 
 import pytest
-
-from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
 from cjm_context_graph_projection.derivedblocks import _nav_step
-from cjm_context_graph_projection.site import (check_rendered_site, output_href, publish_guard, redirect_page,
-                                               site_build, stated)
+from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
+from cjm_context_graph_projection.site import (check_rendered_site, output_href, publish_guard,
+                                               redirect_page, site_build, stated)
 from cjm_context_graph_projection.write import assert_value, decide
 
 _HAVE_GRAPH = (Path(DEFAULT_MANIFESTS) / f"{DEFAULT_GRAPH_ID}.json").exists()

@@ -9,6 +9,7 @@ edit seam (`author` on a Section, `author_section`, `add_section`) and applies e
 difference — never touching a deliberate `link` the content never produced — so a journal-only
 rebuild converges on the edge set an archive ingest of the emitted file produces.
 """
+
 import asyncio
 import json
 import sqlite3
@@ -17,15 +18,9 @@ import sys
 from pathlib import Path
 
 import pytest
-
 from cjm_context_graph_layer.ops import extend_graph, graph_task
 from cjm_context_graph_primitives.journal import read_journal
 from cjm_context_graph_primitives.query import EdgeQuery
-from cjm_dev_graph_schema.identity import note_node_id, section_node_id, series_node_id
-from cjm_dev_graph_schema.predicates import SITE_PATH
-from cjm_markdown_decompose_core.extract import note_from_file
-from cjm_markdown_decompose_core.ingest import corpus_graph_elements
-
 from cjm_context_graph_projection import factlayer as F
 from cjm_context_graph_projection.authoring import author
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
@@ -33,6 +28,11 @@ from cjm_context_graph_projection.series import mint_series
 from cjm_context_graph_projection.sitelinks import site_link_window
 from cjm_context_graph_projection.structure import add_section, new_note
 from cjm_context_graph_projection.write import assert_value, author_section, link
+from cjm_dev_graph_schema.identity import note_node_id, section_node_id, series_node_id
+from cjm_dev_graph_schema.predicates import SITE_PATH
+from cjm_markdown_decompose_core.extract import note_from_file
+from cjm_markdown_decompose_core.ingest import corpus_graph_elements
+
 from conftest import commit_all
 
 # These drive the real graph-storage worker capability via open_graph().

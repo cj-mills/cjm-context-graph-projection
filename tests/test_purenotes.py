@@ -11,14 +11,31 @@ from pathlib import Path
 
 import pytest
 import yaml
-
 from cjm_context_graph_layer.grammar import make_edge
 from cjm_context_graph_layer.ops import extend_graph, graph_task
 from cjm_context_graph_primitives.journal import read_journal
 from cjm_context_graph_primitives.query import EdgeQuery
-from cjm_context_graph_projection.purenotes import apply_judgements, extra_list, merge_point_blocks, plan_notes_blocks, render_judge_brief, render_pairs_brief, unjudged_pairs, close_open_refs, load_notes_propsets, merge_point_proposals, open_reference_list, pick_propset, points_index, render_reconcile_brief, with_points_index, write_notes_propset, _time_link, build_notes_pack, build_point_tree, choose_spine, coverage_gaps, derive_frontmatter, derived_description, overlapping_points, pack_digest, plan_notes_windows, proposals_from_point_rows, pure_notes_type, speaker_labels, render_notes_pack, render_points, stratum_role_policy, render_source_card, synopsis_of, unit_label, lecture_title, date_phrase, unit_title_header, validate_point_rows, _frontmatter_fields, render_works_table, _replace_frontmatter_lines, derive_work_frontmatter, render_work_card, render_work_chapters, work_page_type
-from cjm_context_graph_projection.notes_outline import apply_outline
-from cjm_context_graph_projection.notes_outline import render_outline_brief
+from cjm_context_graph_projection.notes_outline import apply_outline, render_outline_brief
+from cjm_context_graph_projection.purenotes import (_frontmatter_fields, _replace_frontmatter_lines,
+                                                    _time_link, apply_judgements, build_notes_pack,
+                                                    build_point_tree, choose_spine, close_open_refs,
+                                                    coverage_gaps, date_phrase, derive_frontmatter,
+                                                    derive_work_frontmatter, derived_description,
+                                                    extra_list, lecture_title, load_notes_propsets,
+                                                    merge_point_blocks, merge_point_proposals,
+                                                    open_reference_list, overlapping_points,
+                                                    pack_digest, pick_propset, plan_notes_blocks,
+                                                    plan_notes_windows, points_index,
+                                                    proposals_from_point_rows, pure_notes_type,
+                                                    render_judge_brief, render_notes_pack,
+                                                    render_pairs_brief, render_points,
+                                                    render_reconcile_brief, render_source_card,
+                                                    render_work_card, render_work_chapters,
+                                                    render_works_table, speaker_labels,
+                                                    stratum_role_policy, synopsis_of, unit_label,
+                                                    unit_title_header, unjudged_pairs,
+                                                    validate_point_rows, with_points_index,
+                                                    work_page_type, write_notes_propset)
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
 
 _HAVE_GRAPH = (Path(DEFAULT_MANIFESTS) / f"{DEFAULT_GRAPH_ID}.json").exists()

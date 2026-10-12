@@ -9,14 +9,13 @@ published."""
 import asyncio
 
 import pytest
-
 from cjm_context_graph_projection.agentlayer import load_index_copy
-from cjm_context_graph_projection.homepage import (UNDESCRIBED, entry_anchor, entry_refs, home_body,
-                                                   map_entries, recent_posts)
+from cjm_context_graph_projection.homepage import (entry_anchor, entry_refs, home_body, map_entries,
+                                                   recent_posts, UNDESCRIBED)
 from cjm_context_graph_projection.postpage import holds_line, load_site_holds, load_site_summary
 from cjm_context_graph_projection.sitepages import GENERATED, hub_order
 
-from test_sitepages import _HAVE_GRAPH, _HAVE_QUARTO, _facets, _graph, _site, _unrelated
+from test_sitepages import _facets, _graph, _HAVE_GRAPH, _HAVE_QUARTO, _site, _unrelated
 
 WHO = 'site-author:\n  name: "N"\n  role: "R"\n'
 

@@ -14,22 +14,22 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
-
 from cjm_context_graph_layer.ops import extend_graph
+from cjm_context_graph_projection.coverage import mint_entity
+from cjm_context_graph_projection.purenotes import mint_deliverable_type
+from cjm_context_graph_projection.rolereview import parse_review, review_roles
+from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
+from cjm_context_graph_projection.sectionroles import (distribution, effective_roles, judge_roles,
+                                                       load_role_facts, load_role_judgments, NONE,
+                                                       question_hash, role_question, role_scope,
+                                                       scope_sections, section_roles,
+                                                       stale_sections)
+from cjm_context_graph_projection.write import assert_value
 from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.identity import note_node_id
 from cjm_markdown_decompose_core.extract import note_from_text
 from cjm_markdown_decompose_core.ingest import corpus_graph_elements
 
-from cjm_context_graph_projection.coverage import mint_entity
-from cjm_context_graph_projection.purenotes import mint_deliverable_type
-from cjm_context_graph_projection.rolereview import parse_review, review_roles
-from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
-from cjm_context_graph_projection.sectionroles import (NONE, distribution, effective_roles, judge_roles,
-                                                       load_role_facts, load_role_judgments, question_hash,
-                                                       role_question, role_scope, scope_sections,
-                                                       section_roles, stale_sections)
-from cjm_context_graph_projection.write import assert_value
 from conftest import commit_all
 
 _HAVE_GRAPH = (Path(DEFAULT_MANIFESTS) / f"{DEFAULT_GRAPH_ID}.json").exists()

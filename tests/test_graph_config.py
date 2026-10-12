@@ -3,13 +3,12 @@ hardcodes are fallback only — the config beside the addressed graph db names i
 paths, explicit flags always win, and a corrupt config refuses loudly instead of
 silently falling back. No key names a code inventory: that is the source journal's
 (2cc81d3b, finding 7a2d54ae)."""
+
 import argparse
 import json
 
 import pytest
-
-from cjm_context_graph_projection.cli import (_apply_graph_config, DEFAULT_MEMORY,
-                                              DEFAULT_REPOS)
+from cjm_context_graph_projection.cli import _apply_graph_config, DEFAULT_MEMORY, DEFAULT_REPOS
 from cjm_context_graph_projection.config import load_graph_config
 
 

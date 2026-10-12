@@ -5,12 +5,10 @@ import asyncio
 from pathlib import Path
 
 import pytest
-
 from cjm_context_graph_layer.grammar import make_edge
 from cjm_context_graph_layer.ops import extend_graph
-
-from cjm_context_graph_projection.lens import (apply_lens, bind_params, lens_node_id,
-                                               load_lenses, set_lens, validate_lens_spec)
+from cjm_context_graph_projection.lens import (apply_lens, bind_params, lens_node_id, load_lenses,
+                                               set_lens, validate_lens_spec)
 from cjm_context_graph_projection.render import render
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
 

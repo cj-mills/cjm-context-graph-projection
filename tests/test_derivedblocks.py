@@ -6,26 +6,23 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-import yaml
-
 import pytest
-
+import yaml
 from cjm_context_graph_layer.ops import extend_graph
-from cjm_dev_graph_schema.identity import (deliverable_type_node_id, note_node_id, series_node_id,
-                                          topic_node_id)
-from cjm_markdown_decompose_core.extract import note_from_text
-from cjm_markdown_decompose_core.ingest import corpus_graph_elements
-
 from cjm_context_graph_projection.agentlayer import read_jsonld
-from cjm_context_graph_projection.derivedblocks import (DERIVED_DIR, REPORT_FILE, check_end_placement,
-                                                        render_nav)
+from cjm_context_graph_projection.derivedblocks import (check_end_placement, DERIVED_DIR,
+                                                        render_nav, REPORT_FILE)
+from cjm_context_graph_projection.judging import judge_related
 from cjm_context_graph_projection.lens import lens_node_id, set_lens
 from cjm_context_graph_projection.purenotes import mint_deliverable_type
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
 from cjm_context_graph_projection.series import mint_series, set_series_members
-from cjm_context_graph_projection.judging import judge_related
 from cjm_context_graph_projection.site import site_build
 from cjm_context_graph_projection.write import assert_value
+from cjm_dev_graph_schema.identity import (deliverable_type_node_id, note_node_id, series_node_id,
+                                           topic_node_id)
+from cjm_markdown_decompose_core.extract import note_from_text
+from cjm_markdown_decompose_core.ingest import corpus_graph_elements
 
 _HAVE_GRAPH = (Path(DEFAULT_MANIFESTS) / f"{DEFAULT_GRAPH_ID}.json").exists()
 _HAVE_QUARTO = shutil.which("quarto") is not None

@@ -7,11 +7,11 @@ import asyncio
 import json
 
 import pytest
-
-from cjm_context_graph_projection.aboutpage import about_body, background_ref, body_of, load_portrait
+from cjm_context_graph_projection.aboutpage import (about_body, background_ref, body_of,
+                                                    load_portrait)
 from cjm_context_graph_projection.agentlayer import profile_jsonld
 
-from test_sitepages import _HAVE_GRAPH, _HAVE_QUARTO, _graph, _site, _unrelated, _facets
+from test_sitepages import _facets, _graph, _HAVE_GRAPH, _HAVE_QUARTO, _site, _unrelated
 
 LINKS = [{"icon": "envelope-fill", "text": "Email", "href": "mailto:e@x.org"},
          {"icon": "github", "text": "GitHub", "href": "https://github.com/x"}]

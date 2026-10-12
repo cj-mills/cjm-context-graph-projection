@@ -9,16 +9,14 @@ import shutil
 from pathlib import Path
 
 import pytest
-
-from cjm_design_system import systems
-from cjm_dev_graph_schema.identity import entity_node_id
-
 from cjm_context_graph_projection import factlayer as F
-from cjm_context_graph_projection.artifacts import (ARTIFACT, ARTIFACT_RETIRE, artifact_check,
+from cjm_context_graph_projection.artifacts import (ARTIFACT, artifact_check, ARTIFACT_RETIRE,
                                                     capture_artifact, fold_artifacts,
                                                     latest_artifact_ops, uncaptured_artifacts)
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
 from cjm_context_graph_projection.source_state import read_source_journal
+from cjm_design_system import systems
+from cjm_dev_graph_schema.identity import entity_node_id
 
 _HAVE_GRAPH = (Path(DEFAULT_MANIFESTS) / f"{DEFAULT_GRAPH_ID}.json").exists()
 pytestmark_graph = pytest.mark.skipif(not _HAVE_GRAPH, reason="needs the graph capability")

@@ -2,8 +2,8 @@
 
 from datetime import timedelta, timezone
 
-from cjm_context_graph_projection.scratchpad_export import (
-    _local_stamp, derive_entries, render_session_markdown)
+from cjm_context_graph_projection.scratchpad_export import (_local_stamp, derive_entries,
+                                                            render_session_markdown)
 
 KEY = "2026-08-21_11-26-36"
 

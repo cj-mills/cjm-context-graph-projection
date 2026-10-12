@@ -2,14 +2,12 @@
 
 import json
 
-from cjm_context_graph_projection.projection import (
-    _TEXT_FIELDS, _facet_axis_value, _facet_breakdown, _haystack, _locate_row, _terms,
-    node_summary, node_title,
-)
-from cjm_context_graph_projection.onboarding import (
-    _render_manual_block,
-    _load_seeds, _pin_target, _render_coverage, _render_frontier, _strip_frontmatter,
-)
+from cjm_context_graph_projection.onboarding import (_load_seeds, _pin_target, _render_coverage,
+                                                     _render_frontier, _render_manual_block,
+                                                     _strip_frontmatter)
+from cjm_context_graph_projection.projection import (_facet_axis_value, _facet_breakdown, _haystack,
+                                                     _locate_row, _terms, _TEXT_FIELDS,
+                                                     node_summary, node_title)
 from cjm_context_graph_projection.render import _short, render
 
 

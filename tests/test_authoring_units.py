@@ -1,9 +1,8 @@
 """Pure authoring helpers — slot routing + the apply split (no graph needed)."""
 
-from cjm_python_decompose_core.parse import parse_module
-
 from cjm_context_graph_projection.authoring import (_apply, _available_bindings, _flat_refs,
                                                     _slice_block, _slot_for)
+from cjm_python_decompose_core.parse import parse_module
 
 
 def _node(label, **props):

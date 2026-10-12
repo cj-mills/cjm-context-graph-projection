@@ -10,14 +10,12 @@ import sys
 from pathlib import Path
 
 import pytest
-
-from cjm_dev_graph_schema.identity import note_node_id, section_node_id
-
 from cjm_context_graph_projection.journal import _source_spans, touched_node_ids
-from cjm_context_graph_projection.memorysource import (capture_memory_records, memory_lane, MemorySource,
-                                                       note_lane)
+from cjm_context_graph_projection.memorysource import (capture_memory_records, memory_lane,
+                                                       MemorySource, note_lane)
 from cjm_context_graph_projection.notesource import fold_records, NotesFoldError
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS
+from cjm_dev_graph_schema.identity import note_node_id, section_node_id
 
 _HAVE_GRAPH = (Path(DEFAULT_MANIFESTS) / f"{DEFAULT_GRAPH_ID}.json").exists()
 

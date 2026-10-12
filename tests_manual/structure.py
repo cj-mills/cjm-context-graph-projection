@@ -15,17 +15,16 @@ is born on-graph"). On SCRATCH dbs + temp files (real corpus NEVER touched):
     conda run -n cjm-transcript-correction-core --no-capture-output python \
         cjm-context-graph-projection/tests_manual/structure.py
 """
+
 import asyncio
 import sys
 import tempfile
 from pathlib import Path
 
-from cjm_dev_graph_schema.identity import note_node_id, section_node_id
-
 from cjm_context_graph_projection.authoring import read_slot, section_divergence
 from cjm_context_graph_projection.runtime import open_graph
 from cjm_context_graph_projection.structure import add_section, new_note
-
+from cjm_dev_graph_schema.identity import note_node_id, section_node_id
 from cjm_markdown_decompose_core.extract import note_from_file
 
 

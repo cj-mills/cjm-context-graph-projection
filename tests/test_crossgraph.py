@@ -7,12 +7,11 @@ import sys
 from pathlib import Path
 
 import pytest
-
 from cjm_context_graph_primitives.journal import read_journal
 from cjm_context_graph_projection.config import sibling_graphs
 from cjm_context_graph_projection.review import classify_reference_change, reference_baseline
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS
-from cjm_dev_graph_schema.nodes import ReferenceNode, foreign_content_hash, parse_foreign_ref
+from cjm_dev_graph_schema.nodes import foreign_content_hash, parse_foreign_ref, ReferenceNode
 
 _HAVE_GRAPH = (Path(DEFAULT_MANIFESTS) / f"{DEFAULT_GRAPH_ID}.json").exists()
 

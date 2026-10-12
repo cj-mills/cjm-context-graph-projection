@@ -3,17 +3,21 @@ section rows nest by naming a parent section, the set-mode apply orders a parent
 child that shares its anchor, the render derives heading depth from the chain, and the
 draft mode plans — then lands, journaled and replay-faithful — the difference between the
 reader's whole outline and the standing one."""
+
 import json
 from pathlib import Path
 
 import pytest
 from cjm_context_graph_primitives.journal import read_journal
-from cjm_context_graph_projection.notes_outline import apply_outline, outline_of, plan_outline, render_outline_brief
-from cjm_context_graph_projection.purenotes import (build_notes_pack, group_points, points_as_proposals,
-                                                    proposals_from_point_rows, render_points, validate_point_rows)
+from cjm_context_graph_projection.notes_outline import (apply_outline, outline_of, plan_outline,
+                                                        render_outline_brief)
+from cjm_context_graph_projection.purenotes import (build_notes_pack, group_points,
+                                                    points_as_proposals, proposals_from_point_rows,
+                                                    render_points, validate_point_rows)
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID
 from cjm_dev_graph_schema.identity import note_node_id
-from test_purenotes import _HAVE_GRAPH, _build_sibling, _run
+
+from test_purenotes import _build_sibling, _HAVE_GRAPH, _run
 
 
 def _pack_and_points():

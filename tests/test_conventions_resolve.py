@@ -1,10 +1,9 @@
 """Cross-corpus CALLS/IMPORTS resolution + the structural convention audit (pure cores)."""
 
+from cjm_context_graph_projection.codefold import CodeFold
+from cjm_context_graph_projection.conventions import compute_conventions
 from cjm_dev_graph_schema.nodes import CodeSymbolNode
 from cjm_dev_graph_schema.vocab import DevRelations
-
-from cjm_context_graph_projection.conventions import compute_conventions
-from cjm_context_graph_projection.codefold import CodeFold
 
 
 # --- cross-corpus resolution (the code fold's scopes, 2cc81d3b) ---

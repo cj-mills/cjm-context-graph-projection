@@ -8,22 +8,20 @@ import asyncio
 from pathlib import Path
 
 import pytest
-
 from cjm_context_graph_layer.ops import extend_graph
-from cjm_dev_graph_schema.identity import entity_node_id, note_node_id
-from cjm_markdown_decompose_core.extract import note_from_text
-from cjm_markdown_decompose_core.ingest import corpus_graph_elements
-
 from cjm_context_graph_projection.coverage import mint_entity
 from cjm_context_graph_projection.lens import lens_node_id, set_lens
 from cjm_context_graph_projection.library import record_provenance
-from cjm_context_graph_projection.librarypage import (render_index, render_work, topic_pages, work_description,
-                                                      year)
+from cjm_context_graph_projection.librarypage import (render_index, render_work, topic_pages,
+                                                      work_description, year)
 from cjm_context_graph_projection.purenotes import mint_deliverable_type
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
 from cjm_context_graph_projection.site import redirect_plan
 from cjm_context_graph_projection.sitepages import GENERATED, page_plan
 from cjm_context_graph_projection.write import assert_value
+from cjm_dev_graph_schema.identity import entity_node_id, note_node_id
+from cjm_markdown_decompose_core.extract import note_from_text
+from cjm_markdown_decompose_core.ingest import corpus_graph_elements
 
 _HAVE_GRAPH = (Path(DEFAULT_MANIFESTS) / f"{DEFAULT_GRAPH_ID}.json").exists()
 

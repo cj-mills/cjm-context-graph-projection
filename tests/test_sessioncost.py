@@ -3,8 +3,8 @@ its transcript + the journals — invocations by verb, refusals, wall, .py file 
 
 import json
 
-from cjm_context_graph_projection.sessioncost import (cg_invocations, is_refusal,
-                                                      session_cost, transcript_cost)
+from cjm_context_graph_projection.sessioncost import (cg_invocations, is_refusal, session_cost,
+                                                      transcript_cost)
 
 
 def _record(kind, ts, blocks):

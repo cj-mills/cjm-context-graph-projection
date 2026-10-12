@@ -9,18 +9,16 @@ import shutil
 from pathlib import Path
 
 import pytest
-
-from cjm_design_system import systems
-from cjm_dev_graph_schema.identity import entity_node_id
-from cjm_dev_graph_schema.vocab import DevRelations
-
 from cjm_context_graph_projection.artifacts import capture_artifact
 from cjm_context_graph_projection.config import CONFIG_BASENAME
 from cjm_context_graph_projection.coverage import mint_entity
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
-from cjm_context_graph_projection.sitetheme import (THEME_FILES, mode_pair, profile_key, project_theme,
-                                                    theme_wanted)
+from cjm_context_graph_projection.sitetheme import (mode_pair, profile_key, project_theme,
+                                                    THEME_FILES, theme_wanted)
 from cjm_context_graph_projection.write import link
+from cjm_design_system import systems
+from cjm_dev_graph_schema.identity import entity_node_id
+from cjm_dev_graph_schema.vocab import DevRelations
 
 _HAVE_GRAPH = (Path(DEFAULT_MANIFESTS) / f"{DEFAULT_GRAPH_ID}.json").exists()
 needs_graph = pytest.mark.skipif(not _HAVE_GRAPH, reason="needs the graph capability")

@@ -22,6 +22,7 @@ Run in a core env with the substrate runtime + the new libs installed -e:
 
 A SCRATCH db is used; no real graph is touched.
 """
+
 import argparse
 import asyncio
 import sys
@@ -29,14 +30,13 @@ import tempfile
 from pathlib import Path
 
 from cjm_context_graph_layer.ops import extend_graph
-from cjm_dev_graph_schema.identity import entity_node_id, factslot_node_id
-
 from cjm_context_graph_projection import factlayer as F
 from cjm_context_graph_projection.contradictions import contradictions
 from cjm_context_graph_projection.devgraph import build_dev_graph_elements
 from cjm_context_graph_projection.oracle import run_version_oracle
 from cjm_context_graph_projection.runtime import open_graph
 from cjm_context_graph_projection.write import assert_value, resolve_subject
+from cjm_dev_graph_schema.identity import entity_node_id, factslot_node_id
 
 DEFAULT_MEMORY = ("/home/innom-dt/.claude/projects/"
                   "-mnt-SN850X-8TB-EXT4-Projects-GitHub-cj-mills-cjm-substrate/memory")

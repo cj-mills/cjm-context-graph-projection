@@ -7,6 +7,7 @@ applies the draft as a journaled section op and re-asserts the approval on the n
 hash so the frontier clears; a journal-only replay carries the proposal, the applied
 section and the re-approval.
 """
+
 import asyncio
 import json
 import subprocess
@@ -15,14 +16,12 @@ import time
 from pathlib import Path
 
 import pytest
-
 from cjm_context_graph_layer.grammar import make_edge
 from cjm_context_graph_layer.ops import extend_graph
 from cjm_context_graph_primitives.journal import append_op, read_journal
-from cjm_dev_graph_schema.identity import code_module_node_id, note_node_id, section_node_id
-
 from cjm_context_graph_projection.propose import draft_code_block_update
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
+from cjm_dev_graph_schema.identity import code_module_node_id, note_node_id, section_node_id
 
 OLD = "def f():\n    return 1\n"
 NEW = "def f():\n    return 2\n"

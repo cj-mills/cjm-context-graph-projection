@@ -17,8 +17,8 @@ import time
 
 from cjm_context_graph_layer.ops import graph_task
 from cjm_context_graph_primitives.query import EdgeQuery
-from cjm_context_graph_projection.factlayer import (
-    count_label, load_edge_pairs, load_label_where, load_nodes)
+from cjm_context_graph_projection.factlayer import (count_label, load_edge_pairs, load_label_where,
+                                                    load_nodes)
 from cjm_context_graph_projection.projection import show
 from cjm_context_graph_projection.runtime import DEFAULT_MANIFESTS, open_graph
 

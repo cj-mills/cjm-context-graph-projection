@@ -7,14 +7,12 @@ import subprocess
 from pathlib import Path
 
 import pytest
-
-from cjm_dev_graph_schema.identity import note_node_id
-
 from cjm_context_graph_projection.devgraph import notes_corpus_elements, repo_map_elements
 from cjm_context_graph_projection.gitfold import ElementFold, fold_history, unquote_path
 from cjm_context_graph_projection.seeds import (CLASS_SUBJECTS_AUTHORED, RENAME_ALIASES_AUTHORED,
-                                                RENAME_CONTRADICTION_AUTHORED, STALE_VERSION_AUTHORED,
-                                                seed_elements)
+                                                RENAME_CONTRADICTION_AUTHORED, seed_elements,
+                                                STALE_VERSION_AUTHORED)
+from cjm_dev_graph_schema.identity import note_node_id
 
 T1, T2, T3, T4 = 1700000000, 1700100000, 1700200000, 1700300000
 

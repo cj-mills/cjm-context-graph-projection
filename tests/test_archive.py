@@ -12,14 +12,12 @@ import sys
 from pathlib import Path
 
 import pytest
-
-from cjm_dev_graph_schema.identity import note_node_id
-
 from cjm_context_graph_projection.archive import path_owners
 from cjm_context_graph_projection.lens import lens_node_id
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
 from cjm_context_graph_projection.site import redirect_plan
 from cjm_context_graph_projection.sitelinks import site_path_holders, site_path_key
+from cjm_dev_graph_schema.identity import note_node_id
 
 _HAVE_GRAPH = (Path(DEFAULT_MANIFESTS) / f"{DEFAULT_GRAPH_ID}.json").exists()
 

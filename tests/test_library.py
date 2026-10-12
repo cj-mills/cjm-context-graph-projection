@@ -11,14 +11,7 @@ import sys
 from pathlib import Path
 
 import pytest
-
 from cjm_context_graph_layer.ops import extend_graph
-from cjm_dev_graph_schema import predicates as P
-from cjm_dev_graph_schema.identity import entity_node_id, note_node_id
-from cjm_dev_graph_schema.vocab import DevRelations
-from cjm_markdown_decompose_core.extract import note_from_text
-from cjm_markdown_decompose_core.ingest import corpus_graph_elements
-
 from cjm_context_graph_projection import factlayer as F
 from cjm_context_graph_projection.coverage import mint_entity, validate_entity
 from cjm_context_graph_projection.library import (plan_survey, project_library, record_provenance,
@@ -26,6 +19,12 @@ from cjm_context_graph_projection.library import (plan_survey, project_library, 
 from cjm_context_graph_projection.purenotes import load_deliverable_type, mint_deliverable_type
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
 from cjm_context_graph_projection.write import assert_value
+from cjm_dev_graph_schema import predicates as P
+from cjm_dev_graph_schema.identity import entity_node_id, note_node_id
+from cjm_dev_graph_schema.vocab import DevRelations
+from cjm_markdown_decompose_core.extract import note_from_text
+from cjm_markdown_decompose_core.ingest import corpus_graph_elements
+
 from conftest import commit_all
 
 _HAVE_GRAPH = (Path(DEFAULT_MANIFESTS) / f"{DEFAULT_GRAPH_ID}.json").exists()

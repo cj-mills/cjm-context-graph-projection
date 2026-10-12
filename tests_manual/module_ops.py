@@ -13,6 +13,7 @@ NEVER written). Run in a core env with the substrate runtime + the libs installe
     conda run -n cjm-transcript-correction-core --no-capture-output python \
         cjm-context-graph-projection/tests_manual/module_ops.py
 """
+
 import ast
 import asyncio
 import sys
@@ -20,12 +21,11 @@ import tempfile
 from pathlib import Path
 
 from cjm_context_graph_layer.ops import extend_graph
-from cjm_dev_graph_schema.identity import code_module_node_id, code_symbol_node_id
-
 from cjm_context_graph_projection.module_ops import (delete_module, new_module, regroup,
                                                      rename_module)
 from cjm_context_graph_projection.refactor_ops import _get
 from cjm_context_graph_projection.runtime import open_graph
+from cjm_dev_graph_schema.identity import code_module_node_id, code_symbol_node_id
 from cjm_python_decompose_core.extract import decompose_paths
 from cjm_python_decompose_core.ingest import corpus_graph_elements
 

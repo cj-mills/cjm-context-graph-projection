@@ -4,14 +4,12 @@ import asyncio
 import tempfile
 from pathlib import Path
 
-from cjm_context_graph_layer.ops import extend_graph
-from cjm_dev_graph_schema.identity import entity_node_id
-from cjm_dev_graph_schema.nodes import EntityNode
-
 import pytest
-
+from cjm_context_graph_layer.ops import extend_graph
 from cjm_context_graph_projection.readme import project_readme
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
+from cjm_dev_graph_schema.identity import entity_node_id
+from cjm_dev_graph_schema.nodes import EntityNode
 
 # These drive the real graph-storage worker capability via open_graph().
 # Skip wherever its manifest isn't discoverable (e.g. CI).

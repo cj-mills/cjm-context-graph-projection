@@ -1,9 +1,11 @@
 """The post page's projected parts (design 39c51c15): the author strip and the end matter."""
 
-from cjm_context_graph_projection.postpage import (display_date, end_plan, header_meta, links_line, load_holder,
-                                                   load_reading_guide, load_site_links, load_site_nav,
-                                                   load_strip_copy, nav_entries, post_licenses, related_posts,
-                                                   render_end, render_related, render_reuse, site_footer, site_nav)
+from cjm_context_graph_projection.postpage import (display_date, end_plan, header_meta, links_line,
+                                                   load_holder, load_reading_guide, load_site_links,
+                                                   load_site_nav, load_strip_copy, nav_entries,
+                                                   post_licenses, related_posts, render_end,
+                                                   render_related, render_reuse, site_footer,
+                                                   site_nav)
 
 COPY = {"byline": "**A** — a byline.", "links": "[About](/about.html)",
         "pitch": "Hire me for {claims}: [how]({href}).", "questions": "Ask below."}

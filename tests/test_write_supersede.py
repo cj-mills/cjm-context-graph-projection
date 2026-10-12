@@ -11,7 +11,6 @@ import asyncio
 from pathlib import Path
 
 import pytest
-
 from cjm_context_graph_projection import factlayer as F
 from cjm_context_graph_projection.cli import _assert_journaled
 from cjm_context_graph_projection.journal import replay_journal

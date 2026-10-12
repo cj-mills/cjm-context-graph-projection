@@ -12,29 +12,28 @@ from pathlib import Path
 
 import pytest
 import yaml
-
 from cjm_context_graph_layer.ops import extend_graph
 from cjm_context_graph_projection.archive import retire_source
-from cjm_dev_graph_schema.identity import (deliverable_type_node_id, note_node_id, series_node_id,
-                                          topic_node_id)
-from cjm_dev_graph_schema.nodes import series_member_edge
-from cjm_dev_graph_schema.vocab import DevNodeKinds
-from cjm_markdown_decompose_core.extract import note_from_text
-from cjm_markdown_decompose_core.ingest import corpus_graph_elements
-
-from cjm_context_graph_projection.lens import lens_node_id, set_lens, validate_lens_spec
-from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
-from cjm_context_graph_projection.series import mint_series, set_series_members
 from cjm_context_graph_projection.coverage import mint_entity
 from cjm_context_graph_projection.facetjudge import judge_facets
 from cjm_context_graph_projection.facetreview import review_facets
 from cjm_context_graph_projection.judging import judge_related
-from cjm_context_graph_projection.site import publish_guard, redirect_plan, site_build
-from cjm_context_graph_projection.sitepages import (GENERATED, check_category_listing, group_through_series,
-                                                    is_generated, is_public, member_updated, page_plan,
-                                                    page_source, parse_date, project_pages, render_page)
+from cjm_context_graph_projection.lens import lens_node_id, set_lens, validate_lens_spec
 from cjm_context_graph_projection.purenotes import mint_deliverable_type, note_types
+from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
+from cjm_context_graph_projection.series import mint_series, set_series_members
+from cjm_context_graph_projection.site import publish_guard, redirect_plan, site_build
+from cjm_context_graph_projection.sitepages import (check_category_listing, GENERATED,
+                                                    group_through_series, is_generated, is_public,
+                                                    member_updated, page_plan, page_source,
+                                                    parse_date, project_pages, render_page)
 from cjm_context_graph_projection.write import assert_value
+from cjm_dev_graph_schema.identity import (deliverable_type_node_id, note_node_id, series_node_id,
+                                           topic_node_id)
+from cjm_dev_graph_schema.nodes import series_member_edge
+from cjm_dev_graph_schema.vocab import DevNodeKinds
+from cjm_markdown_decompose_core.extract import note_from_text
+from cjm_markdown_decompose_core.ingest import corpus_graph_elements
 
 _HAVE_GRAPH = (Path(DEFAULT_MANIFESTS) / f"{DEFAULT_GRAPH_ID}.json").exists()
 _HAVE_QUARTO = shutil.which("quarto") is not None

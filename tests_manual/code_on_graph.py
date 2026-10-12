@@ -24,6 +24,7 @@ Run in a core env with the substrate runtime + the new libs installed -e:
     conda run -n cjm-transcript-correction-core --no-capture-output python \
         cjm-context-graph-projection/tests_manual/code_on_graph.py
 """
+
 import argparse
 import asyncio
 import sys
@@ -31,15 +32,13 @@ import tempfile
 from pathlib import Path
 
 from cjm_context_graph_layer.ops import extend_graph
-from cjm_dev_graph_schema.identity import (code_module_node_id, code_symbol_node_id,
-                                           decision_node_id)
-from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
-
 from cjm_context_graph_projection.devgraph import build_dev_graph_elements
 from cjm_context_graph_projection.projection import relevant, show
 from cjm_context_graph_projection.runtime import open_graph
 from cjm_context_graph_projection.seeds import conceptual_key
 from cjm_context_graph_projection.write import decide, link
+from cjm_dev_graph_schema.identity import code_module_node_id, code_symbol_node_id, decision_node_id
+from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 
 REPOS = "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills"
 MEMORY = ("/home/innom-dt/.claude/projects/"

@@ -8,13 +8,7 @@ import re
 from pathlib import Path
 
 import pytest
-
 from cjm_context_graph_layer.ops import extend_graph
-from cjm_dev_graph_schema import predicates as P
-from cjm_dev_graph_schema.identity import note_node_id, series_node_id
-from cjm_markdown_decompose_core.extract import note_from_text
-from cjm_markdown_decompose_core.ingest import corpus_graph_elements
-
 from cjm_context_graph_projection.coverage import mint_entity, project_matrix, record_verification
 from cjm_context_graph_projection.lens import apply_lens, lens_node_id, set_lens
 from cjm_context_graph_projection.listing import list_graph
@@ -23,7 +17,12 @@ from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIF
 from cjm_context_graph_projection.series import mint_series, set_series_members
 from cjm_context_graph_projection.site import redirect_plan
 from cjm_context_graph_projection.sitepages import GENERATED, page_plan
-from cjm_context_graph_projection.tutorialspage import _md_inline, anchor, learning_paths, render_body
+from cjm_context_graph_projection.tutorialspage import (_md_inline, anchor, learning_paths,
+                                                        render_body)
+from cjm_dev_graph_schema import predicates as P
+from cjm_dev_graph_schema.identity import note_node_id, series_node_id
+from cjm_markdown_decompose_core.extract import note_from_text
+from cjm_markdown_decompose_core.ingest import corpus_graph_elements
 
 _HAVE_GRAPH = (Path(DEFAULT_MANIFESTS) / f"{DEFAULT_GRAPH_ID}.json").exists()
 

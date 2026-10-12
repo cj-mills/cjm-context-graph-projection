@@ -13,6 +13,7 @@ written). Run in a core env with the substrate runtime + the libs installed -e:
     conda run -n cjm-transcript-correction-core --no-capture-output python \
         cjm-context-graph-projection/tests_manual/rename.py
 """
+
 import ast
 import asyncio
 import sys
@@ -20,11 +21,10 @@ import tempfile
 from pathlib import Path
 
 from cjm_context_graph_layer.ops import extend_graph
-from cjm_dev_graph_schema.identity import code_module_node_id, code_symbol_node_id
-
 from cjm_context_graph_projection.projection import show
 from cjm_context_graph_projection.rename_ops import rename_symbol
 from cjm_context_graph_projection.runtime import open_graph
+from cjm_dev_graph_schema.identity import code_module_node_id, code_symbol_node_id
 from cjm_python_decompose_core.extract import decompose_paths
 from cjm_python_decompose_core.ingest import corpus_graph_elements
 

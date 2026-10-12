@@ -8,21 +8,20 @@ import json
 from pathlib import Path
 
 import pytest
-
 from cjm_context_graph_layer.ops import extend_graph
 from cjm_context_graph_primitives.journal import append_write
+from cjm_context_graph_projection import factlayer as F
+from cjm_context_graph_projection.comments import (fetch_threads, harvest_discussions,
+                                                   load_comments_config, load_threads, map_threads,
+                                                   page_comments, path_key, plan_threads,
+                                                   render_comments)
+from cjm_context_graph_projection.journal import replay_journal
+from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
+from cjm_context_graph_projection.write import assert_value
 from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.identity import note_node_id
 from cjm_markdown_decompose_core.extract import note_from_text
 from cjm_markdown_decompose_core.ingest import corpus_graph_elements
-
-from cjm_context_graph_projection import factlayer as F
-from cjm_context_graph_projection.comments import (fetch_threads, harvest_discussions, load_comments_config,
-                                                   load_threads, map_threads, page_comments, path_key,
-                                                   plan_threads, render_comments)
-from cjm_context_graph_projection.journal import replay_journal
-from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
-from cjm_context_graph_projection.write import assert_value
 
 _HAVE_GRAPH = (Path(DEFAULT_MANIFESTS) / f"{DEFAULT_GRAPH_ID}.json").exists()
 

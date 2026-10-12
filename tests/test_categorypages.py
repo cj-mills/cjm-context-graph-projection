@@ -3,8 +3,10 @@ its display name in one flat namespace; a chip links its category's page where o
 the category listing filtered to it; an entry below the threshold serves a redirect stub into
 that filtered listing; the index lists the earned pages by kind in the chip order."""
 
-from cjm_context_graph_projection.categorypages import (_stub, category_slug, description_basis, description_criteria,
-                                                       description_stale, entry_record, index_body, parse_descriptions)
+from cjm_context_graph_projection.categorypages import (_stub, category_slug, description_basis,
+                                                        description_criteria, description_stale,
+                                                        entry_record, index_body,
+                                                        parse_descriptions)
 from cjm_context_graph_projection.postpage import category_links, header_meta
 
 

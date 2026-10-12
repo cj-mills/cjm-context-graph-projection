@@ -5,16 +5,16 @@ if `cli` forgets to import the name into its own namespace (which broke the real
 run with a NameError at dispatch). This drives the actual CLI end-to-end in a subprocess, so the
 dispatch path's imports are exercised for real.
 """
+
 import json
 import subprocess
 import sys
-
 from pathlib import Path
 
 import pytest
-
 from cjm_context_graph_primitives.journal import read_journal
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS
+
 from conftest import commit_all
 
 # Integration smoke: drives the real CLI, which needs the graph-storage worker

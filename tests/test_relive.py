@@ -16,7 +16,6 @@ import sys
 from pathlib import Path
 
 import pytest
-
 from cjm_context_graph_projection.codefold import CodeFold
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS
 from cjm_dev_graph_schema.identity import code_module_node_id, code_symbol_node_id

@@ -18,6 +18,7 @@ Run in a core env with the substrate runtime + the new libs installed:
 
 A SCRATCH db is used; no real graph is touched.
 """
+
 import argparse
 import asyncio
 import sys
@@ -25,7 +26,6 @@ import tempfile
 from pathlib import Path
 
 from cjm_context_graph_layer.ops import extend_graph
-
 from cjm_context_graph_projection.devgraph import build_dev_graph_elements
 from cjm_context_graph_projection.projection import get_schema, relevant, show, state
 from cjm_context_graph_projection.runtime import open_graph

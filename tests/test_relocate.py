@@ -13,17 +13,16 @@ import sys
 from pathlib import Path
 
 import pytest
-
-from cjm_dev_graph_schema import predicates as P
-from cjm_dev_graph_schema.identity import note_node_id
-
-from cjm_context_graph_projection.relocate import (BLOCK_END, BLOCK_START, ast_targets, copy_dir, copy_targets,
-                                                   copy_url, include_paths, land_relocations, merge_readme,
-                                                   parse_copy_url, pointer_block, render_copy, repo_candidates,
+from cjm_context_graph_projection.relocate import (ast_targets, BLOCK_END, BLOCK_START, copy_dir,
+                                                   copy_targets, copy_url, include_paths,
+                                                   land_relocations, merge_readme, parse_copy_url,
+                                                   pointer_block, render_copy, repo_candidates,
                                                    resolve_target, strip_chrome, with_lead)
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
 from cjm_context_graph_projection.site import redirect_plan
 from cjm_context_graph_projection.standing import load_standing
+from cjm_dev_graph_schema import predicates as P
+from cjm_dev_graph_schema.identity import note_node_id
 
 _HAVE_GRAPH = (Path(DEFAULT_MANIFESTS) / f"{DEFAULT_GRAPH_ID}.json").exists()
 _HAVE_QUARTO = shutil.which("quarto") is not None

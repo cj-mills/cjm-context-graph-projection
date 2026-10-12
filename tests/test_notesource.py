@@ -10,16 +10,14 @@ import sys
 from pathlib import Path
 
 import pytest
-
-from cjm_dev_graph_schema.identity import note_node_id, section_node_id
-from cjm_markdown_decompose_core.extract import note_from_text
-
 from cjm_context_graph_projection.journal import _merge_windows
 from cjm_context_graph_projection.notesource import (birth_records, capture_records, CUTOVER,
-                                                    fold_records, ingest_records, NotesFoldError,
-                                                    place_records, replay_spans, retire_records,
-                                                    section_edit_records)
+                                                     fold_records, ingest_records, NotesFoldError,
+                                                     place_records, replay_spans, retire_records,
+                                                     section_edit_records)
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS
+from cjm_dev_graph_schema.identity import note_node_id, section_node_id
+from cjm_markdown_decompose_core.extract import note_from_text
 
 from conftest import commit_all
 

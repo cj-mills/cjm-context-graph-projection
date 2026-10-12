@@ -25,6 +25,7 @@ Run (SCRATCH dbs + a COPY of the memory dir; nothing real is mutated):
     conda run -n cjm-transcript-correction-core --no-capture-output python \
         cjm-context-graph-projection/tests_manual/m3_cutover.py
 """
+
 import argparse
 import asyncio
 import shutil
@@ -33,19 +34,19 @@ import tempfile
 from pathlib import Path
 
 from cjm_context_graph_layer.ops import extend_graph
-from cjm_dev_graph_schema.identity import note_node_id
-from cjm_dev_graph_schema.vocab import DevNodeKinds
-
+from cjm_context_graph_primitives.journal import append_write
 from cjm_context_graph_projection import factlayer as F
 from cjm_context_graph_projection.authoring import emit_artifact
 from cjm_context_graph_projection.devgraph import build_dev_graph_elements
 from cjm_context_graph_projection.factlayer import note_alias_map
-from cjm_context_graph_projection.journal import m3_baseline_import, journal_sourced_note_paths, replay_journal
-from cjm_context_graph_primitives.journal import append_write
+from cjm_context_graph_projection.journal import (journal_sourced_note_paths, m3_baseline_import,
+                                                  replay_journal)
 from cjm_context_graph_projection.onboarding import project_onboarding
 from cjm_context_graph_projection.reconcile import reconcile_memory
 from cjm_context_graph_projection.runtime import open_graph
 from cjm_context_graph_projection.write import author_section
+from cjm_dev_graph_schema.identity import note_node_id
+from cjm_dev_graph_schema.vocab import DevNodeKinds
 
 DEFAULT_MEMORY = ("/home/innom-dt/.claude/projects/"
                   "-mnt-SN850X-8TB-EXT4-Projects-GitHub-cj-mills-cjm-substrate/memory")

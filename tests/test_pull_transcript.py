@@ -2,9 +2,9 @@
 
 from types import SimpleNamespace
 
-from cjm_context_graph_projection.pull_transcript import (
-    MESSAGE_SOURCE_CC, MESSAGE_SOURCE_HARNESS, MESSAGE_SOURCE_TOOL_PARAM,
-    build_mint_batch, build_pull_payload)
+from cjm_context_graph_projection.pull_transcript import (build_mint_batch, build_pull_payload,
+                                                          MESSAGE_SOURCE_CC, MESSAGE_SOURCE_HARNESS,
+                                                          MESSAGE_SOURCE_TOOL_PARAM)
 from cjm_dev_graph_schema.identity import message_node_id, session_node_id
 from cjm_dev_graph_schema.vocab import DevNodeKinds
 

@@ -30,6 +30,7 @@ Run in a core env with the substrate runtime + the libs installed -e:
     conda run -n cjm-transcript-correction-core --no-capture-output python \
         cjm-context-graph-projection/tests_manual/authoring.py
 """
+
 import argparse
 import ast
 import asyncio
@@ -39,24 +40,19 @@ import tempfile
 from pathlib import Path
 
 from cjm_context_graph_layer.ops import extend_graph, graph_task
-from cjm_dev_graph_schema.identity import (cell_node_id, code_module_node_id,
-                                           code_symbol_node_id, code_text_node_id,
-                                           note_node_id, section_node_id)
-
 from cjm_context_graph_projection.authoring import author, emit_artifact, read_slot
 from cjm_context_graph_projection.devgraph import build_dev_graph_elements
 from cjm_context_graph_projection.runtime import open_graph
 from cjm_context_graph_projection.seeds import conceptual_key
-
-from cjm_python_decompose_core.extract import decompose_file
-from cjm_python_decompose_core.ingest import corpus_graph_elements
-from cjm_notebook_decompose_core.compose import (decompose_notebook_file,
-                                                 module_path_for_notebook)
-from cjm_notebook_decompose_core.ingest import notebook_graph_elements
-
+from cjm_dev_graph_schema.identity import (cell_node_id, code_module_node_id, code_symbol_node_id,
+                                           code_text_node_id, note_node_id, section_node_id)
 from cjm_markdown_decompose_core.extract import note_from_file
 from cjm_markdown_decompose_core.ingest import corpus_graph_elements as md_corpus_graph_elements
 from cjm_markdown_decompose_core.sections import PREAMBLE_ANCHOR
+from cjm_notebook_decompose_core.compose import decompose_notebook_file, module_path_for_notebook
+from cjm_notebook_decompose_core.ingest import notebook_graph_elements
+from cjm_python_decompose_core.extract import decompose_file
+from cjm_python_decompose_core.ingest import corpus_graph_elements
 
 REPOS = "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills"
 MEMORY = ("/home/innom-dt/.claude/projects/"

@@ -1,6 +1,6 @@
 """Module cohesion audit (pure compute over code-graph slices)."""
 
-from cjm_context_graph_projection.cohesion import compute_cohesion, _tokens
+from cjm_context_graph_projection.cohesion import _tokens, compute_cohesion
 
 
 def _mod(mid, repo, path):

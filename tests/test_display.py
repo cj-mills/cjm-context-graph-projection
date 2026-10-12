@@ -3,7 +3,6 @@
 import asyncio
 
 import pytest
-
 from cjm_context_graph_projection.display import (Displayer, first_clause, node_title,
                                                   parse_template, set_display_rule)
 from cjm_context_graph_projection.render import render

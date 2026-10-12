@@ -4,10 +4,8 @@ import asyncio
 from pathlib import Path
 
 import pytest
-
 from cjm_context_graph_layer.grammar import make_edge
 from cjm_context_graph_layer.ops import extend_graph
-
 from cjm_context_graph_projection.projection import full_graph_view, subgraph_view
 from cjm_context_graph_projection.render import render
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph

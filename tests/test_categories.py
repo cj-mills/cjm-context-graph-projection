@@ -2,9 +2,8 @@
 tutorial's teaches_* facts, the matrix's structural rows never -- chips by display name in the
 order task, stage, model, tool, subject; a Series page's chips are what most members carry."""
 
-from cjm_dev_graph_schema import predicates as P
-
 from cjm_context_graph_projection.categories import chip_vocab, majority, post_chips
+from cjm_dev_graph_schema import predicates as P
 
 
 def _e(kind, key, name):

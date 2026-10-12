@@ -4,7 +4,6 @@ uncaptured-module audit (the CLI-side wiring is exercised live; these pin the lo
 import argparse
 
 import pytest
-
 from cjm_context_graph_projection.cli import _decide_state
 from cjm_context_graph_projection.source_state import append_source, uncaptured_modules
 
