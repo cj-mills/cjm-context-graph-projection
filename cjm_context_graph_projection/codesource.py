@@ -42,8 +42,8 @@ from cjm_dev_graph_schema.identity import (code_module_node_id, code_symbol_node
 from cjm_dev_graph_schema.nodes import CodeTextNode
 from cjm_dev_graph_schema.vocab import DevRelations
 from cjm_python_decompose_core.elements import (_parse_own, binding_union, CodeElement,
-                                                compose_module, import_slot, IMPORTS, lift_imports,
-                                                unresolved_names)
+                                                compose_module, element_names, import_slot, IMPORTS,
+                                                lift_imports, unresolved_names)
 from cjm_python_decompose_core.emit import (_looks_like_docstring, render_import_block,
                                             sibling_modules)
 from cjm_python_decompose_core.extract import _text_region_kind, decompose_text
@@ -307,7 +307,18 @@ class SourceState:
     ) -> Set[str]:  # The element-regime module ids it touches (empty for a snapshot record)
         verb, a = rec.get("verb"), rec.get("args") or {}
         if verb in ELEMENT_VERBS:
-            return self.elements.apply(rec)
+            m = self.elements.modules.get(a.get("module")) if verb in (MODULE, CAPTURE) else None
+            was = (m.repo_key, m.module_path) if m is not None else None
+            touched = self.elements.apply(rec)
+            m = self.elements.modules.get(a.get("module"))
+            if verb == CAPTURE:  # a captured module is graph-sourced (a born one has no cutover record)
+                self.sourced.add((m.repo_key, m.module_path))
+            elif verb == MODULE and was is not None and was != (m.repo_key, m.module_path):
+                self.latest.pop(was, None)  # a re-stated path: the key moves, the old one ends
+                if was in self.sourced:
+                    self.sourced.discard(was)
+                    self.sourced.add((m.repo_key, m.module_path))
+            return touched
         key = (a.get("repo_key"), a.get("module_path"))
         if verb == "source":
             if self.elements.captured(key) is not None:
@@ -487,50 +498,79 @@ def _authored_rename(
 
 def absorb_records(
     state: SourceState,  # The source state as the write finds it
-    mid: str,            # The captured module the text is for
+    mid: str,            # The captured module the text is for (or the module the write gives birth to)
     text: str,           # The module's new text (a verb's emit, or the edited file)
     renames: Optional[List[Tuple[str, str]]] = None,  # Keep-identity renames the verb names: (old qualname, new qualname)
     authored: Optional[str] = None,  # The element the verb edited (author's node id)
+    departing: Optional[Set[str]] = None,  # Symbol elements leaving this module in this write (a move's; their members go with them)
+    arrivals: Optional[Dict[str, str]] = None,  # Top-level qualname -> the element arriving from another captured module in this write
+    restate: Optional[Dict[str, str]] = None,  # The module's own state as the write states it ({repo_key, module_path, import_name}): a rename-module, or a birth when `mid` is not journaled
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:  # (the element records for what changed, the report)
     """A write to a captured module, at element grain (abfc2829 (7)): the new text is lifted into
     elements and each is matched to the element it continues -- a symbol by its qualname (through the
     verb's renames; the def an `author` edit renamed keeps its id), the import block to the module's
     one imports element, the module docstring to the module docstring, a text element by identical
-    text, then by its leading line, then one to one within the same gap between matched neighbours; more than one candidate on both sides of a gap is
-    REFUSED (`CodeSourceError`): a guess would hand an id to the wrong content. Records land for what
-    changed only: an `element` record for new or changed content (text or bindings), a `place` record
-    for a new or changed placement, an `element-retire` for an element the text no longer holds; a
-    birth takes its address (design detail 6d35c07d (5)). THE BINDING CHECK (abfc2829 (2)): a write
-    that leaves a name read that no binding, builtin or module-level name covers is refused -- the
-    name it introduces, so a module never holds a NameError between two writes; a binding no element
-    claims is kept on the imports element and reported (`unclaimed`), never pruned. Pure -- the caller
-    appends; the records applied to the state must compose the canonical text, or the write is refused."""
+    text, then by its leading line, then one to one within the same gap between matched neighbours;
+    more than one candidate on both sides of a gap is REFUSED (`CodeSourceError`): a guess would hand
+    an id to the wrong content. Records land for what changed only: an `element` record for new or
+    changed content (text or bindings), a `place` record for a new or changed placement, an
+    `element-retire` for an element the text no longer holds; a birth takes its address (design
+    detail 6d35c07d (5)). THE BINDING CHECK (abfc2829 (2)): a write that leaves a name read that no
+    binding, builtin or module-level name covers is refused -- the name it introduces, so a module
+    never holds a NameError between two writes; a binding no element claims is kept on the imports
+    element and reported (`unclaimed`), never pruned.
+
+    A MOVE (design detail aba8ec79 (2)): an arrival keeps its element id and brings its members, its
+    bindings travelling with it (those its text still names); a departure is never retired here, and
+    the bindings it owned leave with it rather than falling to this module's imports element. A
+    `restate` re-states the module's own path under its kept id (a rename-module, (4)) or, for a
+    module not yet journaled, gives birth to it captured: module record first, capture last (the
+    user's ruling bef8e6b8). Pure -- the caller appends; the records applied to the state must
+    compose the canonical text, or the write is refused."""
     fold = state.elements
-    m = fold.modules[mid]
-    local = state.siblings((m.repo_key, m.module_path))
+    cur = fold.modules.get(mid)
+    if cur is None and restate is None:
+        raise CodeSourceError(f"{mid}: no journaled module and no birth stated")
+    born_module = cur is None
+    own = dict(restate) if restate else {"repo_key": cur.repo_key, "module_path": cur.module_path,
+                                         "import_name": cur.import_name}
+    m = ModuleState(mid, own["repo_key"], own["module_path"], own.get("import_name") or "", True)
+    paths = {mp for rk, mp in state.live_keys() if rk == m.repo_key}
+    if cur is not None and cur.repo_key == m.repo_key:
+        paths.discard(cur.module_path)
+    local = sibling_modules(m.module_path, paths | {m.module_path})
     try:
         new = lift_imports(text).elements
-        canonical = compose_module(new, local)
-        if _shape(lift_imports(canonical).elements) != _shape(new):
-            raise CodeSourceError(f"{m.module_path}: the text does not decompose to the elements it composes")
     except (SyntaxError, ValueError) as e:
-        if isinstance(e, CodeSourceError):
-            raise
         raise CodeSourceError(f"{m.module_path}: the text does not parse: {e}") from e
-    unresolved = unresolved_names(canonical)
-    if unresolved:  # the binding check (abfc2829 (2)): a write never leaves a name nothing binds
-        added = unresolved - (unresolved_names(state.compose(mid)) or set())
-        if added:
-            raise CodeSourceError(
-                f"{m.module_path}: the write reads {', '.join(sorted(added))}, which no binding, builtin "
-                "or module-level name covers -- land the import in the same write (an import rider) "
-                "or before it (an unused import stays on the module's imports element)")
-    outline = fold.outline(mid)
-    addr = fold.addresses(mid)
+    outline = [] if born_module else fold.outline(mid)
+    addr = {} if born_module else fold.addresses(mid)
     by_qual = {q: eid for eid, q in addr.items()}
-    old_imports = fold.imports_element(mid)
+    old_imports = None if born_module else fold.imports_element(mid)
     old_ids = [eid for eid, _ in outline] + ([old_imports] if old_imports else [])
-    taken = set(fold.ever) | set(old_ids)
+    old_kids: Dict[Optional[str], List[str]] = {}
+    for eid, parent in outline:
+        old_kids.setdefault(parent, []).append(eid)
+    arrived: Set[str] = set()
+    for q, eid in (arrivals or {}).items():  # an arrival and its members, as their source holds them
+        src = fold.elements[eid].module
+        s_addr, s_out = fold.addresses(src), fold.outline(src)
+        sub = {eid}
+        for x, p in s_out:  # pre-order: a parent precedes its members
+            if p in sub:
+                sub.add(x)
+                old_kids.setdefault(p, []).append(x)
+        for x in sub:
+            if x in s_addr:
+                by_qual[q + s_addr[x][len(s_addr[eid]):]] = x
+        arrived |= sub
+    departed: Set[str] = set()
+    for eid in departing or ():
+        departed.add(eid)
+        for x, p in outline:
+            if p in departed:
+                departed.add(x)
+    taken = set(fold.ever) | set(old_ids) | arrived
     renames = list(renames or [])
     hint = _authored_rename(addr, new, renames, authored)
     if hint:
@@ -557,9 +597,6 @@ def absorb_records(
             else:
                 ids[i] = _text_id(mid, IMPORTS, taken)
                 taken.add(ids[i])
-    old_kids: Dict[Optional[str], List[str]] = {}
-    for eid, parent in outline:
-        old_kids.setdefault(parent, []).append(eid)
     new_kids: Dict[Optional[str], List[int]] = {}
     for i, e in enumerate(new):
         if e.kind != IMPORTS:
@@ -621,15 +658,50 @@ def absorb_records(
             key = _text_region_key(e.text)
             ids[i] = _text_id(mid, f"{owner}: {key}" if owner else key, taken)
             taken.add(ids[i])
+    if arrived or departed:  # bindings travel with their element (aba8ec79 (2))
+        bkey = lambda b: tuple(sorted(b.items()))
+        for i, e in enumerate(new):
+            if ids[i] in arrived:
+                names = element_names(e.text)
+                have = {bkey(b) for b in e.bindings}
+                e.bindings = e.bindings + [b for b in old_el[ids[i]].bindings
+                                           if b.get("name") in names and bkey(b) not in have]
+            elif e.kind == IMPORTS and departed:
+                owned = {bkey(b) for x in departed for b in old_el[x].bindings}
+                kept = {bkey(b) for b in old_el[old_imports].bindings} if old_imports else set()
+                e.bindings = [b for b in e.bindings if bkey(b) not in owned or bkey(b) in kept]
+    try:
+        canonical = compose_module(new, local)
+        back = lift_imports(canonical).elements
+    except (SyntaxError, ValueError) as e:
+        raise CodeSourceError(f"{m.module_path}: the text does not parse: {e}") from e
+    if [s[:4] for s in _shape(back)] != [s[:4] for s in _shape(new)] or compose_module(back, local) != canonical:
+        raise CodeSourceError(f"{m.module_path}: the text does not decompose to the elements it composes")
+    new = back  # every binding claimed by the names that read it
+    unresolved = unresolved_names(canonical)
+    if unresolved:  # the binding check (abfc2829 (2)): a write never leaves a name nothing binds
+        added = unresolved - (set() if born_module else (unresolved_names(state.compose(mid)) or set()))
+        if added:
+            raise CodeSourceError(
+                f"{m.module_path}: the write reads {', '.join(sorted(added))}, which no binding, builtin "
+                "or module-level name covers -- land the import in the same write (an import rider) "
+                "or before it (an unused import stays on the module's imports element)"
+                + ("; a moved def takes the helpers it reads with it" if arrived or departed else ""))
     recs: List[Dict[str, Any]] = []
+    restated = born_module or (cur.repo_key, cur.module_path, cur.import_name) != \
+        (m.repo_key, m.module_path, m.import_name)
+    if restated:
+        recs.append({"verb": MODULE, "args": {"module": mid, "repo_key": m.repo_key,
+                                              "module_path": m.module_path,
+                                              "import_name": m.import_name}})
     changed, placed, born = [], [], []
     last: Dict[Optional[str], Optional[str]] = {}
     for i, e in enumerate(new):
         eid = ids[i]
         old = old_el.get(eid) if eid in used else None
-        own = "" if e.kind == IMPORTS else e.text
-        if old is None or (old.kind, old.text, _bindings_key(old.bindings)) != (e.kind, own, _bindings_key(e.bindings)):
-            recs.append({"verb": ELEMENT, "args": {"element": eid, "kind": e.kind, "text": own,
+        own_text = "" if e.kind == IMPORTS else e.text
+        if old is None or (old.kind, old.text, _bindings_key(old.bindings)) != (e.kind, own_text, _bindings_key(e.bindings)):
+            recs.append({"verb": ELEMENT, "args": {"element": eid, "kind": e.kind, "text": own_text,
                                                    "bindings": list(e.bindings)}})
             (changed if old is not None else born).append(eid)
         if e.kind == IMPORTS:
@@ -643,13 +715,16 @@ def absorb_records(
                                                  "after": after}})
             if old is not None:
                 placed.append(eid)
-    retired = [eid for eid in old_ids if eid not in used]
+    retired = [eid for eid in old_ids if eid not in used and eid not in departed]
     recs.extend({"verb": ELEMENT_RETIRE, "args": {"element": eid}} for eid in retired)
+    if born_module:
+        recs.append({"verb": CAPTURE, "args": {"module": mid}})
     scratch = ElementFold()
-    scratch.modules[mid] = ModuleState(m.module, m.repo_key, m.module_path, m.import_name, True)
-    scratch.by_key[(m.repo_key, m.module_path)] = mid
-    for e in old_el.values():
-        if e.module == mid:
+    if cur is not None:
+        scratch.modules[mid] = ModuleState(cur.module, cur.repo_key, cur.module_path, cur.import_name, True)
+        scratch.by_key[(cur.repo_key, cur.module_path)] = mid
+    for e in old_el.values():  # a departure is placed elsewhere by its target's records in this write
+        if (e.module == mid and e.element not in departed) or e.element in arrived:
             scratch.elements[e.element] = replace(e, bindings=list(e.bindings))
     for r in recs:
         scratch.apply(r)
@@ -660,6 +735,8 @@ def absorb_records(
     report = {"module": mid, "repo_key": m.repo_key, "module_path": m.module_path, "text": canonical,
               "records": len(recs), "changed": changed, "placed": placed, "born": born,
               "retired": retired, "renamed": [list(hint)] if hint else [],
+              "arrived": sorted(arrived), "departed": sorted(departed),
+              "restated": "born" if born_module else ("path" if restated else ""),
               "unclaimed": [b.get("name") for b in imports.bindings],
               "binding_check": "unchecked (a star import)" if unresolved is None else "clean"}
     return recs, report
@@ -693,20 +770,22 @@ def derive_captured(
         raise CodeSourceError(f"{m.module_path}: the composed text does not decompose to its elements")
     dm = decompose_text(conceptual, m.module_path, path, text, import_name=m.import_name or None,
                         symbol_identity=symbol_identity)
-    if dm.module.id != mid:
-        raise CodeSourceError(f"{m.module_path}: module id {dm.module.id} is not the journaled {mid}")
     by_qual: Dict[str, int] = {}
     for i, e in enumerate(back):
         if e.kind == "symbol":
             if e.qualname in by_qual:
                 raise CodeSourceError(f"{m.module_path}: two elements named {e.qualname}")
             by_qual[e.qualname] = i
-    remap: Dict[str, str] = {}
-    wires: List[Dict[str, Any]] = [dm.module.to_graph_node()]
+    remap: Dict[str, str] = {dm.module.id: mid}  # the module keeps its journaled id across a rename (aba8ec79 (4))
+    module_wire = dm.module.to_graph_node()
+    module_wire["id"] = mid
+    wires: List[Dict[str, Any]] = [module_wire]
     top = [i for i, e in enumerate(els) if e.parent is None]
     order = {i: n for n, i in enumerate(top)}
     for s in dm.symbols:
         w = s.to_graph_node()
+        if w["properties"].get("module_id") == dm.module.id:
+            w["properties"]["module_id"] = mid
         i = by_qual.get(s.qualname)
         if i is not None:
             remap[w["id"]] = ids[i]
@@ -743,7 +822,10 @@ def derive_captured(
             w["properties"]["member_index"] = kids[e.parent].index(i)
         wires.append(w)
     present = {w["id"] for w in wires}
-    local: List[Dict[str, Any]] = [dm.module.about_edge()]
+    about = dm.module.about_edge()
+    local: List[Dict[str, Any]] = [about if about["source_id"] == mid else
+                                   make_edge(mid, about["target_id"], about["relation_type"],
+                                             about.get("properties"))]
     for edge in dm.local_edges:
         if edge["relation_type"] != DevRelations.DEFINES:
             continue

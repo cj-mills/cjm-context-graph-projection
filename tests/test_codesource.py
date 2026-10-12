@@ -9,7 +9,8 @@ from cjm_context_graph_projection.codefold import CodeFold
 from cjm_context_graph_projection.codesource import (absorb_records, capture_records, CodeSourceError,
                                                      ELEMENT, ELEMENT_RETIRE, PLACE, SourceState)
 from cjm_context_graph_projection.relive import _touched_keys
-from cjm_context_graph_projection.source_state import (append_source, flip_module, IdentityWalk,
+from cjm_context_graph_projection.source_state import (append_source, element_plan, flip_module,
+                                                       graph_sourced_modules, IdentityWalk,
                                                        journaled_emit, latest_source_ops)
 from cjm_dev_graph_schema.identity import code_module_node_id, code_symbol_node_id
 from cjm_python_decompose_core.elements import compose_module, lift_imports
@@ -302,11 +303,11 @@ def test_journaled_emit_and_flip_module_land_element_records(tmp_path):
     res = flip_module(str(journal), str(tmp_path / "repos"), LIB, TST)
     assert res["captured"] and res["element_grain"]["changed"] and not res["element_grain"]["born"]
     assert "!= 0" in latest_source_ops(str(journal))[(LIB, TST)]["text"]
-    refused = journaled_emit(str(journal), emissions=[{"repo_key": LIB, "module_path": TST,
-                                                       "import_name": "tests.test_store",
-                                                       "text": edited, "path": str(out)}],
-                             op={"op": "move", "symbols": ["test_open"], "identity": "keep"})
-    assert "does not carry" in refused["error"] and "!= 0" in out.read_text()
+    caller = journaled_emit(str(journal), emissions=[{"repo_key": LIB, "module_path": TST,
+                                                      "import_name": "tests.test_store",
+                                                      "text": edited, "path": str(out)}],
+                            op={"op": "move", "symbols": ["elsewhere"], "identity": "keep"})
+    assert not caller.get("error")  # a module the move only rewrites is an ordinary edit
 
 
 def test_a_retired_captured_module_takes_its_elements_with_it():
@@ -322,10 +323,17 @@ def _state(fold):
     return nodes, set(fold.edges)
 
 
-@pytest.mark.parametrize("step", ["capture", "rename", "absorb"])
+@pytest.mark.parametrize("step", ["capture", "rename", "absorb", "move"])
 def test_a_seeded_step_lands_where_the_whole_fold_lands(tmp_path, step):
     cap, _ = _capture(PREFIX)
     prefix, group = PREFIX, cap
+    if step == "move":  # an element and its members re-homed across two captured modules
+        prefix = _two_captured()
+        plans, _ = element_plan(SourceState.over(prefix),
+                                [_emit(TST, TEXT.replace(FAKE, "")),
+                                 _emit(OTHER, OTHER_TEXT + "\n\n" + FAKE.rstrip("\n") + "\n")],
+                                op={"op": "move", "symbols": ["FakeDeps"], "identity": "keep"})
+        group = [_rec(r["verb"], 300.0, r["args"]) for i in (0, 1) for r in plans[i][0]]
     if step == "absorb":  # a birth, a retire and a re-placed follower in one write
         prefix = PREFIX + cap
         text = TEXT.replace(TEXT[TEXT.index("    def path"):TEXT.index("def test_open")], "\n\n") + \
@@ -357,7 +365,7 @@ def test_a_seeded_step_lands_where_the_whole_fold_lands(tmp_path, step):
         live.advance(r)
     live.walk.flush()
     keys = _touched_keys(group, live.walk.state)
-    assert keys == [(LIB, TST)]
+    assert keys[0] == (LIB, TST) and set(keys) <= {(LIB, TST), (LIB, OTHER)}
     live.seed_corpus({k: [w for w in held[k][0] if w["label"] in ("CodeModule", "CodeSymbol")] for k in held})
     for k in keys:
         live.seed_module(k, *held[k])
@@ -367,9 +375,134 @@ def test_a_seeded_step_lands_where_the_whole_fold_lands(tmp_path, step):
     w_nodes, w_edges = _state(whole)
     l_nodes, l_edges = _state(live)
     for nid, val in w_nodes.items():
-        if nid == MID or val[0]["properties"].get("module_id") == MID:
+        if nid in (MID, MID2) or val[0]["properties"].get("module_id") in (MID, MID2):
             assert l_nodes.get(nid) == val, val[0]["properties"].get("qualname")
     local = ("ABOUT", "DEFINES", "CONTAINS")
     expect = {i for i, r in whole.edges.items()
               if r["wire"]["relation_type"] not in local or r["wire"]["source_id"] in set(l_nodes)}
     assert l_edges == expect
+
+
+# -- move, regroup, rename-module in the element regime (design detail aba8ec79) -----------------------
+OTHER = "tests/test_other.py"
+MID2 = code_module_node_id(LIB, OTHER)
+OTHER_TEXT = '''"""Other tests."""
+
+import json
+
+
+def test_json():
+    assert json.dumps(1)
+'''
+
+
+def _two_captured():
+    """TST and OTHER both captured (the tests phase), as one journal."""
+    prefix = PREFIX + [_src(103.0, OTHER, OTHER_TEXT), _rec("cutover", 104.0, {"repo_key": LIB, "module_path": OTHER})]
+    walk = IdentityWalk()
+    for r in prefix:
+        walk.apply(r)
+    walk.flush()
+    ever, recs = set(walk.state.elements.ever), []
+    for path, text in ((TST, TEXT), (OTHER, OTHER_TEXT)):
+        rs, _ = capture_records(LIB, LIB, path, path[:-3].replace("/", "."), text,
+                                symbol_identity=walk.ident.for_module(LIB, path), ever=ever)
+        ever |= {r["args"]["element"] for r in rs if r["args"].get("element")}
+        recs += [{**r, "ts": 200.0, "generation": 1} for r in rs]
+    return prefix + recs
+
+
+def _emit(mp, text, **kw):
+    return {"repo_key": LIB, "module_path": mp, "import_name": mp[:-3].replace("/", "."), "text": text, **kw}
+
+
+FAKE = TEXT[TEXT.index("class FakeDeps"):TEXT.index("def test_open")]
+
+
+def test_a_move_between_captured_modules_keeps_the_ids_and_the_bindings_travel(tmp_path):
+    prior = _two_captured()
+    state = SourceState.over(prior)
+    held = {e.element for e in state.elements.elements.values() if e.module == MID}
+    fake = _id(state, "class FakeDeps")
+    subtree = {fake, _id(state, "def path"), _id(state, 'name = "fake"')}
+    a_text = TEXT.replace(FAKE, "")
+    b_text = OTHER_TEXT + "\n\n" + FAKE.rstrip("\n") + "\n"
+    plans, _ = element_plan(state, [_emit(TST, a_text), _emit(OTHER, b_text)],
+                            op={"op": "move", "symbols": ["FakeDeps"], "identity": "keep"})
+    (a_recs, a_rep), (b_recs, b_rep) = plans[0], plans[1]
+    assert not a_rep["retired"] and set(a_rep["departed"]) == subtree
+    assert set(b_rep["arrived"]) == subtree and not b_rep["born"]
+    assert {r["args"]["element"] for r in b_recs if r["verb"] == PLACE} >= subtree
+    assert "import os" in b_rep["text"]  # the moved method's binding travelled
+    assert "import os" not in a_rep["text"] and "import sys" in a_rep["text"]  # left with its owner; sys stays
+    recs = [_rec(r["verb"], 300.0, r["args"]) for r in a_recs + b_recs]
+    fold, after, edges = _fold(prior + recs, tmp_path)
+    assert not fold.failures
+    assert after[fake]["properties"]["module_id"] == MID2
+    assert held <= set(after)  # nothing the source held left the graph: the moved ones were re-homed
+    inner = [n for n in after.values() if n["properties"].get("qualname") == "FakeDeps.path.inner"]
+    assert inner and inner[0]["properties"]["module_id"] == MID2
+
+
+def test_regroup_into_a_new_test_module_births_it_captured(tmp_path):
+    prior = _two_captured()
+    state = SourceState.over(prior)
+    test_open = _id(state, "def test_open")
+    new_path = "tests/test_born.py"
+    a_text = TEXT[:TEXT.index("def test_open")].rstrip("\n") + "\n"
+    b_text = "def test_open(tmp_store):\n    assert tmp_store\n"
+    plans, _ = element_plan(state, [_emit(TST, a_text), _emit(new_path, b_text, cutover=True)],
+                            op={"op": "regroup", "symbols": ["test_open"], "identity": "keep"})
+    b_recs, b_rep = plans[1]
+    assert b_recs[0]["verb"] == "module" and b_recs[-1]["verb"] == "capture" and b_rep["restated"] == "born"
+    assert test_open in b_rep["arrived"] and "from conftest import tmp_store" in b_rep["text"]
+    recs = [_rec(r["verb"], 300.0, r["args"]) for r in plans[0][0] + b_recs]
+    after_state = SourceState.over(prior + recs)
+    assert after_state.latest_ops()[(LIB, new_path)]["text"] == b_rep["text"]
+    assert (LIB, new_path) in after_state.sourced
+    fold, after, _ = _fold(prior + recs, tmp_path)
+    assert not fold.failures and after[test_open]["properties"]["module_id"] == b_recs[0]["args"]["module"]
+
+
+def test_rename_module_keeps_the_module_id_and_moves_the_key(tmp_path):
+    journal = tmp_path / "source.jsonl"
+    prior = _two_captured()
+    journal.write_text("".join(json.dumps(r) + "\n" for r in prior))
+    new_path = "tests/test_store_renamed.py"
+    receipt = journaled_emit(str(journal), emissions=[_emit(new_path, TEXT, cutover=True,
+                                                            path=str(tmp_path / "out.py"))],
+                             retires=[{"repo_key": LIB, "module_path": TST, "superseded_by": new_path}],
+                             op={"op": "rename-module", "from": TST, "to": new_path, "identity": "keep"})
+    assert not receipt.get("error")
+    assert [e["verb"] for e in receipt["events"]] == ["elements"] and receipt["events"][0]["restated"] == "path"
+    latest = latest_source_ops(str(journal))
+    assert (LIB, TST) not in latest and latest[(LIB, new_path)]["text"] == TEXT
+    assert (LIB, new_path) in graph_sourced_modules(str(journal)) and (LIB, TST) not in graph_sourced_modules(str(journal))
+    records = [json.loads(ln) for ln in journal.read_text().splitlines()]
+    fold, after, _ = _fold(records, tmp_path)
+    assert not fold.failures
+    assert after[MID]["properties"]["module_path"] == new_path  # the module kept its id
+    assert all(n["properties"].get("module_id") in (None, MID, MID2, code_module_node_id(LIB, CONF))
+               for n in after.values())
+
+
+def test_a_move_across_the_regimes_is_refused_whole(tmp_path):
+    journal = tmp_path / "source.jsonl"
+    prior = _two_captured()
+    journal.write_text("".join(json.dumps(r) + "\n" for r in prior))
+    conf = "import pytest\n\n\n@pytest.fixture\ndef tmp_store():\n    return 1\n\n\n" + \
+        "def test_open(tmp_store):\n    assert tmp_store\n"
+    receipt = journaled_emit(str(journal), emissions=[
+        _emit(TST, TEXT[:TEXT.index("def test_open")].rstrip("\n") + "\n", path=str(tmp_path / "a.py")),
+        _emit(CONF, conf, path=str(tmp_path / "b.py"))],
+        op={"op": "move", "symbols": ["test_open"], "identity": "keep"})
+    assert "not built yet" in receipt["error"] and not (tmp_path / "a.py").exists()
+    assert len(journal.read_text().splitlines()) == len(prior)
+
+
+def test_the_live_step_re_derives_the_module_a_move_leaves():
+    prior = _two_captured()
+    state = SourceState.over(prior)
+    fake = _id(state, "class FakeDeps")
+    keys = _touched_keys([_rec(PLACE, 300.0, {"element": fake, "module": MID2, "parent": None, "after": None})], state)
+    assert set(keys) == {(LIB, TST), (LIB, OTHER)}

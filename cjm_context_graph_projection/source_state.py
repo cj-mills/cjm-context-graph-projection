@@ -48,6 +48,7 @@ from typing import Any, Dict, Iterator, List, Mapping, Optional, Set, Tuple
 
 from cjm_context_graph_primitives.journal import (journal_segments, maybe_rotate, op_clock, op_now,
                                                   read_segment)
+from cjm_dev_graph_schema.identity import code_module_node_id
 from cjm_notebook_decompose_core.project import render_notebook
 from cjm_notebook_decompose_core.read import parse_notebook
 from cjm_python_decompose_core.emit import emit_module_from_nodes
@@ -567,10 +568,10 @@ def append_source(
     return True
 
 
-# Verbs whose writes to a captured module are refused until the element regime carries them: a move
-# or regroup re-homes an element across modules (place records into another module, its bindings
-# travelling with it), and a rename-module re-states the module's own path under its kept id.
-ELEMENT_REFUSED_OPS = ("move", "regroup", "rename-module", "flip-to-py")
+# Verbs whose writes to a captured module are refused: a notebook flip has no element regime.
+ELEMENT_REFUSED_OPS = ("flip-to-py",)
+CROSS_REGIME = ("a move between a captured module and a snapshot module is designed (aba8ec79 (5)) and "
+                "not built yet")
 
 
 def _op_hints(
@@ -586,6 +587,98 @@ def _op_hints(
     return renames, (op.get("node_id") if op.get("op") == "author" else None)
 
 
+def captured_phase(
+    state: SourceState,  # The source state
+    module_path: str,    # A module path
+) -> bool:  # Whether a module born at this path is born captured (the user's ruling bef8e6b8)
+    """A phase is captured whole, so it is captured once any of its modules is: today the tests
+    phase (the tests pilot); the package phase joins when its capture lands."""
+    return is_test_module_path(module_path) and any(
+        m.captured and is_test_module_path(m.module_path) for m in state.elements.modules.values())
+
+
+def element_plan(
+    state: SourceState,  # The source state as the write finds it
+    emissions: List[Dict[str, Any]],  # The write's module texts [{repo_key, module_path, import_name, text, cutover?}]
+    retires: Optional[List[Dict[str, Any]]] = None,  # The write's module retires [{repo_key, module_path, superseded_by?}]
+    op: Optional[Dict[str, Any]] = None,  # The verb's op provenance
+) -> Tuple[Dict[int, Tuple[List[Dict[str, Any]], Dict[str, Any]]], Set[Tuple[str, str]]]:  # (emission index -> its element records + report, the retired keys a re-stated module absorbs)
+    """The element regime's part of one write (abfc2829 (7), design detail aba8ec79): every emission
+    to a captured module, to a module the write gives birth to in a captured phase, or re-stating a
+    captured module's path becomes element records for what changed. A module's part in a move is
+    read from its text: the op's symbols it held and lost depart (their ids kept, their members and
+    bindings with them), the ones it gains arrive; a module with neither is a caller and its write
+    an ordinary edit. Raises `CodeSourceError` -- the whole write refused -- for an ambiguous edit,
+    an unbound name, a notebook flip of a captured module, and a move across the two regimes."""
+    op = op or {}
+    kind = op.get("op")
+    els = state.elements
+    retires = retires or []
+    restates: Dict[int, Tuple[str, Dict[str, str]]] = {}
+    absorbed: Set[Tuple[str, str]] = set()
+    for r in retires:
+        key = (r["repo_key"], r["module_path"])
+        mid = els.captured(key)
+        if mid is None:
+            continue
+        if kind in ELEMENT_REFUSED_OPS:
+            raise CodeSourceError(f"{key[0]}/{key[1]} is captured: `{kind}` has no element regime")
+        if kind != "rename-module":
+            continue  # a delete-module: the snapshot retire ends the key and its elements
+        to = op.get("to") or r.get("superseded_by")
+        idx = next((i for i, e in enumerate(emissions)
+                    if e["repo_key"] == key[0] and e["module_path"] == to), None)
+        if idx is None:
+            raise CodeSourceError(f"{key[0]}/{key[1]}: the rename names no emission for {to}")
+        restates[idx] = (mid, {"repo_key": key[0], "module_path": to,
+                               "import_name": emissions[idx].get("import_name") or ""})
+        absorbed.add(key)
+    symbols = set(op.get("symbols") or []) if kind in ("move", "regroup") else set()
+    latest = state.latest_ops()
+    departures: Dict[str, Tuple[str, str, int]] = {}  # name -> (module id, element id, emission index)
+    gains: Dict[int, Set[str]] = {}
+    for i, e in enumerate(emissions):
+        key = (e["repo_key"], e["module_path"])
+        mid = els.captured(key)
+        if mid is not None and kind in ELEMENT_REFUSED_OPS:
+            raise CodeSourceError(f"{key[0]}/{key[1]} is captured: `{kind}` has no element regime")
+        new_names = _top_level_names(e["text"]) if symbols else set()
+        if mid is not None:
+            held = {q: eid for eid, q in els.addresses(mid).items() if "." not in q}
+            for n in (symbols & set(held)) - new_names:
+                departures[n] = (mid, held[n], i)
+            gains[i] = (symbols & new_names) - set(held)
+        else:
+            prev = latest.get(key)
+            gains[i] = (symbols & new_names) - (_top_level_names(prev["text"]) if prev else set())
+    plans: Dict[int, Tuple[List[Dict[str, Any]], Dict[str, Any]]] = {}
+    renames, authored = _op_hints(op)
+    for i, e in enumerate(emissions):
+        key = (e["repo_key"], e["module_path"])
+        mid, restate = els.captured(key), None
+        if i in restates:
+            mid, restate = restates[i]
+        elif mid is None:
+            if not (key not in latest and e.get("cutover") and captured_phase(state, key[1])):
+                if gains[i] & set(departures):
+                    raise CodeSourceError(f"{key[0]}/{key[1]}: {CROSS_REGIME}")
+                continue  # the snapshot regime's write
+            from .seeds import conceptual_key
+            mid = code_module_node_id(conceptual_key(key[0]), key[1])  # born captured (bef8e6b8)
+            restate = {"repo_key": key[0], "module_path": key[1],
+                       "import_name": e.get("import_name") or ""}
+        stray = gains[i] - set(departures)
+        if stray:
+            raise CodeSourceError(f"{key[0]}/{key[1]} gains {', '.join(sorted(stray))}: {CROSS_REGIME}")
+        plans[i] = absorb_records(state, mid, e["text"], renames=renames, authored=authored,
+                                  departing={d[1] for d in departures.values() if d[2] == i},
+                                  arrivals={n: departures[n][1] for n in gains[i]}, restate=restate)
+    lost = [n for n in departures if not any(n in gains[j] for j in plans)]
+    if lost:
+        raise CodeSourceError(f"{', '.join(sorted(lost))} leaves a captured module: {CROSS_REGIME}")
+    return plans, absorbed
+
+
 def element_absorb(
     state: SourceState,  # The source state as the write finds it
     repo_key: str,       # Journal-space repo key
@@ -593,17 +686,11 @@ def element_absorb(
     text: str,           # The module's new text
     op: Optional[Dict[str, Any]] = None,  # The verb's op provenance (identity hints)
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:  # (the element records for what changed, the report)
-    """A write to a CAPTURED module at element grain (abfc2829 (7), `codesource.absorb_records`):
-    the text becomes element records for what changed only. Raises `CodeSourceError` for a verb the
-    element regime does not carry yet (`ELEMENT_REFUSED_OPS`) and for an ambiguous edit."""
-    kind = (op or {}).get("op")
-    if kind in ELEMENT_REFUSED_OPS:
-        raise CodeSourceError(f"{repo_key}/{module_path} is captured: `{kind}` does not carry the "
-                              "element regime yet (an element re-homed across modules, a module's "
-                              "own path re-stated)")
-    mid = state.elements.captured((repo_key, module_path))
-    renames, authored = _op_hints(op)
-    return absorb_records(state, mid, text, renames=renames, authored=authored)
+    """One captured module's write at element grain -- `element_plan` over a single emission (a file
+    edit, an authored text)."""
+    plans, _ = element_plan(state, [{"repo_key": repo_key, "module_path": module_path, "text": text}],
+                            op=op)
+    return plans[0]
 
 
 def append_elements(
@@ -1001,9 +1088,10 @@ def journaled_emit(
     `unjournaled_files` (auto-capturing would flip phase discipline silently —
     `flip-module` is the deliberate capture verb); write=True with events to land and no
     journal path REFUSES outright. Journaled emissions land their CANONICAL text on disk,
-    so file == journal by construction (the absorb-rewrite folded in). An emission to a CAPTURED
-    module lands at element grain (`element_absorb`: element records for what changed only, the
-    op's identity hints honoured); a verb the element regime does not carry yet is refused whole."""
+    so file == journal by construction (the absorb-rewrite folded in). The element regime's part of
+    the write (`element_plan`) lands as element records: an emission to a captured module, a module
+    born into a captured phase, a captured module's re-stated path (its retire absorbed); a move
+    across the two regimes or a notebook flip of a captured module is refused whole."""
     emissions, retires = emissions or [], retires or []
     deletes, registers = deletes or [], registers or []
     receipt: Dict[str, Any] = {"op": (op or {}).get("op"), "journal_first": True,
@@ -1018,19 +1106,14 @@ def journaled_emit(
     latest, sourced = state.latest_ops(), state.sourced
     # Phase 1: validate/canonicalize everything — no side effects yet.
     plans: List[Dict[str, Any]] = []
-    for r in retires:
-        if state.elements.captured((r["repo_key"], r["module_path"])) is not None \
-                and (op or {}).get("op") in ELEMENT_REFUSED_OPS:
-            return {"error": f"{r['repo_key']}/{r['module_path']} is captured: `{op['op']}` does not "
-                             "carry the element regime yet — NOTHING journaled or written", **receipt}
-    for e in emissions:
+    try:
+        eplans, absorbed = element_plan(state, emissions, retires, op)
+    except (CodeSourceError, SyntaxError, ValueError) as err:
+        return {"error": f"{err} — NOTHING journaled or written", **receipt}
+    for i, e in enumerate(emissions):
         key = (e["repo_key"], e["module_path"])
-        if state.elements.captured(key) is not None:
-            try:
-                recs, rep = element_absorb(state, key[0], key[1], e["text"], op=op)
-            except (CodeSourceError, SyntaxError, ValueError) as err:
-                return {"error": f"{key[0]}/{key[1]} (captured): {err} — NOTHING journaled or "
-                                 "written", **receipt}
+        if i in eplans:
+            recs, rep = eplans[i]
             plans.append({**e, "_journaled": True, "_canonical": rep.pop("text"),
                           "_elements": recs, "_report": rep})
             continue
@@ -1058,7 +1141,9 @@ def journaled_emit(
             receipt["events"].append({"verb": "elements", "repo_key": p["repo_key"],
                                       "module_path": p["module_path"], "appended": bool(appended),
                                       **{k: p["_report"][k] for k in ("records", "changed", "placed",
-                                                                      "born", "retired", "renamed")}})
+                                                                      "born", "retired", "renamed",
+                                                                      "arrived", "departed",
+                                                                      "restated")}})
             continue
         if not p["_journaled"]:
             continue
@@ -1074,6 +1159,8 @@ def journaled_emit(
             receipt["events"].append({"verb": "cutover", "repo_key": p["repo_key"],
                                       "module_path": p["module_path"], "appended": write})
     for r in retires:
+        if (r["repo_key"], r["module_path"]) in absorbed:
+            continue  # a re-stated captured module: its module record moved the key
         appended = write and append_retire(source_journal_path, r["repo_key"],
                                            r["module_path"],
                                            superseded_by=r.get("superseded_by"), op_meta=op)

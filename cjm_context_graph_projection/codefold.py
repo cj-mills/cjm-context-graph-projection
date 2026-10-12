@@ -52,7 +52,7 @@ from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 from cjm_python_decompose_core.extract import decompose_text
 from cjm_python_decompose_core.ingest import resolve_import
 
-from .codesource import CAPTURE, CodeSourceError, derive_captured, ELEMENT_VERBS
+from .codesource import CAPTURE, CodeSourceError, derive_captured, ELEMENT_VERBS, MODULE
 from .seeds import conceptual_key, repo_dir_name
 from .source_state import IdentityWalk, is_test_module_path, read_source_journal
 
@@ -343,9 +343,11 @@ class CodeFold:
             self.failures.append({"repo_key": raw[0], "module_path": raw[1], "ts": rec.get("ts"),
                                   "error": "a snapshot record names a captured module (not applied)"})
             return None, set()
+        was = state.elements.modules.get(a.get("module")) if verb == MODULE else None
+        was = (conceptual_key(was.repo_key), was.module_path) if was is not None else None
         touched = self.walk.apply(rec)
         if verb in ELEMENT_VERBS:
-            keys = set()
+            keys = {was} if was is not None else set()  # a re-stated path empties its old key (aba8ec79 (4))
             for mid in touched:
                 m = state.elements.modules.get(mid)
                 if m is not None:

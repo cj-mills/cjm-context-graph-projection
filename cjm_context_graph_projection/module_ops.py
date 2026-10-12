@@ -275,7 +275,9 @@ async def rename_module(
     federation anchor) but its SYMBOLS keep their ids (36f649d3: the op rides the journal
     with `identity: keep`, and the identity map re-registers every name from the retired
     path): the code fold's step derives the new module, re-homes the symbols in place and
-    drops the old module node + its code-text regions — no rebuild needed."""
+    drops the old module node + its code-text regions — no rebuild needed. A CAPTURED module
+    (the element regime) keeps its module id too: its write re-states the path under the
+    journaled id (design detail aba8ec79 (4))."""
     M = await _module_node(gx, module_id)
     if M is None:
         return {"error": f"no module `{module_id}`", "written": False}
@@ -345,7 +347,8 @@ async def rename_module(
         # The code fold's step: the new key derives (symbols keep their ids, the code-text
         # regions re-key), the retired key's module node + regions go.
         result["live"] = await apply_live(gx, source_journal_path, repos_dir, appended)
-        result["module_id"] = new_id
+        kept = any(ev.get("restated") == "path" for ev in rec.get("events", []))
+        result["module_id"] = module_id if kept else new_id  # a captured module keeps its id (aba8ec79 (4))
         result["written"] = True
     return result
 

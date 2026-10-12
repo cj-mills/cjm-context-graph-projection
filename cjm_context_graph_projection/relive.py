@@ -30,7 +30,7 @@ from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 
 from . import factlayer as F
 from .codefold import CodeFold
-from .codesource import ELEMENT_VERBS, MODULE, SourceState
+from .codesource import ELEMENT_VERBS, MODULE, PLACE, SourceState
 from .runtime import GraphHandle
 from .seeds import conceptual_key
 from .source_state import read_source_journal
@@ -131,6 +131,10 @@ def _touched_keys(
         elif verb in ELEMENT_VERBS:
             if verb == MODULE:
                 named[a["module"]] = (conceptual_key(a["repo_key"]), a["module_path"])
+            if verb == PLACE and state is not None:  # a move: the module the element leaves re-derives too
+                e = state.elements.elements.get(a.get("element"))
+                if e is not None and e.module:
+                    mids[e.module] = None
             if a.get("module"):
                 mids[a["module"]] = None
             elif state is not None:
