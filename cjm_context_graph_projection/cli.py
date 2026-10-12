@@ -442,9 +442,17 @@ async def _dispatch(args) -> int:
             # Authority flip: notes with a genesis `new-note` op (migrated OR born on-graph)
             # are reconstructed from the journal during replay, so don't read their `.md` here.
             skip_memory_paths = journal_sourced_note_paths(args.journal_path) if args.journal_path else None
+            # The memory lane (design c9b29de5 (4), (7)): with the config naming a memory journal, ingest
+            # reads no memory file -- the journals are the notes' source -- and a stray .md in the dir
+            # is reported for capture, never ingested; the lane's groups replay as windows below.
+            from .memorysource import memory_lane, stray_memory_files
+            lane = memory_lane(load_graph_config(args.graph_db_path) or {})
+            if lane:
+                for p in stray_memory_files(args.memory_dir, args.journal_path):
+                    print(f"⚠ stray memory file, not ingested (capture it with new-note): {p}")
             dev_report: Dict[str, Any] = {}
             nodes, edges = build_dev_graph_elements(
-                args.memory_dir, None if args.no_repo_map else args.repos_dir,
+                None if lane else args.memory_dir, None if args.no_repo_map else args.repos_dir,
                 seed=not args.no_seed, note_aliases=note_aliases, code_fold=code_fold,
                 artifact_fold=artifact_fold, skip_memory_paths=skip_memory_paths, report=dev_report)
             res = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
@@ -459,7 +467,7 @@ async def _dispatch(args) -> int:
             if args.journal_path:
                 # Replay born-on-graph writes on top of the fresh projection so
                 # `rm db && ingest` fully reconstructs the graph (the migration story).
-                rc = await replay_journal(gx, args.journal_path)
+                rc = await replay_journal(gx, args.journal_path, notes=lane or None)
                 print(f"replayed journal: {rc}")
             return 0
         if args.command == "ingest-notes":
@@ -498,6 +506,11 @@ async def _dispatch(args) -> int:
                 print(f"replayed journal: {rc}")
             return 0
         if args.command == "m3-baseline":
+            from .memorysource import memory_lane
+            if memory_lane(load_graph_config(args.graph_db_path) or {}):
+                print("error: m3-baseline is retired on the memory lane (design c9b29de5 (7)): a memory "
+                      "note is born with new-note into the memory journal", file=sys.stderr)
+                return 1
             if not args.journal_path:
                 print("error: m3-baseline needs --journal-path (the genesis ops are journaled)",
                       file=sys.stderr)
@@ -519,7 +532,16 @@ async def _dispatch(args) -> int:
                 print("error: replay needs --journal-path", file=sys.stderr)
                 return 1
             notes = None
-            if args.source_offset is not None:
+            if args.memory_offset is not None:
+                # The dev graph's memory lane (design c9b29de5 (4)): its groups after the offset replay
+                # as windows merged by ts into the writes windows, as the notes lane's do
+                from .memorysource import memory_lane
+                notes = memory_lane(load_graph_config(args.graph_db_path) or {})
+                if not notes:
+                    print("error: --memory-offset replays the memory journal — the sibling "
+                          "graph.config.json names no memory_journal_path", file=sys.stderr)
+                    return 1
+            elif args.source_offset is not None:
                 notes = load_graph_config(args.graph_db_path) or {}
                 if not (notes.get("notes_corpus") and notes.get("source_journal_path")):
                     print("error: --source-offset replays the notes source journal — the sibling "
@@ -527,7 +549,8 @@ async def _dispatch(args) -> int:
                     return 1
             rc = await replay_journal(gx, args.journal_path, offset=args.offset,
                                       emit_root=args.emit_root, notes=notes,
-                                      source_offset=args.source_offset)
+                                      source_offset=(args.source_offset if args.memory_offset is None
+                                                     else args.memory_offset))
             print(f"replayed journal: {rc}")
             return 0
         if args.command == "schema":
@@ -652,7 +675,9 @@ async def _dispatch(args) -> int:
                 return 1
             print(render("orphaned-edges", await orphaned_edges(gx, args.journal_path), args.format))
         elif args.command == "journal-window":
-            paths = [p for p in (args.journal_path, args.source_journal_path) if p]
+            # The memory journal's records are session touches too (design c9b29de5 (1))
+            paths = [p for p in (args.journal_path, args.source_journal_path,
+                                 (load_graph_config(args.graph_db_path) or {}).get("memory_journal_path")) if p]
             if not paths:
                 print("error: journal-window needs --journal-path (and usually "
                       "--source-journal-path — code touches live there)", file=sys.stderr)
@@ -1526,9 +1551,18 @@ async def _dispatch(args) -> int:
                               "retire-section", "replay-source"):
             # The archive's graph-sourced cutover (work item 79703485; design amendment 56b24fd5):
             # the notes source journal's verbs, journal-first, each with the notes fold's live step
+            from .memorysource import note_lane
             from .notesource import archive_command
-            res = await archive_command(gx, args, load_graph_config(args.graph_db_path) or {})
+            res = await archive_command(gx, args, note_lane(load_graph_config(args.graph_db_path) or {}))
             print(render(args.command, res, args.format))
+            return 1 if (res.get("error") or res.get("refused")) else 0
+        elif args.command == "cutover-memory":
+            # The memory notes onto the element source unit (design c9b29de5 (4)-(5)): each note read
+            # from the db, canonical, capture + cutover as ONE group in the memory journal
+            from .memorysource import cutover_memory, memory_lane
+            res = await cutover_memory(gx, memory_lane(load_graph_config(args.graph_db_path) or {}),
+                                       args.journal_path, list(args.slugs) or None, write=not args.no_write)
+            print(render("cutover-memory", res, args.format))
             return 1 if (res.get("error") or res.get("refused")) else 0
         elif args.command == "series-members":
             # The whole ordered membership (DEC 72d669c5 (4)): each slug follows the one before.
@@ -1830,10 +1864,12 @@ async def _dispatch(args) -> int:
                 replace = args.replace
             elif args.edit:
                 edit = (args.edit[0], args.edit[1])
-            # A cut-over archive Section is authored journal-first in the notes source journal
-            # (design amendment 56b24fd5 (4)); every other node takes the slot path below
+            # A cut-over note's Section (or the Note) is authored journal-first in its lane's source
+            # journal -- the archive's (56b24fd5 (4)) or the memory lane's (c9b29de5 (6)); every other
+            # node takes the slot path below
+            from .memorysource import note_lane
             from .notesource import archive_author
-            arch = await archive_author(gx, load_graph_config(args.graph_db_path) or {}, args.node_id,
+            arch = await archive_author(gx, note_lane(load_graph_config(args.graph_db_path) or {}), args.node_id,
                                         replace=replace, edit=edit, actor=args.actor,
                                         write=not args.no_write)
             if arch is not None:
@@ -1907,6 +1943,12 @@ async def _dispatch(args) -> int:
             _cli_import_smoke(res)
             return 1 if res.get("error") else 0
         elif args.command == "reconcile-memory":
+            from .memorysource import memory_lane
+            if memory_lane(load_graph_config(args.graph_db_path) or {}):
+                print("error: reconcile-memory is retired on the memory lane (design c9b29de5 (7)): a "
+                      "memory note has no file to reconcile -- the memory journal is its source",
+                      file=sys.stderr)
+                return 1
             res = await reconcile_memory(gx, note_slug=args.note, absorb_anchors=args.absorb,
                                          absorb_all=args.absorb_all, journal_path=args.journal_path,
                                          backup_dir=args.backup_dir)
@@ -1932,8 +1974,9 @@ async def _dispatch(args) -> int:
                         return 1
                     slug = (rn.get("properties") or {}).get("slug") or slug
             # A cut-over archive note births its element in the notes source journal (56b24fd5 (4))
+            from .memorysource import note_lane
             from .notesource import archive_add_section
-            arch = await archive_add_section(gx, load_graph_config(args.graph_db_path) or {}, slug, raw,
+            arch = await archive_add_section(gx, note_lane(load_graph_config(args.graph_db_path) or {}), slug, raw,
                                              parent=args.parent, after=args.after, actor=args.actor,
                                              write=not args.no_write)
             if arch is not None:
@@ -1963,6 +2006,18 @@ async def _dispatch(args) -> int:
             # (flag, else the config's notes_profile). --path alone = the memory lane as before.
             slug = corpus_root = None
             path = args.path
+            from .memorysource import memory_lane, memory_new_note
+            mem_lane = {} if args.slug else memory_lane(load_graph_config(args.graph_db_path) or {})
+            if mem_lane:
+                # The memory lane (design c9b29de5 (6)): a memory note is born cut over in the memory
+                # journal -- one group, no file and no path (ruling fed38997)
+                if path:
+                    print("error: a memory note has no file (ruling fed38997) -- drop --path; its "
+                          "identity is its frontmatter name", file=sys.stderr)
+                    return 1
+                res = await memory_new_note(gx, mem_lane, content, write=not args.no_write)
+                print(render("new-note-memory", res, args.format))
+                return 1 if res.get("error") else 0
             if args.slug:
                 if not args.emit_root:
                     print("error: new-note --slug needs an emit root (--emit-root, or `emit_root` "
@@ -3405,6 +3460,10 @@ def main() -> int:
                       help="Also replay the notes SOURCE journal's groups after the N-th record, merged by ts "
                            "into the writes windows (the notes lane's swap delta and heal; design amendment "
                            "fa61d93a (3)); needs a notes sibling config")
+    p_rp.add_argument("--memory-offset", type=int, default=None,
+                      help="Also replay the MEMORY journal's groups after the N-th record, merged by ts into "
+                           "the writes windows (the dev graph's swap delta and heal; design c9b29de5 (4)); "
+                           "needs memory_journal_path in the sibling config")
 
     p_m3 = sub.add_parser("m3-baseline",
                           help="M3 genesis import: journal a per-note baseline `new-note` op "
@@ -4101,6 +4160,12 @@ def main() -> int:
     p_rsec.add_argument("section_id", help="The Section (id or unique prefix)")
     p_rsec.add_argument("--no-write", action="store_true", help="Prove it; append nothing")
     p_rsec.add_argument("--actor", default=_DEFAULT_ACTOR)
+    p_cm = sub.add_parser("cutover-memory",
+                          help="THE MEMORY CUTOVER (design c9b29de5): each memory note read from the db, "
+                               "canonical (blank lines; an in-body H1 becomes the title), its capture + "
+                               "cutover appended to the memory journal as ONE group")
+    p_cm.add_argument("slugs", nargs="*", help="Memory note slugs (default: every one not yet cut over)")
+    p_cm.add_argument("--no-write", action="store_true", help="List what the cutover changes; append nothing")
     p_rps = sub.add_parser("replay-source",
                            help="The rebuild swap's SOURCE-journal fold (finding 6c121287): fold the records after "
                                 "the N-th into this db through the live step (cg-rebuild runs it)")
@@ -4439,7 +4504,8 @@ def main() -> int:
                           help="M2 gradient: create a new note, born on-graph — a memory note by "
                                "--path, or a POST by --slug under the notes graph's emit root (a42c0f97)")
     p_nn.add_argument("--path", default=None,
-                      help="Where to write the new .md (memory profile, or an explicit location)")
+                      help="Where to write the new .md (the legacy memory regime; a graph whose config names "
+                           "memory_journal_path births a memory note with no file and refuses --path)")
     p_nn.add_argument("--slug", default=None,
                       help="The born post's permalink relative to the emit root: lands as "
                            "<emit_root>/<slug>/index.md, identity = the slug (the notes_corpus_elements convention)")

@@ -645,11 +645,12 @@ def _source_spans(
     """The notes source journal's groups a replay applies as windows (design amendment fa61d93a):
     a full rebuild replays the groups its ingest left out (`replay_spans`); a delta lane replays
     every group after its offset (over-inclusion is safe -- the live step is idempotent)."""
-    if not (notes and notes.get("notes_corpus") and notes.get("source_journal_path")):
+    if not (notes and notes.get("source_journal_path") and (notes.get("notes_corpus") or notes.get("lane"))):
         return [], []
     records = read_notes_journal(notes)
     if source_offset is None:
-        return records, replay_spans(records)
+        # The memory lane folds nothing at ingest: every group is a window (design c9b29de5 (4))
+        return records, (group_spans(records) if notes.get("lane") else replay_spans(records))
     return records, group_spans(records, min(max(0, source_offset), len(records)))
 
 
@@ -743,6 +744,10 @@ def touched_node_ids(
         slug = a.get("slug") or _note_slug(a.get("path"), a.get("content"))
         if slug:
             out.append(note_node_id(slug))
+    elif verb == "section" and a.get("section"):   # a note lane's element state (notes / memory journal)
+        out.append(a["section"])
+    elif (verb in ("note", "place", "cutover") and a.get("note")) or (verb == "retire" and a.get("section")):
+        out.extend(r for r in (a.get("note"), a.get("section")) if r)   # a note lane's note / placement record
     elif verb in ("section", "add-section"):
         if a.get("slug"):
             nid = note_node_id(a["slug"])

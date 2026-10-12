@@ -469,6 +469,33 @@ def archive_source(
                          cutover=cutover_freeze(records))
 
 
+def note_source(
+    config: Dict[str, Any],                          # A note lane's config (the notes graph's, or the dev graph's memory lane)
+    records: Optional[List[Dict[str, Any]]] = None,  # Its source journal (None: read it from the config)
+) -> Any:  # The source its notes decompose under: the memory lane's, else the archive's
+    """One grammar, two lanes (design c9b29de5 (2)): a lane is config DATA plus its source."""
+    if config.get("lane") == "memory":
+        from .memorysource import MemorySource
+        return MemorySource()
+    return archive_source(config, records)
+
+
+def journaled_lane(config: Dict[str, Any]) -> bool:  # The config names a note lane whose notes a source journal holds
+    return bool(config.get("source_journal_path") and (config.get("notes_corpus") or config.get("lane") == "memory"))
+
+
+def held_text(
+    nw: Optional[Dict[str, Any]],     # A Note wire as the db holds it
+    held: Dict[str, Dict[str, Any]],  # Its Section wires
+) -> Tuple[str, Set[str]]:  # (its text: frontmatter + its live Sections' raw in order, their ids)
+    """The note as the db holds it -- what a capture reads, and the prior a cutover's relation
+    re-harvest diffs against."""
+    live = [w for w in held.values() if not (w.get("properties") or {}).get("retired")]
+    live.sort(key=lambda w: int((w.get("properties") or {}).get("order") or 0))
+    fm = str(((nw or {}).get("properties") or {}).get("frontmatter_raw") or "")
+    return fm + "".join(str(w["properties"].get("raw") or "") for w in live), {w["id"] for w in live}
+
+
 def read_notes_journal(
     config: Dict[str, Any],  # The notes graph-sibling config
 ) -> List[Dict[str, Any]]:  # Its source journal's records ([] when none is configured or written)
@@ -754,7 +781,7 @@ async def apply_notes_groups(
     if start >= end:
         return receipt
     fold = fold_records(records[:start])
-    src = archive_source(config, records)
+    src = note_source(config, records)
     profile = config.get("notes_profile") or "quarto_post"
     for ts, group in groups(records[start:end]):
         # The composition each note the group names had BEFORE it (the relation re-harvest's prior)
@@ -774,6 +801,8 @@ async def apply_notes_groups(
                 continue
             note, text = derive_note(fold, nid, src)
             nw, held, held_edges = await _note_rows(gx, nid)
+            if prior.get(nid) is None:   # cut over by this group (a memory capture, a birth): the db's text is the prior
+                prior[nid] = held_text(nw, held)[0]
             retired = [retired_section(held[s]) for s in fold.retired_members(nid) if s in held]
             nodes, edges = note_wires(note, src.note_aliases, retired)
             stamp_note_profile(nodes, profile)
@@ -924,7 +953,7 @@ def journal_write(
         return {"records": [], "appended": [], "unchanged": True, "path": n.path}
     trial = _trial(fold, recs)
     try:
-        _, text = derive_note(trial, note, archive_source(config, records))
+        _, text = derive_note(trial, note, note_source(config, records))
     except NotesFoldError as e:
         return {"error": str(e)}
     appended = append_group(jp, recs, op=op) if write else []
@@ -1034,6 +1063,21 @@ def retire_records(
     return recs
 
 
+def note_edit_records(
+    fold: NotesFold,
+    note: str,         # A cut-over Note id
+    frontmatter: str,  # Its whole new frontmatter
+) -> Any:  # [(NOTE, args)] | [] | {"error": ...}
+    """An edit of a Note's own state, its frontmatter (design c9b29de5 (6)); a changed identity is
+    refused where the note derives (the composition decomposes as another note)."""
+    n = fold.notes.get(note)
+    if n is None or not n.cut_over:
+        return {"error": f"{note} is not a cut-over note"}
+    if frontmatter == n.frontmatter:
+        return []
+    return [(NOTE, {"note": note, "path": n.path, "frontmatter": frontmatter})]
+
+
 def birth_records(
     fold: NotesFold,
     note: str,                      # The cut-over Note id
@@ -1115,7 +1159,8 @@ async def _archive_write(
     if res.get("error") or not res.get("appended"):
         return res
     res["notes_live"] = await apply_notes_live(gx, config, res["appended"])
-    res["file"] = emit_note(config, fold, note)
+    if config.get("website_root"):   # a memory note is emitted nowhere (ruling fed38997)
+        res["file"] = emit_note(config, fold, note)
     return res
 
 
@@ -1125,7 +1170,7 @@ async def _cut_over_section(
     node_ref: str,             # A Section id or unique prefix
 ) -> Tuple[Optional[Any], Optional[NotesFold], Optional[Dict[str, Any]]]:  # (the Section node, the fold, an error) -- (None, None, None) when not an archive element
     from .projection import resolve_node_ref
-    if not (config.get("source_journal_path") and config.get("notes_corpus")):
+    if not journaled_lane(config):
         return None, None, None
     r = await resolve_node_ref(gx, node_ref)
     node = r.get("node")
@@ -1141,6 +1186,61 @@ async def _cut_over_section(
     return node, fold, None
 
 
+async def _cut_over_note(
+    gx: GraphHandle,
+    config: Dict[str, Any],
+    node_ref: str,             # A node id or unique prefix
+) -> Tuple[Optional[Any], Optional[NotesFold]]:  # (the Note, the fold) when it names a cut-over note of the lane, else (None, None)
+    from .projection import resolve_node_ref
+    if not journaled_lane(config):
+        return None, None
+    node = (await resolve_node_ref(gx, node_ref)).get("node")
+    if node is None or F.label(node) != DevNodeKinds.NOTE:
+        return None, None
+    fold = fold_records(read_notes_journal(config))
+    n = fold.notes.get(str(F.nid(node)))
+    return (node, fold) if n is not None and n.cut_over else (None, None)
+
+
+async def _note_author(
+    gx: GraphHandle,
+    config: Dict[str, Any],
+    node: Any,                         # The cut-over Note
+    fold: NotesFold,
+    replace: Optional[str],            # Refused on a Note
+    edit: Optional[Tuple[str, str]],   # (old, new)
+    actor: str,
+    write: bool,
+) -> Dict[str, Any]:
+    """`author` on a cut-over Note (design c9b29de5 (6)): an --edit lands in the one place holding
+    OLD -- the Note's frontmatter (its own state, a note record) or one element; --replace is
+    refused (a Note is a container)."""
+    nid = str(F.nid(node))
+    if replace is not None or edit is None:
+        return {"error": "--replace on a Note is refused: --edit OLD NEW lands in the one place holding "
+                         "OLD (its frontmatter or one element)", "node_id": nid}
+    old, new = edit
+    n = fold.notes[nid]
+    secs = derive_note(fold, nid, note_source(config))[0].sections
+    hits = ([(None, n.frontmatter.count(old))] if old in n.frontmatter else []) + [
+        (s, s.raw.count(old)) for s in secs if old in s.raw]
+    if sum(c for _, c in hits) != 1:
+        where = ", ".join("the frontmatter" if s is None else f"`{s.anchor}` {s.id[:8]}" for s, _ in hits)
+        return {"error": (f"OLD occurs in {where} -- target the element, or widen OLD to one place" if hits
+                          else "OLD is in neither the Note's frontmatter nor any of its elements"),
+                "node_id": nid}
+    s = hits[0][0]
+    profile = config.get("notes_profile") or "quarto_post"
+    if s is None:
+        build = lambda f: note_edit_records(f, nid, n.frontmatter.replace(old, new, 1))
+    else:
+        build = lambda f: section_edit_records(f, s.id, s.raw.replace(old, new, 1), s.level, profile)
+    target = nid if s is None else s.id
+    return {"node_id": target, **await _archive_write(gx, config, nid, build,
+                                                      {"op": "author", "node_id": target, "actor": actor},
+                                                      write)}
+
+
 async def archive_author(
     gx: GraphHandle,
     config: Dict[str, Any],                  # The notes graph-sibling config ({} on the dev lane)
@@ -1154,6 +1254,9 @@ async def archive_author(
     """`author` on a cut-over archive Section, journal-first (56b24fd5 (4)): title + body; a
     changed heading level is refused (level is placement)."""
     from .authoring import _apply
+    note, nfold = await _cut_over_note(gx, config, node_ref)
+    if note is not None:   # the Note itself: its frontmatter or the one element holding OLD (c9b29de5 (6))
+        return await _note_author(gx, config, note, nfold, replace, edit, actor, write)
     node, fold, err = await _cut_over_section(gx, config, node_ref)
     if node is None:
         return None
@@ -1184,7 +1287,7 @@ async def archive_add_section(
     write: bool = True,
 ) -> Optional[Dict[str, Any]]:  # The result, or None when the note is no journaled archive note
     from cjm_dev_graph_schema.identity import note_node_id
-    if not (config.get("source_journal_path") and config.get("notes_corpus")):
+    if not journaled_lane(config):
         return None
     records = read_notes_journal(config)
     fold = fold_records(records)
@@ -1194,7 +1297,7 @@ async def archive_add_section(
         return None
     if not n.cut_over:
         return {"error": f"{n.path} is captured but not cut over: cutover-archive it first"}
-    src = archive_source(config, records)
+    src = note_source(config, records)
     pid, perr = _element_ref(fold, src, nid, parent)
     aid, aerr = _element_ref(fold, src, nid, after)
     if perr or aerr:
@@ -1215,8 +1318,10 @@ async def archive_command(
     write = not getattr(args, "no_write", False)
     if cmd == "replay-source":
         return await replay_source(gx, args, config)
-    if not (config.get("source_journal_path") and config.get("notes_corpus")):
-        return {"error": f"{cmd} runs on the notes graph: its config names no source_journal_path / notes_corpus"}
+    if not journaled_lane(config) or (cmd in ("capture-archive", "cutover-archive", "absorb-archive")
+                                      and not config.get("notes_corpus")):
+        return {"error": f"{cmd} needs a journaled note lane: the notes graph's archive (notes_corpus + "
+                         "source_journal_path) or, for place / retire-section, the dev graph's memory_journal_path"}
     if cmd == "capture-archive":
         res = capture_archive(config, args.commit, write=write)
         if res.get("appended"):
@@ -1248,7 +1353,7 @@ async def archive_command(
             return {"node_id": sid, **await _archive_write(
                 gx, config, nid, lambda f: retire_records(f, sid),
                 {"op": "retire-section", "actor": args.actor}, write)}
-        src = archive_source(config)
+        src = note_source(config)
         pid, perr = _element_ref(fold, src, nid, None if args.top else args.parent)
         aid, aerr = _element_ref(fold, src, nid, None if args.first else args.after)
         if perr or aerr:

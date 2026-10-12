@@ -263,7 +263,9 @@ def build_dev_graph_elements(
 
     `skip_memory_paths` (the M3 genesis-imported notes) are left to journal replay to
     reconstruct rather than read from disk — the authority flip, scoped per note."""
-    nodes, edges = memory_elements(memory_dir, note_aliases, skip_paths=skip_memory_paths)
+    # memory_dir None: the memory lane reads no file, the journals are its notes' source (c9b29de5 (7))
+    nodes, edges = (memory_elements(memory_dir, note_aliases, skip_paths=skip_memory_paths)
+                    if memory_dir else ([], []))
     if repos_dir:
         repo_report: Dict[str, Any] = {}
         rn, re = repo_map_elements(repos_dir, report=repo_report)

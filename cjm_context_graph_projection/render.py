@@ -528,7 +528,8 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
     if kind == "round-trip":
         return _render_round_trip(obj)
     if kind in ("capture-archive", "cutover-archive", "absorb-archive", "place", "retire-section",
-                "replay-source", "source-check-notes", "author-archive", "add-section-archive"):
+                "replay-source", "source-check-notes", "author-archive", "add-section-archive",
+                "cutover-memory", "new-note-memory"):
         return _render_archive_source(kind, obj)
     if kind == "series-order":
         if obj.get("error"):
@@ -2832,6 +2833,27 @@ def _render_archive_source(
                              + (f" -- {r['error']}" if r.get("error") else ""))
     elif kind == "replay-source":
         lines.append(f"## Source-journal fold -- {obj.get('records', 0)} record(s) after offset {obj.get('offset')}")
+    elif kind == "cutover-memory":
+        rows = obj.get("notes") or []
+        by: Dict[str, int] = {}
+        for r in rows:
+            by[r["change"]] = by.get(r["change"], 0) + 1
+        lines.append(f"## Memory cutover -- {len(rows)} note(s) · {obj.get('records', 0)} record(s) · "
+                     + " · ".join(f"{k} {v}" for k, v in sorted(by.items()))
+                     + (f" · {obj['already']} already cut over" if obj.get("already") else "")
+                     + ("" if obj.get("written") else " · nothing appended"))
+        for r in rows:
+            if r["change"] == "title":
+                lines.append(f"- `{r['slug']}`: title “{r['title']}” (the in-body H1); retired "
+                             + (", ".join(f"`{s[:8]}`" for s in r["retired"]) or "nothing"))
+        blank = [r["slug"] for r in rows if r["change"] == "blank-lines"]
+        if blank:
+            lines.append(f"- blank lines normalized ({len(blank)}): " + ", ".join(f"`{s}`" for s in blank))
+    elif kind == "new-note-memory":
+        lines.append(f"## new-note (memory lane) -- `{obj.get('slug')}` · {obj.get('sections', 0)} element(s)"
+                     + ("" if obj.get("canonical") else " · canonicalized (blank lines)")
+                     + ("" if obj.get("written") else " · nothing appended")
+                     + (f" · `{obj['note_id'][:8]}`" if obj.get("note_id") else ""))
     else:   # place | retire-section | author-archive | add-section-archive
         recs = obj.get("records") or []
         lines.append(f"## {kind} -- {len(recs)} record(s)" + (f" · `{obj['node_id'][:8]}`" if obj.get("node_id") else "")
