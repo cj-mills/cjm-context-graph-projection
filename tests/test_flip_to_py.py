@@ -1,19 +1,17 @@
-"""The golden-reference flip (notebook -> plain .py, ONE LOUD VERB): retire-op journal
-semantics, the pure cell->module transform, and the orchestrator over a fake graph."""
+"""The off-nbdev step in the element regime (notebook FILE -> a plain .py module born captured, ONE
+LOUD VERB; design detail 25c1fadc): retire-op journal semantics, the pure cell->module transform,
+and the orchestrator."""
 
 import asyncio
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
-import cjm_context_graph_projection.factlayer as factlayer_mod
 import cjm_context_graph_projection.module_ops as module_ops_mod
-from cjm_context_graph_primitives.journal import read_journal
+from cjm_context_graph_projection.codefold import fold_source_journal
 from cjm_context_graph_projection.module_ops import flip_notebook_to_py
-from cjm_context_graph_projection.source_state import (append_retire, cutover_module, flip_module,
-                                                       graph_sourced_modules, latest_source_ops,
-                                                       notebook_to_py_source, source_check)
-from cjm_dev_graph_schema.identity import code_module_node_id, code_symbol_node_id
+from cjm_context_graph_projection.source_state import (append_retire, flip_module,
+                                                       latest_source_ops, notebook_to_py_source,
+                                                       read_source_journal, source_check)
 
 GX = SimpleNamespace(queue=None, graph_id="g")
 
@@ -40,45 +38,42 @@ DEMO_NB = _nb([
 
 # ---------------------------------------------------------------- retire semantics
 
-def _journal_a_notebook(tmp_path, nb_text=DEMO_NB):
-    """A graph-sourced notebook state (source + cutover), keystone-style."""
+def _born(tmp_path, text="def f():\n    return 1\n"):
+    """A module born captured from its file."""
     repos = tmp_path / "repos"
-    nb_file = repos / "cjm-demo" / "nbs" / "m.ipynb"
-    nb_file.parent.mkdir(parents=True)
-    nb_file.write_text(nb_text)
+    f = repos / "cjm-demo" / "cjm_demo" / "m.py"
+    f.parent.mkdir(parents=True)
+    f.write_text(text)
     sj = str(tmp_path / "src.jsonl")
-    r = flip_module(sj, str(repos), "cjm-demo", "nbs/m.ipynb")
-    assert r["captured"], r
-    # flip_module journals the CANONICAL notebook; align the file so cutover's guard passes
-    nb_file.write_text(latest_source_ops(sj)[("cjm-demo", "nbs/m.ipynb")]["text"])
-    c = cutover_module(sj, str(repos), "cjm-demo", "nbs/m.ipynb")
-    assert c["cut_over"], c
-    return sj, repos, nb_file
+    assert flip_module(sj, str(repos), "cjm-demo", "cjm_demo/m.py")["captured"]
+    return sj, repos, f
 
 
 def test_retire_ends_a_source_key_and_source_check_forgets_it(tmp_path):
-    sj, repos, nb_file = _journal_a_notebook(tmp_path)
-    key = ("cjm-demo", "nbs/m.ipynb")
-    assert key in latest_source_ops(sj) and key in graph_sourced_modules(sj)
-    assert append_retire(sj, "cjm-demo", "nbs/m.ipynb", superseded_by="cjm_demo/m.py")
+    sj, repos, f = _born(tmp_path)
+    key = ("cjm-demo", "cjm_demo/m.py")
+    assert key in latest_source_ops(sj)
+    assert append_retire(sj, "cjm-demo", "cjm_demo/m.py")
     assert key not in latest_source_ops(sj)
-    assert key not in graph_sourced_modules(sj)
-    nb_file.unlink()  # the flipped-away notebook is deleted...
-    chk = source_check(sj, str(repos))
-    assert chk["count"] == 0  # ...and source-check no longer holds the deleted file
+    f.unlink()  # the deleted module's file goes...
+    assert source_check(sj, str(repos))["count"] == 0  # ...and source-check no longer holds it
 
 
 def test_retire_noops_on_an_unknown_key(tmp_path):
     sj = str(tmp_path / "src.jsonl")
-    assert append_retire(sj, "cjm-demo", "nbs/ghost.ipynb") is False
+    assert append_retire(sj, "cjm-demo", "cjm_demo/ghost.py") is False
 
 
-def test_a_later_source_op_revives_a_retired_key(tmp_path):
-    sj, repos, nb_file = _journal_a_notebook(tmp_path)
-    append_retire(sj, "cjm-demo", "nbs/m.ipynb")
-    r = flip_module(sj, str(repos), "cjm-demo", "nbs/m.ipynb")  # generic supersession
-    assert r["captured"]
-    assert ("cjm-demo", "nbs/m.ipynb") in latest_source_ops(sj)
+def test_a_retired_path_is_born_again_captured(tmp_path):
+    sj, repos, f = _born(tmp_path)
+    append_retire(sj, "cjm-demo", "cjm_demo/m.py")
+    assert flip_module(sj, str(repos), "cjm-demo", "cjm_demo/m.py")["captured"]
+    assert ("cjm-demo", "cjm_demo/m.py") in latest_source_ops(sj)
+    assert [r["verb"] for r in read_source_journal(sj)].count("capture") == 2
+    fold = fold_source_journal(sj, str(repos))  # the graph holds the reborn module and its symbol
+    nodes, _ = fold.elements()
+    assert not fold.failures
+    assert [n["properties"]["qualname"] for n in nodes if n["label"] == "CodeSymbol"] == ["f"]
 
 
 # ---------------------------------------------------------------- the pure transform
@@ -105,66 +100,7 @@ def test_notebook_to_py_source_reports_a_nonexporting_notebook():
 
 # ---------------------------------------------------------------- the orchestrator
 
-class FakeGraph:
-    """In-memory stand-in for the graph ops the flip verb touches."""
-
-    def __init__(self, nodes):
-        self.nodes = {n["id"]: n for n in nodes}
-        self.edges = []
-        self.deleted = []
-
-    async def task(self, queue, graph_id, op, **kw):
-        if op == "find_nodes_by_label":
-            return [n for n in self.nodes.values() if n["label"] == kw["label"]]
-        if op == "query_nodes":
-            q = kw["query"]
-            rows = list(self.nodes.values())
-            if q.get("ids") is not None:
-                rows = [n for n in rows if n["id"] in set(q["ids"])]
-            if q.get("label"):
-                rows = [n for n in rows if n["label"] == q["label"]]
-            for p in q.get("where") or []:
-                assert p["op"] == "eq", f"fake supports eq only (got {p['op']})"
-                rows = [n for n in rows
-                        if (n.get("properties") or {}).get(p["prop"]) == p["value"]]
-            return {"nodes": rows}
-        if op == "get_node":
-            return self.nodes.get(kw["node_id"])
-        if op == "delete_nodes":
-            self.deleted.extend(kw["node_ids"])
-            for i in kw["node_ids"]:
-                self.nodes.pop(i, None)
-            return True
-        raise AssertionError(f"unexpected graph op {op}")
-
-
-MID = code_module_node_id("cjm-demo", "cjm_demo/m.py")
-# The symbol's REAL deterministic id: pre-flip (notebook-minted) and post-swap
-# (plain decomposition) agree on it — the invariant the edge continuity rides.
-SYM_F = code_symbol_node_id(MID, "f")
-
-
-def _notebook_graph():
-    """The pre-flip graph shape: module + Cells + a body-less symbol keyed to its cell."""
-    return FakeGraph([
-        {"id": MID, "label": "CodeModule",
-         "properties": {"repo_key": "cjm-demo", "module_path": "cjm_demo/m.py",
-                        "import_name": "cjm_demo.m"}},
-        {"id": "cell-c1", "label": "Cell",
-         "properties": {"module_id": MID, "cell_key": "c1", "cell_type": "markdown"}},
-        {"id": "cell-c3", "label": "Cell",
-         "properties": {"module_id": MID, "cell_key": "c3", "cell_type": "code"}},
-        {"id": "cell-c4", "label": "Cell",
-         "properties": {"module_id": MID, "cell_key": "c4", "cell_type": "code"}},
-        {"id": SYM_F, "label": "CodeSymbol",
-         "properties": {"module_id": MID, "cell_key": "c3", "qualname": "f", "name": "f"}},
-    ])
-
-
-def _wire(fake, monkeypatch, link_calls=None, stepped=None):
-    monkeypatch.setattr(module_ops_mod, "graph_task", fake.task)
-    monkeypatch.setattr(factlayer_mod, "graph_task", fake.task)
-
+def _wire(monkeypatch, stepped=None):
     async def fake_apply_live(gx, source_journal_path, repos_dir, appended):
         # The code fold's step is proven against a real store in test_relive; here the
         # flip must hand it exactly the records it appended.
@@ -172,158 +108,77 @@ def _wire(fake, monkeypatch, link_calls=None, stepped=None):
             stepped.append(list(appended))
         return {"records": len(appended)}
 
-    async def fake_link(gx, source_id, target_id, relation, actor="agent:session"):
-        if link_calls is not None:
-            link_calls.append({"source_id": source_id, "target_id": target_id,
-                               "relation": relation, "actor": actor})
-        return {"source_id": source_id, "target_id": target_id, "relation": relation,
-                "written": True, "source_label": "S", "target_label": "T"}
-
     monkeypatch.setattr(module_ops_mod, "apply_live", fake_apply_live)
-    monkeypatch.setattr(module_ops_mod, "link", fake_link)
+
+
+def _notebook(tmp_path, nb_text=DEMO_NB):
+    repos = tmp_path / "repos"
+    nb_file = repos / "cjm-demo" / "nbs" / "m.ipynb"
+    nb_file.parent.mkdir(parents=True)
+    nb_file.write_text(nb_text)
+    return str(tmp_path / "src.jsonl"), repos, nb_file
 
 
 def _run(coro):
     return asyncio.run(coro)
 
 
-def test_flip_to_py_end_to_end(tmp_path, monkeypatch):
-    sj, repos, nb_file = _journal_a_notebook(tmp_path)
-    wj = str(tmp_path / "writes.jsonl")
-    fake = _notebook_graph()
+def test_flip_to_py_births_the_module_captured_from_the_notebook_file(tmp_path, monkeypatch):
+    sj, repos, nb_file = _notebook(tmp_path)
     stepped = []
-    _wire(fake, monkeypatch, stepped=stepped)
-
-    res = _run(flip_notebook_to_py(GX, sj, wj, str(repos), "cjm-demo", "nbs/m.ipynb",
+    _wire(monkeypatch, stepped=stepped)
+    res = _run(flip_notebook_to_py(GX, sj, str(repos), "cjm-demo", "nbs/m.ipynb",
                                    docstring="The demo module."))
     assert not res.get("error"), res
-    assert res["written"] and res["cut_over"] and res["retired"]
-    # journal: the .py key is graph-sourced, the .ipynb key is GONE
-    assert ("cjm-demo", "cjm_demo/m.py") in graph_sourced_modules(sj)
-    assert ("cjm-demo", "nbs/m.ipynb") not in latest_source_ops(sj)
-    # artifact == journaled canonical state; the notebook file is deleted
+    assert res["written"] and res["notebook_deleted"] and not nb_file.exists()
+    # the journal: the repo's register, then the module's capture group -- the notebook never entered it
+    records = read_source_journal(sj)
+    assert records[0]["verb"] == "register" and records[1]["verb"] == "module"
+    assert records[-1]["verb"] == "capture"
+    assert not any(r["args"].get("module_path", "").endswith(".ipynb") for r in records)
+    assert stepped == [records]  # the live step is handed exactly the flip's records
+    # the artifact is the composition of its elements
     py = repos / "cjm-demo" / "cjm_demo" / "m.py"
     assert py.read_text() == latest_source_ops(sj)[("cjm-demo", "cjm_demo/m.py")]["text"]
     assert py.read_text().startswith('"""The demo module."""')
-    assert "__all__" not in py.read_text()
-    assert not nb_file.exists()
-    assert res["notebook_deleted"]
-    # loud report: dropped cells enumerated, dead import pruned
+    assert "__all__" not in py.read_text() and "def f():" in py.read_text()
+    assert "from pathlib import Path" in py.read_text()  # never claimed: kept on the imports element
+    # loud report: dropped cells enumerated
     assert [c["cell_key"] for c in res["markdown_cells_dropped"]] == ["c1"]
     assert [c["cell_key"] for c in res["nonexport_code_cells_dropped"]] == ["c4"]
-    assert res["pruned_imports"] == ["pathlib.Path"]  # imported, referenced nowhere (module-qualified clause)
-    # the Cells leave; the module derives IN PLACE through the code fold's step (never
-    # deleted — its id and its symbols' ids survive), fed exactly the flip's records
-    assert "cell-c3" in fake.deleted and MID not in fake.deleted and SYM_F not in fake.deleted
-    assert len(stepped) == 1
-    assert [(r["verb"], r["args"]["module_path"]) for r in stepped[0]] == [
-        ("source", "cjm_demo/m.py"), ("cutover", "cjm_demo/m.py"), ("retire", "nbs/m.ipynb")]
-    # the whole walk soaks clean, regen gate included
     chk = source_check(sj, str(repos))
     assert chk["clean"] and chk["regen_clean"] and chk["count"] == 1
 
 
-def test_flip_refuses_an_unsourced_notebook(tmp_path, monkeypatch):
-    repos = tmp_path / "repos"
-    (repos / "cjm-demo" / "nbs").mkdir(parents=True)
-    sj, wj = str(tmp_path / "src.jsonl"), str(tmp_path / "writes.jsonl")
-    _wire(_notebook_graph(), monkeypatch)
-    res = _run(flip_notebook_to_py(GX, sj, wj, str(repos), "cjm-demo", "nbs/m.ipynb"))
-    assert "no live journaled source state" in res["error"]
-
-
-def test_flip_refuses_a_nonexporting_notebook(tmp_path, monkeypatch):
+def test_flip_refuses_a_missing_or_nonexporting_notebook(tmp_path, monkeypatch):
+    _wire(monkeypatch)
+    sj = str(tmp_path / "src.jsonl")
+    res = _run(flip_notebook_to_py(GX, sj, str(tmp_path / "repos"), "cjm-demo", "nbs/m.ipynb"))
+    assert "no notebook" in res["error"]
     nb = _nb([("markdown", "c0", "# prose only"), ("code", "c1", "print('scratch')")])
-    sj, repos, _ = _journal_a_notebook(tmp_path, nb_text=nb)
-    wj = str(tmp_path / "writes.jsonl")
-    _wire(_notebook_graph(), monkeypatch)
-    res = _run(flip_notebook_to_py(GX, sj, wj, str(repos), "cjm-demo", "nbs/m.ipynb"))
+    sj, repos, _ = _notebook(tmp_path, nb_text=nb)
+    res = _run(flip_notebook_to_py(GX, sj, str(repos), "cjm-demo", "nbs/m.ipynb"))
     assert "exports nothing" in res["error"]
 
 
+def test_flip_refuses_a_module_already_on_disk_or_on_the_graph(tmp_path, monkeypatch):
+    _wire(monkeypatch)
+    sj, repos, nb_file = _notebook(tmp_path)
+    py = repos / "cjm-demo" / "cjm_demo" / "m.py"
+    py.parent.mkdir(parents=True)
+    py.write_text("X = 1\n")
+    res = _run(flip_notebook_to_py(GX, sj, str(repos), "cjm-demo", "nbs/m.ipynb"))
+    assert "already exists" in res["error"] and nb_file.exists()
+    assert flip_module(sj, str(repos), "cjm-demo", "cjm_demo/m.py")["captured"]
+    py.unlink()
+    res = _run(flip_notebook_to_py(GX, sj, str(repos), "cjm-demo", "nbs/m.ipynb"))
+    assert "already holds" in res["error"] and nb_file.exists()
+
+
 def test_flip_dry_run_touches_nothing(tmp_path, monkeypatch):
-    sj, repos, nb_file = _journal_a_notebook(tmp_path)
-    wj = str(tmp_path / "writes.jsonl")
-    fake = _notebook_graph()
-    _wire(fake, monkeypatch)
-    res = _run(flip_notebook_to_py(GX, sj, wj, str(repos), "cjm-demo", "nbs/m.ipynb",
-                                   write=False))
+    sj, repos, nb_file = _notebook(tmp_path)
+    _wire(monkeypatch)
+    res = _run(flip_notebook_to_py(GX, sj, str(repos), "cjm-demo", "nbs/m.ipynb", write=False))
     assert not res.get("error") and not res["written"]
-    assert nb_file.exists() and not fake.deleted
-    assert ("cjm-demo", "nbs/m.ipynb") in graph_sourced_modules(sj)
+    assert nb_file.exists() and read_source_journal(sj) == []
     assert not (repos / "cjm-demo" / "cjm_demo" / "m.py").exists()
-
-
-def test_flip_blocks_on_an_unretargetable_cell_ref_and_force_drops_loudly(
-        tmp_path, monkeypatch):
-    sj, repos, nb_file = _journal_a_notebook(tmp_path)
-    wj = str(tmp_path / "writes.jsonl")
-    # a journaled assert SUBJECT on a markdown cell — no surviving symbol, no retarget
-    Path(wj).write_text(json.dumps(
-        {"verb": "assert", "ts": 0,
-         "args": {"subject": "cell-c1", "predicate": "p", "value": "v"}}) + "\n")
-    fake = _notebook_graph()
-    _wire(fake, monkeypatch)
-    res = _run(flip_notebook_to_py(GX, sj, wj, str(repos), "cjm-demo", "nbs/m.ipynb"))
-    assert "re-home them first" in res["error"]
-    assert res["cell_ref_blockers"][0]["cell_id"] == "cell-c1"
-    assert nb_file.exists()  # refused = untouched
-
-    res = _run(flip_notebook_to_py(GX, sj, wj, str(repos), "cjm-demo", "nbs/m.ipynb",
-                                   force_drop_cell_refs=True))
-    assert not res.get("error"), res
-    assert res["cell_refs_dropped"][0]["cell_id"] == "cell-c1"
-    assert not nb_file.exists()
-
-
-def test_flip_retargets_a_link_onto_the_surviving_symbol(tmp_path, monkeypatch):
-    sj, repos, _ = _journal_a_notebook(tmp_path)
-    wj = str(tmp_path / "writes.jsonl")
-    # a Decision SHAPES edge onto the def cell — content survives as symbol `f`
-    Path(wj).write_text(json.dumps(
-        {"verb": "link", "ts": 0,
-         "args": {"source_id": "dec-1", "target_id": "cell-c3",
-                  "relation": "SHAPES", "actor": "human"}}) + "\n")
-    fake = _notebook_graph()
-    link_calls = []
-    _wire(fake, monkeypatch, link_calls=link_calls)
-    res = _run(flip_notebook_to_py(GX, sj, wj, str(repos), "cjm-demo", "nbs/m.ipynb"))
-    assert not res.get("error"), res
-    assert res["cell_refs_retargeted"][0]["surviving_symbol"] == "f"
-    assert link_calls == [{"source_id": "dec-1", "target_id": SYM_F,
-                           "relation": "SHAPES", "actor": "human"}]
-    ops = read_journal(wj)
-    assert ops[-1]["verb"] == "link" and ops[-1]["args"]["target_id"] == SYM_F
-
-
-def test_flip_keeps_a_surviving_symbol_and_its_curation_edges_in_place(tmp_path, monkeypatch):
-    sj, repos, _ = _journal_a_notebook(tmp_path)
-    wj = str(tmp_path / "writes.jsonl")
-    # a note's REFERENCES onto the SYMBOL — the endpoint survives under the same id, and
-    # the step updates it IN PLACE (no cascade delete), so nothing is re-linked or replayed
-    Path(wj).write_text(json.dumps(
-        {"verb": "link", "ts": 0,
-         "args": {"source_id": "note-1", "target_id": SYM_F,
-                  "relation": "REFERENCES", "actor": "human"}}) + "\n")
-    fake = _notebook_graph()
-    link_calls = []
-    _wire(fake, monkeypatch, link_calls=link_calls)
-    res = _run(flip_notebook_to_py(GX, sj, wj, str(repos), "cjm-demo", "nbs/m.ipynb"))
-    assert not res.get("error"), res
-    assert SYM_F not in fake.deleted and link_calls == []
-    assert len(read_journal(wj)) == 1
-
-
-def test_import_clauses_see_same_root_submodule_imports():
-    """The prune-report universe is per-CLAUSE: dropping one of two `import urllib.X`
-    statements is visible even though both bind the name `urllib` (the flip-time
-    import-dedupe blind spot — with bound-name granularity the report said nothing)."""
-    from cjm_context_graph_projection.module_ops import _import_clauses
-    both = "import urllib.request\nimport urllib.error\nimport os\n"
-    one = "import urllib.error\nimport os\n"
-    assert _import_clauses(both) - _import_clauses(one) == {"urllib.request"}
-    # from-imports report module-qualified leaf clauses; aliases stay visible
-    aliased = "from pathlib import Path as P\nimport numpy as np\n"
-    assert _import_clauses(aliased) == {"pathlib.Path as P", "numpy as np"}
-    relative = "from .util import helper\nfrom . import sibling\n"
-    assert _import_clauses(relative) == {".util.helper", ".sibling"}

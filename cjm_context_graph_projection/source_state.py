@@ -1,39 +1,18 @@
-"""N+3 Phase 1 (SHADOW): capture a module's canonical source into a SOURCE journal and
-validate it against the file across sessions — WITHOUT yet making it the ingest input.
+"""The code SOURCE journal's write side: every live module's source is its element records
+(`codesource`), and every write lands through `journaled_emit` -- events before files.
 
-The persistence flip ([[true-b-projected-structure-discussion]] N+3) inverts file→graph
-source-of-truth. It is the make-or-break inversion, so it is decomposed (per the ratified
-gate) into a safe SHADOW phase first: the module's source-of-truth state is journaled and
-diffed against the file each session (the soak), while the FILE stays the real ingest input —
-zero risk. A later, tiny cutover (Phase 2) makes the journal the actual source and the file a
-generated, committed build artifact.
+The persistence flip (file -> graph source of truth) ran in two regimes. The SNAPSHOT regime
+journaled a module's whole canonical text per write (`source` records, a `cutover` making the
+journal its source); the ELEMENT regime (design abfc2829) journals what changed at element grain
+and composes the text. Every phase of the code lane is captured (tests 2d42e2dc, packages
+872b741e), so the snapshot regime's write side is RETIRED (design detail 25c1fadc): a module is
+born captured, a write to it is element records, a notebook is converted from its file into a
+module born captured (`flip-to-py`). The snapshot history stays in the journal and the fold keeps
+reading it (f1173d0b): `SourceState` folds both regimes' records, `IdentityWalk` derives ids
+through every historical move, and `retire` -- which ends a key in either regime -- is live.
 
-Two deliberate design choices (user-ratified):
-- **Full-module-text granularity (v1).** A `source` op carries the module's whole canonical
-  text; the existing `decompose_text` re-derives symbols/regions/bindings/USES/emit unchanged —
-  so a graph-sourced module is just "the source bytes live in the journal, not in a file."
-  Per-slot granularity is a planned near-term refinement.
-- **A SEPARATE source stream** (NOT the private planning write-journal): `source` ops are
-  PUBLIC code state (they will eventually ship per-repo with the generated files), the planning
-  journal is private — don't entangle them (journal evolution seam #2: one log per domain).
-
-`canonical_emit` is exactly what Phase 2's ingest+emit will produce for the module, so the
-shadow diff faithfully predicts the cutover: `decompose_text` → the same `corpus_graph_elements`
-wire dicts ingest builds → `emit_module_from_nodes(derive_imports=True)` ("graph owns
-formatting", imports-as-projection).
-
-**Notebook modules** (the nbdev transition window, [[off-nbdev-endpoint]]): a `module_path`
-ending in `.ipynb` dispatches every verb to the CELL substrate — the journaled state is the
-canonical `.ipynb` text (`render_notebook(parse_notebook(text))`: verbatim cell sources,
-outputs/metadata stripped — outputs are derived, regenerated on demand). The notebook is the
-TRANSITIONAL source shape; the exported `.py` stays nbdev-export's during the window and the
-whole nbdev surface retires at the post-transition transformation.
-
-**Retire ops** (the golden-reference flip, [[substrate-golden-reference]]): a `retire` op
-ends a module key's life in the journal — `latest_source_ops` / `graph_sourced_modules`
-drop the key, so `source-check` stops holding a DELETED file (the flipped-away `.ipynb`)
-to the membrane forever. Ops are processed in append order, so a later `source` op on the
-same key would revive it (generic supersession, not a special case).
+A SEPARATE stream from the private planning write-journal: source records are PUBLIC code state,
+the planning journal is private (journal evolution seam #2: one log per domain).
 """
 
 import ast
@@ -49,11 +28,7 @@ from typing import Any, Dict, Iterator, List, Mapping, Optional, Set, Tuple
 from cjm_context_graph_primitives.journal import (journal_segments, maybe_rotate, op_clock, op_now,
                                                   read_segment)
 from cjm_dev_graph_schema.identity import code_module_node_id, code_symbol_node_id
-from cjm_notebook_decompose_core.project import render_notebook
 from cjm_notebook_decompose_core.read import parse_notebook
-from cjm_python_decompose_core.emit import emit_module_from_nodes
-from cjm_python_decompose_core.extract import decompose_text
-from cjm_python_decompose_core.ingest import corpus_graph_elements
 from cjm_python_decompose_core.parse import source_lines
 
 from .codesource import (absorb_records, CodeSourceError, element_canonical, ELEMENT_RETIRE,
@@ -61,60 +36,16 @@ from .codesource import (absorb_records, CodeSourceError, element_canonical, ELE
 
 
 def is_test_module_path(module_path: str) -> bool:
-    """Whether a module path denotes TEST source (`tests/` or `tests_manual/`).
-
-    Test modules keep their import block VERBATIM — never derived from ref bindings.
-    pytest wires fixtures by parameter-name / string match (`usefixtures("db")`,
-    `indirect=`, `getfixturevalue`) that no AST ref walk can see, and script-shaped
-    manual tests nest closures inside `try`/`with` blocks the symbol walk doesn't
-    extract — both channels FALSE-PRUNE a needed import under imports-as-projection.
-    Verbatim is the only canonicalization where fixture imports PROVABLY survive."""
+    """Whether a module path denotes TEST source (`tests/` or `tests_manual/`) -- the code fold's
+    test / package classification (a test module's calls are TESTS edges)."""
     return module_path.startswith(("tests/", "tests_manual/"))
 
 
-def is_package_module_path(module_path: str) -> bool:
-    """Whether a module path belongs to the PACKAGE phase of the code lane: every module that is
-    not test source -- the packages and the scripts beside them (design detail ed20aa51)."""
-    return not is_test_module_path(module_path)
-
-
-def canonical_emit(
-    repo_key: str,                       # The repo's durable conceptual slug
-    module_path: str,                    # Repo-relative module path (identity input)
-    path: str,                           # File path (provenance locator)
-    text: str,                           # The module source text
-    import_name: Optional[str] = None,   # Override the derived dotted import name
-) -> str:  # The canonical .py the graph-sourced module would emit (== Phase 2 ingest+emit)
-    """Decompose source text and re-emit it canonically — the exact graph→`.py` Phase 2 yields.
-
-    Routes through the SAME `decompose_text` + `corpus_graph_elements` ingest builds, then
-    `emit_module_from_nodes(derive_imports=True)` (the import block is regenerated from the
-    symbols' bindings). So this is a faithful predictor of what the file would become once the
-    module is graph-sourced — the basis for the shadow soak diff. TEST modules are the
-    exception: their import block stays verbatim (see `is_test_module_path`)."""
-    dm = decompose_text(repo_key, module_path, path, text, import_name=import_name)
-    nodes, _edges = corpus_graph_elements([dm])
-    module_node = next((n for n in nodes if n["label"] == "CodeModule"), None)
-    regions = [n for n in nodes if n["label"] in ("CodeSymbol", "CodeText")]
-    return emit_module_from_nodes(regions, module_node=module_node,
-                                  derive_imports=not is_test_module_path(module_path))
-
-
-def canonical_emit_notebook(
-    text: str,  # The `.ipynb` file text (JSON)
-) -> str:  # The canonical notebook the graph-sourced module would emit
-    """The notebook analogue of `canonical_emit`: parse to cells, re-render canonically.
-
-    Cell sources round-trip verbatim (verbatim-first at the cell level); outputs,
-    execution counts, and metadata are STRIPPED — they are derived state, regenerated
-    on demand, never part of the journaled source. Raises `json.JSONDecodeError`
-    (a `ValueError`) on malformed notebook JSON."""
-    return render_notebook(parse_notebook(text).cells)
-
-
-def _is_notebook(module_path: str) -> bool:
-    """Whether a source-state module is notebook-sourced (dispatch key for every verb)."""
-    return module_path.endswith(".ipynb")
+def derive_import_name(module_path: str) -> str:  # repo-relative path -> dotted import name
+    """A module's dotted import name from its repo-relative path ("pkg/sub.py" -> "pkg.sub");
+    overridable where the package layout does not map directly."""
+    stem = module_path[:-3] if module_path.endswith(".py") else module_path
+    return stem.replace("/", ".")
 
 
 # An nbdev directive line (`#| export`, `#| eval: false`, ...) — stripped ANYWHERE in a
@@ -144,7 +75,7 @@ def notebook_to_py_source(
     Everything not kept is REPORTED, never silently discarded — markdown cells (prose
     triage disposes of them BEFORE the flip) and non-export code cells (their test
     content must be projected to `tests/` BEFORE the flip) come back as loud lists.
-    The result is RAW (pre-canonical): the caller runs `canonical_emit` over it.
+    The result is RAW: the caller births it captured, which composes its import block.
     Raises `json.JSONDecodeError` on malformed notebook JSON, `SyntaxError` if the
     assembled module doesn't parse."""
     parsed = parse_notebook(nb_text)
@@ -185,23 +116,10 @@ def notebook_to_py_source(
             "nonexport_code_cells": nonexport_code, "dropped_all_dunder": dropped_all}
 
 
-def _canonical(
-    repo_key: str,                       # The repo's durable conceptual slug
-    module_path: str,                    # Repo-relative source path (`.py` or `.ipynb`)
-    path: str,                           # File path (provenance locator)
-    text: str,                           # The module/notebook source text
-    import_name: Optional[str] = None,   # Override the derived dotted import name (`.py` only)
-) -> str:  # The canonical source the graph would emit for this module
-    """Dispatch canonical emit on the source kind (`.ipynb` → cell substrate, else `.py`)."""
-    if _is_notebook(module_path):
-        return canonical_emit_notebook(text)
-    return canonical_emit(repo_key, module_path, path, text, import_name)
-
-
 def canonicalization_report(
     file_text: str,       # The module's text as the file holds it
     canonical: str,       # The canonical text a flip / emit would journal or write
-    module_path: str = "",  # Repo-relative path (a notebook is never checked — its cells are not Python statements)
+    module_path: str = "",  # Repo-relative path (reported in nothing; kept for the callers' uniform call)
 ) -> Dict[str, Any]:  # {"diff": unified diff ("" when byte-equal), "hazards": [one line per semantic risk]}
     """What a canonicalization CHANGES, and whether the change can alter runtime behaviour
     (work item e526672a W4; ruling 865ba564; the second sighting 0fca6536).
@@ -213,12 +131,12 @@ def canonicalization_report(
     ABOVE a module-level non-import statement it followed in the file (a `sys.path`
     insert, an `os.environ` setting, `matplotlib.use(...)`: setup the import may depend
     on). Statements are matched by their AST, imports by the names they bind, so a
-    merged or re-wrapped import line is still the same import. A `.ipynb` module or
-    text that does not parse reports its diff and no hazards."""
+    merged or re-wrapped import line is still the same import. Text that does not parse
+    reports its diff and no hazards."""
     diff = "".join(difflib.unified_diff(file_text.splitlines(keepends=True),
                                         canonical.splitlines(keepends=True),
                                         fromfile="file", tofile="canonical"))
-    if not diff or _is_notebook(module_path):
+    if not diff:
         return {"diff": diff, "hazards": []}
     try:
         before, after = ast.parse(file_text).body, ast.parse(canonical).body
@@ -264,20 +182,6 @@ def canonicalization_report(
     return {"diff": diff, "hazards": hazards}
 
 
-def _derive_import_name(
-    repo_key: str,     # The repo's durable conceptual slug (assumed == its dir/package stem)
-    module_path: str,  # Repo-relative source path
-    text: str,         # The source text (a notebook's `#| default_exp` names its export target)
-) -> str:  # The dotted import name of what this source builds ("" if it exports nothing)
-    """Derive the import name a source state maps to. A `.py` path converts directly; a
-    notebook maps to its nbdev export target (`<package>.<default_exp>`), or "" for a
-    non-exporting notebook."""
-    if _is_notebook(module_path):
-        exp = parse_notebook(text).default_exp
-        return f"{repo_key.replace('-', '_')}.{exp}" if exp else ""
-    return (module_path[:-3] if module_path.endswith(".py") else module_path).replace("/", ".")
-
-
 def read_source_journal(
     path: str,  # Source-journal file path (JSONL)
 ) -> List[Dict[str, Any]]:  # The recorded source ops, in append order
@@ -301,18 +205,6 @@ def latest_source_ops(
     composed from its element records (design detail 6d35c07d (2)). A `retire` op ends the key
     (dropped from the map) until a later `source` revives it."""
     return SourceState.over(read_source_journal(path)).latest_ops()
-
-
-def graph_sourced_modules(
-    path: str,  # Source-journal file path (JSONL)
-) -> set:  # {(repo_key, module_path)} of modules PAST the Phase-2 cutover
-    """The modules whose ingest source IS the journal (a `cutover` op exists for them).
-
-    Phase distinction: a module with only `source` ops is in SHADOW (the file is still
-    the ingest input, the journal soaks); a `cutover` op flips it — the journal becomes
-    the source of truth and the file a generated, committed artifact. A `retire` op
-    removes the key (its content lives on under a successor key, e.g. `.ipynb` -> `.py`)."""
-    return SourceState.over(read_source_journal(path)).sourced
 
 
 class SymbolIdentity:
@@ -651,45 +543,6 @@ def append_retire(
     return True
 
 
-def append_source(
-    path: str,             # Source-journal file path (JSONL)
-    repo_key: str,         # The repo's durable conceptual slug
-    module_path: str,      # Repo-relative module path
-    import_name: str,      # Dotted import name
-    text: str,             # The module's canonical source text (the journaled STATE)
-    op_meta: Optional[Dict[str, Any]] = None,  # Replay-ignored op provenance ({'op': 'move', ...})
-) -> bool:  # True if appended, False if identical to the current latest state (no-op)
-    """Append a `source` op, skipping a write identical to the module's current latest state.
-
-    New records carry `generation` (1 = module-snapshot grain; replay will UPCAST older
-    generations when the symbol-granular endpoint lands — DEC 6ee4b4f2 pillar 2) and,
-    when given, an `op` envelope naming the mutating verb that produced the state — pure
-    provenance for the session lens / orphaned-edges remap, NEVER replay input (replay is
-    STATE-based, verb+args only; intent replay would bake verb bugs into history).
-
-    A CAPTURED module (the element regime, design detail 6d35c07d (2)) is refused: its source is its
-    element records, and a snapshot would end that regime silently -- its writes land at element
-    grain through `element_absorb` + `append_elements` (abfc2829 (7))."""
-    state = SourceState.over(read_source_journal(path))
-    if state.elements.captured((repo_key, module_path)) is not None:
-        raise CodeSourceError(f"{repo_key}/{module_path} is captured: its source is its element "
-                              "records, and a full-module snapshot is refused")
-    cur = state.latest_ops().get((repo_key, module_path))
-    if cur is not None and cur.get("text") == text:
-        return False
-    record: Dict[str, Any] = {"verb": "source", "ts": op_now(), "generation": 1,
-                              "args": {"repo_key": repo_key, "module_path": module_path,
-                                       "import_name": import_name, "text": text}}
-    if op_meta:
-        record["op"] = op_meta
-    _append_record(path, record)
-    return True
-
-
-# Verbs whose writes to a captured module are refused: a notebook flip has no element regime.
-ELEMENT_REFUSED_OPS = ("flip-to-py",)
-
-
 def _op_hints(
     op: Optional[Dict[str, Any]],  # The verb's op provenance
 ) -> Tuple[List[Tuple[str, str]], Optional[str]]:  # (keep-identity renames, the element the verb edited)
@@ -703,85 +556,23 @@ def _op_hints(
     return renames, (op.get("node_id") if op.get("op") == "author" else None)
 
 
-def captured_phase(
-    state: SourceState,  # The source state
-    module_path: str,    # A module path
-) -> bool:  # Whether a module born at this path is born captured (the user's ruling bef8e6b8)
-    """A phase is captured whole (`capture_phase`), so it is captured once any of its modules is:
-    the tests phase (the tests pilot) and the package phase (design detail ed20aa51), each by its
-    own `capture`."""
-    return any(member(module_path) and any(m.captured and member(m.module_path)
-                                           for m in state.elements.modules.values())
-               for member in CAPTURE_PHASES.values())
-
-
-def _absolute(
-    binding: Dict[str, Any],  # An import-binding descriptor read in some module
-    import_name: str,         # That module's dotted import name
-    module_path: str,         # Its path (a package's __init__ is its package)
-) -> Dict[str, Any]:  # The descriptor with a relative module resolved against that module's package
-    """A binding travelling out of its package keeps naming what it named: `from .x import y` read in
-    `pkg.sub.mod` lands as `from pkg.sub.x import y`."""
-    level = binding.get("level") or 0
-    if not level:
-        return binding
-    parts = import_name.split(".") if import_name else []
-    package = parts if module_path.endswith("__init__.py") else parts[:-1]
-    base = package[:len(package) - (level - 1)]
-    mod = ".".join(base + ([binding["module"]] if binding.get("module") else []))
-    return {**binding, "module": mod, "level": 0}
-
-
-def _adoptions(
-    state: SourceState,  # The source state as the write finds it
-    by_source: Dict[Tuple[str, str], Set[str]],  # snapshot module key -> the op's symbols it gives up to a captured module
-    identity: SymbolIdentity,  # The identity map as the write finds it (conceptual keys)
-) -> Dict[str, Dict[str, Any]]:  # symbol -> {"ids": {qualname: id}, "bindings": [descriptor]} for each adopted subtree
-    """What a captured module adopts from a snapshot module (design detail aba8ec79 (5)): every symbol
-    of the subtree keeps the id the identity map gives it at its source address, and the subtree's
-    import bindings in the source's derivation travel with it, a relative one resolved."""
-    from .seeds import conceptual_key
-    latest = state.latest_ops()
-    out: Dict[str, Dict[str, Any]] = {}
-    for key, names in by_source.items():
-        prev = latest[key]
-        ck = conceptual_key(key[0])
-        dm = decompose_text(ck, key[1], "", prev["text"], import_name=prev.get("import_name") or None,
-                            symbol_identity=identity.for_module(ck, key[1]))
-        imp = dm.module.import_name
-        for n in names:
-            sub = [s for s in dm.symbols if s.qualname == n or s.qualname.startswith(n + ".")]
-            seen: Set[str] = set()
-            bindings = []
-            for s in sub:
-                for b in s.import_bindings:
-                    b = _absolute(b, imp, key[1])
-                    k = json.dumps(b, sort_keys=True)
-                    if k not in seen:
-                        seen.add(k)
-                        bindings.append(b)
-            out[n] = {"ids": {s.qualname: s.id for s in sub}, "bindings": bindings}
-    return out
-
-
 def element_plan(
     state: SourceState,  # The source state as the write finds it
-    emissions: List[Dict[str, Any]],  # The write's module texts [{repo_key, module_path, import_name, text, cutover?}]
+    emissions: List[Dict[str, Any]],  # The write's module texts [{repo_key, module_path, import_name, text, born?}]
     retires: Optional[List[Dict[str, Any]]] = None,  # The write's module retires [{repo_key, module_path, superseded_by?}]
     op: Optional[Dict[str, Any]] = None,  # The verb's op provenance
-    identity: Any = None,  # A callable giving the identity map as the write finds it (asked only when a captured module adopts a snapshot symbol)
 ) -> Tuple[Dict[int, Tuple[List[Dict[str, Any]], Dict[str, Any]]], Set[Tuple[str, str]]]:  # (emission index -> its element records + report, the retired keys a re-stated module absorbs)
     """The element regime's part of one write (abfc2829 (7), design detail aba8ec79): every emission
-    to a captured module, to a module the write gives birth to in a captured phase, or re-stating a
-    captured module's path becomes element records for what changed. A module's part in a move is
-    read from its text: the op's symbols it held and lost depart (their ids kept, their members and
-    bindings with them), the ones it gains arrive; a module with neither is a caller and its write
-    an ordinary edit. ACROSS THE REGIMES ((5)): a captured symbol a snapshot module gains retires
-    from the element regime (the identity walk hands its birth to the target's record); a snapshot
-    symbol a captured module gains arrives under the ids the identity map gives it at its source,
-    its bindings travelling. Raises `CodeSourceError` -- the whole write refused -- for an ambiguous
-    edit, an unbound name, a notebook flip of a captured module, and a symbol the write moves that
-    no module in it gives up or takes."""
+    to a captured module, to a module the write gives birth to (`born`: born captured, the ruling
+    bef8e6b8), or re-stating a captured module's path becomes element records for what changed. A
+    module's part in a move is read from its text: the op's symbols it held and lost depart (their ids
+    kept, their members and bindings with them), the ones it gains arrive; a module with neither is a
+    caller and its write an ordinary edit. An emission to a path the journal holds no module at, and
+    that is not born, is no part of the plan (the caller writes it unjournaled, loudly). Raises
+    `CodeSourceError` -- the whole write refused -- for an ambiguous edit, an unbound name, a write to
+    a live snapshot module or a birth at a notebook path (the snapshot regime's write side is retired,
+    design detail 25c1fadc), and a symbol the write moves that no module in it gives up or takes."""
+    from .seeds import conceptual_key
     op = op or {}
     kind = op.get("op")
     els = state.elements
@@ -791,12 +582,8 @@ def element_plan(
     for r in retires:
         key = (r["repo_key"], r["module_path"])
         mid = els.captured(key)
-        if mid is None:
-            continue
-        if kind in ELEMENT_REFUSED_OPS:
-            raise CodeSourceError(f"{key[0]}/{key[1]} is captured: `{kind}` has no element regime")
-        if kind != "rename-module":
-            continue  # a delete-module: the snapshot retire ends the key and its elements
+        if mid is None or kind != "rename-module":
+            continue  # a delete-module: the retire ends the key and its elements
         to = op.get("to") or r.get("superseded_by")
         idx = next((i for i, e in enumerate(emissions)
                     if e["repo_key"] == key[0] and e["module_path"] == to), None)
@@ -805,28 +592,7 @@ def element_plan(
         restates[idx] = (mid, {"repo_key": key[0], "module_path": to,
                                "import_name": emissions[idx].get("import_name") or ""})
         absorbed.add(key)
-    symbols = set(op.get("symbols") or []) if kind in ("move", "regroup") else set()
     latest = state.latest_ops()
-    departures: Dict[str, Tuple[str, str, int]] = {}  # name -> (module id, element id, emission index): leaving a captured module
-    snap_departures: Dict[str, Tuple[str, str]] = {}  # name -> the snapshot module key it leaves
-    gains: Dict[int, Set[str]] = {}
-    for i, e in enumerate(emissions):
-        key = (e["repo_key"], e["module_path"])
-        mid = els.captured(key)
-        if mid is not None and kind in ELEMENT_REFUSED_OPS:
-            raise CodeSourceError(f"{key[0]}/{key[1]} is captured: `{kind}` has no element regime")
-        new_names = _top_level_names(e["text"]) if symbols else set()
-        if mid is not None:
-            held = {q: eid for eid, q in els.addresses(mid).items() if "." not in q}
-            for n in (symbols & set(held)) - new_names:
-                departures[n] = (mid, held[n], i)
-            gains[i] = (symbols & new_names) - set(held)
-        else:
-            prev = latest.get(key)
-            before = _top_level_names(prev["text"]) if prev else set()
-            for n in (symbols & before) - new_names:
-                snap_departures[n] = key
-            gains[i] = (symbols & new_names) - before
     targets: Dict[int, Tuple[str, Optional[Dict[str, str]]]] = {}  # the emissions the element regime plans
     for i, e in enumerate(emissions):
         key = (e["repo_key"], e["module_path"])
@@ -834,41 +600,43 @@ def element_plan(
         if i in restates:
             mid, restate = restates[i]
         elif mid is None:
-            if not (key not in latest and e.get("cutover") and captured_phase(state, key[1])):
-                continue  # the snapshot regime's write
-            from .seeds import conceptual_key
+            if key in latest:
+                raise CodeSourceError(f"{key[0]}/{key[1]} is a live snapshot module: the snapshot regime's "
+                                      "write side is retired (design detail 25c1fadc)")
+            if not e.get("born"):
+                continue  # no module at this path: an unjournaled file
+            if not key[1].endswith(".py"):
+                raise CodeSourceError(f"{key[0]}/{key[1]}: only a .py module has an element form "
+                                      "(a notebook is converted with flip-to-py)")
             mid = code_module_node_id(conceptual_key(key[0]), key[1])  # born captured (bef8e6b8)
             restate = {"repo_key": key[0], "module_path": key[1],
                        "import_name": e.get("import_name") or ""}
-        stray = gains[i] - set(departures) - set(snap_departures)
+        targets[i] = (mid, restate)
+    symbols = set(op.get("symbols") or []) if kind in ("move", "regroup") else set()
+    departures: Dict[str, Tuple[str, str, int]] = {}  # name -> (module id, element id, emission index): leaving its module
+    gains: Dict[int, Set[str]] = {}
+    for i, (mid, _restate) in targets.items():
+        new_names = _top_level_names(emissions[i]["text"]) if symbols else set()
+        held = ({q: eid for eid, q in els.addresses(mid).items() if "." not in q}
+                if mid in els.modules and els.modules[mid].captured else {})
+        for n in (symbols & set(held)) - new_names:
+            departures[n] = (mid, held[n], i)
+        gains[i] = (symbols & new_names) - set(held)
+    for i, g in gains.items():
+        stray = g - set(departures)
         if stray:
+            key = (emissions[i]["repo_key"], emissions[i]["module_path"])
             raise CodeSourceError(f"{key[0]}/{key[1]} gains {', '.join(sorted(stray))}, which no module "
                                   "in the write gives up")
-        targets[i] = (mid, restate)
     lost = [n for n in departures if not any(n in g for g in gains.values())]
     if lost:
-        raise CodeSourceError(f"{', '.join(sorted(lost))} leaves a captured module for no module in the write")
-    exiting = {n for n in departures if not any(n in gains[j] for j in targets)}  # into a snapshot module
-    by_source: Dict[Tuple[str, str], Set[str]] = {}
-    for j in targets:
-        for n in gains[j] & set(snap_departures) - set(departures):
-            by_source.setdefault(snap_departures[n], set()).add(n)
-    adopted: Dict[str, Dict[str, Any]] = {}
-    if by_source:
-        ident = identity() if identity is not None else None
-        if ident is None:
-            raise CodeSourceError(f"{', '.join(sorted(set().union(*by_source.values())))} arrives from a "
-                                  "snapshot module, and the write was given no identity map to keep its ids")
-        adopted = _adoptions(state, by_source, ident)
+        raise CodeSourceError(f"{', '.join(sorted(lost))} leaves its module for no module in the write")
     plans: Dict[int, Tuple[List[Dict[str, Any]], Dict[str, Any]]] = {}
     renames, authored = _op_hints(op)
     for i, (mid, restate) in targets.items():
-        mine = {n: d for n, d in departures.items() if d[2] == i}
         plans[i] = absorb_records(state, mid, emissions[i]["text"], renames=renames, authored=authored,
-                                  departing={d[1] for n, d in mine.items() if n not in exiting},
-                                  exiting={d[1] for n, d in mine.items() if n in exiting},
-                                  arrivals={n: departures[n][1] for n in gains[i] if n in departures},
-                                  adopted={n: adopted[n] for n in gains[i] if n in adopted},
+                                  departing={d[1] for d in departures.values() if d[2] == i},
+                                  arrivals={n: departures[n][1] for n in gains[i]},
                                   restate=restate)
     return plans, absorbed
 
@@ -884,6 +652,8 @@ def element_absorb(
     edit, an authored text)."""
     plans, _ = element_plan(state, [{"repo_key": repo_key, "module_path": module_path, "text": text}],
                             op=op)
+    if not plans:
+        raise CodeSourceError(f"{repo_key}/{module_path}: no module the journal holds")
     return plans[0]
 
 
@@ -910,89 +680,37 @@ def _resolve_path(repos_dir: str, repo_key: str, module_path: str) -> str:
 
 
 def flip_module(
-    source_journal_path: str,            # Where to record the source op (a SEPARATE stream)
+    source_journal_path: str,            # The source journal
     repos_dir: str,                      # The repos root (to read the current file)
     repo_key: str,                       # The repo's durable conceptual slug
-    module_path: str,                    # Repo-relative module path to flip into shadow source
-    import_name: Optional[str] = None,   # Override the derived dotted import name
-    write: bool = True,                  # False = preview the capture, journal nothing
-    allow_reorder: bool = False,         # Journal a canonicalization even when it carries a hazard
+    module_path: str,                    # Repo-relative module path
+    import_name: Optional[str] = None,   # Override the derived dotted import name (a birth)
+    write: bool = True,                  # False = preview, journal nothing
+    allow_reorder: bool = False,         # Journal the canonical form even when it carries a hazard
 ) -> Dict[str, Any]:  # The flip result (captured?, whether the file is already canonical, or error)
-    """Capture a module's CANONICAL source into the shadow source journal (Phase 1).
-
-    Reads the current file, computes the canonical emit (what the graph-sourced module would
-    produce), and records it as the module's source state. The file remains the real ingest
-    input — this only starts the shadow soak. Reports whether the file is ALREADY canonical
-    (byte-exact) or what the one-time canonicalization changes: its unified diff, and any
-    HAZARD (`canonicalization_report`: the first statement changing kind, an import moved
-    above a module-level statement it followed). A hazard REFUSES the flip unless
-    `allow_reorder` (work item e526672a W4) — restructure the file so its canonical form
-    keeps its behaviour, or accept the reorder knowingly."""
+    """Absorb a module's FILE into the source journal at element grain (abfc2829 (7)): a captured
+    module's out-of-band edit lands as element records for what changed only -- the tool an agent
+    reaches for after a file edit stays a safe graph path; a file-born module the journal does not
+    hold is BORN CAPTURED (the ruling bef8e6b8; every phase is captured, design detail 25c1fadc): its
+    capture group lands, graph-sourced at once. Reports whether the file already is the canonical
+    form and its unified diff; a HAZARD in it (`canonicalization_report`: the first statement
+    changing kind, an import moved above a module-level statement it followed) REFUSES unless
+    `allow_reorder` (work item e526672a W4). A notebook is converted with `flip-to-py`."""
     file_path = _resolve_path(repos_dir, repo_key, module_path)
+    if module_path.endswith(".ipynb"):
+        return {"error": f"{module_path} is a notebook: convert it with flip-to-py (its module is born "
+                         "captured)", "captured": False}
     if not Path(file_path).exists():
         return {"error": f"no file at {file_path}", "captured": False}
     file_text = Path(file_path).read_text()
     state = SourceState.over(read_source_journal(source_journal_path))
-    born = ((repo_key, module_path) not in state.latest_ops()
-            and not _is_notebook(module_path) and captured_phase(state, module_path))
-    if born or state.elements.captured((repo_key, module_path)) is not None:
-        return _flip_captured(source_journal_path, state, repo_key, module_path, file_path,
-                              file_text, write, allow_reorder, born=born,
-                              import_name=import_name)
-    try:
-        canonical = _canonical(repo_key, module_path, file_path, file_text, import_name)
-    except (SyntaxError, ValueError) as e:
-        return {"error": f"cannot decompose {module_path}: {e}", "captured": False}
-    report = canonicalization_report(file_text, canonical, module_path)
-    if report["hazards"] and not allow_reorder:
-        return {"error": f"the canonical form of {module_path} can change its behaviour — "
-                         + "; ".join(report["hazards"])
-                         + " (restructure the file, or pass --allow-reorder to journal it anyway)",
-                "captured": False, "repo_key": repo_key, "module_path": module_path,
-                "canonicalization_diff": report["diff"], "hazards": report["hazards"]}
-    imp = import_name or _derive_import_name(repo_key, module_path, canonical)
-    appended = (append_source(source_journal_path, repo_key, module_path, imp, canonical)
-                if write else False)
-    sourced = (repo_key, module_path) in graph_sourced_modules(source_journal_path)
-    note = ("GRAPH-SOURCED: absorbed into the source journal (this module's source of truth); "
-            "if the file was not already canonical, regenerate it via emit-artifact"
-            if sourced else
-            "SHADOW: journaled and on the graph (the code fold projects every live key, "
-            "2cc81d3b); cut it over to make the journal its source of truth at the regen gate")
-    if not write:
-        note = "PREVIEW (--no-write): nothing journaled — a real flip would capture this state"
-    return {"repo_key": repo_key, "module_path": module_path, "import_name": imp,
-            "file_path": file_path, "captured": appended, "previewed": not write,
-            "graph_sourced": sourced,
-            "file_already_canonical": canonical == file_text,
-            "canonicalization_diff": report["diff"], "hazards": report["hazards"],
-            "canonical_bytes": len(canonical.encode("utf-8")),
-            "note": note}
-
-
-def _flip_captured(
-    source_journal_path: str,  # The source journal
-    state: SourceState,        # Its state (the module is captured)
-    repo_key: str,             # Journal-space repo key
-    module_path: str,          # Repo-relative module path
-    file_path: str,            # The file read
-    file_text: str,            # Its text (the out-of-band edit to absorb)
-    write: bool,               # False = preview, journal nothing
-    allow_reorder: bool,       # Journal even when the canonical form carries a hazard
-    born: bool = False,        # A file-born module captured into a captured phase: born captured
-    import_name: Optional[str] = None,  # Override the derived dotted import name (a birth)
-) -> Dict[str, Any]:  # flip_module's result, with the element grain's report
-    """flip-module on a CAPTURED module: the file's edit lands as element records for what changed
-    only (abfc2829 (7)) -- the tool an agent reaches for after a file edit stays a safe graph path.
-    A file-born module first captured where its phase is captured is BORN CAPTURED (the ruling
-    bef8e6b8): its capture group lands, graph-sourced at once, so no cutover follows and the phase
-    never holds a snapshot module."""
+    born = (repo_key, module_path) not in state.latest_ops()
     op = {"op": "flip-module"}
+    imp = import_name or derive_import_name(module_path)
     try:
         if born:
-            imp = import_name or _derive_import_name(repo_key, module_path, file_text)
             plans, _ = element_plan(state, [{"repo_key": repo_key, "module_path": module_path,
-                                             "import_name": imp, "text": file_text, "cutover": True}],
+                                             "import_name": imp, "text": file_text, "born": True}],
                                     op=op)
             recs, rep = plans[0]
         else:
@@ -1010,8 +728,8 @@ def _flip_captured(
                          + "; ".join(report["hazards"])
                          + " (restructure the file, or pass --allow-reorder to journal it anyway)"}
     appended = append_elements(source_journal_path, recs, op_meta=op) if write and recs else 0
-    note = (("BORN CAPTURED: its phase is captured, so the module's capture group landed -- its source is "
-             "its elements, graph-sourced now (no cutover follows)" if born else
+    note = (("BORN CAPTURED: the module's capture group landed -- its source is its elements, "
+             "graph-sourced now" if born else
              "CAPTURED: the edit landed as element records (this module's source is its elements)")
             + "; if the file was not already canonical, regenerate it via emit-artifact")
     if not write:
@@ -1023,195 +741,23 @@ def _flip_captured(
             "canonical_bytes": len(canonical.encode("utf-8")), "note": note}
 
 
-def cutover_module(
-    source_journal_path: str,  # The source journal (holds the module's shadow state)
-    repos_dir: str,            # The repos root (to verify/write the file artifact)
-    repo_key: str,             # The repo's durable conceptual slug
-    module_path: str,          # Repo-relative module path to cut over
-    write: bool = True,        # False = run every guard, flip nothing (the preview)
-) -> Dict[str, Any]:  # The cutover result (or the guard that refused it)
-    """Phase 2: make the JOURNAL the module's source of truth (the persistence flip).
-
-    Guarded — refuses unless the shadow is provably clean RIGHT NOW: a journaled source
-    state exists, it is a round-trip fixpoint, and the file byte-equals it (a drifted
-    file means an out-of-band edit the reconcile leg must absorb first via `flip-module`).
-    A MISSING file is not drift: it is (re)written from the journal — post-cutover the
-    file is a generated, committed artifact, and this is its first emit. On success a
-    `cutover` op is appended; `ingest` then reads this module's text from the journal
-    and `source-check` holds the file to the regen gate."""
-    a = latest_source_ops(source_journal_path).get((repo_key, module_path))
-    if a is None:
-        return {"error": f"no journaled source state for {repo_key}/{module_path} — "
-                         "run flip-module (shadow) first", "cut_over": False}
-    if (repo_key, module_path) in graph_sourced_modules(source_journal_path):
-        return {"repo_key": repo_key, "module_path": module_path, "cut_over": False,
-                "already_graph_sourced": True,
-                "note": "already past the cutover — the journal is this module's source"}
-    journaled = a.get("text", "")
-    file_path = _resolve_path(repos_dir, repo_key, module_path)
-    try:
-        if _canonical(repo_key, module_path, file_path, journaled, a.get("import_name")) != journaled:
-            return {"error": f"journaled source for {repo_key}/{module_path} is not a "
-                             "round-trip fixpoint — re-flip before cutting over", "cut_over": False}
-    except (SyntaxError, ValueError) as e:
-        return {"error": f"journaled source for {repo_key}/{module_path} does not parse: {e}",
-                "cut_over": False}
-    artifact_missing = not Path(file_path).exists()
-    if not artifact_missing and Path(file_path).read_text() != journaled:
-        return {"error": f"file drifted from the journaled state for {repo_key}/{module_path} "
-                         "— absorb it (flip-module) or regenerate it (emit-artifact) first",
-                "cut_over": False}
-    if not write:
-        return {"repo_key": repo_key, "module_path": module_path,
-                "import_name": a.get("import_name"), "file_path": file_path,
-                "cut_over": False, "previewed": True, "artifact_written": False,
-                "note": "PREVIEW (--no-write): every guard passes — a real cutover would make "
-                        "the journal this module's source of truth"
-                        + (" and write its first artifact" if artifact_missing else "")}
-    # Journal-first (the seam discipline): the cutover event lands BEFORE the missing
-    # artifact is regenerated — a crash between the two leaves the journal ahead of the
-    # files, the recoverable direction (emit-artifact regenerates).
-    _append_cutover(source_journal_path, repo_key, module_path)
-    artifact_written = False
-    if artifact_missing:
-        Path(file_path).parent.mkdir(parents=True, exist_ok=True)
-        Path(file_path).write_text(journaled)
-        artifact_written = True
-    return {"repo_key": repo_key, "module_path": module_path,
-            "import_name": a.get("import_name"), "file_path": file_path,
-            "cut_over": True, "artifact_written": artifact_written,
-            "note": "GRAPH-SOURCED: the journal is now this module's source of truth; the file "
-                    "is a generated committed artifact — source-check gates its regen"}
-
-
-CAPTURE_PHASES = {"tests": is_test_module_path, "packages": is_package_module_path}  # A phase of the code lane -> its module-path predicate
-
-
-def capture_phase(
-    source_journal_path: str,  # The source journal
-    repos_dir: str,            # The repos root (the files the capture checks and rewrites)
-    phase: str = "tests",      # The phase to capture whole (`CAPTURE_PHASES`)
-    write: bool = True,        # False = run every guard and report the capture, journal nothing
-    allow_reorder: bool = False,  # Capture even when a module's capture form carries a hazard
-    diffs: bool = False,       # Carry each module's unified diff (snapshot -> capture form) in its row
-) -> Dict[str, Any]:  # The capture's receipt (or {'error': ..., 'refused': [rows]})
-    """Capture a phase of the code lane into the element regime (design abfc2829 (6), design detail
-    6d35c07d; the tests pilot's leg 2, work item 8caa95e1): every live module of the phase becomes
-    its element records, ONE journaled group per module (module, element and place records, then
-    capture -- `capture_records`). The phase is captured whole -- the ruling bef8e6b8 holds one
-    regime per phase -- so a phase holding a shadow module (journaled, never cut over) or an
-    already captured one is refused. Every module is guarded before anything lands (one refusal
-    refuses the phase): its file byte-equals its snapshot (a drifted file is an edit to absorb
-    first), its capture form composes back to itself, it introduces no name the snapshot left
-    bound (the binding check, abfc2829 (2)), and a HAZARD in the layout change refuses unless
-    `allow_reorder`. Journal first, then the files whose capture form differs. The receipt names
-    each module's layout change, the import-region ids that leave the graph, the births and the
-    unclaimed bindings -- what the user reviews before the capture lands."""
-    from .codesource import capture_records
-    from .seeds import conceptual_key
-    from cjm_python_decompose_core.elements import compose_module, lift_imports, unresolved_names
-    member = CAPTURE_PHASES.get(phase)
-    if member is None:
-        return {"error": f"no phase `{phase}` -- one of {', '.join(sorted(CAPTURE_PHASES))}"}
-    records = read_source_journal(source_journal_path)
-    state = SourceState.over(records)
-    latest = state.latest_ops()
-    keys = sorted(k for k in latest if member(k[1]) and k[1].endswith(".py"))
-    done = [k for k in keys if state.elements.captured(k) is not None]
-    if done:
-        return {"error": f"the {phase} phase is already captured ({len(done)} of {len(keys)} "
-                         "modules) -- a module born into it is born captured (bef8e6b8)"}
-    shadow = [f"{rk}/{mp}" for rk, mp in keys if (rk, mp) not in state.sourced]
-    if shadow:
-        return {"error": f"{len(shadow)} {phase} module(s) are shadows, never cut over -- cut each "
-                         "over (or retire it) first, so the phase captures whole: "
-                         + ", ".join(shadow[:10])}
-    identity = _identity_over(records, conceptual_key)
-    ever = set(state.elements.ever)
-    groups: List[List[Dict[str, Any]]] = []
-    rows: List[Dict[str, Any]] = []
-    planned: List[Tuple[str, str]] = []  # The modules with an element form, in `keys` order
-    refused: List[Dict[str, Any]] = []
-    for rk, mp in keys:
-        a = latest[(rk, mp)]
-        ck = conceptual_key(rk)
-        try:
-            recs, rep = capture_records(rk, ck, mp, a.get("import_name") or "", a["text"],
-                                        symbol_identity=identity.for_module(ck, mp), ever=ever)
-        except (CodeSourceError, SyntaxError, ValueError) as e:  # no element form (design detail ed20aa51 (2))
-            refused.append({"repo_key": rk, "module_path": mp, "faults": [str(e)]})
-            continue
-        ever |= {r["args"]["element"] for r in recs if r["args"].get("element")}
-        planned.append((rk, mp))
-        groups.append(recs)
-        rows.append({**rep, "file_path": _resolve_path(repos_dir, rk, mp)})
-    after = SourceState.over(records + [{**r, "ts": 0.0} for g in groups for r in g])
-    composed = after.latest_ops()
-    for (rk, mp), row in zip(planned, rows):
-        before, text = latest[(rk, mp)]["text"], composed[(rk, mp)]["text"]
-        faults: List[str] = []
-        fp = Path(row["file_path"])
-        if fp.exists() and fp.read_text() != before:
-            faults.append("the file drifted from its snapshot -- absorb it (flip-module) first")
-        if compose_module(lift_imports(text).elements, after.siblings((rk, mp))) != text:
-            faults.append("the capture form does not compose back to itself")
-        unbound = unresolved_names(text)
-        if unbound:
-            unbound -= unresolved_names(before) or set()
-            if unbound:
-                faults.append(f"the capture form reads {', '.join(sorted(unbound))}, which nothing binds")
-        report = canonicalization_report(before, text, mp)
-        row.update(layout_changed=bool(report["diff"]), hazards=report["hazards"])
-        if diffs:
-            row["diff"] = report["diff"]
-        if report["hazards"] and not allow_reorder:
-            faults.append("a hazard: " + "; ".join(report["hazards"]))
-        if faults:
-            refused.append({"repo_key": rk, "module_path": mp, "faults": faults})
-        row["_text"] = text
-    receipt: Dict[str, Any] = {
-        "phase": phase, "modules": len(keys), "records": sum(len(g) for g in groups),
-        "layout_changes": sum(1 for r in rows if r["layout_changed"]),
-        "leaving": sum(len(r["leaving"]) for r in rows), "born": sum(len(r["born"]) for r in rows),
-        "unclaimed_modules": sum(1 for r in rows if r["unclaimed"]),
-        "captured": False, "previewed": not write, "files_written": [], "refused": refused}
-    rows_out = [_capture_row(r) for r in rows]
-    if refused:
-        return {**receipt, "rows": rows_out,
-                "error": f"{len(refused)} {phase} module(s) refused the capture -- NOTHING journaled"}
-    # Through the seam: every group lands before any file is rewritten to its capture form
-    journal = journaled_emit(source_journal_path, op={"op": "capture", "phase": phase}, write=write,
-                             element_groups=[{"repo_key": k[0], "module_path": k[1], "records": g,
-                                              "text": r["_text"], "path": r["file_path"]}
-                                             for k, g, r in zip(planned, groups, rows)])
-    if journal.get("error"):
-        return {**receipt, "rows": rows_out, "error": journal["error"]}
-    receipt.update(captured=write, files_written=journal["files_written"] if write else [])
-    return {**receipt, "rows": rows_out}
-
-
-def _capture_row(row: Dict[str, Any]) -> Dict[str, Any]:  # A capture receipt row, its composed text dropped
-    return {k: v for k, v in row.items() if k != "_text"}
-
-
 def birth_form(
-    source_journal_path: Optional[str],  # The source journal (None: no state to read, no captured phase)
+    source_journal_path: Optional[str],  # The source journal (None: an empty state)
     repo_key: str,       # Journal-space repo key
     module_path: str,    # The path a module is born at
     import_name: str,    # Its dotted import name
-    text: str,           # Its canonical snapshot text
-) -> Optional[str]:  # The text the birth lands in a captured phase (its capture form), else None
-    """What a module born at this path lands as its text: born into a captured phase (the ruling
-    bef8e6b8) it is born captured, so its text is the composition of its element records -- the
-    form `element_plan` gives the birth, which `add-module` shows and guards before it journals.
-    Raises `CodeSourceError` for a birth the element regime refuses (an unbound name)."""
-    if not source_journal_path:
-        return None
-    state = SourceState.over(read_source_journal(source_journal_path))
-    if (repo_key, module_path) in state.latest_ops() or not captured_phase(state, module_path):
-        return None
+    text: str,           # The text it is born with
+) -> str:  # The text the birth lands (its capture form)
+    """What a module born at this path lands as its text: born captured (the ruling bef8e6b8), its
+    text is the composition of its element records -- the form `element_plan` gives the birth, which
+    `add-module` shows and guards before it journals. Raises `CodeSourceError` for a birth the element
+    regime refuses (an unbound name, a path the journal already holds, a notebook path)."""
+    state = (SourceState.over(read_source_journal(source_journal_path)) if source_journal_path
+             else SourceState())
+    if (repo_key, module_path) in state.latest_ops():
+        raise CodeSourceError(f"{repo_key}/{module_path}: the journal already holds this module")
     plans, _ = element_plan(state, [{"repo_key": repo_key, "module_path": module_path,
-                                     "import_name": import_name, "text": text, "cutover": True}])
+                                     "import_name": import_name, "text": text, "born": True}])
     return plans[0][1]["text"]
 
 
@@ -1252,99 +798,45 @@ def emit_source_artifact(
     return res
 
 
-def absorb_authored_text(
-    source_journal_path: str,  # The source journal (the authoritative stream)
-    repo_key: str,             # The repo's durable conceptual slug
-    module_path: str,          # Repo-relative module path
-    file_path: str,            # The artifact file the author verb just wrote
-    emitted_text: str,         # The text the author verb emitted
-    import_name: Optional[str] = None,  # Override the derived dotted import name
-) -> Dict[str, Any]:  # The absorb result
-    """Absorb an `author` edit of a GRAPH-SOURCED module into the source journal.
-
-    The author verb emits verbatim (its import block is whatever the graph carried);
-    the journaled state is CANONICAL (imports-as-projection). So: canonicalize the
-    emitted text, journal it as the module's new source state, and — if
-    canonicalization changed anything (e.g. a now-dead import pruned) — rewrite the
-    file so artifact == journal and the regen gate stays clean by construction. A CAPTURED
-    module's edit lands at element grain (`element_absorb`)."""
-    state = SourceState.over(read_source_journal(source_journal_path))
-    if state.elements.captured((repo_key, module_path)) is not None:
-        try:
-            recs, rep = element_absorb(state, repo_key, module_path, emitted_text,
-                                       op={"op": "author"})
-        except (CodeSourceError, SyntaxError, ValueError) as e:
-            return {"error": f"authored text for {repo_key}/{module_path}: {e}", "absorbed": False}
-        appended = append_elements(source_journal_path, recs, op_meta={"op": "author"}) if recs else 0
-        if rep["text"] != emitted_text:
-            Path(file_path).write_text(rep["text"])
-        return {"repo_key": repo_key, "module_path": module_path, "absorbed": bool(appended),
-                "canonicalized": rep["text"] != emitted_text,
-                "note": "authored state journaled as element records (the module is captured)"}
-    try:
-        canonical = _canonical(repo_key, module_path, file_path, emitted_text, import_name)
-    except (SyntaxError, ValueError) as e:
-        return {"error": f"authored text for {repo_key}/{module_path} does not parse: {e}",
-                "absorbed": False}
-    imp = import_name or _derive_import_name(repo_key, module_path, canonical)
-    appended = append_source(source_journal_path, repo_key, module_path, imp, canonical)
-    canonicalized = canonical != emitted_text
-    if canonicalized:
-        Path(file_path).write_text(canonical)
-    return {"repo_key": repo_key, "module_path": module_path, "absorbed": appended,
-            "canonicalized": canonicalized,
-            "note": "authored state journaled (the journal is this module's source)"}
-
-
 def source_check(
-    source_journal_path: str,  # The shadow source journal
+    source_journal_path: str,  # The code source journal
     repos_dir: str,            # The repos root (to read the current files for the membrane diff)
-) -> Dict[str, Any]:  # Per-module soak status (the cross-session validation instrument)
-    """The soak instrument: for each shadow-sourced module, check two things.
+) -> Dict[str, Any]:  # Per-module regen status
+    """The regen gate over every live module: two checks each.
 
-    - **Membrane (file drift):** does the current file still equal the journaled source state?
-      A mismatch means the file was edited OUT-OF-BAND (an agent / `ruff` / a human) — surfaced,
-      never silently overridden (the reconcile leg can absorb it into a new source op).
-    - **Round-trip fixpoint:** re-decomposing+emitting the journaled text reproduces it exactly
-      (the graph-sourced emit is stable). A clean soak = both true across several sessions, the
-      gate to the Phase 2 cutover.
+    - **Membrane (file drift):** does the file equal the module's composed text? A mismatch is a
+      stale or dirtied ARTIFACT (an out-of-band edit by an agent / `ruff` / a human) -- surfaced,
+      never silently overridden: absorb it with `flip-module` or regenerate it with `emit-artifact`.
+    - **Fixpoint:** the composed text lifted into elements and composed again reproduces itself
+      (`element_canonical`).
 
-    Post-cutover (GRAPH-SOURCED) modules are held to the same two checks with inverted
-    meaning: the journal is the source, so a file mismatch is a stale/dirtied ARTIFACT
-    (the regen gate — nbdev-style `emit(graph)==file`), absorbed via `flip-module` or
-    regenerated via `emit-artifact`. `regen_clean` reports that gate alone."""
+    A live module that is not captured (a snapshot key in an old journal) fails the gate: the
+    snapshot regime's write side is retired (design detail 25c1fadc). `regen_clean` is the gate."""
     state = SourceState.over(read_source_journal(source_journal_path))
-    flipped = state.sourced
     modules = []
     drifted = stable = 0
-    regen_clean = True
     for (repo_key, module_path), a in sorted(state.latest_ops().items()):
         journaled = a.get("text", "")
         file_path = _resolve_path(repos_dir, repo_key, module_path)
         file_text = Path(file_path).read_text() if Path(file_path).exists() else None
         file_matches = file_text == journaled
+        captured = state.elements.captured((repo_key, module_path)) is not None
         try:
-            if state.elements.captured((repo_key, module_path)) is not None:  # the element regime's fixpoint
-                reemit = element_canonical(journaled, state.siblings((repo_key, module_path)))
-            else:
-                reemit = _canonical(repo_key, module_path, file_path, journaled, a.get("import_name"))
-            fixpoint = reemit == journaled
+            fixpoint = captured and element_canonical(
+                journaled, state.siblings((repo_key, module_path))) == journaled
         except (SyntaxError, ValueError):
             fixpoint = False
-        graph_sourced = (repo_key, module_path) in flipped
-        if graph_sourced and not (file_matches and fixpoint):
-            regen_clean = False
         drifted += 0 if file_matches else 1
         stable += 1 if fixpoint else 0
         modules.append({"module": a.get("import_name") or module_path, "repo_key": repo_key,
-                        "graph_sourced": graph_sourced,
+                        "graph_sourced": captured,
                         "file_present": file_text is not None,
                         "file_matches_source": file_matches, "roundtrip_fixpoint": fixpoint})
+    clean = drifted == 0 and stable == len(modules)
     return {"modules": modules, "count": len(modules),
             "graph_sourced_count": sum(1 for m in modules if m["graph_sourced"]),
             "file_drift": drifted, "roundtrip_stable": stable,
-            "regen_clean": regen_clean,
-            "clean": drifted == 0 and stable == len(modules) and len(modules) > 0}
+            "regen_clean": clean, "clean": clean and len(modules) > 0}
 
 
 def _stamp_session(record: Dict[str, Any]) -> Dict[str, Any]:
@@ -1361,24 +853,6 @@ def _stamp_session(record: Dict[str, Any]) -> Dict[str, Any]:
     if actor:
         record["actor"] = actor
     return record
-
-
-def _append_cutover(
-    path: str,         # Source-journal file path (JSONL)
-    repo_key: str,     # The repo's durable conceptual slug
-    module_path: str,  # The module key crossing the Phase-2 boundary
-    op_meta: Optional[Dict[str, Any]] = None,  # Replay-ignored op provenance
-) -> None:
-    """Append the raw `cutover` record (generation-tagged) — ONE grammar site per event.
-
-    The GUARDED path is `cutover_module` (shadow-clean checks); this is the shared
-    append it and `journaled_emit` route through when the caller has already validated
-    (e.g. flip-to-py births a `.py` graph-sourced from a state it just canonicalized)."""
-    record: Dict[str, Any] = {"verb": "cutover", "ts": op_now(), "generation": 1,
-                              "args": {"repo_key": repo_key, "module_path": module_path}}
-    if op_meta:
-        record["op"] = op_meta
-    _append_record(path, record)
 
 
 def append_register(
@@ -1411,72 +885,50 @@ def append_register(
 def journaled_emit(
     source_journal_path: Optional[str],  # The source journal — REQUIRED for any real write
     *,
-    emissions: Optional[List[Dict[str, Any]]] = None,  # [{repo_key, module_path, import_name, text, path, cutover?}] — JOURNAL-space keys
+    emissions: Optional[List[Dict[str, Any]]] = None,  # [{repo_key, module_path, import_name, text, path, born?}] — JOURNAL-space keys
     retires: Optional[List[Dict[str, Any]]] = None,    # [{repo_key, module_path, superseded_by?}]
     deletes: Optional[List[str]] = None,               # File paths to unlink AFTER events land
     registers: Optional[List[Dict[str, Any]]] = None,  # [{repo_key, repo_root?, source_kind?}]
     op: Optional[Dict[str, Any]] = None,               # Op provenance ({'op': 'move', ...}); replay-ignored
     write: bool = True,                                # False = full preview, ZERO side effects
-    element_groups: Optional[List[Dict[str, Any]]] = None,  # [{repo_key, module_path, records, text, path}] — element records the caller planned and guarded (a capture), one op-clock group each
 ) -> Dict[str, Any]:  # The uniform receipt every mutating verb carries (or {'error': ...})
     """The ops seam (pillar 1 of DEC 6ee4b4f2): events BEFORE files — THE file-write path.
 
-    Three strict phases: (1) validate + canonicalize the WHOLE batch (zero side effects —
-    one canonicalization failure refuses everything); (2) append ALL journal events
-    (source / cutover / retire / register, generation-tagged, `op` provenance riding
-    replay-ignored); (3) only then touch disk. A crash between (2) and (3) leaves the
-    journal AHEAD of the files — the recoverable direction (`emit-artifact` regenerates);
-    files ahead of the journal is the rebuild-revert class (finding ff8522fa) this seam
-    makes impossible by construction. An emission whose (repo_key, module_path) has NO
-    live journal key is written as a plain file and reported LOUDLY in
-    `unjournaled_files` (auto-capturing would flip phase discipline silently —
-    `flip-module` is the deliberate capture verb); write=True with events to land and no
-    journal path REFUSES outright. Journaled emissions land their CANONICAL text on disk,
-    so file == journal by construction (the absorb-rewrite folded in). The element regime's part of
-    the write (`element_plan`) lands as element records: an emission to a captured module, a module
-    born into a captured phase, a captured module's re-stated path (its retire absorbed); a move
-    across the two regimes or a notebook flip of a captured module is refused whole. Element groups
-    the caller planned whole (`capture_phase`) land as one op-clock group each, then their files."""
+    Three strict phases: (1) plan the WHOLE batch (`element_plan`, zero side effects — one refusal
+    refuses everything); (2) append ALL journal events (each module's element records as one
+    op-clock group, the register and retire events, `op` provenance riding replay-ignored); (3)
+    only then touch disk. A crash between (2) and (3) leaves the journal AHEAD of the files — the
+    recoverable direction (`emit-artifact` regenerates); files ahead of the journal is the
+    rebuild-revert class (finding ff8522fa) this seam makes impossible by construction. Every
+    emission is to a captured module, a module the write gives birth to (`born`), or a captured
+    module's re-stated path (a rename-module, its retire absorbed), and lands its COMPOSED text on
+    disk, so file == journal by construction. An emission at a path the journal holds no module at,
+    and not born, is written as a plain file and reported LOUDLY in `unjournaled_files`;
+    write=True with events to land and no journal path REFUSES outright."""
     emissions, retires = emissions or [], retires or []
-    element_groups = element_groups or []
     deletes, registers = deletes or [], registers or []
     receipt: Dict[str, Any] = {"op": (op or {}).get("op"), "journal_first": True,
                                "written": False, "events": [], "files_written": [],
                                "files_deleted": [], "unjournaled_files": [],
                                "canonicalized": []}
-    if write and not source_journal_path and (emissions or retires or registers or element_groups):
+    if write and not source_journal_path and (emissions or retires or registers):
         return {"error": "journaled_emit refuses: no source-journal path — journal-first "
                          "means events land before files (pass source_journal_path; "
                          "cg-write bakes it)", **receipt}
-    from .seeds import conceptual_key
-    records = read_source_journal(source_journal_path) if source_journal_path else []
-    state = SourceState.over(records)
-    latest, sourced = state.latest_ops(), state.sourced
-    # Phase 1: validate/canonicalize everything — no side effects yet.
-    plans: List[Dict[str, Any]] = []
+    state = SourceState.over(read_source_journal(source_journal_path) if source_journal_path else [])
+    # Phase 1: plan everything — no side effects yet.
     try:
-        eplans, absorbed = element_plan(state, emissions, retires, op,
-                                        identity=lambda: _identity_over(records, conceptual_key))
+        eplans, absorbed = element_plan(state, emissions, retires, op)
     except (CodeSourceError, SyntaxError, ValueError) as err:
         return {"error": f"{err} — NOTHING journaled or written", **receipt}
+    plans: List[Dict[str, Any]] = []
     for i, e in enumerate(emissions):
-        key = (e["repo_key"], e["module_path"])
         if i in eplans:
             recs, rep = eplans[i]
             plans.append({**e, "_journaled": True, "_canonical": rep.pop("text"),
                           "_elements": recs, "_report": rep})
-            continue
-        journaled = key in latest or bool(e.get("cutover"))
-        canonical = e["text"]
-        if journaled:
-            try:
-                canonical = _canonical(e["repo_key"], e["module_path"],
-                                       e.get("path") or "", e["text"], e.get("import_name"))
-            except (SyntaxError, ValueError) as err:
-                return {"error": f"canonical emit failed for {e['repo_key']}/"
-                                 f"{e['module_path']}: {err} — NOTHING journaled or written",
-                        **receipt}
-        plans.append({**e, "_journaled": journaled, "_canonical": canonical})
+        else:
+            plans.append({**e, "_journaled": False, "_canonical": e["text"]})
     # Phase 2: events (journal leads).
     for r in registers:
         appended = write and append_register(source_journal_path, r["repo_key"],
@@ -1485,33 +937,15 @@ def journaled_emit(
         receipt["events"].append({"verb": "register", "repo_key": r["repo_key"],
                                   "appended": bool(appended)})
     for p in plans:
-        if "_elements" in p:
-            appended = write and append_elements(source_journal_path, p["_elements"], op_meta=op)
-            receipt["events"].append({"verb": "elements", "repo_key": p["repo_key"],
-                                      "module_path": p["module_path"], "appended": bool(appended),
-                                      **{k: p["_report"][k] for k in ("records", "changed", "placed",
-                                                                      "born", "retired", "renamed",
-                                                                      "arrived", "departed", "exited",
-                                                                      "restated")}})
-            continue
         if not p["_journaled"]:
             continue
-        appended = write and append_source(source_journal_path, p["repo_key"],
-                                           p["module_path"], p.get("import_name") or "",
-                                           p["_canonical"], op_meta=op)
-        receipt["events"].append({"verb": "source", "repo_key": p["repo_key"],
-                                  "module_path": p["module_path"], "appended": bool(appended)})
-        if p.get("cutover") and (p["repo_key"], p["module_path"]) not in sourced:
-            if write:
-                _append_cutover(source_journal_path, p["repo_key"], p["module_path"],
-                                op_meta=op)
-            receipt["events"].append({"verb": "cutover", "repo_key": p["repo_key"],
-                                      "module_path": p["module_path"], "appended": write})
-    for g in element_groups:
-        appended = write and append_elements(source_journal_path, g["records"], op_meta=op)
-        receipt["events"].append({"verb": "elements", "repo_key": g["repo_key"],
-                                  "module_path": g["module_path"], "appended": bool(appended),
-                                  "records": len(g["records"])})
+        appended = write and append_elements(source_journal_path, p["_elements"], op_meta=op)
+        receipt["events"].append({"verb": "elements", "repo_key": p["repo_key"],
+                                  "module_path": p["module_path"], "appended": bool(appended),
+                                  **{k: p["_report"][k] for k in ("records", "changed", "placed",
+                                                                  "born", "retired", "renamed",
+                                                                  "arrived", "departed",
+                                                                  "restated")}})
     for r in retires:
         if (r["repo_key"], r["module_path"]) in absorbed:
             continue  # a re-stated captured module: its module record moved the key
@@ -1525,7 +959,7 @@ def journaled_emit(
         path = p.get("path")
         if not path:
             continue
-        out_text = p["_canonical"] if p["_journaled"] else p["text"]
+        out_text = p["_canonical"]
         if p["_journaled"] and out_text != p["text"]:
             receipt["canonicalized"].append(p["module_path"])
         if not p["_journaled"]:
@@ -1533,15 +967,6 @@ def journaled_emit(
         if write:
             Path(path).parent.mkdir(parents=True, exist_ok=True)
             Path(path).write_text(out_text)
-        receipt["files_written"].append(path)
-    for g in element_groups:
-        path = g.get("path")
-        if not path or (Path(path).exists() and Path(path).read_text() == g["text"]):
-            continue
-        if write:
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
-            Path(path).write_text(g["text"])
-        receipt["canonicalized"].append(g["module_path"])
         receipt["files_written"].append(path)
     for d in deletes:
         if not d:
@@ -1570,15 +995,14 @@ def uncaptured_modules(
 ) -> Dict[str, List[str]]:  # {repo_key: [module_path, ...]} — .py files with NO journal capture
     """The uncaptured-module audit (build a6453f70) — the ac3d52f4 recipe as a verb.
 
-    In an on-graph library every .py the repo carries should be journal-captured
-    (shadow or cut over): a file-sourced module's edits are unjournaled plain writes,
+    In an on-graph library every .py the repo carries should be journal-captured: a file-sourced module's edits are unjournaled plain writes,
     invisible to journal-window and unrecoverable from the journals (the 2026-08-27
     hand audit found 21 uncaptured test modules across 7 repos). Since the code fold
     (2cc81d3b) an uncaptured file is also ABSENT from the graph — ingest reads no file —
     so ingest reports this audit's rows. This walks each repo tree — tests/ INCLUDED,
     caches/runtime/hidden dirs and the stated exclusions skipped — and diffs against
-    the journal's captured keys. Rows are advisory: capture each with flip-module +
-    cutover (nbdev v3 repos keep config in pyproject.toml — a lone settings.ini repo is
+    the journal's captured keys. Rows are advisory: capture each with flip-module (born
+    captured; a notebook is converted with flip-to-py; nbdev v3 repos keep config in pyproject.toml — a lone settings.ini repo is
     unmigrated, see the nbdev-v3 note e73525de)."""
     from .seeds import repo_dir_name
     captured = set(latest_source_ops(source_journal_path))
@@ -1611,7 +1035,7 @@ def _append_record(
 ) -> None:
     """THE source-journal append choke point (finding 160466f7, P-48).
 
-    Every source-journal event (`source` / `retire` / `cutover` / `register`) lands
+    Every source-journal event (element records, `retire`, `register`) lands
     through here: session+actor stamping (`_stamp_session`), parent-dir creation, the
     one-line JSONL write, and the POST-append rotation check (`maybe_rotate`) live in
     ONE place, so append-level behavior added later (validation, telemetry, a rotation
@@ -1641,7 +1065,7 @@ def collect_appends() -> Iterator[List[Dict[str, Any]]]:  # The records appended
     """Collect every source-journal record appended inside the block, as it landed on disk.
 
     Every append goes through `_append_record`, so whatever helper a verb uses (journaled_emit,
-    flip_module, cutover_module, append_retire) its records are collected here — the group
+    flip_module, append_retire) its records are collected here — the group
     the live fold step (`relive.apply_live`) applies, exactly the records a rebuild will fold."""
     records: List[Dict[str, Any]] = []
     token = _APPENDED.set(records)

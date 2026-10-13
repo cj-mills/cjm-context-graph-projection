@@ -188,14 +188,13 @@ async def _relocate(
     b_emission = _emission_for(B, b_text)
     if b_emission is not None and source_journal_path:
         # A target with no live journal key in a move whose SOURCES are journaled is a
-        # module being BORN by the relocation (regroup's created target) — it enters the
-        # journal graph-sourced from birth rather than dropping to an unjournaled write
-        # a rebuild would silently revert.
+        # module being BORN by the relocation (regroup's created target) — born captured
+        # rather than dropping to an unjournaled write a rebuild would silently revert.
         latest = latest_source_ops(source_journal_path)
         if ((b_emission["repo_key"], b_emission["module_path"]) not in latest
                 and any(e and (e["repo_key"], e["module_path"]) in latest
                         for e in emissions)):
-            b_emission["cutover"] = True
+            b_emission["born"] = True
     emissions.append(b_emission)
 
     # Callers: modules importing a source; rewrite each `from a_import import S` to point at B.

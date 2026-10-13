@@ -60,15 +60,12 @@ from .rename_ops import rename_symbol, rename_symbols
 from .render import render as _render_base
 from .review import review_frontier
 from .runtime import DEFAULT_MANIFESTS, open_graph
-from .seeds import repo_dir_name
 from .series import mint_series, place_in_series, series_order, set_series_members
 from .serve import serve_graphs
 from .sessioncost import session_cost
 from .site import site_build
 from .sitelinks import resolve_site_links, site_link_window
-from .source_state import (absorb_authored_text, capture_phase, CAPTURE_PHASES, collect_appends,
-                           cutover_module, emit_source_artifact, flip_module, graph_sourced_modules,
-                           source_check)
+from .source_state import collect_appends, emit_source_artifact, flip_module, source_check
 from .structure import add_section, new_note
 from .viz import project_viz
 from .workbench import anchor_lead_view, portfolio_view, session_feed
@@ -102,9 +99,9 @@ _DEFAULT_ACTOR = os.environ.get("CJM_ACTOR") or "agent:session"
 # pillar-3 content-type unification.
 MUTATES_SOURCE: Dict[str, bool] = {
     "author": True, "add-symbol": True, "add-text": True, "emit": True,
-    "flip-module": True, "flip-to-py": True, "cutover": True, "emit-artifact": True,
+    "flip-module": True, "flip-to-py": True, "emit-artifact": True,
     "move": True, "regroup": True, "new-module": True, "add-module": True, "rename-module": True,
-    "delete-module": True, "rename-symbol": True, "capture-artifact": True, "capture": True,
+    "delete-module": True, "rename-symbol": True, "capture-artifact": True,
 }
 
 # Id-ref registry (work item b73e7688): every POSITIONAL that accepts a node id —
@@ -113,7 +110,7 @@ MUTATES_SOURCE: Dict[str, bool] = {
 # here, verb by verb. The conformance test statically scans the parser source for
 # id-shaped positionals and fails the build on any undeclared one, so verb N+1
 # cannot ship without prefix support (the flip-module wall: 28 hits / 20 sessions
-# before 8bc9abf4). `repo_key` on the three source-state verbs is DUAL: a repo
+# before 8bc9abf4). `repo_key` on the two source-state verbs is DUAL: a repo
 # slug in the two-positional form, a CodeModule id/prefix in the single-arg form.
 # `edit-message.source_uuid` is exempt — a capture-source uuid, not a graph node.
 ID_REFS: Dict[str, tuple] = {
@@ -125,7 +122,7 @@ ID_REFS: Dict[str, tuple] = {
     "emit": ("module_id",), "move": ("symbol_id", "target_module_id"),
     "regroup": ("symbol_ids",), "rename-module": ("module_id",),
     "delete-module": ("module_id",), "rename-symbol": ("symbol_id",),
-    "flip-module": ("repo_key",), "cutover": ("repo_key",),
+    "flip-module": ("repo_key",),
     "emit-artifact": ("repo_key",), "emit-post": ("note_id",),
     "review-frontier": ("subject",), "propose": ("subject",), "confirm-proposal": ("proposal",),
     "link-audit": ("note",), "place": ("section_id",), "retire-section": ("section_id",),
@@ -265,7 +262,7 @@ async def _resolve_module_ref(
     ref: str,    # A CodeModule node id, or a unique id prefix (>= 6 hex chars)
 ):  # -> ({repo_key, module_path} | None, error | None) — the _resolve_capture shape
     """Resolve a CodeModule id/prefix to (repo_key, module_path) for the source-state
-    verbs (work item 8bc9abf4): flip-module / cutover / emit-artifact were the only
+    verbs (work item 8bc9abf4): flip-module / emit-artifact were among the only
     id-taking verbs refusing a node id — the miner corpus's most-repeated wall (28
     hits / 20 sessions). Wrong label, ambiguity, and no-match all fail LOUD; the
     RESOLVED repo_key + module_path are what the source journal records, so replay
@@ -307,51 +304,6 @@ def _editor_pop(
         return Path(tmp).read_text()
     finally:
         os.unlink(tmp)
-
-
-def _absorb_graph_sourced(res, args) -> int:  # 0 = ok (absorbed or not applicable), 1 = loud failure
-    """RETIRED IN PLACE (pillar-1 seam, DEC 6ee4b4f2): no call sites — journaling now
-    happens INSIDE the authoring verbs via `journaled_emit` (events BEFORE files), so
-    this after-the-fact absorb wrapper is dead; it awaits the delete-symbol verb
-    (0d8adfac) for physical removal.
-
-    Was: N+3 Phase 2 absorb gate, shared by the module-emitting write verbs (author,
-    add-symbol): an edit of a GRAPH-SOURCED module lands in the SOURCE journal (the
-    authority), canonicalized, with the artifact file kept in sync. A notebook's
-    journal key is its .ipynb source path (what cutover recorded) — NOT the nbdev
-    export-target `module_path` the result carries — re-derived from `artifact_path`
-    under --repos-dir, loud-fail (the f06ef1a6 lesson: 'written to disk' and
-    'journaled' are separate facts)."""
-    if not (res.get("artifact") in ("module", "notebook") and args.source_journal_path
-            and res.get("written") and not res.get("unchanged")):
-        return 0
-    src_path = res.get("module_path")
-    if res["artifact"] == "notebook":
-        try:
-            src_path = Path(res["artifact_path"]).relative_to(
-                Path(args.repos_dir) / res["repo_key"]).as_posix()
-        except (KeyError, TypeError, ValueError):
-            print(f"⚠ authored notebook NOT absorbed into the source journal: "
-                  f"cannot derive the repo-relative path of "
-                  f"{res.get('artifact_path')!r} under {args.repos_dir!r}",
-                  file=sys.stderr)
-            return 1
-    # The node's repo_key is the rename-stable CONCEPTUAL key; the source journal
-    # keys by repo DIR name (source_state's space) — denormalize so a renamed
-    # repo's authored state still absorbs (finding c89519cd: an unmapped key
-    # skipped this gate silently, emitting the file WITHOUT journaling).
-    dir_key = repo_dir_name(res.get("repo_key"))
-    if ((dir_key, src_path)
-            in graph_sourced_modules(args.source_journal_path)):
-        ab = absorb_authored_text(args.source_journal_path, dir_key,
-                                  src_path, res["artifact_path"],
-                                  res["emitted_text"])
-        if ab.get("error"):
-            print(f"⚠ source-journal absorb FAILED: {ab['error']}", file=sys.stderr)
-            return 1
-        print(f"  ↳ graph-sourced: authored state journaled"
-              f"{' (canonicalized — file rewritten)' if ab.get('canonicalized') else ''}")
-    return 0
 
 
 def _report_site_links(links: Dict[str, Any]) -> None:
@@ -931,7 +883,7 @@ async def _dispatch(args) -> int:
                     print(f"- **{key}** ({len(rows[key])}):")
                     for m in rows[key]:
                         print(f"    {m}")
-                print("_capture: `flip-module <repo_key> <module_path>` then `cutover` — "
+                print("_capture: `flip-module <repo_key> <module_path>` (born captured) — "
                       "tests/ included (user rule ac3d52f4)_")
             if arts:
                 total = sum(len(v) for v in arts.values())
@@ -2229,17 +2181,14 @@ async def _dispatch(args) -> int:
             print(render("flip", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "flip-to-py":
-            if not (args.source_journal_path and args.journal_path):
-                print("error: flip-to-py needs --source-journal-path AND --journal-path "
-                      "(it re-keys the source stream and re-targets write-journal links)",
-                      file=sys.stderr)
+            if not args.source_journal_path:
+                print("error: flip-to-py needs --source-journal-path", file=sys.stderr)
                 return 1
             doc = Path(args.docstring_file).read_text().strip() if args.docstring_file \
                 else args.docstring
             res = await flip_notebook_to_py(
-                gx, args.source_journal_path, args.journal_path, args.repos_dir,
-                args.repo_key, args.notebook_path, docstring=doc,
-                force_drop_cell_refs=args.force_drop_cell_refs, write=not args.no_write)
+                gx, args.source_journal_path, args.repos_dir, args.repo_key, args.notebook_path,
+                docstring=doc, write=not args.no_write)
             print(render("flip-to-py", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "source-check":
@@ -2259,46 +2208,8 @@ async def _dispatch(args) -> int:
             from .artifacts import artifact_check
             res["artifacts"] = artifact_check(args.source_journal_path, args.repos_dir)
             print(render("source-check", res, args.format))
-            # Shadow drift is informational (the soak); a GRAPH-SOURCED module failing
-            # the regen gate is an error (the artifact diverged from its source).
+            # A module failing the regen gate is an error (the artifact diverged from its source).
             return 0 if res.get("regen_clean", True) else 1
-        elif args.command == "cutover":
-            if not args.source_journal_path:
-                print("error: cutover needs --source-journal-path", file=sys.stderr)
-                return 1
-            repo_key, module_path = args.repo_key, args.module_path
-            if module_path is None:
-                # Single-arg form (8bc9abf4): the positional is a CodeModule id/prefix.
-                spec, merr = await _resolve_module_ref(gx, args.repo_key)
-                if merr:
-                    print(f"error: {merr}", file=sys.stderr)
-                    return 1
-                repo_key, module_path = spec["repo_key"], spec["module_path"]
-            res = cutover_module(args.source_journal_path, args.repos_dir,
-                                 repo_key, module_path,
-                                 write=not args.no_write)
-            print(render("cutover", res, args.format))
-            return 1 if res.get("error") else 0
-        elif args.command == "capture":
-            if not args.source_journal_path:
-                print("error: capture needs --source-journal-path", file=sys.stderr)
-                return 1
-            with collect_appends() as appended:
-                res = capture_phase(args.source_journal_path, args.repos_dir, args.phase,
-                                    write=not args.no_write, allow_reorder=args.allow_reorder,
-                                    diffs=bool(args.diff_file))
-            if args.diff_file:
-                Path(args.diff_file).write_text("".join(r.pop("diff", "") for r in res.get("rows", [])))
-                res["diff_file"] = args.diff_file
-            if args.report:
-                Path(args.report).write_text(json.dumps(res, indent=1))
-            if appended:
-                # The capture groups are source records like any other: the code fold's step
-                # derives them into the db now (2cc81d3b, B2)
-                res["live"] = await apply_live(gx, args.source_journal_path, args.repos_dir,
-                                               appended)
-            print(render("capture", res, args.format))
-            return 1 if res.get("error") else 0
         elif args.command == "emit-artifact":
             if not args.source_journal_path:
                 print("error: emit-artifact needs --source-journal-path", file=sys.stderr)
@@ -2431,7 +2342,7 @@ def _report_code_fold(fold, args) -> None:
     total = sum(len(v) for v in rows.values())
     if total:
         print(f"⚠ code fold: {total} uncaptured .py file(s) in on-graph repos are NOT on the "
-              f"graph (capture: flip-module + cutover; list: `uncaptured`)", file=sys.stderr)
+              f"graph (capture: flip-module; list: `uncaptured`)", file=sys.stderr)
 
 
 def _report_artifact_fold(fold, records, repos, args) -> None:
@@ -4349,7 +4260,7 @@ def main() -> int:
     p_un = sub.add_parser("uncaptured",
                           help="Audit: .py files in on-graph repos with NO source-journal "
                                "capture (absent from the graph; their edits are unjournaled "
-                               "plain writes); capture each with flip-module + cutover (a6453f70)")
+                               "plain writes); capture each with flip-module (a6453f70)")
     p_un.add_argument("--repo", action="append", default=None,
                       help="Limit to this repo key (repeatable; default: every repo the "
                            "source journal holds, less the config's code_exclude)")
@@ -4589,7 +4500,7 @@ def main() -> int:
     p_mv.add_argument("--repos-dir", default=DEFAULT_REPOS,
                       help="Repos root — the live code fold step derives node paths under it (as ingest does)")
 
-    p_nm = sub.add_parser("new-module", help="Mint an EMPTY module, journaled + cut over at birth (graph-sourced; populate with add-text / add-symbol)")
+    p_nm = sub.add_parser("new-module", help="Mint an EMPTY module, born captured (graph-sourced; populate with add-text / add-symbol)")
     p_nm.add_argument("repo_key", help="The repo's durable conceptual slug")
     p_nm.add_argument("module_path", help="Repo-relative path of the new module (e.g. pkg/sub.py)")
     p_nm.add_argument("--import-name", help="Dotted import name (derived from module_path if omitted)")
@@ -4601,8 +4512,8 @@ def main() -> int:
                       help="Repos root — the live code fold step derives node paths under it (as ingest does)")
 
     p_am = sub.add_parser("add-module",
-                          help="Birth a module WHOLE in one journaled op (regions + symbols + "
-                               "imports + cutover; graph-sourced from its first record — tests too)")
+                          help="Birth a module WHOLE in one journaled op, born captured (its "
+                               "elements journaled as one group; graph-sourced from its first record)")
     p_am.add_argument("repo_key", help="The repo's durable conceptual slug")
     p_am.add_argument("module_path", help="Repo-relative path of the new module (e.g. pkg/sub.py, tests/test_x.py)")
     p_am.add_argument("--body-file", required=True, help="The module's whole text")
@@ -4670,72 +4581,44 @@ def main() -> int:
                       help="Repos root — the live code fold step derives node paths under it (as ingest does)")
 
     p_fl = sub.add_parser("flip-module",
-                          help="N+3 Phase 1 (SHADOW): capture a module's canonical source into the source journal")
+                          help="Absorb a module's FILE at element grain: a captured module's edit lands as "
+                               "element records; a file-born module is born captured")
     p_fl.add_argument("repo_key", help="The repo's durable conceptual slug — or a CodeModule "
                                        "id / unique id prefix (the single-arg form, 8bc9abf4)")
     p_fl.add_argument("module_path", nargs="?", default=None,
-                      help="Repo-relative source path (e.g. pkg/sub.py, or "
-                           "nbs/core/mod.ipynb for a notebook-sourced module); omit it "
+                      help="Repo-relative source path (e.g. pkg/sub.py); omit it "
                            "when the first positional is a CodeModule id/prefix")
     p_fl.add_argument("--import-name", help="Dotted import name (derived from module_path if omitted)")
     p_fl.add_argument("--no-write", action="store_true",
-                      help="Dry run: report what a flip would capture, journal nothing")
+                      help="Dry run: report what a flip would land, journal nothing")
     p_fl.add_argument("--allow-reorder", action="store_true",
                       help="Journal the canonical form even when it carries a hazard (the first "
                            "statement changing kind, an import moved above a statement it followed)")
     p_fl.add_argument("--repos-dir", default=DEFAULT_REPOS)
 
     p_fp = sub.add_parser("flip-to-py",
-                          help="Golden-reference flip, ONE LOUD VERB: a graph-sourced notebook's "
-                               "export cells -> plain .py source state (arc-lib shape, no __all__); "
-                               "journals source+cutover under the .py key, RETIRES the .ipynb key, "
-                               "re-targets write-journal Cell links, writes the .py, deletes the notebook")
-    p_fp.add_argument("repo_key", help="The repo's durable conceptual slug")
-    p_fp.add_argument("notebook_path", help="Repo-relative .ipynb path (the retiring source-journal key)")
+                          help="The off-nbdev step, ONE LOUD VERB: a notebook FILE's export cells -> a "
+                               "plain .py module BORN CAPTURED (arc-lib shape, no __all__); writes the "
+                               ".py, deletes the notebook (its text stays in git history)")
+    p_fp.add_argument("repo_key", help="The repo's directory under the repos root")
+    p_fp.add_argument("notebook_path", help="Repo-relative .ipynb path (the file converted, then deleted)")
     p_fp.add_argument("--docstring", help="Module docstring (the prose-triage fold), verbatim")
     p_fp.add_argument("--docstring-file", help="Read the module docstring from a file instead")
-    p_fp.add_argument("--force-drop-cell-refs", action="store_true",
-                      help="Proceed past un-retargetable Cell-id write ops (they orphan on rebuild — LOUD)")
     p_fp.add_argument("--no-write", action="store_true",
                       help="Dry run: report the full flip plan, touch nothing")
     p_fp.add_argument("--repos-dir", default=DEFAULT_REPOS)
 
     p_sc = sub.add_parser("source-check",
-                          help="N+3 soak: file-drift (membrane) + round-trip fixpoint for shadow-sourced modules; "
-                               "exit 1 if a GRAPH-SOURCED module fails the regen gate")
+                          help="The regen gate: file-drift (membrane) + composition fixpoint for every live "
+                               "module; exit 1 if any fails")
     p_sc.add_argument("--repos-dir", default=DEFAULT_REPOS)
-
-    p_co = sub.add_parser("cutover",
-                          help="N+3 Phase 2: make the journal a module's source of truth "
-                               "(guarded — requires a clean shadow); the file becomes a generated committed artifact")
-    p_co.add_argument("repo_key", help="The repo's durable conceptual slug — or a CodeModule "
-                                       "id / unique id prefix (the single-arg form, 8bc9abf4)")
-    p_co.add_argument("module_path", nargs="?", default=None,
-                      help="Repo-relative source path (.py or nbs/*.ipynb); omit it "
-                           "when the first positional is a CodeModule id/prefix")
-    p_co.add_argument("--no-write", action="store_true",
-                      help="Dry run: run every cutover guard, flip nothing")
-    p_co.add_argument("--repos-dir", default=DEFAULT_REPOS)
-
-    p_cap = sub.add_parser("capture",
-                           help="Capture a phase of the code lane into the element regime, whole: each "
-                                "live module's elements journaled as one group, then the files rewritten "
-                                "to their capture form (design abfc2829; guarded -- one refusal refuses all)")
-    p_cap.add_argument("phase", choices=sorted(CAPTURE_PHASES), help="The phase to capture (tests, packages)")
-    p_cap.add_argument("--no-write", action="store_true",
-                       help="Dry run: run every guard and report the capture, journal nothing")
-    p_cap.add_argument("--allow-reorder", action="store_true",
-                       help="Capture even when a module's capture form carries a hazard")
-    p_cap.add_argument("--diff-file", help="Write every module's layout diff (snapshot -> capture form) here")
-    p_cap.add_argument("--report", help="Write the full receipt (per-module rows: leaving / born / unclaimed) here as JSON")
-    p_cap.add_argument("--repos-dir", default=DEFAULT_REPOS)
 
     p_ea = sub.add_parser("emit-artifact",
                           help="(Re)generate a module's file from its journaled source (the journal is authoritative)")
     p_ea.add_argument("repo_key", help="The repo's durable conceptual slug — or a CodeModule "
                                        "id / unique id prefix (the single-arg form, 8bc9abf4)")
     p_ea.add_argument("module_path", nargs="?", default=None,
-                      help="Repo-relative source path (.py or nbs/*.ipynb); omit it "
+                      help="Repo-relative source path; omit it "
                            "when the first positional is a CodeModule id/prefix")
     p_ea.add_argument("--repos-dir", default=DEFAULT_REPOS)
     p_ea.add_argument("--no-write", action="store_true", help="Dry run: report drift, don't touch the file")

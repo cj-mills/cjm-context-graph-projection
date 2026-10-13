@@ -2,7 +2,6 @@
 graph-task layer (get_node / find_nodes_by_label / add_nodes / add_edges / update_node)."""
 
 import asyncio
-import json
 from types import SimpleNamespace
 
 import cjm_context_graph_projection.authoring as authoring_mod
@@ -136,17 +135,6 @@ def test_add_symbol_refuses_bad_bodies_and_duplicates(tmp_path, monkeypatch):
     assert "no module" in missing["error"]
 
 
-def test_add_symbol_refuses_notebook_modules(tmp_path, monkeypatch):
-    mod = _module_node(tmp_path)
-    cell = {"id": "cell1", "label": "Cell",
-            "properties": {"module_id": "mod1", "cell_type": "code",
-                           "source": "def f():\n    pass", "cell_key": "c0"}}
-    fake = FakeGraph([mod, cell])
-    _wire(fake, monkeypatch)
-    res = asyncio.run(add_symbol(GX, "mod1", "def g():\n    pass\n"))
-    assert ".py modules only" in res["error"]
-
-
 def _class_module_graph(tmp_path):
     """A module holding a class with a method — the method is a NESTED symbol (no body)."""
     mod = _module_node(tmp_path)
@@ -176,29 +164,6 @@ def test_nested_symbol_replace_is_refused_with_guidance(tmp_path, monkeypatch):
     _wire(fake, monkeypatch)
     res = asyncio.run(author(GX, "meth1", replace="def m(self):\n    return 3\n"))
     assert "--edit" in res["error"] and "cls1" in res["error"]
-
-
-def test_nested_symbol_routes_to_owning_notebook_cell(tmp_path, monkeypatch):
-    nb_path = tmp_path / "nbs" / "00_m.ipynb"
-    nb_path.parent.mkdir(parents=True, exist_ok=True)
-    mod = {"id": "mod1", "label": "CodeModule",
-           "properties": {"repo_key": "cjm-demo", "module_path": "cjm_demo/m.py",
-                          "path": str(nb_path), "import_name": "cjm_demo.m"}}
-    cell = {"id": "cell1", "label": "Cell",
-            "properties": {"module_id": "mod1", "cell_type": "code", "cell_key": "c0",
-                           "source": "class K:\n    def m(self):\n        return 1",
-                           "order_index": 0}}
-    nested = {"id": "meth1", "label": "CodeSymbol",
-              "properties": {"module_id": "mod1", "qualname": "K.m", "name": "K.m",
-                             "symbol_kind": "method"}}
-    fake = FakeGraph([mod, cell, nested])
-    _wire(fake, monkeypatch)
-    res = asyncio.run(author(GX, "meth1", edit=("return 1", "return 2")))
-    assert not res.get("error"), res
-    assert res["routed_from"] == "meth1" and res["node_id"] == "cell1"
-    assert res["artifact"] == "notebook"
-    nb = json.loads(nb_path.read_text())
-    assert any("return 2" in "".join(c.get("source", [])) for c in nb["cells"])
 
 
 def test_add_symbol_dry_run_touches_nothing(tmp_path, monkeypatch):

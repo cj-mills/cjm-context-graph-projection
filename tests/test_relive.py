@@ -3,9 +3,9 @@
 The pure half pins that a fold SEEDED the way the live step seeds it (the journal prefix
 advanced, the indexes and the touched module loaded from held state) and then stepped over a
 group lands exactly where a fold of the whole journal lands — nodes, times and edges. The
-end-to-end half drives a batch of real live code verbs into a db (author, add-symbol, a name
-made ambiguous, new-module, move, rename-symbol, rename-module, a flip-module absorb,
-delete-module) and, after EVERY op, rebuilds the same source journal into a fresh db and
+end-to-end half births a repo captured and drives a batch of real live code verbs into a db
+(author, add-symbol, new-module, move, a name made ambiguous, rename-symbol, rename-module, a
+flip-module absorb, add-module, delete-module) and, after EVERY op, rebuilds the same source journal into a fresh db and
 requires rebuild-diff CLEAN — a later op re-deriving a module must not mask an earlier op's
 miss (the first real swap caught exactly that: callers in untouched modules): leg B's
 acceptance."""
@@ -146,25 +146,39 @@ def _cli(*args):
                           capture_output=True, text=True)
 
 
+FORM = "cjm_demo_lib/form.py"
 FILES = {
     "cjm_demo_lib/__init__.py": "",
     UTIL: "def helper(x):\n    return x\n",
     CORE: ('"""Core."""\n\nfrom cjm_demo_lib.util import helper\n\n\ndef alpha(x):\n'
            "    return helper(x) + 1\n\n\ndef beta(y):\n    return alpha(y) * 2\n"),
     TST: "from cjm_demo_lib.core import alpha\n\n\ndef test_alpha():\n    assert alpha(1) == 2\n",
+    "tests/test_util.py": ("import sys\nfrom cjm_demo_lib.util import helper\nimport os\n\n\n"
+                           "def test_helper():\n    assert helper(os.sep) and sys\n"),
+    FORM: ("class Form:\n    @property\n    def row(self):\n        return self._row\n\n"
+           "    @row.setter\n    def row(self, i):\n        self._row = i\n"),
 }
 
 
-@needs_capability
-def test_live_code_verbs_equal_their_rebuild(tmp_path):
+def _born_repo(tmp_path):
+    """The demo repo on disk, each module born captured from its file (flip-module), the file
+    regenerated where its capture form differs (emit-artifact)."""
     repos = tmp_path / "repos"
     for rel, text in FILES.items():
         (repos / LIB / rel).parent.mkdir(parents=True, exist_ok=True)
         (repos / LIB / rel).write_text(text)
-    live = str(tmp_path / "live.db")
-    sj = str(tmp_path / "source.jsonl")
+    live, sj = str(tmp_path / "live.db"), str(tmp_path / "source.jsonl")
     R = ("--repos-dir", str(repos))
+    for rel in FILES:
+        for verb in ("flip-module", "emit-artifact"):
+            r = _cli("--graph-db-path", live, "--source-journal-path", sj, verb, LIB, rel, *R)
+            assert r.returncode == 0, r.stderr or r.stdout
+    return repos, live, sj, R
 
+
+@needs_capability
+def test_live_code_verbs_equal_their_rebuild(tmp_path):
+    repos, live, sj, R = _born_repo(tmp_path)
     memory = tmp_path / "memory"
     memory.mkdir()
     checks = []
@@ -186,41 +200,61 @@ def test_live_code_verbs_equal_their_rebuild(tmp_path):
         checks.append(after)
 
     def step(*args):
-        ok(*args)
+        out = ok(*args)
         equals_its_rebuild(args[0])
+        return out
 
-    # Capture: every flip is a source record the live step derives into the db.
-    for rel in FILES:
-        ok("flip-module", LIB, rel, *R)
-        ok("emit-artifact", LIB, rel, *R)  # regenerate the file if the flip canonicalized
-        ok("cutover", LIB, rel, *R)
-    equals_its_rebuild("capture")
+    equals_its_rebuild("birth")
+    assert (repos / LIB / "tests/test_util.py").read_text().startswith(
+        "import os\nimport sys\n\nfrom cjm_demo_lib.util import helper\n")  # the derived layout
     core, util = code_module_node_id(LIB, CORE), code_module_node_id(LIB, UTIL)
     extra = code_module_node_id(LIB, "cjm_demo_lib/extra.py")
-    # The batch: a body edit, new symbols, a name turned ambiguous corpus-wide, a module born
-    # on-graph, a keep-identity move / rename / module rename, an absorbed plain edit, a delete.
+    tst, fm = code_module_node_id(LIB, TST), code_module_node_id(LIB, FORM)
+    # The batch: a body edit (an accessor chain's member too), new symbols, a module born on-graph,
+    # a keep-identity move, a name turned ambiguous corpus-wide (after the move: before it, the move
+    # is refused -- finding 73714120), a keep-identity rename / module rename, absorbed plain edits,
+    # births whole and empty, a delete -- on package and test modules alike.
     step("author", code_symbol_node_id(core, "alpha"), "--edit", "helper(x) + 1", "helper(x) + 2", *R)
+    step("author", code_symbol_node_id(fm, "Form.row"), "--edit", "self._row = i", "self._row = int(i)", *R)
+    assert "@row.setter\n    def row(self, i):\n        self._row = int(i)\n" in (repos / LIB / FORM).read_text()
     step("add-symbol", util, "--body", "def gamma(z):\n    return helper(z)", *R)
-    step("add-symbol", core, "--body", "def helper(x):\n    return -x", *R)
     step("new-module", LIB, "cjm_demo_lib/extra.py", *R)
     step("add-symbol", extra, "--body", "def delta():\n    return 1", *R)
     step("move", code_symbol_node_id(util, "gamma"), extra, *R)
+    step("add-symbol", core, "--body", "def helper(x):\n    return -x", *R)
     step("rename-symbol", code_symbol_node_id(core, "beta"), "beta2", *R)
     step("rename-module", util, "cjm_demo_lib/tools.py", *R)
-    tst = repos / LIB / TST
-    tst.write_text("from cjm_demo_lib.core import alpha, beta2\n\n\ndef test_alpha():\n"
-                   "    assert alpha(1) == 3\n\n\ndef test_beta():\n    assert beta2(1) == 6\n")
+    (repos / LIB / CORE).write_text((repos / LIB / CORE).read_text() + "\n\ndef omega():\n    return 0\n")
+    step("flip-module", LIB, CORE, *R)
+    step("author", code_symbol_node_id(tst, "test_alpha"), "--edit", "== 2", "== 3", *R)
+    step("add-symbol", tst, "--body", "def test_beta():\n    assert beta2(1) == 6", "--import",
+         "from cjm_demo_lib.core import beta2", *R)
+    (repos / LIB / TST).write_text((repos / LIB / TST).read_text() + "\n\ndef test_three():\n    assert alpha(3)\n")
     step("flip-module", LIB, TST, *R)
+    body = tmp_path / "born.py"
+    body.write_text('"""Born."""\n\nfrom cjm_demo_lib.core import alpha\n\n\ndef twice(x):\n'
+                    "    return alpha(x) * 2\n")
+    assert "born captured" in step("add-module", LIB, "cjm_demo_lib/born.py", "--body-file", str(body), *R)
+    tbody = tmp_path / "test_born.py"
+    tbody.write_text("import sys\nimport os\n\n\ndef test_born():\n    assert os and sys\n")
+    out = step("add-module", LIB, "tests/test_born.py", "--body-file", str(tbody), *R)
+    assert "born captured" in out and "+import os" in out  # the birth shows the form it lands
+    step("new-module", LIB, "tests/test_empty.py", *R)
+    step("add-symbol", code_module_node_id(LIB, "tests/test_empty.py"), "--body",
+         "def test_empty():\n    assert True", *R)
     step("delete-module", extra, "--force", *R)
 
-    assert len(checks) == 11
+    assert len(checks) == 19
+    assert "source" not in {json.loads(ln)["verb"] for ln in open(sj)}  # element records only
     # ... and not vacuously: the live db holds what the batch made, derived edges included.
     import sqlite3
     con = sqlite3.connect(live)
     q = lambda sql, *a: con.execute(sql, a).fetchall()
     paths = {p for (p,) in q("select json_extract(properties,'$.module_path') from nodes "
                              "where label='CodeModule'")}
-    assert paths == {"cjm_demo_lib/__init__.py", CORE, "cjm_demo_lib/tools.py", TST}
+    assert paths == {"cjm_demo_lib/__init__.py", CORE, "cjm_demo_lib/tools.py", TST, FORM,
+                     "tests/test_util.py", "cjm_demo_lib/born.py", "tests/test_born.py",
+                     "tests/test_empty.py"}
     beta = code_symbol_node_id(core, "beta")  # the rename kept its birth id
     assert q("select json_extract(properties,'$.qualname') from nodes where id=?", beta) == [("beta2",)]
     rel = lambda s, r: {t for (t,) in q("select target_id from edges where source_id=? and "
@@ -228,31 +262,23 @@ def test_live_code_verbs_equal_their_rebuild(tmp_path):
     alpha = code_symbol_node_id(core, "alpha")
     assert rel(beta, "CALLS") == {alpha}
     assert rel(alpha, "CALLS") == set()  # `helper` is defined twice: ambiguous, no edge
-    test_beta = code_symbol_node_id(code_module_node_id(LIB, TST), "test_beta")
+    test_beta = code_symbol_node_id(tst, "test_beta")
     assert beta in rel(test_beta, "TESTS")
-    assert rel(code_module_node_id(LIB, TST), "IMPORTS") == {core}
+    assert rel(tst, "IMPORTS") == {core}
 
 
 @needs_capability
 def test_add_module_births_a_whole_module_equal_to_its_rebuild(tmp_path):
-    # 177dcb07: one add-module journals a whole module (regions + symbols + imports + the
-    # cutover) and the live db equals the same journal folded fresh; a test module too;
+    # 177dcb07: one add-module journals a whole module born captured (its elements, one group) and
+    # the live db equals the same journal folded fresh; a test module too;
     # a re-birth on a held path and a birth over a file already on disk both refuse.
-    repos = tmp_path / "repos"
-    for rel, text in FILES.items():
-        (repos / LIB / rel).parent.mkdir(parents=True, exist_ok=True)
-        (repos / LIB / rel).write_text(text)
-    live, sj = str(tmp_path / "live.db"), str(tmp_path / "source.jsonl")
-    R = ("--repos-dir", str(repos))
+    repos, live, sj, R = _born_repo(tmp_path)
     memory = tmp_path / "memory"
     memory.mkdir()
 
     def run(*args):
         return _cli("--graph-db-path", live, "--source-journal-path", sj, *args)
 
-    for rel in FILES:
-        for verb in ("flip-module", "emit-artifact", "cutover"):
-            assert run(verb, LIB, rel, *R).returncode == 0
     born, born_test = "cjm_demo_lib/born.py", "tests/test_born.py"
     body = tmp_path / "born.py"
     body.write_text('"""Born whole."""\n\nfrom cjm_demo_lib.core import alpha\n\n\n'
@@ -284,147 +310,4 @@ def test_add_module_births_a_whole_module_equal_to_its_rebuild(tmp_path):
     assert again.returncode == 1 and "already exists" in again.stdout
     (repos / LIB / "cjm_demo_lib/filed.py").write_text("X = 1\n")
     over = run("add-module", LIB, "cjm_demo_lib/filed.py", "--body-file", str(body), *R)
-    assert over.returncode == 1 and "flip-module + cutover" in over.stdout
-
-
-@needs_capability
-def test_the_tests_capture_and_writes_on_captured_modules_equal_their_rebuild(tmp_path):
-    # The capture verb (abfc2829 (6), bef8e6b8): `capture tests` journals each test module's
-    # elements as one group and the live db equals the same journal folded fresh; so does every
-    # later write to a captured module -- author, add-symbol, an absorbed file edit, a module born
-    # captured whole and empty -- and a second capture refuses.
-    files = {**FILES, "tests/test_util.py": "import sys\nfrom cjm_demo_lib.util import helper\nimport os\n\n\n"
-                                            "def test_helper():\n    assert helper(os.sep) and sys\n"}
-    repos = tmp_path / "repos"
-    for rel, text in files.items():
-        (repos / LIB / rel).parent.mkdir(parents=True, exist_ok=True)
-        (repos / LIB / rel).write_text(text)
-    live, sj = str(tmp_path / "live.db"), str(tmp_path / "source.jsonl")
-    R = ("--repos-dir", str(repos))
-    memory = tmp_path / "memory"
-    memory.mkdir()
-    checks = []
-
-    def run(*args):
-        return _cli("--graph-db-path", live, "--source-journal-path", sj, *args)
-
-    def step(*args):
-        r = run(*args)
-        assert r.returncode == 0, f"{args[0]} failed: {r.stderr or r.stdout}"
-        out = r.stdout
-        rebuilt = str(tmp_path / f"rebuilt{len(checks)}.db")
-        r = _cli("--graph-db-path", rebuilt, "--source-journal-path", sj, "ingest",
-                 "--memory-dir", str(memory), "--no-repo-map", "--no-seed", *R)
-        assert r.returncode == 0, r.stderr or r.stdout
-        r = _cli("--graph-db-path", live, "rebuild-diff", "--against", rebuilt)
-        assert r.returncode == 0 and "CLEAN" in r.stdout, (
-            f"after {args[0]}: the live db differs from its rebuild:\n{r.stdout}\n{r.stderr}")
-        checks.append(args[0])
-        return out
-
-    for rel in files:
-        for verb in ("flip-module", "emit-artifact", "cutover"):
-            assert run(verb, LIB, rel, *R).returncode == 0
-    n = len(open(sj).read().splitlines())
-    diff = tmp_path / "layout.diff"
-    r = run("capture", "tests", "--no-write", "--diff-file", str(diff), *R)
-    assert r.returncode == 0 and "PREVIEW" in r.stdout, r.stderr or r.stdout
-    assert len(open(sj).read().splitlines()) == n and "+import os" in diff.read_text()
-    step("capture", "tests", *R)
-    assert (repos / LIB / "tests/test_util.py").read_text().startswith(
-        "import os\nimport sys\n\nfrom cjm_demo_lib.util import helper\n")  # the derived layout
-    tst = code_module_node_id(LIB, TST)
-    step("author", code_symbol_node_id(tst, "test_alpha"), "--edit", "== 2", "== 2, alpha", *R)
-    step("add-symbol", tst, "--body", "def test_twice():\n    assert alpha(2) == 3", *R)
-    (repos / LIB / TST).write_text((repos / LIB / TST).read_text() + "\n\ndef test_three():\n    assert alpha(3)\n")
-    step("flip-module", LIB, TST, *R)
-    body = tmp_path / "test_born.py"
-    body.write_text("import sys\nimport os\n\n\ndef test_born():\n    assert os and sys\n")
-    out = step("add-module", LIB, "tests/test_born.py", "--body-file", str(body), *R)
-    assert "born captured" in out and "+import os" in out  # the birth shows the form it lands
-    assert (repos / LIB / "tests/test_born.py").read_text().startswith("import os\nimport sys\n")
-    step("new-module", LIB, "tests/test_empty.py", *R)
-    born = code_module_node_id(LIB, "tests/test_empty.py")
-    step("add-symbol", born, "--body", "def test_empty():\n    assert True", *R)
-    assert len(checks) == 7
-    again = run("capture", "tests", *R)
-    assert again.returncode == 1 and "already captured" in again.stdout
-    tail = [json.loads(ln) for ln in open(sj).read().splitlines()][n:]
-    assert "source" not in {r["verb"] for r in tail if r["args"].get("module_path", "tests/").startswith("tests/")}
-
-
-@needs_capability
-def test_the_packages_capture_and_writes_on_captured_packages_equal_their_rebuild(tmp_path):
-    # The package phase (design detail ed20aa51): `capture packages` after `capture tests` rewrites no
-    # file (the package files are the canonical emit already), and every graph-driven write after it --
-    # author (an accessor chain's member too), add-symbol, new-module, move, a name turned ambiguous
-    # (after the move: before it, the move is refused -- finding 73714120), rename-symbol,
-    # rename-module, an absorbed file edit, add-module, delete-module -- lands element
-    # records, never a snapshot, and the live db equals the same journal folded fresh after each.
-    form = "cjm_demo_lib/form.py"
-    files = {**FILES, form: ("class Form:\n    @property\n    def row(self):\n        return self._row\n\n"
-                             "    @row.setter\n    def row(self, i):\n        self._row = i\n")}
-    repos = tmp_path / "repos"
-    for rel, text in files.items():
-        (repos / LIB / rel).parent.mkdir(parents=True, exist_ok=True)
-        (repos / LIB / rel).write_text(text)
-    live, sj = str(tmp_path / "live.db"), str(tmp_path / "source.jsonl")
-    R = ("--repos-dir", str(repos))
-    memory = tmp_path / "memory"
-    memory.mkdir()
-    checks = []
-
-    def run(*args):
-        return _cli("--graph-db-path", live, "--source-journal-path", sj, *args)
-
-    def step(*args):
-        r = run(*args)
-        assert r.returncode == 0, f"{args[0]} failed: {r.stderr or r.stdout}"
-        out = r.stdout
-        rebuilt = str(tmp_path / f"rebuilt{len(checks)}.db")
-        r = _cli("--graph-db-path", rebuilt, "--source-journal-path", sj, "ingest",
-                 "--memory-dir", str(memory), "--no-repo-map", "--no-seed", *R)
-        assert r.returncode == 0, r.stderr or r.stdout
-        r = _cli("--graph-db-path", live, "rebuild-diff", "--against", rebuilt)
-        assert r.returncode == 0 and "CLEAN" in r.stdout, (
-            f"after {args[0]}: the live db differs from its rebuild:\n{r.stdout}\n{r.stderr}")
-        checks.append(args[0])
-        return out
-
-    for rel in files:
-        for verb in ("flip-module", "emit-artifact", "cutover"):
-            assert run(verb, LIB, rel, *R).returncode == 0
-    step("capture", "tests", *R)
-    held = {rel: (repos / LIB / rel).read_text() for rel in files}
-    n = len(open(sj).read().splitlines())
-    r = run("capture", "packages", "--no-write", *R)
-    assert r.returncode == 0 and "PREVIEW" in r.stdout, r.stderr or r.stdout
-    assert len(open(sj).read().splitlines()) == n
-    step("capture", "packages", *R)
-    assert {rel: (repos / LIB / rel).read_text() for rel in files} == held  # no file rewritten
-    core, util = code_module_node_id(LIB, CORE), code_module_node_id(LIB, UTIL)
-    extra = code_module_node_id(LIB, "cjm_demo_lib/extra.py")
-    fm = code_module_node_id(LIB, form)
-    step("author", code_symbol_node_id(core, "alpha"), "--edit", "helper(x) + 1", "helper(x) + 2", *R)
-    step("author", code_symbol_node_id(fm, "Form.row"), "--edit", "self._row = i", "self._row = int(i)", *R)
-    assert "@row.setter\n    def row(self, i):\n        self._row = int(i)\n" in (repos / LIB / form).read_text()
-    step("add-symbol", util, "--body", "def gamma(z):\n    return helper(z)", *R)
-    step("new-module", LIB, "cjm_demo_lib/extra.py", *R)
-    step("add-symbol", extra, "--body", "def delta():\n    return 1", *R)
-    step("move", code_symbol_node_id(util, "gamma"), extra, *R)
-    step("add-symbol", core, "--body", "def helper(x):\n    return -x", *R)
-    step("rename-symbol", code_symbol_node_id(core, "beta"), "beta2", *R)
-    step("rename-module", util, "cjm_demo_lib/tools.py", *R)
-    (repos / LIB / CORE).write_text((repos / LIB / CORE).read_text() + "\n\ndef omega():\n    return 0\n")
-    step("flip-module", LIB, CORE, *R)
-    body = tmp_path / "born.py"
-    body.write_text('"""Born."""\n\nfrom cjm_demo_lib.core import alpha\n\n\ndef twice(x):\n'
-                    "    return alpha(x) * 2\n")
-    out = step("add-module", LIB, "cjm_demo_lib/born.py", "--body-file", str(body), *R)
-    assert "born captured" in out
-    step("delete-module", extra, "--force", *R)
-    assert len(checks) == 14
-    again = run("capture", "packages", *R)
-    assert again.returncode == 1 and "already captured" in again.stdout
-    tail = [json.loads(ln) for ln in open(sj).read().splitlines()][n:]
-    assert "source" not in {r["verb"] for r in tail}  # every write after the capture is element records
+    assert over.returncode == 1 and "captured with flip-module" in over.stdout

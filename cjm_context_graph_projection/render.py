@@ -1274,12 +1274,11 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
     if kind == "flip":
         if obj.get("error"):
             return "\n".join([f"⚠ {obj['error']}"] + _canonicalization_block(obj))
+        born = (obj.get("element_grain") or {}).get("restated") == "born"
         if obj.get("previewed"):
-            verb = "PREVIEW — would " + ("absorb (graph-sourced)" if obj.get("graph_sourced")
-                                         else "capture (shadow)")
+            verb = "PREVIEW — would " + ("birth it captured" if born else "absorb the edit")
         else:
-            verb = (("absorbed (graph-sourced)" if obj.get("graph_sourced")
-                     else "captured (shadow)")
+            verb = (("born captured" if born else "absorbed at element grain")
                     if obj.get("captured") else "already current (no-op)")
         canon = ("file is already canonical" if obj.get("file_already_canonical")
                  else "⚠ a one-time canonicalization — the change:")
@@ -1312,7 +1311,8 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
     if kind == "source-check":
         n = obj.get("count", 0)
         gs = obj.get("graph_sourced_count", 0)
-        head = (f"**source soak**: {n} module(s) ({gs} graph-sourced / {n - gs} shadow) · "
+        head = (f"**source check**: {n} module(s) ({gs} captured"
+                + (f" / {n - gs} SNAPSHOT -- a retired regime, failing the gate" if n - gs else "") + ") · "
                 f"file-drift {obj.get('file_drift')} · "
                 f"round-trip-stable {obj.get('roundtrip_stable')}/{n}"
                 + ("  ✓ CLEAN" if obj.get("clean") else "")
@@ -1339,94 +1339,26 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             if not m.get("roundtrip_fixpoint"):
                 flags.append("round-trip NOT a fixpoint")
             status = "ok" if not flags else "⚠ " + "; ".join(flags)
-            phase = "GRAPH-SOURCED" if sourced else "shadow"
+            phase = "captured" if sourced else "SNAPSHOT"
             lines.append(f"  - `{m.get('module')}` [{phase}] — {status}")
         return "\n".join(lines)
-    if kind == "flip-to-py":
-        lines = []
+    if kind == "flip-to-py":   # design detail 25c1fadc (N): a notebook file -> a module born captured
         if obj.get("error"):
-            lines.append(f"⚠ {obj['error']}")
-            for b in obj.get("cell_ref_blockers", []):
-                lines.append(f"  ✗ journaled `{b.get('verb')}` op #{b.get('op_index')} "
-                             f"({b.get('arg_path')}) -> Cell `{b.get('cell_id')}` "
-                             f"(surviving symbols: {b.get('surviving_symbols') or 'NONE'})")
-            if len(lines) == 1:
-                return lines[0]
-            return "\n".join(lines)
+            return f"⚠ {obj['error']}"
         head = ("**FLIPPED**" if obj.get("written") else "**flip plan (dry run)**")
         lines = [f"{head} `{obj.get('notebook_path')}` → `{obj.get('module_path')}` "
-                 f"({obj.get('export_cells')} export cells → "
-                 f"{obj.get('canonical_bytes')} canonical bytes)"]
-        md = obj.get("markdown_cells_dropped", [])
-        lines.append(f"  markdown cells DROPPED ({len(md)}) — prose triage owns their disposition:")
-        lines += [f"    - [{c.get('index')}] {c.get('first_line', '')[:90]}" for c in md]
-        nx = obj.get("nonexport_code_cells_dropped", [])
-        if nx:
-            lines.append(f"  ⚠ NON-EXPORT code cells DROPPED ({len(nx)}) — project their tests FIRST:")
-            lines += [f"    - [{c.get('index')}] {c.get('first_line', '')[:90]}" for c in nx]
+                 f"({obj.get('export_cells')} export cells → {obj.get('born_bytes')} bytes, born captured)"]
+        for c in obj.get("markdown_cells_dropped", []):
+            lines.append(f"  markdown cell {c.get('index')} dropped: {c.get('first_line', '')[:70]}")
+        for c in obj.get("nonexport_code_cells_dropped", []):
+            lines.append(f"  non-export code cell {c.get('index')} dropped: {c.get('first_line', '')[:70]}")
         if obj.get("dropped_all_dunder"):
-            lines.append(f"  __all__ assignment(s) dropped: {obj['dropped_all_dunder']} "
-                         "(nbdev star-import scar-repair; arc-lib shape carries none)")
-        if obj.get("pruned_imports"):
-            lines.append(f"  imports pruned by canonical emit: {', '.join(obj['pruned_imports'])} "
-                         "— VERIFY each is dead (comment/docstring refs don't count)")
-        for rt in obj.get("cell_refs_retargeted", []):
-            lines.append(f"  ↳ re-linked {rt.get('relation')} Cell `{rt.get('replaces_cell')}` "
-                         f"→ symbol `{rt.get('surviving_symbol')}`")
-        for b in obj.get("cell_refs_dropped", []):
-            lines.append(f"  ✗ FORCED DROP: `{b.get('verb')}` op #{b.get('op_index')} "
-                         f"({b.get('arg_path')}) -> Cell `{b.get('cell_id')}` orphans on rebuild")
+            lines.append(f"  __all__ assignments dropped: {obj['dropped_all_dunder']}")
         if obj.get("written"):
-            g = obj.get("graph", {})
-            lines.append(f"  journal: source+cutover `{obj.get('module_path')}` · "
-                         f"RETIRED `{obj.get('notebook_path')}` · notebook file "
-                         f"{'deleted' if obj.get('notebook_deleted') else 'ALREADY ABSENT'}")
-            lines.append(f"  graph: {g.get('dropped_nodes')} nodes out → "
-                         f"{g.get('added_nodes')} in / {g.get('added_edges')} edges")
+            lines.append(f"  notebook file {'deleted' if obj.get('notebook_deleted') else 'ALREADY ABSENT'}")
         if obj.get("note"):
             lines.append(f"  _{obj['note']}_")
         return "\n".join(lines)
-    if kind == "capture":   # design abfc2829: a phase of the code lane into the element regime
-        if obj.get("error") and not obj.get("rows"):
-            return f"⚠ {obj['error']}"
-        head = ("⚠ " + obj["error"] if obj.get("error") else
-                f"**PREVIEW — would capture the {obj.get('phase')} phase**" if obj.get("previewed") else
-                f"**CAPTURED the {obj.get('phase')} phase** — each module's elements are its source")
-        repos: Dict[str, int] = {}
-        for r in obj.get("rows", []):
-            if r.get("layout_changed"):
-                repos[r["repo_key"]] = repos.get(r["repo_key"], 0) + 1
-        lines = [head,
-                 f"  {obj.get('modules')} modules · {obj.get('records')} records (one group per module) · "
-                 f"{obj.get('layout_changes')} layout changes · {obj.get('leaving')} import-region ids "
-                 f"leave · {obj.get('born')} born · {obj.get('unclaimed_modules')} modules with "
-                 "unclaimed bindings"]
-        lines += [f"  layout changes in {rk}: {n}" for rk, n in sorted(repos.items())]
-        for f in obj.get("refused", []):
-            lines.append(f"  ✗ {f['repo_key']}/{f['module_path']}: " + "; ".join(f["faults"]))
-        hz = [r for r in obj.get("rows", []) if r.get("hazards")]
-        lines += [f"  ⚠ hazard {r['repo_key']}/{r['module_path']}: " + "; ".join(r["hazards"]) for r in hz]
-        if obj.get("diff_file"):
-            lines.append(f"  layout diff: {obj['diff_file']}")
-        if obj.get("files_written"):
-            lines.append(f"  files rewritten to their capture form: {len(obj['files_written'])}")
-        return "\n".join(lines)
-    if kind == "cutover":
-        if obj.get("error"):
-            return f"⚠ {obj['error']}"
-        if obj.get("already_graph_sourced"):
-            return f"**already graph-sourced** `{obj.get('module_path')}` (no-op)"
-        if obj.get("previewed"):
-            return "\n".join([
-                f"**PREVIEW — would cut over** `{obj.get('import_name') or obj.get('module_path')}`",
-                f"  {obj.get('file_path')}",
-                f"  _{obj.get('note', '')}_"])
-        art = " (artifact file regenerated from the journal)" if obj.get("artifact_written") else ""
-        return "\n".join([
-            f"**CUT OVER** `{obj.get('import_name') or obj.get('module_path')}` — "
-            f"the journal is now this module's source of truth{art}",
-            f"  {obj.get('file_path')}",
-            f"  _{obj.get('note', '')}_"])
     if kind == "session-cost":
         return _render_session_cost(obj)
     if kind == "emit-artifact":

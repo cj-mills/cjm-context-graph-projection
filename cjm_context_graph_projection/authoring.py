@@ -1,35 +1,25 @@
 """The B write surface: AUTHOR a verbatim-text slot on-graph, emit the canonical artifact.
 
 The make-or-break authoring increment of [[graph-as-source-of-truth-inversion]]. A
-`CodeSymbol` body, a `CodeText` region, a notebook `Cell` source, and a memory
-`Section`'s verbatim `raw` span are the SAME kind of thing — a VERBATIM-TEXT SLOT on a
-node — so `author` targets that slot abstraction, not a node kind: it edits code
-symbols, code-text regions, notebook cells, and memory sections uniformly.
+`CodeSymbol` body, a `CodeText` element and a memory `Section`'s verbatim `raw` span are the
+SAME kind of thing — a VERBATIM-TEXT SLOT on a node — so `author` targets that slot
+abstraction, not a node kind: it edits code symbols, code-text elements and memory sections
+uniformly.
 
-The slot composes a per-kind canonical ARTIFACT: code regions -> a `.py` module, a cell
--> an `.ipynb`, a memory section -> its enclosing `.md` note (reusing M1's lossless
-`frontmatter_raw + concat(section.raw)` reconstruction). Memory authoring (M2a) is the
-prose case of the [[memory-files-retirement-plan]].
+The slot composes a per-kind canonical ARTIFACT: code -> a `.py` module, a memory section ->
+its enclosing `.md` note (reusing M1's lossless `frontmatter_raw + concat(section.raw)`
+reconstruction).
 
-Two modes (the lesson from the pre-arc NotebookEdit pain, where every change meant
-rewriting the whole cell):
-- `replace` — set the slot's full new text (the Write / NotebookEdit analogue), and
+Two modes:
+- `replace` — set the slot's full new text (the Write analogue), and
 - `edit` — a unique-match OLD->NEW splice within the slot (the Edit analogue; the
   low-token targeted path).
 
-Persistence = Fork-1(a) (file stays the source; the graph is the editing surface): the
-edit is applied to the container's regions READ FROM THE GRAPH, the canonical artifact is
-re-emitted (graph OWNS formatting), and the FILE on disk is the durable record — the next
-`ingest` re-derives the graph from it (code/notebooks are rebuilt sources, NOT journaled;
-a targeted OLD->NEW splice isn't replay-idempotent anyway, so the journal correctly waits
-for true-B, which will journal the resulting body STATE, not the diff). So author against a
-freshly-ingested graph; emit reproduces the file byte-exact except the authored change.
-
-Fork-1(a) holds for memory authoring too in this cut: the `.md` stays the source and is
-re-emitted on each author, so graph-edits and hand-edits coexist safely (no clobber).
-True-B for memory — journaling the section STATE so the `.md` becomes a pure projection
-that survives a db rebuild — is the explicit M3 on-ramp, deferred until the editing
-surface is trusted (mirrors the code path's deferral).
+Persistence: a code write is journal-first (`journaled_emit`): the edit is applied to the
+module's elements READ FROM THE GRAPH, the module is emitted verbatim, and the element regime
+lands what changed as element records (every module is captured, design detail 25c1fadc); the
+code fold's step then re-derives the module live. A memory section's edit rides the memory
+journal (design c9b29de5).
 """
 
 import ast
@@ -45,7 +35,6 @@ from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 from cjm_markdown_decompose_core.extract import note_from_file, note_from_text
 from cjm_markdown_decompose_core.ingest import corpus_graph_elements
 from cjm_markdown_decompose_core.project import note_text_from_graph_nodes
-from cjm_notebook_decompose_core.project import render_notebook
 from cjm_python_decompose_core.emit import emit_module_from_nodes
 from cjm_python_decompose_core.parse import parse_module
 
@@ -76,7 +65,6 @@ async def _resolve_node(
 _SLOTS = {
     DevNodeKinds.CODE_SYMBOL: ("body", "module"),    # a top-level symbol's body -> a .py module
     DevNodeKinds.CODE_TEXT: ("text", "module"),      # a non-def region's text -> a .py module
-    DevNodeKinds.CELL: ("source", "notebook"),       # a notebook cell's source -> an .ipynb
     DevNodeKinds.SECTION: ("raw", "note"),           # a memory section's verbatim span -> a .md note (M2a)
 }
 
@@ -100,8 +88,6 @@ def _slot_for(node: Any) -> Optional[Tuple[str, str, str]]:
         slot, artifact = _SLOTS[label]
         return slot, artifact, label
     p = F.props(node)
-    if "source" in p and "cell_type" in p:
-        return "source", "notebook", DevNodeKinds.CELL
     if p.get("body"):
         return "body", "module", DevNodeKinds.CODE_SYMBOL
     if "text" in p and "region_key" in p:
@@ -154,28 +140,17 @@ async def _module_region_wires(
     return out
 
 
-async def _notebook_cell_wires(
-    gx: GraphHandle, module_id: str,
-) -> List[Dict[str, Any]]:  # Cell wire dicts for one notebook
-    """All of a notebook's Cell nodes, as wire dicts."""
-    return [_as_wire(n, DevNodeKinds.CELL)
-            for n in await F.load_label(gx, DevNodeKinds.CELL)
-            if F.prop(n, "module_id") == module_id]
-
-
 async def _owning_slot_hint(gx: GraphHandle, node: Any) -> Optional[str]:
     """For a nested CodeSymbol, name the authorable slot that OWNS its text.
 
     A method/nested def has no verbatim body of its own — the authoring unit is
-    the notebook Cell (or top-level .py symbol) that defines it. Resolving that
+    the top-level symbol that defines it. Resolving that
     here (via `_owning_slot_wire`, the shared locator) turns the 'no authorable
     slot' error into a pointer instead of sending the caller on a per-cell scan
     of the enclosing module (soak 2026-07-05: 3x ~60-read manual scans)."""
     owner = await _owning_slot_wire(gx, node)
     if owner is None:
         return None
-    if owner["label"] == DevNodeKinds.CELL:
-        return f"its text lives in Cell `{owner['id']}` — author that"
     return (f"its text lives in symbol `{owner['id']}` "
             f"(`{owner['properties'].get('name')}`) — author that")
 
@@ -315,11 +290,11 @@ async def read_node(
       - Note     -> the WHOLE file reconstructed lossless (frontmatter_raw + ordered
                     section `raw` spans) — needs a `lossless` ingest (M1).
       - Section  -> that one section's verbatim `raw` span (the fine, per-section unit).
-      - CodeModule -> the module/notebook reassembled read-only (reuses `emit`).
-      - CodeSymbol body / CodeText / Cell -> that authorable verbatim slot.
+      - CodeModule -> the module reassembled read-only (reuses `emit`).
+      - CodeSymbol body / CodeText -> that authorable verbatim slot.
 
     A nested symbol (a method) carries no own body — its text lives in the enclosing
-    class block / notebook Cell, so we deliver a server-side SLICE of the owning slot
+    class block, so we deliver a server-side SLICE of the owning slot
     (via `_slice_block`) rather than a pointer the reader must chase."""
     from .projection import ambiguity_error, resolve_node_ref
     res = await resolve_node_ref(gx, node_id)
@@ -370,7 +345,7 @@ async def read_node(
     if label == DevNodeKinds.CODE_SYMBOL:
         owner = await _owning_slot_wire(gx, node)
         if owner is not None:
-            src_slot = "source" if owner["label"] == DevNodeKinds.CELL else "body"
+            src_slot = "body"
             basename = str(p.get("qualname") or p.get("name") or "").split(".")[-1]
             block = _slice_block(str(owner["properties"].get(src_slot) or ""), basename)
             if block is not None:
@@ -451,19 +426,18 @@ async def section_divergence(
 
 async def emit_artifact(
     gx: GraphHandle,
-    module_id: str,        # The CodeModule id (a .py module / notebook) or a Note id to emit
+    module_id: str,        # The CodeModule id (a .py module) or a Note id to emit
     *,
     write: bool = False,   # Write to the container's path on disk (else just return the text)
     source_journal_path: Optional[str] = None,  # The source journal (a code write routes journal-first)
-    repos_dir: Optional[str] = None,  # The repos root (notebook journal keys derive under it)
+    repos_dir: Optional[str] = None,  # The repos root (the live fold step derives node paths under it)
 ) -> Dict[str, Any]:  # {artifact, artifact_path, text, written} or {error}
-    """Emit a container's canonical artifact FROM THE GRAPH (graph -> .py / .ipynb / .md).
+    """Emit a container's canonical artifact FROM THE GRAPH (graph -> .py / .md).
 
     The round-trip read leg, standalone: reassemble the file from its stored
     regions/cells/sections with no mutation — proves the graph is a sufficient source, and
     (true-B preview) lets a generated file be refreshed from the graph. Detects a Note
-    (-> `.md` via M1's lossless reconstruction) by label, else notebook vs `.py` by whether
-    the module has `Cell` children."""
+    (-> `.md` via M1's lossless reconstruction) by label, else a `.py` module."""
     module = await _module_node(gx, module_id)
     if module is None:
         return {"error": f"no module `{module_id}`", "module_id": module_id}
@@ -473,21 +447,17 @@ async def emit_artifact(
         artifact = "note"
         text = note_text_from_graph_nodes(_as_wire(module, DevNodeKinds.NOTE), secs)
     else:
-        cells = await _notebook_cell_wires(gx, module_id)
-        if cells:
-            artifact, text = "notebook", render_notebook(cells)
-        else:
-            wires = await _module_region_wires(gx, module_id)
-            if write:
-                # 1b089df2: on a born/captured-but-never-rebuilt module the projection
-                # is empty and a --write would land a 0-byte file — refuse, don't clobber.
-                stale = _stale_projection_error(module, wires, "emit --write")
-                if stale:
-                    return {"error": stale, "module_id": module_id, "written": False}
-            text = emit_module_from_nodes(
-                wires, module_node=module,
-                derive_imports=not is_test_module_path(F.prop(module, "module_path", "")))
-            artifact = "module"
+        wires = await _module_region_wires(gx, module_id)
+        if write:
+            # 1b089df2: on a born/captured-but-never-rebuilt module the projection
+            # is empty and a --write would land a 0-byte file — refuse, don't clobber.
+            stale = _stale_projection_error(module, wires, "emit --write")
+            if stale:
+                return {"error": stale, "module_id": module_id, "written": False}
+        text = emit_module_from_nodes(
+            wires, module_node=module,
+            derive_imports=not is_test_module_path(F.prop(module, "module_path", "")))
+        artifact = "module"
     res = {"module_id": module_id, "artifact": artifact, "artifact_path": artifact_path,
            "emitted_bytes": len(text.encode("utf-8")), "text": text, "written": False}
     if write and artifact_path and artifact != "note" and source_journal_path is not None:
@@ -530,7 +500,7 @@ async def _route_nested_symbol(
     """Route an author call on a NESTED CodeSymbol through its OWNING verbatim slot.
 
     A method/nested def has no body of its own — the authoring unit is the top-level
-    `.py` symbol (or notebook Cell) whose text defines it. The 3e13d95a hint NAMED that
+    `.py` symbol whose text defines it. The 3e13d95a hint NAMED that
     owner; this executes the edit through it: resolve the owner via `_owning_slot_wire`
     (the shared locator behind the hint and the read-slice, so the surfaces never drift),
     then re-enter `author` on the owner with the caller's splice (uniqueness is
@@ -561,22 +531,22 @@ async def _route_nested_symbol(
 
 async def author(
     gx: GraphHandle,
-    node_id: str,                          # The node whose verbatim slot to author (CodeSymbol / CodeText / Cell / Section)
+    node_id: str,                          # The node whose verbatim slot to author (CodeSymbol / CodeText / Section)
     *,
     replace: Optional[str] = None,         # Full replacement text (replace mode)
     edit: Optional[Tuple[str, str]] = None,  # (old, new) unique-match splice (edit mode)
     actor: str = "agent:session",          # Who authored it (recorded in the result; provenance lands via decide/link)
     write: bool = True,                    # Emit the canonical artifact to disk (Fork-1(a)); False = dry run
     source_journal_path: Optional[str] = None,  # The source journal (code artifacts route journal-first)
-    repos_dir: Optional[str] = None,       # The repos root (a notebook's journal key derives under it)
+    repos_dir: Optional[str] = None,       # The repos root (the live fold step derives node paths under it)
     imports: Optional[List[str]] = None,   # Import riders: statements the edited body uses, landed in the same op (55f96b45)
 ) -> Dict[str, Any]:  # The write result (incl. error, the emitted artifact path + text)
     """Author a node's verbatim-text slot, then emit its canonical artifact to disk.
 
-    Reads the enclosing container's regions FROM THE GRAPH (a CodeModule's regions/cells,
-    or a Note's sections), applies the edit in memory, reassembles the canonical artifact
-    (`.py` / `.ipynb` for a cell / `.md` for a memory section), and writes the file — the
-    graph is the editing surface, the file the durable source. Returns the artifact path
+    Reads the enclosing container's regions FROM THE GRAPH (a CodeModule's elements, or a
+    Note's sections), applies the edit in memory, reassembles the canonical artifact (`.py`
+    / `.md` for a memory section), and lands it journal-first — the graph is the editing
+    surface, the journal the durable source. Returns the artifact path
     + emitted text (and, on `write=False`, emits without touching disk: a dry-run/preview)."""
     node, amb = await _resolve_node(gx, node_id)
     if amb:
@@ -602,7 +572,7 @@ async def author(
         if routed is not None:
             return routed
         err = ("node has no authorable verbatim slot (not a top-level CodeSymbol / "
-               "CodeText / Cell / Section)")
+               "CodeText / Section)")
         hint = await _owning_slot_hint(gx, node)
         return {"error": err + (f" — {hint}" if hint else ""), "node_id": node_id,
                 "label": _label_of(node), "written": False}
@@ -634,7 +604,7 @@ async def author(
                 err = f"{err}\n{near[1]}"
         return {"error": err, "node_id": node_id, "label": label, "slot": slot, "written": False}
 
-    # Resolve the enclosing container: a CodeModule for code/notebooks, a Note for memory.
+    # Resolve the enclosing container: a CodeModule for code, a Note for memory.
     container_key = "note_id" if artifact == "note" else "module_id"
     container_id = F.prop(node, container_key)
     container = await _module_node(gx, container_id)  # get_node — works for a Note too
@@ -643,10 +613,8 @@ async def author(
                 "written": False}
     artifact_path = F.prop(container, "path")
 
-    # Read the container's regions/cells/sections from the graph, inject the mutated slot.
-    if artifact == "notebook":
-        wires = await _notebook_cell_wires(gx, container_id)
-    elif artifact == "note":
+    # Read the container's regions/sections from the graph, inject the mutated slot.
+    if artifact == "note":
         wires = await _note_section_wires(gx, container_id)
         # The whole note is reconstructed from its sections' `raw`; a non-lossless ingest
         # (sections without `raw`) would silently truncate it — refuse rather than corrupt.
@@ -673,9 +641,7 @@ async def author(
         if rerr:
             return {"error": rerr, "node_id": node_id, "label": label, "slot": slot,
                     "written": False}
-    if artifact == "notebook":
-        emitted = render_notebook(wires)
-    elif artifact == "note":
+    if artifact == "note":
         emitted = note_text_from_graph_nodes(_as_wire(container, DevNodeKinds.NOTE), wires)
     else:
         emitted = emit_module_from_nodes(wires)
@@ -740,11 +706,8 @@ async def author(
         # The durable section identity (slug, anchor) the journal records for M2b's shadow.
         result["note_slug"] = F.prop(container, "slug")
         result["anchor"] = F.prop(node, "anchor")
-    elif artifact in ("module", "notebook"):
-        # The durable module identity, so the CLI can absorb an authored edit of a
-        # GRAPH-SOURCED module into the source journal (N+3 Phase 2). A notebook's
-        # journal key is its .ipynb source path, not the export-target `module_path`
-        # this carries — the CLI re-derives it from `artifact_path` + --repos-dir.
+    elif artifact == "module":
+        # The durable module identity, the source journal's key for the write.
         result["repo_key"] = F.prop(container, "repo_key")
         result["module_path"] = F.prop(container, "module_path")
     if artifact_path and artifact != "note" and source_journal_path is not None:
@@ -824,7 +787,7 @@ async def add_symbol(
     actor: str = "agent:session",  # Who authored it (recorded in the result)
     write: bool = True,         # Add the node + emit the artifact (False = dry-run preview)
     source_journal_path: Optional[str] = None,  # The source journal (journal-first routing)
-    repos_dir: Optional[str] = None,  # The repos root (notebook journal keys derive under it)
+    repos_dir: Optional[str] = None,  # The repos root (the live fold step derives node paths under it)
     after: Optional[str] = None,  # Placement anchor: insert after this top-level qualname/region id
     imports: Optional[List[str]] = None,  # Import riders: statements the body uses, landed in the same op (55f96b45)
 ) -> Dict[str, Any]:  # The add result (incl. the emitted artifact path + text), or error
@@ -854,9 +817,6 @@ async def add_symbol(
     if _label_of(module) != DevNodeKinds.CODE_MODULE:
         return {"error": f"add-symbol targets a CodeModule (got {_label_of(module)})",
                 "written": False}
-    if await _notebook_cell_wires(gx, module_id):
-        return {"error": "v1 adds symbols to .py modules only (this module has notebook "
-                         "cells — author a new Cell instead)", "written": False}
     text = body.rstrip("\n")
     try:
         tree = ast.parse(text)
@@ -976,7 +936,7 @@ async def add_text(
     actor: str = "agent:session",  # Who authored it (recorded in the result)
     write: bool = True,         # Add the node + emit the artifact (False = dry-run preview)
     source_journal_path: Optional[str] = None,  # The source journal (journal-first routing)
-    repos_dir: Optional[str] = None,  # The repos root (notebook journal keys derive under it)
+    repos_dir: Optional[str] = None,  # The repos root (the live fold step derives node paths under it)
 ) -> Dict[str, Any]:  # The add result (incl. the emitted artifact path + text), or error
     """Mint a NEW CodeText region (imports/constants/docstring/`__all__`) into a module, then emit.
 
@@ -1006,9 +966,6 @@ async def add_text(
     if _label_of(module) != DevNodeKinds.CODE_MODULE:
         return {"error": f"add-text targets a CodeModule (got {_label_of(module)})",
                 "written": False}
-    if await _notebook_cell_wires(gx, module_id):
-        return {"error": "v1 adds text regions to .py modules only (this module has "
-                         "notebook cells — author a Cell instead)", "written": False}
     text = body.rstrip("\n")
     if not text.strip():
         return {"error": "empty body", "written": False}
@@ -1130,9 +1087,9 @@ def _slice_block(text: str, basename: str) -> Optional[str]:
     """Slice one def/class block (decorators included) out of an enclosing body, by name.
 
     The server-side read-slice for NESTED symbols (de9d7696 (a)): a method's text lives
-    in its owning top-level symbol / notebook Cell, and 'read the encloser, then find
+    in its owning top-level symbol, and 'read the encloser, then find
     your method in it' was exactly the routing rule weaker readers could not hold. Plain
-    line-scan, not ast: the input is ONE verbatim slot (a Cell may hold several
+    line-scan, not ast: the input is ONE verbatim slot (a symbol body may hold several
     statements), and the block ends at the first subsequent non-blank line at <= the
     header's indent. Contiguous decorator lines directly above the header (same indent)
     ride along. First name-match wins; None when the name opens no block here."""
@@ -1166,7 +1123,7 @@ async def _owning_slot_wire(
     """Locate the verbatim slot that OWNS a nested CodeSymbol's text — the ONE locator.
 
     A method/nested def has no body of its own; its text lives in a top-level `.py`
-    symbol or a notebook Cell. This is the shared resolver behind the author routing
+    symbol. This is the shared resolver behind the author routing
     (`_route_nested_symbol`), the error-path pointer (`_owning_slot_hint`), and the
     nested read-slice (`read_node`), so the three surfaces can never drift apart:
     qualname's top-level prefix first, def/class marker scan as fallback (the
@@ -1182,11 +1139,6 @@ async def _owning_slot_wire(
     if container is None:
         return None
     markers = (f"def {basename}(", f"class {basename}(", f"class {basename}:")
-    if str(F.prop(container, "path") or "").endswith(".ipynb"):
-        for w in await _notebook_cell_wires(gx, module_id):
-            if any(m in str(w["properties"].get("source") or "") for m in markers):
-                return w
-        return None
     wires = [w for w in await _module_region_wires(gx, module_id)
              if w["label"] == DevNodeKinds.CODE_SYMBOL and w["id"] != F.nid(node)]
     top = qualname.split(".")[0]
@@ -1200,31 +1152,18 @@ async def _owning_slot_wire(
 
 def _source_emission(
     repo_key: str,             # The node's rename-stable CONCEPTUAL repo key
-    module_path: str,          # The node's module_path (a notebook's EXPORT-TARGET .py path)
+    module_path: str,          # The node's module_path
     artifact_path: str,        # The absolute artifact path the emit targets
     text: str,                 # The emitted artifact text
-    repos_dir: Optional[str],  # The repos root (a notebook's journal path derives under it)
+    repos_dir: Optional[str],  # Unused (kept for the callers' uniform call)
     import_name: Optional[str] = None,  # Dotted import name (rides the source event)
 ) -> Optional[Dict[str, Any]]:  # A journaled_emit emission dict, or None (key underivable)
-    """Map an authoring emit into the SOURCE JOURNAL's key space.
-
-    The node carries the rename-stable conceptual repo key and (for notebooks) the nbdev
-    EXPORT-TARGET module_path; the source journal keys by repo DIR name and the .ipynb
-    SOURCE path (what cutover recorded) — the c89519cd/f06ef1a6 lessons: an unmapped key
-    once skipped journaling SILENTLY while the file still wrote. A notebook's journal path
-    re-derives from artifact_path under repos_dir/<dir_key>; None (underivable) tells the
-    caller to go LOUD — never write unjournaled."""
-    dir_key = repo_dir_name(repo_key)
-    src_path = module_path
-    if str(artifact_path).endswith(".ipynb"):
-        if not repos_dir:
-            return None
-        try:
-            src_path = Path(artifact_path).relative_to(Path(repos_dir) / dir_key).as_posix()
-        except ValueError:
-            return None
-    return {"repo_key": dir_key, "module_path": src_path, "import_name": import_name,
-            "text": text, "path": str(artifact_path)}
+    """Map an authoring emit into the SOURCE JOURNAL's key space: the node carries the
+    rename-stable conceptual repo key, the source journal keys by repo DIR name (the
+    c89519cd lesson: an unmapped key once skipped journaling SILENTLY while the file still
+    wrote)."""
+    return {"repo_key": repo_dir_name(repo_key), "module_path": module_path,
+            "import_name": import_name, "text": text, "path": str(artifact_path)}
 
 
 def _flat_refs(
@@ -1373,11 +1312,8 @@ def _stale_wires_error(
     source ops (a rename, a move, a flip-module absorb) have landed since the last
     ingest, that emission no longer reproduces the file — emitting from it would
     silently REVERT them (the move-#2 / rename-#2 / author-after-flip class). The
-    file on disk is the arbiter, and the file holds the CANONICAL emission
-    (`journaled_emit` folds the absorb-rewrite in: unused imports pruned, formatting
-    converged) — so candidates are compared raw AND in canonical space before ruling.
-    A raw-vs-file mismatch that converges canonically is the lone-unused-import case
-    (slot retains the line, the file prunes it until a body binds it) — safe. A
+    file on disk is the arbiter, and it holds the module's composed text — which the
+    live wires reproduce (the imports element's node carries the composed block). A
     `converged_text` match is the sanctioned 11c981b7 repair (the file already
     carries the fix by hand; re-landing it brings the journal in step). An absent
     file is a birth; an empty-projection module is `_stale_projection_error`'s class."""
@@ -1391,15 +1327,6 @@ def _stale_wires_error(
     candidates = [live_text] + ([converged_text] if converged_text is not None else [])
     if on_disk in candidates:
         return None
-    from .source_state import _canonical
-    for cand in candidates:
-        try:
-            if on_disk == _canonical(F.prop(module, "repo_key", ""),
-                                     str(F.prop(module, "module_path") or ""),
-                                     path, cand, F.prop(module, "import_name")):
-                return None
-        except (SyntaxError, ValueError):
-            pass
     return (f"`{verb}` refused: the live projection of "
             f"{F.prop(module, 'module_path') or path} no longer reproduces the file on "
             "disk — journaled source ops landed since the last ingest, so a rewrite "
@@ -1559,12 +1486,10 @@ async def _route_container_edit(
     nid = F.nid(node)
     if label == DevNodeKinds.CODE_MODULE:
         wires = await _module_region_wires(gx, nid)
-        if not wires:
-            wires = await _notebook_cell_wires(gx, nid)
     else:
         wires = await _note_section_wires(gx, nid)
     slot_of = {DevNodeKinds.CODE_SYMBOL: "body", DevNodeKinds.CODE_TEXT: "text",
-               DevNodeKinds.CELL: "source", DevNodeKinds.SECTION: "raw"}
+               DevNodeKinds.SECTION: "raw"}
     old = edit[0]
 
     def _name(w: Dict[str, Any]) -> str:

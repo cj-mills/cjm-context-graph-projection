@@ -20,9 +20,9 @@ def test_section_routes_by_inference_without_a_surfaced_label():
     assert _slot_for(_node(None, note_id="note:x", anchor="a", raw="")) == ("raw", "note", "Section")
 
 
-def test_code_and_cell_slots_still_route():
+def test_code_slots_route_and_a_notebook_cell_is_no_slot():
     assert _slot_for(_node("CodeSymbol", body="def f(): ...", module_id="m"))[:2] == ("body", "module")
-    assert _slot_for(_node("Cell", source="x", cell_type="code", module_id="m"))[:2] == ("source", "notebook")
+    assert _slot_for(_node("Cell", source="x", cell_type="code", module_id="m")) is None  # the notebook lane retired
 
 
 def test_non_authorable_node_returns_none():

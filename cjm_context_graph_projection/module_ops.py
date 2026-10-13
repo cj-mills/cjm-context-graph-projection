@@ -14,8 +14,7 @@ push scoped identifier substitution INTO bodies (Ext-B) — is its own deliberat
 The graph-mutation posture (design amendment 2cc81d3b, build B2 of leg B): every op lands
 its source-journal records, then the code fold's step (`relive.apply_live`) applies exactly
 those records to the db — a module exists on the graph because the journal holds it, so
-`new_module` journals an EMPTY module and cuts it over at birth (graph-sourced from its first
-record), `rename_module` re-keys the module while its symbols keep their ids, and
+`new_module` births an EMPTY module captured (graph-sourced from its first record), `rename_module` re-keys the module while its symbols keep their ids, and
 `delete_module`'s retire takes the whole subtree with it.
 """
 
@@ -23,8 +22,6 @@ import ast
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from cjm_context_graph_layer.ops import graph_task
-from cjm_context_graph_primitives.journal import append_write, read_journal
 from cjm_context_graph_primitives.provenance import SourceRef
 from cjm_context_graph_primitives.query import PropertyPredicate
 from cjm_dev_graph_schema.identity import code_module_node_id
@@ -33,24 +30,14 @@ from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 from cjm_python_decompose_core.emit import emit_module_from_nodes
 
 from . import factlayer as F
-from .authoring import (_label_of, _module_node, _module_region_wires, _notebook_cell_wires,
-                        _resolve_node)
+from .authoring import _label_of, _module_node, _module_region_wires, _resolve_node
 from .codesource import CodeSourceError
 from .refactor_ops import _emission_for, _get, _relocate
 from .relive import apply_live
 from .runtime import GraphHandle
 from .seeds import repo_dir_name
-from .source_state import (birth_form, canonical_emit, canonicalization_report, collect_appends,
-                           graph_sourced_modules, is_test_module_path, journaled_emit,
-                           latest_source_ops, notebook_to_py_source)
-from .write import link
-
-
-def _derive_import_name(module_path: str) -> str:  # repo-relative path -> dotted import name
-    """Derive a module's dotted import name from its repo-relative path
-    ("pkg/sub.py" -> "pkg.sub"). Overridable where the package layout doesn't map directly."""
-    stem = module_path[:-3] if module_path.endswith(".py") else module_path
-    return stem.replace("/", ".")
+from .source_state import (birth_form, canonicalization_report, collect_appends, derive_import_name,
+                           is_test_module_path, journaled_emit, notebook_to_py_source)
 
 
 def rewrite_module_import(
@@ -101,10 +88,10 @@ async def _repo_root(gx: GraphHandle, repo_key: str) -> Optional[str]:
 
 
 async def _module_subtree_ids(gx: GraphHandle, module_id: str) -> List[str]:
-    """A module + every node homed in it (top-level + nested symbols, code-text regions,
-    notebook cells) — the ids to drop so a rename/delete leaves no stale, resurrectable node."""
+    """A module + every node homed in it (top-level + nested symbols, code-text elements) —
+    the ids to drop so a rename/delete leaves no stale, resurrectable node."""
     ids = [module_id]
-    for label in (DevNodeKinds.CODE_SYMBOL, DevNodeKinds.CODE_TEXT, DevNodeKinds.CELL):
+    for label in (DevNodeKinds.CODE_SYMBOL, DevNodeKinds.CODE_TEXT):
         for n in await F.load_label_where(
                 gx, label, [PropertyPredicate("module_id", "eq", module_id)]):
             ids.append(F.nid(n))
@@ -120,20 +107,19 @@ async def add_module(
     import_name: Optional[str] = None,  # Dotted import name (derived from module_path if omitted)
     repo_root: Optional[str] = None,    # Absolute repo root — anchors the FIRST module of a fresh repo (no sibling to derive from)
     write: bool = True,       # Journal + write + derive (else dry run)
-    source_journal_path: Optional[str] = None,  # The source journal (the module's first record + cutover, and the repo REGISTER, land here)
+    source_journal_path: Optional[str] = None,  # The source journal (the module's capture group and the repo REGISTER land here)
     repos_dir: Optional[str] = None,  # The repos root (the live fold step derives node paths under it)
     allow_reorder: bool = False,      # Birth the canonical form even when it carries a hazard
 ) -> Dict[str, Any]:  # The add-module result (or error)
-    """Birth a module WHOLE in ONE journaled op, graph-sourced from its first record (work
-    item 177dcb07, ruling 865ba564): the body's canonical text is journaled as the module's
-    first `source` record with its `cutover` (and the repo's REGISTER), the file is written
-    from it, and the code fold's step derives the CodeModule, every region and symbol, and
-    their edges — no add-text / add-symbol per region, no flip-module / cutover after.
-    Test modules too (their import block stays verbatim). Nothing exists before the op, so
-    nothing re-keys: a module the graph already holds, or a path with a file already on
-    disk (a file-born module takes flip-module + cutover), REFUSES. The canonicalization
-    is shown as a diff and a HAZARD refuses unless `allow_reorder` (e526672a W4). An
-    empty body is the empty-module birth `new_module` delegates to."""
+    """Birth a module WHOLE in ONE journaled op, BORN CAPTURED (work item 177dcb07, the ruling
+    bef8e6b8): the body's elements are journaled as the module's capture group (with the repo's
+    REGISTER), the file is written as their composition, and the code fold's step derives the
+    CodeModule, every element and symbol, and their edges — no add-text / add-symbol per region,
+    no flip-module after. Nothing exists before the op, so nothing re-keys: a module the graph
+    already holds, or a path with a file already on disk (a file-born module is captured with
+    flip-module), REFUSES. The capture form is shown as a diff and a HAZARD refuses unless
+    `allow_reorder` (e526672a W4). An empty body is the empty-module birth `new_module`
+    delegates to."""
     mid = code_module_node_id(repo_key, module_path)
     if await _get(gx, mid) is not None:
         return {"error": f"module `{module_path}` already exists in {repo_key}",
@@ -148,19 +134,15 @@ async def add_module(
     path = root + module_path
     if body and Path(path).exists():
         return {"error": f"a file already exists at {path} — a file-born module is captured "
-                         "with flip-module + cutover, never re-born", "written": False}
-    imp = import_name or _derive_import_name(module_path)
-    text, report, captured = "", {"diff": "", "hazards": []}, None
+                         "with flip-module, never re-born", "written": False}
+    imp = import_name or derive_import_name(module_path)
+    report = {"diff": "", "hazards": []}
     try:
-        if body:
-            text = canonical_emit(repo_dir_name(repo_key), module_path, path, body, imp)
-        # Born into a captured phase, the module is born captured (bef8e6b8): its text is the
-        # composition of its element records, the form shown and guarded here
-        captured = birth_form(source_journal_path, repo_dir_name(repo_key), module_path, imp, text)
+        # Born captured (bef8e6b8): its text is the composition of its element records, the form
+        # shown and guarded here
+        text = birth_form(source_journal_path, repo_dir_name(repo_key), module_path, imp, body)
     except (SyntaxError, ValueError, CodeSourceError) as e:
         return {"error": f"body does not decompose: {e}", "written": False}
-    if captured is not None:
-        text = captured
     if body:
         report = canonicalization_report(body, text, module_path)
     result = {"module_id": mid, "repo_key": repo_key, "module_path": module_path,
@@ -168,13 +150,11 @@ async def add_module(
               "body_bytes": len(text.encode("utf-8")),
               "file_already_canonical": text == body,
               "canonicalization_diff": report["diff"], "hazards": report["hazards"],
-              "born_captured": captured is not None,
+              "born_captured": True,
               "note": ("born captured: its element records are its source, journaled as one group "
-                       "(the ruling bef8e6b8)" if captured is not None else
-                       "born graph-sourced: the whole module is journaled and cut over in one op"
-                       if body else
-                       "born graph-sourced: the empty module is journaled and cut over — "
-                       "populate it with add-text / add-symbol (no flip-module / cutover)")}
+                       "(the ruling bef8e6b8)" if body else
+                       "born captured: the empty module is journaled as one group — populate it "
+                       "with add-text / add-symbol (no flip-module follows)")}
     if report["hazards"] and not allow_reorder:
         return {**result, "error": f"the canonical form of {module_path} can change its "
                                    "behaviour — " + "; ".join(report["hazards"])
@@ -182,12 +162,12 @@ async def add_module(
     if write and not source_journal_path:
         return {**result, "error": "add-module needs the source journal — a module is on the "
                                    "graph because the journal holds it (2cc81d3b)"}
-    # The module's first record + its cutover, and the repo REGISTER event (DEC c47912f6).
+    # The module's capture group, and the repo REGISTER event (DEC c47912f6).
     with collect_appends() as appended:
         rec = journaled_emit(source_journal_path,
                              emissions=[{"repo_key": repo_dir_name(repo_key),
                                          "module_path": module_path, "import_name": imp,
-                                         "text": text, "path": path, "cutover": True}],
+                                         "text": text, "path": path, "born": True}],
                              registers=[{"repo_key": repo_dir_name(repo_key),
                                          "repo_root": root.rstrip("/"),
                                          "source_kind": "code"}],
@@ -210,16 +190,16 @@ async def new_module(
     import_name: Optional[str] = None,  # Dotted import name (derived from module_path if omitted)
     repo_root: Optional[str] = None,    # Absolute repo root — anchors the FIRST module of a fresh repo (no sibling to derive from)
     write: bool = True,       # Journal + write + derive (else dry run)
-    source_journal_path: Optional[str] = None,  # The source journal (the module's first record + cutover, and the repo REGISTER, land here)
+    source_journal_path: Optional[str] = None,  # The source journal (the module's capture group and the repo REGISTER land here)
     repos_dir: Optional[str] = None,  # The repos root (the live fold step derives node paths under it)
 ) -> Dict[str, Any]:  # The new-module result (or error)
     """Mint an EMPTY module, graph-sourced from birth (the target add-text / add-symbol /
     `regroup` / `move` populate).
 
     Under the code fold (2cc81d3b) a module is on the graph because the journal holds it: the
-    verb journals the empty module's first `source` record + its `cutover` (and the repo's
-    REGISTER), writes the empty file, and the code fold's step derives the CodeModule node —
-    so no flip-module / cutover follows the birth, and the module survives every rebuild. A
+    verb journals the empty module's capture group (and the repo's REGISTER), writes the empty
+    file, and the code fold's step derives the CodeModule node — so no flip-module follows the
+    birth, and the module survives every rebuild. A
     repo with no modules yet (born-on-graph greenfield) has no sibling to derive the on-disk
     root from — pass `repo_root` explicitly there; an existing sibling-derived root always
     wins. The empty-body case of `add_module` (177dcb07): one birth path, two verbs."""
@@ -244,8 +224,8 @@ async def regroup(
     finding. Creates the target module if it doesn't exist, then batch-relocates every
     symbol in ONE emit pass via `_relocate` (re-emitting each affected source module + the
     target + the importers, imports re-derived). A NOT-yet-existing target is synthesized
-    in memory and born by the relocation's own records (source + cutover), so the code
-    fold's step derives it with everything else."""
+    in memory and born captured by the relocation's own records, so the code fold's step
+    derives it with everything else."""
     target_id = code_module_node_id(repo_key, target_module_path)
     existing = await _get(gx, target_id)
     target_node: Any = existing
@@ -255,7 +235,7 @@ async def regroup(
         if root is None:
             return {"error": f"no existing module in repo `{repo_key}` to anchor the path",
                     "written": False}
-        imp = import_name or _derive_import_name(target_module_path)
+        imp = import_name or derive_import_name(target_module_path)
         node = CodeModuleNode(repo_key=repo_key, module_path=target_module_path,
                               path=root + target_module_path,
                               content_hash=SourceRef.compute_hash(b""), import_name=imp)
@@ -265,7 +245,7 @@ async def regroup(
                           source_journal_path=source_journal_path, op_name="regroup",
                           repos_dir=repos_dir)
     res["created_target"] = created
-    res["target_module"] = import_name or _derive_import_name(target_module_path)
+    res["target_module"] = import_name or derive_import_name(target_module_path)
     return res
 
 
@@ -291,9 +271,6 @@ async def rename_module(
     M = await _module_node(gx, module_id)
     if M is None:
         return {"error": f"no module `{module_id}`", "written": False}
-    if await _notebook_cell_wires(gx, module_id):
-        return {"error": "v1 renames .py modules only (this module has notebook cells)",
-                "written": False}
     repo_key = F.prop(M, "repo_key")
     old_path, old_mp = F.prop(M, "path"), F.prop(M, "module_path")
     old_import = F.prop(M, "import_name", "")
@@ -306,7 +283,7 @@ async def rename_module(
         return {"error": "cannot resolve the repo root from the module path", "written": False}
     root = old_path[: -len(old_mp)]
     new_path = root + new_module_path
-    new_import = new_import_name or _derive_import_name(new_module_path)
+    new_import = new_import_name or derive_import_name(new_module_path)
 
     text = emit_module_from_nodes(await _module_region_wires(gx, module_id),
                                   module_node=M, derive_imports=not is_test_module_path(old_mp))
@@ -315,10 +292,6 @@ async def rename_module(
     renamed_emission: Dict[str, Any] = {"repo_key": dir_key, "module_path": new_module_path,
                                         "import_name": new_import, "text": text,
                                         "path": new_path}
-    if source_journal_path and (dir_key, old_mp) in graph_sourced_modules(source_journal_path):
-        # The renamed key inherits its predecessor's phase: born graph-sourced (the
-        # re-key pattern — retire the old key, source+cutover the new one).
-        renamed_emission["cutover"] = True
     emissions: List[Optional[Dict[str, Any]]] = [renamed_emission]
     import_pairs = await F.load_edge_pairs(gx, DevRelations.IMPORTS)
     importers = [s for s, t in import_pairs if t == module_id and s != module_id]
@@ -395,9 +368,7 @@ async def delete_module(
                 "written": False}
     path = F.prop(M, "path")
     if str(path or "").endswith(".ipynb"):
-        return {"error": "delete-module v1 handles .py modules — retire a notebook via "
-                         "flip-to-py (or an explicit retire) so its journal key ends too",
-                "written": False}
+        return {"error": "delete-module handles .py modules", "written": False}
     ids = await _module_subtree_ids(gx, module_id)
     result = {"module_id": module_id, "import_name": F.prop(M, "import_name", ""),
               "path": path, "node_count": len(ids), "forced": force, "written": False}
@@ -420,96 +391,31 @@ async def delete_module(
     return result
 
 
-def _import_clauses(text: str) -> set:
-    """The top-level import CLAUSES a module carries (the prune-report universe).
-
-    Statement-clause granularity, not bound-name granularity: `import urllib.request`
-    and `import urllib.error` both bind the name `urllib`, so a name-keyed universe
-    cannot see one of them being dropped (the flip-time import-dedupe blind spot) —
-    per-clause identity makes every dropped import statement REPORTABLE."""
-    clauses = set()
-    for node in ast.parse(text).body:
-        if isinstance(node, ast.Import):
-            for a in node.names:
-                clauses.add(f"{a.name} as {a.asname}" if a.asname else a.name)
-        elif isinstance(node, ast.ImportFrom):
-            mod = "." * (node.level or 0) + (node.module or "")
-            for a in node.names:
-                leaf = f"{a.name} as {a.asname}" if a.asname else a.name
-                sep = "" if mod.endswith(".") else "."
-                clauses.add(f"{mod}{sep}{leaf}" if mod else leaf)
-    return clauses
-
-
-def _cell_id_refs(
-    ops: List[Dict[str, Any]],  # journaled write ops
-    cell_ids: set,              # the flipping module's Cell node ids
-) -> List[Dict[str, Any]]:  # one entry per (op, path) referencing a Cell id
-    """Deep-scan journaled op args for references to the retiring Cell ids.
-
-    ALL verbs, ALL arg positions (not just link endpoints) — an assert subject or a
-    decide-supports entry pointing at a Cell would orphan just as silently."""
-    hits: List[Dict[str, Any]] = []
-
-    def walk(x: Any, path: str, op_index: int, verb: str):
-        if isinstance(x, str) and x in cell_ids:
-            hits.append({"op_index": op_index, "verb": verb, "arg_path": path, "cell_id": x})
-        elif isinstance(x, dict):
-            for k, v in x.items():
-                walk(v, f"{path}.{k}" if path else k, op_index, verb)
-        elif isinstance(x, list):
-            for i, v in enumerate(x):
-                walk(v, f"{path}[{i}]", op_index, verb)
-
-    for i, op in enumerate(ops):
-        walk(op.get("args", {}), "", i, op.get("verb", ""))
-    return hits
-
-
 async def flip_notebook_to_py(
     gx: GraphHandle,
-    source_journal_path: str,   # The source journal (both the old .ipynb and new .py keys)
-    writes_journal_path: str,   # The write journal (scanned for Cell-id refs; re-target ops land here)
+    source_journal_path: str,   # The source journal (the module's capture group lands here)
     repos_dir: str,             # The repos root
-    repo_key: str,              # The repo's durable conceptual slug
-    notebook_path: str,         # Repo-relative .ipynb path (the retiring source-journal key)
+    repo_key: str,              # The repo's durable conceptual slug (its directory under the repos root)
+    notebook_path: str,         # Repo-relative .ipynb path (the file converted, then deleted)
     *,
-    docstring: Optional[str] = None,       # Module docstring (the prose-triage fold), verbatim
-    force_drop_cell_refs: bool = False,    # Proceed past un-retargetable Cell-id refs (they orphan on rebuild)
-    write: bool = True,                    # Execute (else dry-run preview, nothing touched)
+    docstring: Optional[str] = None,  # Module docstring (the prose-triage fold), verbatim
+    write: bool = True,               # Execute (else dry-run preview, nothing touched)
 ) -> Dict[str, Any]:  # The flip report (or the guard that refused it)
-    """The golden-reference flip, ONE LOUD VERB (DEC b2c5363d): notebook -> plain `.py`.
+    """The off-nbdev step, ONE LOUD VERB, in the element regime (design detail 25c1fadc, ruling N):
+    a notebook FILE -> a plain `.py` module BORN CAPTURED.
 
-    Per-module endpoint pass: build the arc-lib-shaped module from the journaled
-    notebook's EXPORT cells (`notebook_to_py_source` — `#|` directives stripped,
-    `__all__` dropped, non-kept cells reported), canonicalize, then in one pass:
-
-    - journal the `.py` state + cut it over (the new key is GRAPH-SOURCED from birth),
-    - RETIRE the `.ipynb` key (source-check stops holding the deleted file),
-    - write the `.py` artifact, delete the notebook file,
-    - swap the graph subtree (Cell nodes out, plain-module decomposition in — the
-      CodeModule/CodeSymbol ids are IDENTICAL before/after: module identity is the
-      export-target path, so decision SHAPES edges onto symbols survive untouched),
-    - EDGE CONTINUITY for the Cell ids that do vanish: journaled write ops referencing
-      them are deep-scanned; a `link` endpoint whose cell content survives as exactly
-      one CodeSymbol is re-linked to it (live + journaled); anything else REFUSES the
-      flip unless `force_drop_cell_refs` (loud, never silent — the b2c5363d rule).
-
-    Packaged as one verb because the steps that can individually skip are the bug
-    class (the journaling-gap lesson): a flip that journals but doesn't retire leaves
-    source-check red forever; one that retires but doesn't re-link orphans provenance."""
-    latest = latest_source_ops(source_journal_path)
-    sourced = graph_sourced_modules(source_journal_path)
-    a = latest.get((repo_key, notebook_path))
-    if a is None:
-        return {"error": f"no live journaled source state for {repo_key}/{notebook_path} "
-                         "(never flipped into the journal, or already retired)", "written": False}
-    if (repo_key, notebook_path) not in sourced:
-        return {"error": f"{repo_key}/{notebook_path} is not GRAPH-SOURCED — this verb flips "
-                         "post-cutover notebooks; run flip-module + cutover first", "written": False}
-
+    Builds the arc-lib-shaped module from the notebook's EXPORT cells (`notebook_to_py_source`:
+    `#|` directives stripped, `__all__` dropped, every other cell reported -- never silently
+    discarded), then in one journaled op births it captured (its capture group, and the repo's
+    REGISTER), writes the `.py` as the composition of its elements, and deletes the notebook file.
+    The notebook never enters the code journal: its text stays in the repo's git history, the
+    derivation's provenance. A notebook that exports nothing, a module the journal already holds
+    and a `.py` file already on disk (a file-born module is captured with flip-module) REFUSE."""
+    nb_file = Path(repos_dir) / repo_key / notebook_path
+    if not notebook_path.endswith(".ipynb") or not nb_file.exists():
+        return {"error": f"no notebook at {nb_file}", "written": False}
     try:
-        built = notebook_to_py_source(a.get("text", ""), docstring=docstring)
+        built = notebook_to_py_source(nb_file.read_text(), docstring=docstring)
     except (SyntaxError, ValueError) as e:
         return {"error": f"cannot build .py from {notebook_path}: {e}", "written": False}
     if not built["default_exp"]:
@@ -518,116 +424,45 @@ async def flip_notebook_to_py(
                 "written": False}
     if not built["text"].strip():
         return {"error": f"{notebook_path} has no export-cell content to flip", "written": False}
-
     module_path = (repo_key.replace("-", "_") + "/"
                    + built["default_exp"].replace(".", "/") + ".py")
-    if (repo_key, module_path) in sourced:
-        return {"error": f"{repo_key}/{module_path} is already graph-sourced — re-flip the "
-                         "notebook key only after retiring the .py (not a supported walk)",
-                "written": False}
-    import_name = _derive_import_name(module_path)
+    import_name = derive_import_name(module_path)
     file_path = str(Path(repos_dir) / repo_key / module_path)
-    nb_file = Path(repos_dir) / repo_key / notebook_path
+    if Path(file_path).exists():
+        return {"error": f"a file already exists at {file_path} — capture it with flip-module "
+                         "and retire the notebook by hand", "written": False}
     try:
-        canonical = canonical_emit(repo_key, module_path, file_path, built["text"],
-                                   import_name=import_name)
-    except (SyntaxError, ValueError) as e:
-        return {"error": f"canonical emit failed for the built module: {e}", "written": False}
-    pruned = sorted(_import_clauses(built["text"]) - _import_clauses(canonical))
-
-    # Edge continuity: what journaled knowledge points at the Cells about to vanish?
-    module_id = code_module_node_id(repo_key, module_path)
-    cells = await _notebook_cell_wires(gx, module_id)
-    cell_ids = {w["id"] for w in cells}
-    syms_by_cellkey: Dict[str, List[Dict[str, Any]]] = {}
-    for w in await _module_region_wires(gx, module_id):
-        ck = w["properties"].get("cell_key")
-        if w["label"] == DevNodeKinds.CODE_SYMBOL and ck:
-            syms_by_cellkey.setdefault(str(ck), []).append(w)
-    cellkey_by_id = {w["id"]: str(w["properties"].get("cell_key", "")) for w in cells}
-
-    ops = read_journal(writes_journal_path)
-    refs = _cell_id_refs(ops, cell_ids)
-    retargets: List[Dict[str, Any]] = []
-    blockers: List[Dict[str, Any]] = []
-    for r in refs:
-        op = ops[r["op_index"]]
-        survivors = syms_by_cellkey.get(cellkey_by_id.get(r["cell_id"], ""), [])
-        if (op.get("verb") == "link" and r["arg_path"] in ("source_id", "target_id")
-                and len(survivors) == 1):
-            oa = op.get("args", {})
-            new_id = survivors[0]["id"]
-            retargets.append({"relation": oa.get("relation"),
-                              "source_id": new_id if r["arg_path"] == "source_id"
-                                           else oa.get("source_id"),
-                              "target_id": new_id if r["arg_path"] == "target_id"
-                                           else oa.get("target_id"),
-                              "actor": oa.get("actor", "agent:session"),
-                              "replaces_cell": r["cell_id"],
-                              "surviving_symbol": survivors[0]["properties"].get("qualname")})
-        else:
-            blockers.append({**r, "surviving_symbols":
-                             [s["properties"].get("qualname") for s in survivors]})
-    if blockers and not force_drop_cell_refs:
-        return {"error": f"{len(blockers)} journaled write op(s) reference Cell ids this flip "
-                         "would orphan and no unambiguous symbol re-target exists — re-home "
-                         "them first, or pass force_drop_cell_refs to drop them LOUDLY",
-                "cell_ref_blockers": blockers, "written": False}
-
+        text = birth_form(source_journal_path, repo_key, module_path, import_name, built["text"])
+    except (SyntaxError, ValueError, CodeSourceError) as e:
+        return {"error": f"the built module does not decompose: {e}", "written": False}
     result = {"repo_key": repo_key, "notebook_path": notebook_path,
               "module_path": module_path, "import_name": import_name,
-              "file_path": file_path, "module_id": module_id,
+              "file_path": file_path, "module_id": code_module_node_id(repo_key, module_path),
               "export_cells": built["export_cells"],
               "markdown_cells_dropped": built["markdown_cells"],
               "nonexport_code_cells_dropped": built["nonexport_code_cells"],
               "dropped_all_dunder": built["dropped_all_dunder"],
-              "pruned_imports": pruned,
-              "canonical_bytes": len(canonical.encode("utf-8")),
-              "cell_refs_retargeted": retargets, "cell_refs_dropped": blockers,
-              "written": False}
+              "born_bytes": len(text.encode("utf-8")), "written": False}
     if not write:
         result["note"] = "dry run — nothing journaled, written, or deleted"
         return result
-
-    # ONE seam call (journal-first): source + cutover + retire land BEFORE the .py write
-    # and the notebook unlink — the partial-flip states the old inline sequence could
-    # leave (journaled-but-not-retired, written-but-not-cut-over) are gone structurally.
-    nb_existed = nb_file.exists()
+    # ONE seam call (journal-first): the capture group lands BEFORE the .py write and the
+    # notebook unlink.
     with collect_appends() as appended:
         rec = journaled_emit(source_journal_path,
                              emissions=[{"repo_key": repo_key, "module_path": module_path,
-                                         "import_name": import_name, "text": canonical,
-                                         "path": file_path, "cutover": True}],
-                             retires=[{"repo_key": repo_key, "module_path": notebook_path,
-                                       "superseded_by": module_path}],
+                                         "import_name": import_name, "text": text,
+                                         "path": file_path, "born": True}],
+                             registers=[{"repo_key": repo_key,
+                                         "repo_root": str(Path(repos_dir) / repo_key),
+                                         "source_kind": "code"}],
                              deletes=[str(nb_file)],
                              op={"op": "flip-to-py", "from": notebook_path, "to": module_path})
     if rec.get("error"):
         return {"error": f"flip refused at the seam: {rec['error']}", **result}
     result["journal"] = rec
-    notebook_deleted = nb_existed and not nb_file.exists()
-
-    # The Cells leave (no lane projects notebooks); the plain module derives through the
-    # code fold's step, IN PLACE — ids that survive keep every edge.
-    if cell_ids:
-        await graph_task(gx.queue, gx.graph_id, "delete_nodes", node_ids=sorted(cell_ids),
-                         cascade=True)
-    live = await apply_live(gx, source_journal_path, repos_dir, appended)
-    for rt in retargets:
-        rres = await link(gx, rt["source_id"], rt["target_id"], rt["relation"],
-                          actor=rt["actor"])
-        if rres.get("error"):
-            return {"error": f"re-target link failed ({rt['relation']} -> "
-                             f"{rt['surviving_symbol']}): {rres['error']}", **result}
-        append_write(writes_journal_path, "link",
-                     {"source_id": rres["source_id"], "target_id": rres["target_id"],
-                      "relation": rt["relation"], "actor": rt["actor"],
-                      "source_label": rres.get("source_label"),
-                      "target_label": rres.get("target_label")})
-    result.update({"written": True, "cut_over": True, "retired": True,
-                   "notebook_deleted": notebook_deleted,
-                   "graph": {"dropped_cells": len(cell_ids), "live": live},
-                   "note": "GRAPH-SOURCED as plain .py; the .ipynb key is retired and the "
-                           "notebook file deleted; the module derived live, every derived "
-                           "edge included"})
+    result.update({"written": True, "notebook_deleted": not nb_file.exists(),
+                   "live": await apply_live(gx, source_journal_path, repos_dir, appended),
+                   "note": "BORN CAPTURED as plain .py; the notebook file is deleted (its text stays "
+                           "in the repo's git history)"})
     return result

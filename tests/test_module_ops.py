@@ -1,12 +1,13 @@
 """Pure-helper tests for the module-edit ops (rewrite_module_import + import-name derivation)."""
 
-from cjm_context_graph_projection.module_ops import _derive_import_name, rewrite_module_import
+from cjm_context_graph_projection.module_ops import rewrite_module_import
+from cjm_context_graph_projection.source_state import derive_import_name
 
 
 def test_derive_import_name_strips_py_and_dots_path():
-    assert _derive_import_name("pkg/sub.py") == "pkg.sub"
-    assert _derive_import_name("pkg/__init__.py") == "pkg.__init__"
-    assert _derive_import_name("top.py") == "top"
+    assert derive_import_name("pkg/sub.py") == "pkg.sub"
+    assert derive_import_name("pkg/__init__.py") == "pkg.__init__"
+    assert derive_import_name("top.py") == "top"
 
 
 def test_rewrite_from_import_repoints_module_keeping_names():

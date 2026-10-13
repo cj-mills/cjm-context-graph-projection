@@ -3,7 +3,7 @@ the inventory and the only source, ids follow the identity map as of each record
 node / edge time is the ts of the record that produced it."""
 
 from cjm_context_graph_projection.codefold import CodeFold, fold_source_journal
-from cjm_context_graph_projection.source_state import cutover_module, flip_module
+from cjm_context_graph_projection.source_state import flip_module
 from cjm_dev_graph_schema.identity import code_module_node_id, code_symbol_node_id
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 
@@ -42,14 +42,13 @@ def _edges(edges, rel):
 
 
 def test_the_journal_is_the_only_source(tmp_path):
-    # Cut over, then the file is edited out-of-band and finally deleted: the graph never reads it.
+    # Born captured, then the file is edited out-of-band and finally deleted: the graph never reads it.
     pkg = tmp_path / REPO / "cjm_demo_lib"
     pkg.mkdir(parents=True)
     (pkg / "a.py").write_text('"""A."""\n\n\ndef fa():\n    return 1\n')
     (pkg / "b.py").write_text('"""B."""\n\n\ndef fb():\n    return 2\n')  # never captured
     j = str(tmp_path / "source.jsonl")
-    flip_module(j, str(tmp_path), REPO, "cjm_demo_lib/a.py")
-    cutover_module(j, str(tmp_path), REPO, "cjm_demo_lib/a.py")
+    assert flip_module(j, str(tmp_path), REPO, "cjm_demo_lib/a.py")["captured"]
     (pkg / "a.py").write_text('"""A."""\n\n\ndef fa():\n    return 999\n')
     nodes, _ = fold_source_journal(j, str(tmp_path)).elements()
     names = {n["properties"].get("qualname") for n in nodes if n["label"] == DevNodeKinds.CODE_SYMBOL}

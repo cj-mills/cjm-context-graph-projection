@@ -5,7 +5,7 @@ import argparse
 
 import pytest
 from cjm_context_graph_projection.cli import _decide_state
-from cjm_context_graph_projection.source_state import append_source, uncaptured_modules
+from cjm_context_graph_projection.source_state import flip_module, uncaptured_modules
 
 
 def test_decide_state_open_passes():
@@ -33,9 +33,9 @@ def test_uncaptured_modules_diffs_tree_against_journal(tmp_path, monkeypatch):
     (repo / "pkg/__pycache__").mkdir()
     (repo / "pkg/__pycache__/c.py").write_text("")     # skipped dir
     jp = str(tmp_path / "source.jsonl")
-    append_source(jp, "demo-repo", "pkg/captured.py", "pkg.captured", "X = 1\n")
+    assert flip_module(jp, str(tmp_path), "demo-repo", "pkg/captured.py")["captured"]
     rows = uncaptured_modules(jp, ["demo-repo", "absent-repo"], str(tmp_path))
     assert rows == {"demo-repo": ["pkg/loose.py", "tests/test_loose.py"]}
-    append_source(jp, "demo-repo", "pkg/loose.py", "pkg.loose", "Y = 2\n")
-    append_source(jp, "demo-repo", "tests/test_loose.py", "tests.test_loose", "def test():\n    pass\n")
+    assert flip_module(jp, str(tmp_path), "demo-repo", "pkg/loose.py")["captured"]
+    assert flip_module(jp, str(tmp_path), "demo-repo", "tests/test_loose.py")["captured"]
     assert uncaptured_modules(jp, ["demo-repo"], str(tmp_path)) == {}

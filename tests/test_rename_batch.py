@@ -166,7 +166,7 @@ def test_sequential_renames_land_without_a_rebuild(tmp_path, monkeypatch):
     rename #1 (ids kept), so rename #2 lands from current wires and NEITHER reverts."""
     from cjm_dev_graph_schema.identity import code_module_node_id, code_symbol_node_id
     from cjm_python_decompose_core.extract import decompose_text
-    from cjm_context_graph_projection.source_state import append_source
+    from cjm_context_graph_projection.source_state import flip_module
     repos = tmp_path / "repos"
     m_path = repos / "cjm-demo" / "cjm_demo/m.py"
     u_path = repos / "cjm-demo" / "cjm_demo/uses.py"
@@ -185,8 +185,8 @@ def test_sequential_renames_land_without_a_rebuild(tmp_path, monkeypatch):
     m_path.write_text(m_src)
     u_path.write_text(u_src)
     jp = str(tmp_path / "source.jsonl")
-    append_source(jp, "cjm-demo", "cjm_demo/m.py", "cjm_demo.m", m_src)
-    append_source(jp, "cjm-demo", "cjm_demo/uses.py", "cjm_demo.uses", u_src)
+    assert flip_module(jp, str(repos), "cjm-demo", "cjm_demo/m.py")["captured"]
+    assert flip_module(jp, str(repos), "cjm-demo", "cjm_demo/uses.py")["captured"]
     mid = code_module_node_id("cjm-demo", "cjm_demo/m.py")
     f_id, g_id = code_symbol_node_id(mid, "f"), code_symbol_node_id(mid, "g")
     res1 = asyncio.run(rename_symbol(GX, f_id, "f2", write=True, source_journal_path=jp,
@@ -277,10 +277,10 @@ def test_rename_keeps_symbol_identity_and_relives_the_graph(tmp_path, monkeypatc
     m_path.write_text(m_src)
     u_path.write_text(u_src)
     jp = str(tmp_path / "source.jsonl")
-    # The modules are journaled (graph-sourced) so the rename lands as source ops with provenance.
-    from cjm_context_graph_projection.source_state import append_source
-    append_source(jp, "cjm-demo", "cjm_demo/m.py", "cjm_demo.m", m_src)
-    append_source(jp, "cjm-demo", "cjm_demo/uses.py", "cjm_demo.uses", u_src)
+    # The modules are journaled (born captured) so the rename lands as element records with provenance.
+    from cjm_context_graph_projection.source_state import flip_module
+    assert flip_module(jp, str(repos), "cjm-demo", "cjm_demo/m.py")["captured"]
+    assert flip_module(jp, str(repos), "cjm-demo", "cjm_demo/uses.py")["captured"]
     mid = code_module_node_id("cjm-demo", "cjm_demo/m.py")
     f_id, g_id = code_symbol_node_id(mid, "f"), code_symbol_node_id(mid, "g")
 
