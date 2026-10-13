@@ -18,6 +18,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - **`cjm_context_graph_projection.cli`** — The `cjm-context-graph` CLI — first driver of the projection core.
 - **`cjm_context_graph_projection.code_edges`** — Orphaned code-target edge detector: journaled links whose endpoint no longer resolves.
 - **`cjm_context_graph_projection.codefold`** — The code lane as a FOLD over the source journal (design amendment 2cc81d3b to 8f6f2343).
+- **`cjm_context_graph_projection.codesource`** — The code lane's ELEMENT regime: a captured module's source is its element records (design abfc2829,
 - **`cjm_context_graph_projection.cohesion`** — Module cohesion audit over the code graph — the read-only cohesion ORACLE (N+1).
 - **`cjm_context_graph_projection.comments`** — The post page's comments (design 39c51c15 (1), rulings 98d33f9e (2) + 86f4a34d, under the
 - **`cjm_context_graph_projection.conceptjudge`** — The concept judge (ruling ad37f62a (2), under design amendment 25a58e0e (6) and the path model ae698640).
@@ -47,6 +48,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - **`cjm_context_graph_projection.librarypage`** — The Library's pages: the index a Lens with the `library` view layout projects, and a work page
 - **`cjm_context_graph_projection.linkaudit`** — Link liveness audit — the derived worklist for the EXTERNAL links a note carries
 - **`cjm_context_graph_projection.listing`** — Structured enumeration: every node of a LABEL / assertion of a PREDICATE / edge of a RELATION.
+- **`cjm_context_graph_projection.memorysource`** — The memory notes on the element source unit (design c9b29de5, work item 40a35288).
 - **`cjm_context_graph_projection.module_ops`** — Module-edit ops — create / rename / delete / regroup a module as graph edge ops.
 - **`cjm_context_graph_projection.notes_outline`** — The OUTLINE PASS of the notes lane — the first of the standalone lecture resource's passes
 - **`cjm_context_graph_projection.notes_place`** — The PLACEMENT PASS of the notes lane — the second of the standalone lecture resource's
@@ -87,7 +89,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - **`cjm_context_graph_projection.sitelisting`** — The site's PROJECTED LISTING: one component for every listing (design 0efb5497 + amendment
 - **`cjm_context_graph_projection.sitepages`** — The site's PROJECTED pages: every series page from its Series, every topic page from its Lens
 - **`cjm_context_graph_projection.sitetheme`** — The site's THEME, projected from the design system its profile is bound to (leg C of the
-- **`cjm_context_graph_projection.source_state`** — N+3 Phase 1 (SHADOW): capture a module's canonical source into a SOURCE journal and
+- **`cjm_context_graph_projection.source_state`** — The code SOURCE journal's write side: every live module's source is its element records
 - **`cjm_context_graph_projection.sourcemoves`** — Which rows a moved source accounts for (design amendment a9176261 to 19edbe97 (6)).
 - **`cjm_context_graph_projection.sources`** — The post page's sources (design 39c51c15 (3), amendment 722a8232, under the redesign build
 - **`cjm_context_graph_projection.standing`** — A page's STANDING (design amendment cbd5f154 to the disposition pass 9a21e345, amended by
@@ -163,7 +165,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `add_symbol` _function_ — Mint a NEW top-level CodeSymbol into a module, then emit its canonical artifact.
 - `add_text` _function_ — Mint a NEW CodeText region (imports/constants/docstring/`__all__`) into a module, then emit.
 - `author` _function_ — Author a node's verbatim-text slot, then emit its canonical artifact to disk.
-- `emit_artifact` _function_ — Emit a container's canonical artifact FROM THE GRAPH (graph -> .py / .ipynb / .md).
+- `emit_artifact` _function_ — Emit a container's canonical artifact FROM THE GRAPH (graph -> .py / .md).
 - `emit_post` _function_ — Emit a born post to the PUBLIC website clone — GATED on publish_state=published.
 - `file_section_raws` _function_ — Each of a note's sections' `raw` span as the FILE currently decomposes (the other
 - `graph_section_raws` _function_ — Each of a note's sections' on-graph `raw` span, keyed by anchor (the divergence/
@@ -222,6 +224,19 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 
 - `CodeFold` _class_ — The projected code corpus as a fold over source-journal records (see module docstring).
 - `fold_source_journal` _function_ — Fold every record of the source journal, in append order (the rebuild's code lane).
+
+### `cjm_context_graph_projection.codesource`
+
+- `CodeSourceError` _class_ — A captured module whose element state does not compose, or does not decompose back to itself.
+- `ElementFold` _class_ — The element records folded to state: modules, elements, every id a record has named.
+- `ElementState` _class_ — A journaled element's content and placement.
+- `LatestSources` _class_ — `latest_source_ops`' answer over both regimes: (repo_key, module_path) -> the module's latest
+- `ModuleState` _class_ — A journaled module's own state.
+- `SourceState` _class_ — The code source journal folded over BOTH regimes: the latest snapshot per key, the phase-2
+- `absorb_records` _function_ — A write to a captured module, at element grain (abfc2829 (7)): the new text is lifted into
+- `capture_records` _function_ — The records that capture one module into the element regime, and what the capture changes:
+- `derive_captured` _function_ — A captured module's nodes and local edges, every node keyed by its element id (see the module
+- `element_canonical` _function_
 
 ### `cjm_context_graph_projection.cohesion`
 
@@ -421,7 +436,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `load_contradicts` _function_ — All CONTRADICTS pairs already recorded (for write idempotency / reporting).
 - `load_edge_pairs` _function_ — All (source, target) pairs for an edge relation type.
 - `load_edges` _function_ — The edges an `EdgeQuery` matches, whole -- for a caller that diffs edge ids.
-- `load_label` _function_ — All nodes of a label (bounded by `limit`).
+- `load_label` _function_ — All nodes of a label — every row, never a capped subset (finding a107e2f3); the
 - `load_label_where` _function_ — Nodes of a label filtered by property predicates, SERVER-SIDE (`NodeQuery.where`).
 - `load_nodes` _function_ — Batch-fetch nodes by id in ONE worker round-trip (`NodeQuery.ids`).
 - `load_supersedes` _function_ — All SUPERSEDES (superseder, superseded) pairs (the resolve_active input).
@@ -571,11 +586,24 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `list_graph` _function_ — Enumerate one CLASS of the graph: nodes by label / assertions by predicate / edges
 - `parse_where` _function_ — Parse `--where PROP=VALUE` clauses into property predicates (op `eq`, AND).
 
+### `cjm_context_graph_projection.memorysource`
+
+- `MemorySource` _class_ — The memory lane's decomposition: the memory profile, identity from the frontmatter name,
+- `capture_memory_records` _function_ — One note's capture + cutover records, canonical, proved: the db's text re-decomposes to the
+- `cutover_memory` _function_ — Capture + cut over the memory notes as ONE group, each read from the db as its writes-journal
+- `is_memory_lane` _function_
+- `memory_inventory` _function_ — The memory notes the writes journal holds: each `new-note` genesis op without a born
+- `memory_lane` _function_ — The note-lane config the notes lane's machinery reads: the memory journal as its source
+- `memory_new_note` _function_ — A memory note born cut over (c9b29de5 (6)): one group -- the note, its elements' state and
+- `note_lane` _function_ — One graph, one note lane: the notes graph's archive, else the dev graph's memory notes.
+- `stray_memory_files` _function_ — A memory note is born on the graph; a markdown file that appears in the harness memory dir
+- `title_records` _function_ — An in-body H1 is the note's title (c9b29de5 (5)): its text moves into the frontmatter as
+
 ### `cjm_context_graph_projection.module_ops`
 
-- `add_module` _function_ — Birth a module WHOLE in ONE journaled op, graph-sourced from its first record (work
+- `add_module` _function_ — Birth a module WHOLE in ONE journaled op, BORN CAPTURED (work item 177dcb07, the ruling
 - `delete_module` _function_ — Delete a module — retire its journal key, drop its file, and let the code fold's step
-- `flip_notebook_to_py` _function_ — The golden-reference flip, ONE LOUD VERB (DEC b2c5363d): notebook -> plain `.py`.
+- `flip_notebook_to_py` _function_ — The off-nbdev step, ONE LOUD VERB, in the element regime (design detail 25c1fadc, ruling N):
 - `new_module` _function_ — Mint an EMPTY module, graph-sourced from birth (the target add-text / add-symbol /
 - `regroup` _function_ — Gather symbols into a module — the EXECUTE verb for an `under_split` (extract a
 - `rename_module` _function_ — Rename a `.py` module — re-emit its content at the new path, drop the old file, and
@@ -623,8 +651,12 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `fold_source_records` _function_ — Continue the cut-over paths in the git fold's ElementFold: each journal step that touches a
 - `group_spans` _function_ — `groups` as index ranges: one write's records share a ts.
 - `groups` _function_ — One write's records share a ts and fold as one step.
+- `held_text` _function_ — The note as the db holds it -- what a capture reads, and the prior a cutover's relation
 - `ingest_records` _function_
 - `journal_write` _function_ — The journal-first write path every authoring verb takes: build the records from the
+- `journaled_lane` _function_
+- `note_edit_records` _function_ — An edit of a Note's own state, its frontmatter (design c9b29de5 (6)); a changed identity is
+- `note_source` _function_ — One grammar, two lanes (design c9b29de5 (2)): a lane is config DATA plus its source.
 - `note_wires` _function_
 - `notes_source_check` _function_ — Each journaled note's file against its journal: CLEAN (working tree == HEAD == journal),
 - `place_records` _function_ — A move, re-parent or reorder: the element's own placement, plus the two siblings whose
@@ -1104,25 +1136,24 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 
 - `IdentityWalk` _class_ — The identity map's walk ONE RECORD AT A TIME — the step `symbol_identity_map` folds
 - `SymbolIdentity` _class_ — Container-independent CodeSymbol identity, DERIVED from the source journal (36f649d3).
-- `absorb_authored_text` _function_ — Absorb an `author` edit of a GRAPH-SOURCED module into the source journal.
+- `append_elements` _function_ — Append one write's element records under ONE op-clock time: they fold as one group (the
 - `append_register` _function_ — Append a `register` event — repo inventory as JOURNAL DATA (DEC c47912f6).
 - `append_retire` _function_ — Append a `retire` op ending a module key's journal life.
-- `append_source` _function_ — Append a `source` op, skipping a write identical to the module's current latest state.
-- `canonical_emit` _function_ — Decompose source text and re-emit it canonically — the exact graph→`.py` Phase 2 yields.
-- `canonical_emit_notebook` _function_ — The notebook analogue of `canonical_emit`: parse to cells, re-render canonically.
+- `birth_form` _function_ — What a module born at this path lands as its text: born captured (the ruling bef8e6b8), its
 - `canonicalization_report` _function_ — What a canonicalization CHANGES, and whether the change can alter runtime behaviour
 - `collect_appends` _function_ — Collect every source-journal record appended inside the block, as it landed on disk.
-- `cutover_module` _function_ — Phase 2: make the JOURNAL the module's source of truth (the persistence flip).
+- `derive_import_name` _function_ — A module's dotted import name from its repo-relative path ("pkg/sub.py" -> "pkg.sub");
+- `element_absorb` _function_ — One captured module's write at element grain -- `element_plan` over a single emission (a file
+- `element_plan` _function_ — The element regime's part of one write (abfc2829 (7), design detail aba8ec79): every emission
 - `emit_source_artifact` _function_ — (Re)generate a module's file artifact from its journaled source (the recovery /
-- `flip_module` _function_ — Capture a module's CANONICAL source into the shadow source journal (Phase 1).
-- `graph_sourced_modules` _function_ — The modules whose ingest source IS the journal (a `cutover` op exists for them).
-- `is_test_module_path` _function_ — Whether a module path denotes TEST source (`tests/` or `tests_manual/`).
+- `flip_module` _function_ — Absorb a module's FILE into the source journal at element grain (abfc2829 (7)): a captured
+- `is_test_module_path` _function_ — Whether a module path denotes TEST source (`tests/` or `tests_manual/`) -- the code fold's
 - `journal_repos` _function_ — The on-graph repos — DERIVED from the journal (finding 7a2d54ae): a repo is on-graph
 - `journaled_emit` _function_ — The ops seam (pillar 1 of DEC 6ee4b4f2): events BEFORE files — THE file-write path.
-- `latest_source_ops` _function_ — The LATEST source state per module (last write wins — the 'journal STATE, not diff'
+- `latest_source_ops` _function_ — The LATEST source state per module, over both regimes (`codesource.SourceState`): before a
 - `notebook_to_py_source` _function_ — Build a plain-`.py` module source from a notebook's EXPORT cells (the flip transform).
 - `read_source_journal` _function_ — Read every `source` op across the rotated SEGMENT FAMILY (one JSON object per
-- `source_check` _function_ — The soak instrument: for each shadow-sourced module, check two things.
+- `source_check` _function_ — The regen gate over every live module: two checks each.
 - `symbol_identity_map` _function_ — Derive the container-independent symbol identity map from the source journal (36f649d3).
 - `uncaptured_modules` _function_ — The uncaptured-module audit (build a6453f70) — the ac3d52f4 recipe as a verb.
 
