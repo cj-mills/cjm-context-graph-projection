@@ -16,13 +16,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from cjm_context_graph_layer.edits import resolve_active
 from cjm_context_graph_layer.ops import graph_task
-from cjm_context_graph_primitives.query import EdgeQuery, NodeQuery, PropertyPredicate
+from cjm_context_graph_primitives.query import EdgeQuery, NodeQuery, OrderBy, PropertyPredicate
 from cjm_dev_graph_schema.aliases import build_alias_index
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 
 from .runtime import GraphHandle
 
-_LABEL_LIMIT = 10000  # Generous per-label cap (the dev graph is small; raise if needed)
+_LABEL_PAGE = 5000  # Keyset page of a whole-label read: a transport bound, never a cap (a107e2f3)
 
 
 def nid(node: Any) -> Optional[str]:
@@ -54,29 +54,47 @@ def prop(node: Any, key: str, default: Any = None) -> Any:
 
 async def load_label(
     gx: GraphHandle,
-    label: str,        # Node label to load
-    limit: int = _LABEL_LIMIT,
-) -> List[Any]:  # GraphNodes carrying that label
-    """All nodes of a label (bounded by `limit`)."""
-    res = await graph_task(gx.queue, gx.graph_id, "find_nodes_by_label", label=label, limit=limit)
-    return list(res or [])
+    label: str,  # Node label to load
+) -> List[Any]:  # EVERY GraphNode carrying that label, in id order
+    """All nodes of a label — every row, never a capped subset (finding a107e2f3); the
+    keyset pages are `load_label_where`'s."""
+    return await load_label_where(gx, label, [])
 
 
 async def load_label_where(
     gx: GraphHandle,
-    label: str,                        # Node label to load
-    where: List[PropertyPredicate],    # Property predicates (AND) — the server-side filter
-    limit: int = _LABEL_LIMIT,
-    offset: int = 0,
+    label: str,                          # Node label to load
+    where: List[PropertyPredicate],      # Property predicates (AND) — the server-side filter
+    limit: Optional[int] = None,         # Window size; None = EVERY match
+    offset: int = 0,                     # Window start (with a limit)
+    order_by: Optional[OrderBy] = None,  # Ordering (default: id)
 ) -> List[Any]:  # GraphNodes matching label + predicates
     """Nodes of a label filtered by property predicates, SERVER-SIDE (`NodeQuery.where`).
 
     The read-surface exposure of the query machinery the primitives always had —
-    a property filter runs in the worker, not over a full-label client scan."""
-    q = NodeQuery(label=label, where=list(where), limit=limit, offset=offset)
-    res = await graph_task(gx.queue, gx.graph_id, "query_nodes", query=q.to_dict())
-    return list(getattr(res, "nodes", None)
-                or (res.get("nodes") if isinstance(res, dict) else None) or [])
+    a property filter runs in the worker, not over a full-label client scan. With no
+    `limit` it returns EVERY match (finding a107e2f3: a default cap once returned an
+    arbitrary subset past it, silently), read in keyset pages on the id — each page a
+    range scan over the (label, id) index — unless an ordering asks for one ordered read.
+    A window (`limit` / `offset`) is ordered in SQL before it is cut — by `order_by`, the
+    id breaking ties, else by the id — so it is never an arbitrary subset either."""
+    def _nodes(res: Any) -> List[Any]:
+        return list(getattr(res, "nodes", None)
+                    or (res.get("nodes") if isinstance(res, dict) else None) or [])
+
+    if limit is not None or offset or order_by is not None:
+        q = NodeQuery(label=label, where=list(where), limit=limit, offset=offset,
+                      order_by=order_by)
+        return _nodes(await graph_task(gx.queue, gx.graph_id, "query_nodes", query=q.to_dict()))
+    out: List[Any] = []
+    after: Optional[str] = None
+    while True:
+        q = NodeQuery(label=label, where=list(where), limit=_LABEL_PAGE, after=after)
+        page = _nodes(await graph_task(gx.queue, gx.graph_id, "query_nodes", query=q.to_dict()))
+        out.extend(page)
+        if len(page) < _LABEL_PAGE:
+            return out
+        after = nid(page[-1])
 
 
 async def count_label(

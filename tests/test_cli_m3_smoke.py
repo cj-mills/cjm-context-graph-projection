@@ -7,6 +7,7 @@ dispatch path's imports are exercised for real.
 """
 
 import json
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -325,3 +326,26 @@ def test_born_post_location_derives_from_emit_root_on_replay(tmp_path):
     assert r4.returncode == 0, r4.stderr or r4.stdout
     nid4, path4, ids4 = note(tmp_path / "none.db")
     assert nid4 == nid and ids4 == ids3 and not path4
+
+
+def test_read_verbs_open_read_only_and_the_flag_refuses_writes(tmp_path):
+    # Finding ff3ede3d: a read verb opens the db read-only -- no ANALYZE, no write lock,
+    # nothing committed (an observer's data_version holds) -- and --read-only refuses
+    # every verb outside the read class.
+    mem = tmp_path / "memory"
+    mem.mkdir()
+    db = str(tmp_path / "dev.db")
+    journal = str(tmp_path / "writes.jsonl")
+    r = _run("--graph-db-path", db, "--journal-path", journal, "new-note",
+             "--path", str(mem / "ro.md"), "--content", "---\nname: ro-demo\ndescription: d\n---\n\nbody\n")
+    assert r.returncode == 0, r.stderr or r.stdout
+    observer = sqlite3.connect(db)
+    before = observer.execute("PRAGMA data_version").fetchone()[0]
+    for verb in (["schema"], ["locate", "ro-demo"], ["readiness"]):
+        r = _run("--graph-db-path", db, "--read-only", *verb)
+        assert r.returncode == 0, f"{verb}: {r.stderr or r.stdout}"
+    assert observer.execute("PRAGMA data_version").fetchone()[0] == before
+    observer.close()
+    r = _run("--graph-db-path", db, "--journal-path", journal, "--read-only",
+             "session", "2026-01-01_00-00-00")
+    assert r.returncode == 2 and "READ-ONLY" in r.stderr

@@ -129,6 +129,36 @@ ID_REFS: Dict[str, tuple] = {
     "notes-retract": ("point",), "notes-check": ("point",), "notes-edit": ("point",),
 }
 
+# The read class (finding ff3ede3d): verbs that never write the graph db. Each opens it
+# READ-ONLY (SQLite `mode=ro`: a write raises at the storage layer, so a read neither
+# takes the write lock nor contends with a writer), and `--read-only` -- the flag
+# cg-read passes -- refuses every verb outside it, so the read surface is this one
+# list. A projector here may still write a FILE it generates (`readme --write`),
+# never the db; the conformance test holds every entry to a subparser.
+READ_COMMANDS = frozenset({
+    "schema", "state", "relevant", "explore", "show", "locate", "grep", "read",
+    "conventions", "refactor-candidates", "cohesion", "contradictions", "readiness",
+    "review-frontier", "link-audit", "register-drift", "prose-refs", "orphaned-edges",
+    "filing", "list", "journal-window", "subgraph", "export", "export-session", "lens",
+    "readme", "viz", "serve", "source-check", "portfolio", "lead", "feed",
+    "notes-coverage", "notes-overlap", "notes-check", "notes-promotion",
+    "notes-staging-index", "series-order", "site-links", "coverage", "hardware", "claims",
+    "library", "paths", "traffic", "inbound-links", "standing", "relocation-plan",
+    "rebuild-diff", "round-trip", "section-roles", "concepts", "session-cost",
+})
+# A read verb whose named flag turns on a WRITE mode: with the flag given, the invocation
+# is a write (opened read-write, refused under --read-only) -- `notes-overlap --rows` lands
+# the judge's edits (the read-only open caught it; cg-read's old allowlist let it write).
+READ_WRITE_MODES = {"notes-overlap": "rows"}
+
+
+def _reads_only(args) -> bool:
+    """Whether this invocation only reads the graph db: a read verb, not in its write mode."""
+    if args.command not in READ_COMMANDS:
+        return False
+    flag = READ_WRITE_MODES.get(args.command)
+    return not (flag and getattr(args, flag, None))
+
 
 def _will_write(args) -> bool:
     """Whether this invocation would MUTATE source files (the seam-gate predicate).
@@ -316,6 +346,13 @@ def _report_site_links(links: Dict[str, Any]) -> None:
 
 
 async def _dispatch(args) -> int:
+    # The read surface (finding ff3ede3d): under --read-only only the read class runs.
+    if getattr(args, "read_only", False) and not _reads_only(args):
+        mode = (f" with --{READ_WRITE_MODES[args.command]} (its write mode)"
+                if args.command in READ_COMMANDS else "")
+        print(f"error: READ-ONLY -- `{args.command}`{mode} is not a read; the read verbs: "
+              + " ".join(sorted(READ_COMMANDS)), file=sys.stderr)
+        return 2
     # The pillar-1 seam gate (DEC 6ee4b4f2): a source-mutating invocation is refused
     # OUTRIGHT when its verb isn't routed through journaled_emit, or when no source
     # journal is given for events to land in BEFORE files. Dispatch-time, not deep in
@@ -371,7 +408,8 @@ async def _dispatch(args) -> int:
         return 1 if any(p.get("error") for p in pulls) else 0
     # One live write window per invocation (design amendment 9ee4e346): the site-link step
     # runs once at its close, inside the op clock, when the invocation moved an input.
-    async with open_graph(args.graph_db_path, args.manifests_dir) as gx, \
+    async with open_graph(args.graph_db_path, args.manifests_dir,
+                          readonly=_reads_only(args)) as gx, \
             site_link_window(gx, report=_report_site_links):
         if args.command == "ingest":
             note_aliases = await note_alias_map(gx)  # confirmed link aliases heal drifted refs
@@ -3352,6 +3390,10 @@ def main() -> int:
                          "appends {verb, delivered ids, n, request, session} — a SEPARATE "
                          "prunable telemetry stream, never the write journal (DEC 45df767d). "
                          "No default (cg-read bakes it).")
+    ap.add_argument("--read-only", action="store_true",
+                    help="Refuse every verb outside the read class (READ_COMMANDS) -- the "
+                         "read surface cg-read exposes; a read verb opens the db read-only "
+                         "with or without it (finding ff3ede3d).")
     sub = ap.add_subparsers(dest="command", required=True)
 
     p_ing = sub.add_parser("ingest", help="Build/refresh the dev graph (idempotent)")

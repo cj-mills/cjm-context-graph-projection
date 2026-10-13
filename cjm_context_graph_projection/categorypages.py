@@ -250,7 +250,9 @@ async def plan_category_pages(
         out["pages"].append({"source": csrc, "kind": DevNodeKinds.ENTITY,
                              "key": f"{e['entry']['entity_kind']}:{e['entry']['key']}", "subject": e["entry"]["id"],
                              "categories": [], "members": len(got["contents"]), "updated": got["updated"],
-                             "listed": got["ids"], "href": e["href"], "sequence": False, "title": e["name"],
+                             # the listing's own order, never the membership read's storage order
+                             "listed": [of[it["source"]] for it in items], "href": e["href"],
+                             "sequence": False, "title": e["name"],
                              "description": e["description"],
                              "layout": PAGE_LAYOUT, "entity_kind": e["entry"]["entity_kind"], "feed": feed,
                              "text": render_page(front, body=body)})

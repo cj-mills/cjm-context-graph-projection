@@ -180,7 +180,7 @@ class Displayer:
     async def load(cls, gx: GraphHandle) -> "Displayer":
         """Load + parse the graph's DisplayRules (a malformed stored rule is skipped)."""
         rules: Dict[str, Dict[str, Any]] = {}
-        for n in await F.load_label(gx, DISPLAY_RULE_LABEL, limit=1000):
+        for n in await F.load_label(gx, DISPLAY_RULE_LABEL):
             for_label = F.prop(n, "for_label")
             if not for_label:
                 continue

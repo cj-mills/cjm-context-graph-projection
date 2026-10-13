@@ -6,11 +6,12 @@ an 'available but dangerous' verb) and every registered verb exists as a CLI sub
 (an AST scan — adding a `write_text`/`unlink` to a new verb fails HERE, not in review);
 (3) every mutating verb has the uniform --no-write preview (`emit` inverts to --write)."""
 
+import argparse
 import ast
 from pathlib import Path
 
 import cjm_context_graph_projection.cli as cli_mod
-from cjm_context_graph_projection.cli import MUTATES_SOURCE
+from cjm_context_graph_projection.cli import MUTATES_SOURCE, READ_COMMANDS, READ_WRITE_MODES
 
 
 def test_registry_fully_routed_and_every_verb_parseable():
@@ -23,6 +24,22 @@ def test_registry_fully_routed_and_every_verb_parseable():
         assert f'add_parser("{verb}"' in src, f"registry names `{verb}` but no subparser exists"
     # And the gate itself is wired at dispatch.
     assert "MUTATES_SOURCE[args.command]" in src
+
+
+def test_read_class_parseable_and_disjoint_from_mutators():
+    # The read class (finding ff3ede3d) opens the db read-only and is the whole cg-read
+    # surface: every entry names a subparser, no source-mutating verb is in it, and the
+    # dispatch's graph open is keyed to it.
+    src = Path(cli_mod.__file__).read_text()
+    for verb in READ_COMMANDS:
+        assert f'add_parser("{verb}"' in src, f"READ_COMMANDS names `{verb}` but no subparser exists"
+    assert not READ_COMMANDS & set(MUTATES_SOURCE)
+    assert "readonly=_reads_only(args)" in src
+    # a read verb's write mode is declared, and turns the invocation into a write
+    for verb, flag in READ_WRITE_MODES.items():
+        assert verb in READ_COMMANDS
+        assert cli_mod._reads_only(argparse.Namespace(command=verb, **{flag: None}))
+        assert not cli_mod._reads_only(argparse.Namespace(command=verb, **{flag: "x"}))
 
 
 def test_no_direct_file_mutation_outside_the_seam():

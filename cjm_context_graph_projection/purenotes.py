@@ -353,8 +353,7 @@ async def read_source_unit(
         return {"error": str(e)}
     groups: Dict[Optional[str], int] = {sp.get("skeleton_hash"): int(sp.get("segments") or 0) for sp in spines}
     # Corrections for the source (append-only; supersession from SUPERSEDES edges).
-    cq = NodeQuery(label="Correction", where=[PropertyPredicate("payload.source_id", "eq", source_id)],
-                   limit=200000)
+    cq = NodeQuery(label="Correction", where=[PropertyPredicate("payload.source_id", "eq", source_id)])
     cres = await graph_task(sg.queue, sg.graph_id, "query_nodes", query=cq.to_dict())
     corrections: List[Dict[str, Any]] = []
     for n in (getattr(cres, "nodes", None) or []):
@@ -397,7 +396,7 @@ async def read_source_unit(
     assigned = active_speaker_assignments(active, superseded)
     if assigned:
         eres = await graph_task(sg.queue, sg.graph_id, "query_nodes",
-                                query=NodeQuery(label="Entity", limit=100000).to_dict())
+                                query=NodeQuery(label="Entity").to_dict())
         names: Dict[str, Optional[str]] = {}
         for n in (getattr(eres, "nodes", None) or []):
             d = n.to_dict() if hasattr(n, "to_dict") else dict(n)
@@ -443,7 +442,7 @@ async def read_source_references(
     """The Source's human-added resource links (`Reference` nodes minted by the transcription
     core's `add-reference`; ruling a7ca900d (3), item ae103970) — read LIVE from the sibling
     so every rendering of the unit carries the current set, never a body-authored copy."""
-    q = NodeQuery(label="Reference", where=[PropertyPredicate("source_id", "eq", source_id)], limit=10000)
+    q = NodeQuery(label="Reference", where=[PropertyPredicate("source_id", "eq", source_id)])
     res = await graph_task(sg.queue, sg.graph_id, "query_nodes", query=q.to_dict())
     out: List[Dict[str, Any]] = []
     for n in (getattr(res, "nodes", None) or []):
@@ -4365,7 +4364,7 @@ async def work_promotion_status(
         async with open_graph(siblings[key], manifests_dir or DEFAULT_MANIFESTS, readonly=True) as sg:
             # Full nodes, not a projected row set: the structure map is a NESTED property and
             # only the node form carries it whole (the `read_source_unit` corrections pattern).
-            q = NodeQuery(label="Source", limit=200000)
+            q = NodeQuery(label="Source")
             res = await graph_task(sg.queue, sg.graph_id, "query_nodes", query=q.to_dict())
             rows = []
             for n in (getattr(res, "nodes", None) or []):
@@ -4574,7 +4573,7 @@ async def read_work_structure(
     first, the Collections those Sources are PART_OF (a book's collection is the work; a
     lecture's is its series), and the work's human-added links (Reference nodes on the
     Collection, `read_source_references`). Read live; the render journals what it observed."""
-    q = NodeQuery(label="Source", limit=200000)
+    q = NodeQuery(label="Source")
     res = await graph_task(sg.queue, sg.graph_id, "query_nodes", query=q.to_dict())
     units: List[Dict[str, Any]] = []
     work: Dict[str, Any] = {}

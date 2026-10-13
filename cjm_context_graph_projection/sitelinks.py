@@ -119,14 +119,13 @@ async def _live_section_anchors(
     An anchor names a Section through the Section's `anchor` property, never by deriving its
     id: a graph-sourced Section keeps the id its heading was born with across a rename, so a link
     to the new anchor finds it there; and a retired Section stays a node, so a link naming its old
-    anchor finds nothing and is reported. One read for every holder, sized by the true count so
-    no holder set is ever truncated."""
+    anchor finds nothing and is reported. One read for every holder; an uncapped read returns
+    every match (a107e2f3), so no holder set is ever truncated."""
     held = sorted(set(holders))
     if not held:
         return {}
     where = [PropertyPredicate("note_id", "in", held)]
-    total = await F.count_label(gx, DevNodeKinds.SECTION, where)
-    sections = await F.load_label_where(gx, DevNodeKinds.SECTION, where, limit=max(total, 1))
+    sections = await F.load_label_where(gx, DevNodeKinds.SECTION, where)
     return {(str(F.prop(s, "note_id")), str(F.prop(s, "anchor"))): str(F.nid(s))
             for s in sections if not F.prop(s, "retired")}
 
@@ -144,10 +143,9 @@ async def _retired_sources(
         return set()
     where = [PropertyPredicate("predicate", "eq", P.PUBLISH_STATE),
              PropertyPredicate("subject_id", "in", ids)]
-    total = await F.count_label(gx, DevNodeKinds.ASSERTION, where)
-    if not total:
+    facts = await F.load_label_where(gx, DevNodeKinds.ASSERTION, where)
+    if not facts:
         return set()
-    facts = await F.load_label_where(gx, DevNodeKinds.ASSERTION, where, limit=total)
     q = EdgeQuery(target_ids=sorted(str(F.nid(a)) for a in facts),
                   relation_type=DevRelations.SUPERSEDES)
     res = await graph_task(gx.queue, gx.graph_id, "query_edges", query=q.to_dict())

@@ -209,8 +209,7 @@ async def _load_session_messages(
     """Gather a session's Message property dicts + NEXT / DERIVED_FROM pairs + the
     spine's display title — the shared load behind the exporter and `read --session`."""
     nodes = await load_label_where(
-        gx, "Message", [PropertyPredicate("session_key", "eq", session_key)],
-        limit=100000)
+        gx, "Message", [PropertyPredicate("session_key", "eq", session_key)])
     messages: List[Dict[str, Any]] = []
     for n in nodes:
         props = dict((n.get("properties") if isinstance(n, dict)

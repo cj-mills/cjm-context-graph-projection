@@ -426,7 +426,7 @@ def test_category_pages_earn_a_page_or_redirect(tmp_path):
     lede = [p for p in marked["pages"] if p.get("layout") == "category"][0]
     assert lede["description"] == UNDESCRIBED and "PyTorch as" not in lede["text"]
     assert "## PyTorch · tool `pytorch` · 2 posts <!-- category tool:pytorch " in doc
-    assert "\nPage description:\n" in doc and "- Post A\n- Post B\n" in doc and "Vision ·" not in doc
+    assert "\nPage description:\n" in doc and "- Post B\n- Post A\n" in doc and "Vision ·" not in doc  # the listing order
     assert dry["counts"] == {"changed": 1, "reconfirmed": 0, "unchanged": 0, "blank": 0} and not dry["written"]
     fields = described["landed"][0]["fields"]
     assert described["written"] and fields == {

@@ -206,7 +206,8 @@ async def serve_graphs(
     async with AsyncExitStack() as stack:
         handles: Dict[str, GraphHandle] = {}
         for name, path in names.items():
-            handles[name] = await stack.enter_async_context(open_graph(path, manifests_dir))
+            handles[name] = await stack.enter_async_context(
+                open_graph(path, manifests_dir, readonly=True))  # a read never writes (ff3ede3d)
         app = build_app(handles, names, index_html, hybrid_html)
         print(f"[graph-serve] read-only explorer on http://{host}:{port} "
               f"({len(handles)} graph(s))"

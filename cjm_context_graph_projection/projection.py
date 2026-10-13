@@ -128,8 +128,7 @@ async def graph_overview(
                sorted(counts.items(), key=lambda kv: kv[1], reverse=True)]
 
     res = await graph_task(gx.queue, gx.graph_id, "query_edges",
-                           query=EdgeQuery(project=["source_id", "target_id"],
-                                           limit=10_000_000).to_dict())
+                           query=EdgeQuery(project=["source_id", "target_id"]).to_dict())
     rows = _get(res, "rows", None)
     if rows is None:  # non-project fallback (whole edges)
         rows = [{"source_id": _get(e, "source_id"), "target_id": _get(e, "target_id")}
@@ -388,8 +387,7 @@ async def full_graph_view(gx: GraphHandle) -> Dict[str, Any]:
         nodes.append({"id": r["id"], "label": r.get("label"), "title": title or r["id"]})
     res = await graph_task(gx.queue, gx.graph_id, "query_edges",
                            query=EdgeQuery(project=["source_id", "target_id",
-                                                    "relation_type"],
-                                           limit=10_000_000).to_dict())
+                                                    "relation_type"]).to_dict())
     edges = list(_get(res, "rows", None) or [])
     return {"nodes": nodes, "edges": edges,
             "node_count": len(nodes), "edge_count": len(edges)}

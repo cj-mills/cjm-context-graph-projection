@@ -65,8 +65,7 @@ async def _list_label(gx: GraphHandle, label: str, limit: int, offset: int = 0,
     if contains or only is not None:
         # Title and id-set filtering run client-side over every match, so load them all;
         # the true total is the match count.
-        nodes = (await F.load_label_where(gx, label, preds, limit=1_000_000) if preds
-                 else await F.load_label(gx, label, limit=1_000_000))
+        nodes = await F.load_label_where(gx, label, preds)
         if only is not None:
             nodes = [n for n in nodes if F.nid(n) in only]
         await annotate_display(gx, nodes)
@@ -77,9 +76,7 @@ async def _list_label(gx: GraphHandle, label: str, limit: int, offset: int = 0,
     else:
         # Server-side page + a count query for the true total (two bounded round-trips).
         total = await F.count_label(gx, label, preds)
-        window = (await F.load_label_where(gx, label, preds, limit=limit, offset=offset)
-                  if preds else
-                  (await F.load_label(gx, label, limit=offset + limit))[offset:offset + limit])
+        window = await F.load_label_where(gx, label, preds, limit=limit, offset=offset)
         await annotate_display(gx, window)
 
     def _text(n: Any) -> str:

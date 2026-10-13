@@ -215,7 +215,7 @@ def _lens_row(n: Any) -> Optional[Dict[str, Any]]:
 
 async def load_lenses(gx: GraphHandle) -> List[Dict[str, Any]]:
     """Every well-formed Lens on this graph (the shelf feed), slug-sorted."""
-    rows = [r for r in (_lens_row(n) for n in await F.load_label(gx, LENS_LABEL, limit=1000))
+    rows = [r for r in (_lens_row(n) for n in await F.load_label(gx, LENS_LABEL))
             if r is not None]
     return sorted(rows, key=lambda r: r["slug"])
 
