@@ -320,3 +320,26 @@ def test_add_module_births_a_whole_module_equal_to_its_rebuild(tmp_path):
     (repos / LIB / "cjm_demo_lib/filed.py").write_text("X = 1\n")
     over = run("add-module", LIB, "cjm_demo_lib/filed.py", "--body-file", str(body), *R)
     assert over.returncode == 1 and "captured with flip-module" in over.stdout
+
+
+@needs_capability
+def test_the_swap_delta_folds_a_source_tail_into_the_rebuilt_db(tmp_path):
+    # cg-rebuild's delta: source records appended while the offline db was built fold into it through
+    # `replay-source --offset N` (the parser once lacked --repos-dir, so a code tail crashed the swap),
+    # and the rebuilt db then equals the live one.
+    repos, live, sj, R = _born_repo(tmp_path)
+    memory = tmp_path / "memory"
+    memory.mkdir()
+    rebuilt = str(tmp_path / "rebuilt.db")
+    r = _cli("--graph-db-path", rebuilt, "--source-journal-path", sj, "ingest",
+             "--memory-dir", str(memory), "--no-repo-map", "--no-seed", *R)
+    assert r.returncode == 0, r.stderr or r.stdout
+    n = len(open(sj).read().splitlines())
+    (repos / LIB / CORE).write_text((repos / LIB / CORE).read_text() + "\n\ndef omega():\n    return 0\n")
+    r = _cli("--graph-db-path", live, "--source-journal-path", sj, "flip-module", LIB, CORE, *R)
+    assert r.returncode == 0, r.stderr or r.stdout
+    assert len(open(sj).read().splitlines()) > n
+    r = _cli("--graph-db-path", rebuilt, "--source-journal-path", sj, "replay-source", "--offset", str(n), *R)
+    assert r.returncode == 0, r.stderr or r.stdout
+    r = _cli("--graph-db-path", live, "rebuild-diff", "--against", rebuilt)
+    assert r.returncode == 0 and "CLEAN" in r.stdout, r.stdout + r.stderr

@@ -4102,6 +4102,8 @@ def main() -> int:
                            help="The rebuild swap's SOURCE-journal fold (finding 6c121287): fold the records after "
                                 "the N-th into this db through the live step (cg-rebuild runs it)")
     p_rps.add_argument("--offset", type=int, required=True, help="Records already folded (the count before the build)")
+    p_rps.add_argument("--repos-dir", default=DEFAULT_REPOS,
+                       help="Repos root — the code fold's step derives node paths under it (as ingest does)")
     p_rs = sub.add_parser("retire-source",
                           help="Retire an ARCHIVE source as a fact (journaled; design amendment e916a4b9): "
                                "publish_state retired + where its source lived, so a rebuild restores it "
