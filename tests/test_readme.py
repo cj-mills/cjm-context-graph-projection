@@ -81,6 +81,26 @@ def test_readme_projection_structural():
     assert asyncio.run(run())
 
 
+def test_readme_names_repos_by_distribution_never_by_key():
+    # A repo key is a durable slug that outlives a rename (hf-utils is cjm-substrate-hf-utils):
+    # the title and every "Used by" entry name the distribution ([project].name); a repo with
+    # no pyproject falls back to its key.
+    async def run():
+        with tempfile.TemporaryDirectory() as root:
+            db = str(Path(root) / "g.db")
+            await _build(root, db)
+            async with open_graph(db) as gx:
+                assert (await project_readme(gx, "app"))["markdown"].startswith("# app\n")
+                (Path(root) / "app_repo" / "pyproject.toml").write_text("[project]\nname = 'cjm-app'\n")
+                res = await project_readme(gx, "app")
+                assert res["markdown"].startswith("# cjm-app\n")
+                # the README lands at the root its modules sit under, never <repos dir>/<key>
+                assert Path(res["root"]) == Path(root) / "app_repo"
+                assert "**Used by:** `cjm-app`" in (await project_readme(gx, "lib"))["markdown"]
+        return True
+    assert asyncio.run(run())
+
+
 def test_readme_uses_on_graph_purpose():
     async def run():
         with tempfile.TemporaryDirectory() as root:

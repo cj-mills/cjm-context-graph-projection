@@ -2270,7 +2270,8 @@ async def _dispatch(args) -> int:
             if res.get("error"):
                 print(render("readme", res, args.format))
                 return 1
-            path = Path(args.repos_dir) / args.repo_key / "README.md"
+            # the repo root its modules sit under -- a repo key is a slug, not a directory
+            path = Path(res.get("root") or Path(args.repos_dir) / args.repo_key) / "README.md"
             if args.check:
                 cur = path.read_text() if path.exists() else None
                 res["drift"] = cur != res["markdown"]

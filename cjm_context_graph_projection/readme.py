@@ -67,6 +67,36 @@ async def repo_purpose(
     return str(F.prop(active[-1], "value")) if active else None
 
 
+def _repo_roots(
+    modules: List[Any],  # CodeModule nodes (any repos)
+) -> Dict[str, str]:  # repo key -> the repo's checkout root (the dir holding its pyproject)
+    """Each repo's root, read off its modules: a module's path less its repo-relative path."""
+    roots: Dict[str, str] = {}
+    for m in modules:
+        key, p, rel = F.prop(m, "repo_key"), F.prop(m, "path", "") or "", F.prop(m, "module_path", "") or ""
+        if key and p and rel and p.endswith(rel):
+            roots.setdefault(key, p[: -len(rel)])
+    return roots
+
+
+def _pyproject(
+    root: Optional[str],  # A repo root (None: unknown)
+) -> Dict[str, Any]:  # Its parsed pyproject.toml ({} when absent)
+    """A repo's own pyproject, the source of its distribution name and dependencies."""
+    if root and (Path(root) / "pyproject.toml").exists():
+        return tomllib.loads((Path(root) / "pyproject.toml").read_text())
+    return {}
+
+
+def _distribution_name(
+    root: Optional[str],  # The repo's root
+    repo_key: str,        # Its repo key (the fallback)
+) -> str:  # The name the repo is published under
+    """A repo is NAMED by its distribution ([project].name), never its repo key: a key is a
+    durable slug that outlives a rename (hf-utils is cjm-substrate-hf-utils)."""
+    return str((_pyproject(root).get("project") or {}).get("name") or repo_key)
+
+
 async def project_readme(
     gx: GraphHandle,
     repo_key: str,  # The repo to project a README for
@@ -103,32 +133,27 @@ async def project_readme(
     # ([project].dependencies — derive-don't-hand-write applied to the projector
     # itself): graph IMPORTS edges omitted direct deps, listed transitives, and
     # even reversed direction across the corpus (soak finding 582c2405). "Used by"
-    # stays graph-derived — a consumer's pyproject is not this repo's file.
-    depends_on, used_by = set(), set()
-    root = None
-    for m in repo_modules:
-        p = F.prop(m, "path", "") or ""
-        rel = F.prop(m, "module_path", "") or ""
-        if p and rel and p.endswith(rel):
-            root = p[: -len(rel)]
-            break
-    if root and (Path(root) / "pyproject.toml").exists():
-        proj = tomllib.loads((Path(root) / "pyproject.toml").read_text())
-        for spec in (proj.get("project") or {}).get("dependencies", []):
-            name = spec
-            for sep in "<>=!~[;( ":
-                name = name.split(sep, 1)[0]
-            if name:
-                depends_on.add(name.replace("_", "-"))
+    # stays graph-derived — a consumer's pyproject is not this repo's file. Every repo,
+    # this one and its consumers, is named by its distribution (`_distribution_name`).
+    roots = _repo_roots(all_modules)
+    depends_on, used_keys = set(), set()
+    for spec in (_pyproject(roots.get(repo_key)).get("project") or {}).get("dependencies", []):
+        name = spec
+        for sep in "<>=!~[;( ":
+            name = name.split(sep, 1)[0]
+        if name:
+            depends_on.add(name.replace("_", "-"))
     for src, tgt in await F.load_edge_pairs(gx, DevRelations.IMPORTS):
         sr, tr = repo_of.get(src), repo_of.get(tgt)
         if tr == repo_key and sr and sr != repo_key:
-            used_by.add(sr)
+            used_keys.add(sr)
+    used_by = {_distribution_name(roots.get(k), k) for k in used_keys}
+    title = _distribution_name(roots.get(repo_key), repo_key)
 
     purpose = await repo_purpose(gx, repo_key)
     ordered = sorted(repo_modules, key=lambda m: name_of[F.nid(m)])
 
-    lines: List[str] = [f"# {repo_key}", "", _GENERATED_MARKER, ""]
+    lines: List[str] = [f"# {title}", "", _GENERATED_MARKER, ""]
     if purpose:
         lines += [purpose.rstrip(), ""]
     else:
@@ -164,7 +189,7 @@ async def project_readme(
         lines.append("")
 
     markdown = "\n".join(lines).rstrip() + "\n"
-    return {"repo_key": repo_key, "markdown": markdown,
+    return {"repo_key": repo_key, "root": roots.get(repo_key), "markdown": markdown,
             "module_count": len(repo_modules), "symbol_count": symbol_count,
             "has_purpose": purpose is not None,
             "depends_on": sorted(depends_on), "used_by": sorted(used_by)}
