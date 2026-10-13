@@ -892,10 +892,10 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 
 ### `cjm_context_graph_projection.rebuilddiff`
 
-- `diff_graphs` _function_ — The pure comparison: node and edge id sets, then every field on each shared id.
+- `moved_sources` _function_ — The `source moved` attribution: the rows a moved source's changed paths decompose to,
 - `parse_path_map` _function_ — Parse `--path-map OLD=NEW` flags; a pair without `=` is refused loudly.
 - `rebuild_diff` _function_ — Compare two graph dbs property for property — the live-versus-rebuild standing check.
-- `render_rebuild_diff` _function_ — Markdown by class and field (the drift map), or the report as JSON for agents. Rows a
+- `render_rebuild_diff` _function_ — Markdown by class and field (the drift map, the layer's), with this lane's Sources
 
 ### `cjm_context_graph_projection.reconcile`
 

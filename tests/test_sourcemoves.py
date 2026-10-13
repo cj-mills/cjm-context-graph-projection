@@ -10,10 +10,11 @@ import sys
 from pathlib import Path
 
 import pytest
+from cjm_context_graph_layer.graphdiff import diff_graphs
 from cjm_context_graph_projection.devgraph import (ARCHIVE_SOURCE, notes_corpus_elements,
                                                    repo_entity, repo_map_elements, REPO_SOURCE,
                                                    source_id)
-from cjm_context_graph_projection.rebuilddiff import diff_graphs
+from cjm_context_graph_projection.rebuilddiff import moved_sources, SOURCE_MOVED
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS
 from cjm_context_graph_projection.sourcemoves import attribute_moved_sources
 from cjm_dev_graph_schema.identity import note_node_id
@@ -81,8 +82,8 @@ def test_a_moved_archive_accounts_for_exactly_its_changed_paths_rows(tmp_path):
 
     raw = diff_graphs(nodes_a, edges_a, nodes_b, edges_b)
     assert not raw["clean"]                                              # the move reads as drift alone…
-    res = diff_graphs(nodes_a, edges_a, nodes_b, edges_b, moved=moves["ids"])
-    assert res["clean"] and res["moved"] == raw["nodes"]["differing"] + raw["nodes"]["only_b"]["count"] + \
+    res = diff_graphs(nodes_a, edges_a, nodes_b, edges_b, attribution=[moved_sources(moves["ids"])])
+    assert res["clean"] and res["attributed"][SOURCE_MOVED] == raw["nodes"]["differing"] + raw["nodes"]["only_b"]["count"] + \
         raw["edges"]["differing"] + raw["edges"]["only_b"]["count"]   # …and every such row is attributed
 
 
@@ -98,11 +99,11 @@ def test_attribution_never_hides_drift_outside_the_moved_rows():
     nb = [node("post", 2.0), node("born", 3.0)]                          # born drifts on its own
     ea = [edge("out", "post", "born", 1.0), edge("in", "born", "post", 1.0)]
     eb = [edge("out", "post", "born", 2.0), edge("in", "born", "post", 2.0)]
-    res = diff_graphs(na, ea, nb, eb, moved={"post"})
+    res = diff_graphs(na, ea, nb, eb, attribution=[moved_sources({"post"})])
     assert not res["clean"]
-    assert res["nodes"]["differing"] == 1 and res["nodes"]["moved"]["differing"] == 1
+    assert res["nodes"]["differing"] == 1 and res["nodes"]["attributed"][SOURCE_MOVED]["differing"] == 1
     # an edge the moved row ORIGINATES is its row; an edge pointing INTO it is not
-    assert res["edges"]["moved"]["differing"] == 1 and res["edges"]["differing"] == 1
+    assert res["edges"]["attributed"][SOURCE_MOVED]["differing"] == 1 and res["edges"]["differing"] == 1
     assert res["edges"]["rows"][0]["samples"][0]["id"] == "in"
 
 
@@ -165,7 +166,7 @@ def test_a_moved_repo_accounts_for_its_dependency_edges_and_a_new_repo_for_its_e
     assert by[source_id(REPO_SOURCE, str(lib))]["status"] == "added"
     assert repo_entity(str(lib)).to_graph_node()["id"] in moves["ids"]
     assert not diff_graphs(nodes_a, edges_a, nodes_b, edges_b)["clean"]
-    assert diff_graphs(nodes_a, edges_a, nodes_b, edges_b, moved=moves["ids"])["clean"]
+    assert diff_graphs(nodes_a, edges_a, nodes_b, edges_b, attribution=[moved_sources(moves["ids"])])["clean"]
 
 
 def _run(*args):
@@ -194,7 +195,7 @@ def test_two_ingests_across_a_commit_read_clean_with_the_move_attributed(tmp_pat
     r = _run("--graph-db-path", dbs[0], "--format", "agent", "rebuild-diff", "--against", dbs[1])
     assert r.returncode == 0, r.stdout + r.stderr
     res = json.loads(r.stdout)
-    assert res["clean"] and res["moved"] > 0 and res["record"] == {"a": 1, "b": 1}
+    assert res["clean"] and res["attributed"][SOURCE_MOVED] > 0 and res["record"] == {"a": 1, "b": 1}
     (entry,) = res["sources"]
     assert entry["status"] == "moved" and entry["paths"] == ["posts/a/index.md", "posts/c/index.md"]
     human = _run("--graph-db-path", dbs[0], "rebuild-diff", "--against", dbs[1]).stdout

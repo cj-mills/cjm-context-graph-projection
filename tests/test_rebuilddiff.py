@@ -1,9 +1,9 @@
 """The live-versus-rebuild standing check (design 8f6f2343, amendment efd659a1, finding fbce0173).
 
-The pure half pins what `diff_graphs` reports (a time drift, a property drift, a one-sided id, a
-path moved on disk). The end-to-end half drives real CLI writes into a live db, replays their
-journal into a fresh db, and requires the two to be EQUAL on every property and both time
-columns — the property the op clock exists to hold."""
+What the comparison reports is pinned where it lives, the layer's graphdiff (ruling f8b9c728).
+Here: the CLI's path map parsing, and the end-to-end half -- real CLI writes into a live db,
+their journal replayed into a fresh db, the two required EQUAL on every property and both time
+columns (the property the op clock exists to hold), read through the streamed comparison."""
 
 import json
 import re
@@ -12,40 +12,8 @@ import sys
 from pathlib import Path
 
 import pytest
-from cjm_context_graph_projection.rebuilddiff import diff_graphs, parse_path_map
+from cjm_context_graph_projection.rebuilddiff import parse_path_map
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS
-
-
-def _node(nid, t=1.0, **props):
-    return {"id": nid, "label": "Decision", "properties": props, "sources": [],
-            "created_at": t, "updated_at": t}
-
-
-def test_identical_graphs_are_clean():
-    a = [_node("n1", statement="x")]
-    assert diff_graphs(a, [], [dict(a[0])], [])["clean"]
-
-
-def test_time_and_property_drift_are_named_by_class_and_field():
-    res = diff_graphs([_node("n1", 1.0, statement="x")], [],
-                      [_node("n1", 1.08, statement="y")], [])
-    assert not res["clean"] and res["nodes"]["differing"] == 1
-    fields = {r["field"] for r in res["nodes"]["rows"]}
-    assert fields == {"created_at", "updated_at", "properties.statement"}
-    assert all(r["class"] == "Decision" for r in res["nodes"]["rows"])
-
-
-def test_one_sided_ids_are_counted_by_class():
-    res = diff_graphs([_node("n1"), _node("n2")], [], [_node("n1")], [])
-    assert res["nodes"]["only_a"] == {"count": 1, "by_class": {"Decision": 1}, "sample": ["n2"]}
-    assert not res["clean"]
-
-
-def test_path_map_normalizes_a_corpus_moved_on_disk():
-    a = [_node("n1", path="/old/site/posts/a.md")]
-    b = [_node("n1", path="/new/site/posts/a.md")]
-    assert not diff_graphs(a, [], b, [])["clean"]
-    assert diff_graphs(a, [], b, [], parse_path_map(["/old/site=/new/site"]))["clean"]
 
 
 def test_path_map_refuses_a_pair_without_equals():

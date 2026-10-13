@@ -36,6 +36,7 @@ async def open_graph(
     manifests_dir: str = DEFAULT_MANIFESTS,   # Dir holding the graph-storage capability manifest
     graph_id: str = DEFAULT_GRAPH_ID,         # Capability instance id
     readonly: bool = False,                   # Open the db read-only (a SIBLING graph a cross-graph reference observes — never written)
+    max_history: int = 100,                   # Completed jobs the queue retains, results included (a stream keeps few)
 ) -> AsyncIterator[GraphHandle]:  # The live graph handle
     """Load the graph-storage capability on `graph_db_path` and yield a started handle.
 
@@ -64,7 +65,7 @@ async def open_graph(
         # accounting must not grind the substrate journal at feed-poll /
         # rebuild-storm cadence (hasattr: older substrate = pre-gate behavior).
         manager.set_observability_class(graph_id, "ambient")
-    queue = JobQueue(deps=manager)
+    queue = JobQueue(deps=manager, max_history=max_history)
     await queue.start()
     try:
         yield GraphHandle(queue=queue, graph_id=graph_id)
