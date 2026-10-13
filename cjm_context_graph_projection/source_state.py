@@ -54,6 +54,7 @@ from cjm_notebook_decompose_core.read import parse_notebook
 from cjm_python_decompose_core.emit import emit_module_from_nodes
 from cjm_python_decompose_core.extract import decompose_text
 from cjm_python_decompose_core.ingest import corpus_graph_elements
+from cjm_python_decompose_core.parse import source_lines
 
 from .codesource import (absorb_records, CodeSourceError, element_canonical, ELEMENT_RETIRE,
                          SourceState)
@@ -69,6 +70,12 @@ def is_test_module_path(module_path: str) -> bool:
     extract — both channels FALSE-PRUNE a needed import under imports-as-projection.
     Verbatim is the only canonicalization where fixture imports PROVABLY survive."""
     return module_path.startswith(("tests/", "tests_manual/"))
+
+
+def is_package_module_path(module_path: str) -> bool:
+    """Whether a module path belongs to the PACKAGE phase of the code lane: every module that is
+    not test source -- the packages and the scripts beside them (design detail ed20aa51)."""
+    return not is_test_module_path(module_path)
 
 
 def canonical_emit(
@@ -161,7 +168,7 @@ def notebook_to_py_source(
     text = "\n\n".join(chunks) + "\n" if chunks else ""
     dropped_all = 0
     if text:
-        lines = text.splitlines(keepends=True)
+        lines = source_lines(text, keepends=True)
         drop: set = set()
         for node in ast.parse(text).body:
             if (isinstance(node, ast.Assign)
@@ -701,8 +708,8 @@ def captured_phase(
     module_path: str,    # A module path
 ) -> bool:  # Whether a module born at this path is born captured (the user's ruling bef8e6b8)
     """A phase is captured whole (`capture_phase`), so it is captured once any of its modules is:
-    today the tests phase (the tests pilot); the package phase joins `CAPTURE_PHASES` when its
-    capture lands."""
+    the tests phase (the tests pilot) and the package phase (design detail ed20aa51), each by its
+    own `capture`."""
     return any(member(module_path) and any(m.captured and member(m.module_path)
                                            for m in state.elements.modules.values())
                for member in CAPTURE_PHASES.values())
@@ -1077,7 +1084,7 @@ def cutover_module(
                     "is a generated committed artifact — source-check gates its regen"}
 
 
-CAPTURE_PHASES = {"tests": is_test_module_path}  # A phase of the code lane -> its module-path predicate
+CAPTURE_PHASES = {"tests": is_test_module_path, "packages": is_package_module_path}  # A phase of the code lane -> its module-path predicate
 
 
 def capture_phase(
@@ -1123,18 +1130,24 @@ def capture_phase(
     ever = set(state.elements.ever)
     groups: List[List[Dict[str, Any]]] = []
     rows: List[Dict[str, Any]] = []
+    planned: List[Tuple[str, str]] = []  # The modules with an element form, in `keys` order
+    refused: List[Dict[str, Any]] = []
     for rk, mp in keys:
         a = latest[(rk, mp)]
         ck = conceptual_key(rk)
-        recs, rep = capture_records(rk, ck, mp, a.get("import_name") or "", a["text"],
-                                    symbol_identity=identity.for_module(ck, mp), ever=ever)
+        try:
+            recs, rep = capture_records(rk, ck, mp, a.get("import_name") or "", a["text"],
+                                        symbol_identity=identity.for_module(ck, mp), ever=ever)
+        except (CodeSourceError, SyntaxError, ValueError) as e:  # no element form (design detail ed20aa51 (2))
+            refused.append({"repo_key": rk, "module_path": mp, "faults": [str(e)]})
+            continue
         ever |= {r["args"]["element"] for r in recs if r["args"].get("element")}
+        planned.append((rk, mp))
         groups.append(recs)
         rows.append({**rep, "file_path": _resolve_path(repos_dir, rk, mp)})
     after = SourceState.over(records + [{**r, "ts": 0.0} for g in groups for r in g])
     composed = after.latest_ops()
-    refused: List[Dict[str, Any]] = []
-    for (rk, mp), row in zip(keys, rows):
+    for (rk, mp), row in zip(planned, rows):
         before, text = latest[(rk, mp)]["text"], composed[(rk, mp)]["text"]
         faults: List[str] = []
         fp = Path(row["file_path"])
@@ -1170,7 +1183,7 @@ def capture_phase(
     journal = journaled_emit(source_journal_path, op={"op": "capture", "phase": phase}, write=write,
                              element_groups=[{"repo_key": k[0], "module_path": k[1], "records": g,
                                               "text": r["_text"], "path": r["file_path"]}
-                                             for k, g, r in zip(keys, groups, rows)])
+                                             for k, g, r in zip(planned, groups, rows)])
     if journal.get("error"):
         return {**receipt, "rows": rows_out, "error": journal["error"]}
     receipt.update(captured=write, files_written=journal["files_written"] if write else [])

@@ -66,8 +66,9 @@ from .serve import serve_graphs
 from .sessioncost import session_cost
 from .site import site_build
 from .sitelinks import resolve_site_links, site_link_window
-from .source_state import (absorb_authored_text, capture_phase, collect_appends, cutover_module,
-                           emit_source_artifact, flip_module, graph_sourced_modules, source_check)
+from .source_state import (absorb_authored_text, capture_phase, CAPTURE_PHASES, collect_appends,
+                           cutover_module, emit_source_artifact, flip_module, graph_sourced_modules,
+                           source_check)
 from .structure import add_section, new_note
 from .viz import project_viz
 from .workbench import anchor_lead_view, portfolio_view, session_feed
@@ -4720,7 +4721,7 @@ def main() -> int:
                            help="Capture a phase of the code lane into the element regime, whole: each "
                                 "live module's elements journaled as one group, then the files rewritten "
                                 "to their capture form (design abfc2829; guarded -- one refusal refuses all)")
-    p_cap.add_argument("phase", choices=["tests"], help="The phase to capture (the tests pilot first)")
+    p_cap.add_argument("phase", choices=sorted(CAPTURE_PHASES), help="The phase to capture (tests, packages)")
     p_cap.add_argument("--no-write", action="store_true",
                        help="Dry run: run every guard and report the capture, journal nothing")
     p_cap.add_argument("--allow-reorder", action="store_true",

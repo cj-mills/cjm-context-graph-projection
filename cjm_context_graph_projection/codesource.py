@@ -547,8 +547,10 @@ def absorb_records(
     local = sibling_modules(m.module_path, paths | {m.module_path})
     try:
         new = lift_imports(text).elements
-    except (SyntaxError, ValueError) as e:
+    except SyntaxError as e:
         raise CodeSourceError(f"{m.module_path}: the text does not parse: {e}") from e
+    except ValueError as e:  # no element form: a duplicate qualname, a member shallower than its class
+        raise CodeSourceError(f"{m.module_path}: {e}") from e
     outline = [] if born_module else fold.outline(mid)
     addr = {} if born_module else fold.addresses(mid)
     by_qual = {q: eid for eid, q in addr.items()}

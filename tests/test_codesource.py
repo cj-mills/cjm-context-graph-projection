@@ -645,11 +645,14 @@ UNSORTED = "tests/test_unsorted.py"
 UNSORTED_TEXT = "import sys\nimport os\n\n\ndef test_paths():\n    assert os and sys\n"
 
 
-def _phase(tmp_path, cut_conf=True):
-    """A tests phase of four cut-over modules (CONF a shadow unless `cut_conf`), their files on disk."""
+def _phase(tmp_path, cut_conf=True, extra=()):
+    """A tests phase of four cut-over modules (CONF a shadow unless `cut_conf`) and the `extra`
+    (path, text) modules, their files on disk."""
     recs = PREFIX + ([_rec("cutover", 102.5, {"repo_key": LIB, "module_path": CONF})] if cut_conf else []) + [
         _src(103.0, OTHER, OTHER_TEXT), _rec("cutover", 104.0, {"repo_key": LIB, "module_path": OTHER}),
-        _src(105.0, UNSORTED, UNSORTED_TEXT), _rec("cutover", 106.0, {"repo_key": LIB, "module_path": UNSORTED})]
+        _src(105.0, UNSORTED, UNSORTED_TEXT), _rec("cutover", 106.0, {"repo_key": LIB, "module_path": UNSORTED})] + [
+        r for n, (mp, text) in enumerate(extra)
+        for r in (_src(107.0 + 2 * n, mp, text), _rec("cutover", 108.0 + 2 * n, {"repo_key": LIB, "module_path": mp}))]
     journal = _journal(tmp_path, recs)
     repos = tmp_path / "repos"
     for (rk, mp), a in latest_source_ops(journal).items():
@@ -702,7 +705,37 @@ def test_the_capture_verb_refuses_a_drifted_file_or_a_shadow_and_journals_nothin
     shadow, _, _ = _phase(tmp_path / "shadow", cut_conf=False)
     res = capture_phase(shadow, str(tmp_path / "shadow" / "repos"))
     assert "shadows, never cut over" in res["error"] and CONF in res["error"]
-    assert "no phase" in capture_phase(journal, str(repos), phase="packages")["error"]
+    assert "no phase" in capture_phase(journal, str(repos), phase="docs")["error"]
+
+
+def test_the_capture_verb_captures_a_property_accessor_chain_as_one_symbol(tmp_path):
+    fake = "tests/test_fake.py"
+    text = ("class Fake:\n    @property\n    def row(self):\n        return self._row\n\n"
+            "    @row.setter\n    def row(self, i):\n        self._row = i\n\n\n"
+            "def test_row():\n    f = Fake()\n    f.row = 2\n    assert f.row == 2\n")
+    journal, repos, prior = _phase(tmp_path, extra=[(fake, text)])
+    res = capture_phase(journal, str(repos))
+    assert res["captured"] and not res["refused"]
+    assert latest_source_ops(journal)[(LIB, fake)]["text"] == text  # the chain composes back as written
+    elements = [r["args"] for r in _records(journal)[len(prior):] if r["verb"] == "element"]
+    assert [e["text"].split("\n")[0] for e in elements if "def row" in e["text"]] == ["@property"]
+    fold, nodes, _ = _fold(_records(journal), tmp_path)
+    assert not fold.failures
+    rows = [n for n in nodes.values() if n["label"] == "CodeSymbol"
+            and n["properties"]["qualname"] == "Fake.row"]
+    assert len(rows) == 1 and rows[0]["properties"]["decorators"] == ["property", "setter"]
+    assert rows[0]["properties"]["lineno"] == 3  # the getter's: the attribute's first def
+
+
+def test_the_capture_verb_refuses_a_duplicate_qualname_by_name_and_journals_nothing(tmp_path):
+    dup = "tests/test_dup.py"
+    text = "def test_a():\n    assert 1\n\n\ndef test_a():\n    assert 2\n"  # pytest runs only the second
+    journal, repos, prior = _phase(tmp_path, extra=[(dup, text)])
+    res = capture_phase(journal, str(repos))
+    assert "refused the capture" in res["error"] and not res["captured"]
+    assert [(f["module_path"], f["faults"][0][:26]) for f in res["refused"]] == [(dup, "two definitions of test_a ")]
+    assert len(_records(journal)) == len(prior)
+    assert (repos / LIB / UNSORTED).read_text() == UNSORTED_TEXT  # no file rewritten either
 
 
 def test_a_module_born_into_the_captured_phase_is_born_captured(tmp_path):
