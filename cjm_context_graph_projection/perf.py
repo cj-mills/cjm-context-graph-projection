@@ -16,6 +16,7 @@ write that read most of the graph. Nothing it reports is stored.
 """
 
 import json
+import math
 import os
 import statistics
 import sys
@@ -26,6 +27,7 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 from cjm_context_graph_layer.ops import graph_task
 from cjm_context_graph_primitives.journal import append_op, journal_segments, read_journal
+from cjm_context_graph_primitives.query import NodeQuery
 from cjm_context_graph_primitives.timings import begin_run, CURRENT_RUN, end_run, Run, span
 
 from .runtime import GraphHandle
@@ -52,6 +54,9 @@ def invocation_parsed(
     run.attrs.update({k: v for k, v in attrs.items() if v is not None})
     if step:
         run.attrs["step"] = step
+    tier = os.environ.get("CJM_BENCH_TIER")
+    if tier:  # a scale-harness run (design detail 3bd8673d): its tier, kept apart from live runs
+        run.attrs.update({"tier": int(tier), "lane": os.environ.get("CJM_BENCH_LANE")})
     if not timings_path:
         end_run(run)
 
@@ -106,10 +111,11 @@ def journal_footprint(
 async def measure_covariates(
     gx: GraphHandle,                      # The open graph
     journals: Dict[str, Optional[str]],  # Journal family name -> live path
-) -> Dict[str, Any]:  # {nodes, edges, db_bytes, kinds, journals}
+) -> Dict[str, Any]:  # {nodes, edges, db_bytes, kinds, repos, journals}
     """The growth covariates every event carries: nodes, edges and bytes of the store, nodes
-    per kind, and each journal family's segments and bytes. Measured with the run DISARMED, so
-    the storage table holds the verb's calls alone; its cost is the `covariates` phase."""
+    per kind, the repos on the graph (the code lane's distinct repo keys), and each journal
+    family's segments and bytes. Measured with the run DISARMED, so the storage table holds the
+    verb's calls alone; its cost is the `covariates` phase."""
     run = CURRENT_RUN.get()
     token = CURRENT_RUN.set(None)
     t = time.perf_counter()
@@ -118,6 +124,10 @@ async def measure_covariates(
         kinds = dict(sorted((schema.get("counts") or {}).items()))
         out: Dict[str, Any] = {"nodes": sum(kinds.values()), "edges": schema.get("edge_count"),
                                "db_bytes": schema.get("db_bytes"), "kinds": kinds}
+        if kinds.get("CodeModule"):
+            mods = await graph_task(gx.queue, gx.graph_id, "query_nodes",
+                                    query=NodeQuery(label="CodeModule", project=["repo_key"]).to_dict())
+            out["repos"] = len({r.get("repo_key") for r in (mods.rows or []) if r.get("repo_key")})
         fams = {name: journal_footprint(p) for name, p in journals.items() if p}
         out["journals"] = {k: v for k, v in fams.items() if v and v["segments"]}
         return out
@@ -148,7 +158,7 @@ async def invocation_graph(
 # The read: `perf`
 # ---------------------------------------------------------------------------------------------
 
-FIT_COVARIATES = ("nodes", "edges", "db_bytes", "journal_bytes")
+FIT_COVARIATES = ("nodes", "edges", "db_bytes", "journal_bytes", "repos")
 REGRESSION_RATIO = 1.5    # latest / median of the verb's earlier runs ...
 REGRESSION_FLOOR_S = 0.25  # ... and at least this much slower
 SLOPE_RATIO = 2.0          # a replay verb's late-bin mean cost over its early-bin mean
@@ -232,6 +242,10 @@ def guards(ev: Dict[str, Any]) -> List[Dict[str, Any]]:  # The guard findings on
         for where, row in (ev.get("whole") or {}).items():
             out.append({"guard": "whole-scope-in-write", "where": where, "calls": row["calls"],
                         "s": row["s"]})
+    for where, row in (ev.get("plan_scans") or {}).items():
+        # the plan guard (3bd8673d): a typed query whose plan reads a table whole, or a whole
+        # kind row by row -- O(graph) or O(kind) whatever it returns, read or write alike
+        out.append({"guard": "plan-scan", "where": where, "calls": row["calls"], "s": row["s"]})
     for method, row in (ev.get("storage") or {}).items():
         cut, paged = row.get("at_limit", 0), row.get("paged", 0)
         if cut > paged:
@@ -252,17 +266,83 @@ def guards(ev: Dict[str, Any]) -> List[Dict[str, Any]]:  # The guard findings on
     return out
 
 
+def growth(
+    cells: List[Dict[str, Any]],  # One verb's cells across the tiers ({tier, wall_s, outcome})
+) -> Optional[Dict[str, float]]:  # {b, r2, n}: cost ~ tier^b, or None under three good tiers
+    """A cost's growth exponent across the scale tiers (design detail 3bd8673d): least squares
+    of log(seconds) on log(tier) over the runs that succeeded. b ~ 0 is flat, ~ 1 linear, ~ 2
+    quadratic -- the shape d7742c47 (b) reads, against a size the harness controls."""
+    pts = [(math.log(c["tier"]), math.log(c["wall_s"])) for c in cells
+           if c.get("outcome") == 0 and (c.get("wall_s") or 0) > 0 and (c.get("tier") or 0) >= 1]
+    if len({x for x, _ in pts}) < 3:
+        return None
+    mx, my = statistics.fmean(x for x, _ in pts), statistics.fmean(y for _, y in pts)
+    sxx = sum((x - mx) ** 2 for x, _ in pts)
+    sxy = sum((x - mx) * (y - my) for x, y in pts)
+    syy = sum((y - my) ** 2 for _, y in pts)
+    return {"b": sxy / sxx, "r2": (sxy * sxy) / (sxx * syy) if syy else 1.0, "n": len(pts)}
+
+
+def tier_curves(
+    events: List[Dict[str, Any]],  # The ledger's tier-tagged events (the harness's and the CLI's)
+    verb: Optional[str] = None,    # Only this canonical verb
+) -> List[Dict[str, Any]]:  # Per lane: {lane, tiers, verbs: [{verb, cells, growth}], builds}
+    """The scale harness's read (design detail 3bd8673d): per lane and canonical verb, the
+    latest run at each tier -- the harness's wall and peak RSS, joined by run id with the CLI's
+    own event for its heaviest phases -- and the growth exponent across the tiers; beside them
+    the latest build wall per tier."""
+    cli = {e.get("run_id"): e for e in events if e.get("kind") == "cli" and e.get("run_id")}
+    latest: Dict[tuple, Dict[str, Any]] = {}
+    builds: Dict[tuple, Dict[str, Any]] = {}
+    for e in events:
+        if e.get("kind") != "bench":
+            continue
+        a = e.get("attrs") or {}
+        if e.get("verb") == "bench-build":
+            key = (a.get("lane"), a.get("tier"))
+            if key not in builds or (e.get("ts") or 0) > (builds[key].get("ts") or 0):
+                builds[key] = e
+            continue
+        if not e.get("run_id") or (verb and e.get("verb") != verb):
+            continue
+        key = (a.get("lane"), e.get("verb"), a.get("tier"))
+        if key not in latest or (e.get("ts") or 0) > (latest[key].get("ts") or 0):
+            latest[key] = e
+    lanes: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+    for (lane, name, tier), e in latest.items():
+        c = cli.get(e.get("run_id"))
+        selfs = sorted(self_times(c.get("phases") or {}).items(), key=lambda kv: -kv[1]) if c else []
+        lanes.setdefault(lane, {}).setdefault(name, []).append(
+            {"tier": tier, "wall_s": e.get("wall_s"), "peak_rss_kb": e.get("peak_rss_kb"),
+             "outcome": e.get("outcome"), "nodes": _covariate(c, "nodes") if c else None,
+             "top_phases": [{"phase": p, "self_s": s} for p, s in selfs[:3]]})
+    out: List[Dict[str, Any]] = []
+    for lane in sorted(set(lanes) | {l for l, _ in builds}, key=str):
+        verbs = []
+        for name, cells in sorted((lanes.get(lane) or {}).items()):
+            cells.sort(key=lambda c: c["tier"])
+            verbs.append({"verb": name, "cells": cells, "growth": growth(cells)})
+        built = {t: e.get("wall_s") for (l, t), e in builds.items() if l == lane}
+        tiers = sorted({c["tier"] for v in verbs for c in v["cells"]} | set(built))
+        out.append({"lane": lane, "tiers": tiers, "verbs": verbs, "builds": built})
+    return out
+
+
 def perf_report(
     path: str,                   # The timings ledger
     verb: Optional[str] = None,  # Only this verb
     runs: int = 50,              # History kept per verb (the newest N)
     since: Optional[float] = None,  # Only events at or after this unix time
-) -> Dict[str, Any]:  # {ledger, events, verbs, fits, regressions, guards, rebuilds, unmeasured}
+) -> Dict[str, Any]:  # {ledger, events, verbs, fits, regressions, guards, rebuilds, tiers, unmeasured}
     """The ledger read: per verb the latest / median / p90 END-TO-END seconds (launch + import
     + wall), the latest run's heaviest phases by self time and storage by method; fits of that
     cost against each covariate; regressions; the guards on each verb's latest run; the latest
-    rebuild per lane."""
+    rebuild per lane; the scale harness's curves per lane (`tier_curves`)."""
     events = [e for e in read_journal(path) if not since or (e.get("ts") or 0) >= since]
+    # A scale-harness run (design detail 3bd8673d) carries its tier: its cost belongs to the
+    # tier curves, never to a live verb's history, fits, regressions or guards
+    tiered = [e for e in events if (e.get("attrs") or {}).get("tier") is not None]
+    events = [e for e in events if (e.get("attrs") or {}).get("tier") is None]
     by_verb: Dict[str, List[Dict[str, Any]]] = {}
     for e in events:
         if e.get("kind") == "cli" and (verb is None or e.get("verb") == verb):
@@ -316,15 +396,24 @@ def perf_report(
                              "steps": step_rows})
     return {"ledger": path, "events": len(events), "verbs": verbs, "fits": fits,
             "regressions": regressions, "guards": found, "rebuilds": rebuild_rows,
-            "unmeasured": ["the query-plan SCAN guard (needs a plan read through the storage seam)",
-                           "journal op counts per family (B's journal index)",
-                           "repos on the graph as a covariate",
+            "tiers": tier_curves(tiered, verb=verb),
+            "unmeasured": ["journal op counts per family (B's journal index)",
                            "app gestures (the Qt kit's loop-thread seam)",
-                           "the scale harness's synthetic tiers"]}
+                           "code writes at scale (the sandbox repo tier, work item 29318333)",
+                           "the synthetic replay tier (deferred, design detail 3bd8673d)"]}
 
 
 def _s(v: Optional[float]) -> str:  # Seconds, compact
     return "-" if v is None else (f"{v:.3f}" if v < 10 else f"{v:.1f}")
+
+
+def _tier_cell(c: Optional[Dict[str, Any]]) -> str:  # One tier's cell: seconds and peak RSS, or the failure
+    if not c:
+        return "-"
+    if c.get("outcome") != 0:
+        return f"**{c.get('outcome')}**"
+    rss = c.get("peak_rss_kb")
+    return f"{_s(c.get('wall_s'))} s" + (f" · {rss / 1024 ** 2:.2f} GB" if rss else "")
 
 
 def render_perf(
@@ -335,7 +424,7 @@ def render_perf(
     if fmt == "agent":
         return json.dumps(res, indent=1, default=str)
     out = [f"## Perf — {Path(res['ledger']).name} · {res['events']} event(s)", ""]
-    if not res["verbs"] and not res["rebuilds"]:
+    if not res["verbs"] and not res["rebuilds"] and not res.get("tiers"):
         return "\n".join(out + ["(no events yet -- the wrappers record one per invocation)"])
     out += ["### Verbs (seconds end to end: launch + import + the run)", "",
             "| verb | runs | latest | median | p90 | heaviest phases, latest run (self s) |",
@@ -364,5 +453,19 @@ def render_perf(
         for s in r["steps"]:
             top = " · ".join(f"{p['phase']} {_s(p['self_s'])}" for p in s["top_phases"])
             out.append(f"- step `{s['step']}` ({s['verb']}) {_s(s['wall_s'])} s — {top}")
+    for lane in res.get("tiers") or []:
+        ks = lane["tiers"]
+        out += ["", f"### Scale tiers — {lane['lane']} (end to end s · peak RSS; growth = b in "
+                    "cost ~ size^b over the runs that succeeded)", "",
+                "| verb | " + " | ".join(f"x{k}" for k in ks) + " | growth |",
+                "|---|" + "---:|" * len(ks) + "---|"]
+        for v in lane["verbs"]:
+            cells = {c["tier"]: c for c in v["cells"]}
+            g = v.get("growth")
+            out.append(f"| {v['verb']} | " + " | ".join(_tier_cell(cells.get(k)) for k in ks)
+                       + " | " + (f"b {g['b']:.2f} (r² {g['r2']:.2f})" if g else "-") + " |")
+        if lane["builds"]:
+            out.append("| _(build)_ | " + " | ".join(
+                f"{_s(lane['builds'][k])} s" if k in lane["builds"] else "-" for k in ks) + " | |")
     out += ["", "_Not yet measured: " + "; ".join(res["unmeasured"]) + "._"]
     return "\n".join(out)

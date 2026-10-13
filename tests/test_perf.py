@@ -64,6 +64,16 @@ def test_guards_read_one_event():
     assert {g["guard"] for g in guards(ev)} == {"cut-answer", "rising-with-position"}
 
 
+def test_the_plan_guard_reads_whole_table_plans_on_reads_and_writes():
+    # 3bd8673d: a plan that reads a table whole is reported wherever it ran -- a read included,
+    # unlike the whole-scope guard, which is about writes
+    ev = _event("locate", 0.5, 1.0, read_only=True,
+                plan_scans={"verb :: query_nodes :: nodes": {"calls": 1, "s": 0.29}})
+    (g,) = guards(ev)
+    assert g["guard"] == "plan-scan" and g["where"] == "verb :: query_nodes :: nodes"
+    assert g["calls"] == 1
+
+
 def test_report_per_verb_regression_fit_and_rebuild(tmp_path):
     ledger = str(tmp_path / "dev-graph.timings.jsonl")
     for i, (wall, nodes) in enumerate([(1.0, 1000), (1.1, 2000), (1.2, 4000), (3.0, 8000)]):

@@ -147,7 +147,7 @@ READ_COMMANDS = frozenset({
     "notes-coverage", "notes-overlap", "notes-check", "notes-promotion",
     "notes-staging-index", "series-order", "site-links", "coverage", "hardware", "claims",
     "library", "paths", "traffic", "inbound-links", "standing", "relocation-plan",
-    "rebuild-diff", "round-trip", "section-roles", "concepts", "session-cost", "perf",
+    "rebuild-diff", "round-trip", "section-roles", "concepts", "session-cost", "perf", "bench",
 })
 # A read verb whose named flag turns on a WRITE mode: with the flag given, the invocation
 # is a write (opened read-write, refused under --read-only) -- `notes-overlap --rows` lands
@@ -388,6 +388,33 @@ async def _dispatch(args) -> int:
         print(render_perf(perf_report(args.timings_path, verb=args.verb, runs=args.runs,
                                       since=_parse_ts(args.since)), args.format))
         return 0
+    if args.command == "bench":
+        # The scale harness (design detail 3bd8673d): its tiers live in the bench directory and
+        # every measured run is its own CLI invocation against one -- no graph opens here
+        from .bench import BenchRefusal, bench_config, render_bench, resolve_lane
+        from .bench import build as bench_build, run as bench_run, status as bench_status
+        try:
+            settings = bench_config(args.graph_db_path)
+            journals = {"writes": args.journal_path, "source": args.source_journal_path,
+                        "memory": (load_graph_config(args.graph_db_path) or {}).get("memory_journal_path")}
+            lane = resolve_lane(args.graph_db_path, journals, args.manifests_dir, lane=args.lane,
+                                settings=settings)
+            if args.action == "build":
+                res = bench_build(lane, settings, tiers=args.tier, resnapshot=args.resnapshot,
+                                  ledger=args.timings_path)
+            elif args.action == "run":
+                if not args.timings_path:
+                    raise BenchRefusal("bench run records into the timings ledger -- pass "
+                                       "--timings-path (cg-read bakes it)")
+                res = bench_run(lane, settings, args.timings_path, tiers=args.tier,
+                                verbs=args.verb, repeat=args.repeat)
+            else:
+                res = bench_status(lane, settings)
+        except BenchRefusal as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        print(render_bench(args.action, res, args.format))
+        return 0
     if args.command == "rebuild-diff":
         # The standing check (design 8f6f2343): opens BOTH graphs read-only itself, so it
         # doesn't ride the single-graph context below. Exit 3 = differences found.
@@ -538,6 +565,15 @@ async def _dispatch(args) -> int:
             if not args.journal_path:
                 print("error: replay needs --journal-path", file=sys.stderr)
                 return 1
+            if args.workflow:
+                # A workflow graph's journal through the layer's replay and every installed
+                # core's registry (the scale harness's delta replay, design detail 3bd8673d)
+                from cjm_context_graph_layer.journal import composed_replay_handlers
+                from cjm_context_graph_layer.journal import replay_journal as replay_workflow
+                rc = await replay_workflow(gx.queue, gx.graph_id, args.journal_path,
+                                           handlers=composed_replay_handlers(), offset=args.offset)
+                print(f"replayed journal: {rc}")
+                return 0
             notes = None
             if args.memory_offset is not None:
                 # The dev graph's memory lane (design c9b29de5 (4)): its groups after the offset replay
@@ -3463,6 +3499,9 @@ def main() -> int:
                       help="Also replay the MEMORY journal's groups after the N-th record, merged by ts into "
                            "the writes windows (the dev graph's swap delta and heal; design c9b29de5 (4)); "
                            "needs memory_journal_path in the sibling config")
+    p_rp.add_argument("--workflow", action="store_true",
+                      help="Replay a WORKFLOW graph's journal through the layer's replay with every "
+                           "installed core's registry (the scale harness's delta replay, 3bd8673d)")
 
     p_m3 = sub.add_parser("m3-baseline",
                           help="M3 genesis import: journal a per-note baseline `new-note` op "
@@ -3691,6 +3730,23 @@ def main() -> int:
     p_perf.add_argument("--since", default=None,
                         help="Only events at or after this time (unix seconds, a session key, "
                              "or YYYY-MM-DD)")
+
+    p_bench = sub.add_parser("bench",
+                             help="The scale harness (design detail 3bd8673d): build synthetic tiers "
+                                  "of a lane's graph and journals in the bench directory, run the "
+                                  "canonical verbs at each into the timings ledger (perf reads the "
+                                  "curves), or show what the bench holds")
+    p_bench.add_argument("action", choices=("build", "run", "status"))
+    p_bench.add_argument("--lane", default=None,
+                         help="A sibling_graphs key (default: the invoking graph)")
+    p_bench.add_argument("--tier", type=int, action="append", default=None,
+                         help="Only this tier (repeatable; build: default the configured tiers + "
+                              "x1; run: default every built tier)")
+    p_bench.add_argument("--verb", action="append", default=None,
+                         help="run: only this canonical verb (repeatable)")
+    p_bench.add_argument("--repeat", type=int, default=1, help="run: runs per verb per tier")
+    p_bench.add_argument("--resnapshot", action="store_true",
+                         help="build: take a fresh snapshot (every copy and tier rebuilds)")
 
     p_pf = sub.add_parser("portfolio",
                           help="Workbench front door: every role-asserted anchor + lock lead "

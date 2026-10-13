@@ -12,6 +12,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - **`cjm_context_graph_projection.archive`** — Retiring an archive source, restoring it from git, and moving a page's path between holders
 - **`cjm_context_graph_projection.artifacts`** — Observed-source ARTIFACTS (design 9a7224a7, work item 4765b699): files the graph VERSIONS
 - **`cjm_context_graph_projection.authoring`** — The B write surface: AUTHOR a verbatim-text slot on-graph, emit the canonical artifact.
+- **`cjm_context_graph_projection.bench`** — THE SCALE HARNESS: synthetic tiers of a graph and its journals, the canonical verbs run at each.
 - **`cjm_context_graph_projection.categories`** — A post's CATEGORIES: the one reader every renderer calls (design ce17606b (1) under the category
 - **`cjm_context_graph_projection.categorypages`** — CATEGORY PAGES (design a62f2499 under the category model 0f7fcdcb (5), work item 779c7a79).
 - **`cjm_context_graph_projection.claims`** — The claims the site may make about the user's work, and the deliverables that back them
@@ -175,6 +176,27 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `read_slot` _function_ — Read a node's current verbatim-slot text (the `--editor` pop / preview input).
 - `reharvest_note_relations` _function_ — Re-run the relationship harvest on an EDITED note and apply the edge DIFF (finding cbde404c).
 - `section_divergence` _function_ — Read-only: detect, at SECTION grain, where a note's `.md` has drifted from the graph.
+
+### `cjm_context_graph_projection.bench`
+
+- `BenchRefusal` _class_ — A harness precondition failed (no bench directory, a path outside it, a missing lane).
+- `assemble_tier` _function_ — Build tier xK: a fresh db holding the snapshot's rows plus copies 1 .. k-1 (plain row
+- `bench_config` _function_ — The harness's settings as DATA; `bench_dir` has no default (a path on one machine is
+- `build` _function_ — Snapshot (once), stage the copies the tiers need (missing or from another snapshot, in
+- `family_ops` _function_ — Ops in a tier's family as it stands: the cold segments counted at assembly (immutable),
+- `inside` _function_ — The path guard (design detail 3bd8673d (3)): every write resolves inside the bench.
+- `lane_dir` _function_ — The lane's directory under the bench directory, refused if the lane's own graph or
+- `measure` _function_ — Run one invocation under the limits: its peak RSS is the process tree's (the graph
+- `placeholders_of` _function_ — The default targets of the canonical verbs, read off the snapshot once.
+- `rekeyer` _function_ — The copy's id map, applied to any value: a string has every UUID token replaced by
+- `render_bench` _function_ — Render a bench result: tables for a person, the result as JSON for an agent.
+- `resolve_lane` _function_ — A lane: the graph a tier copies and the journal families beside it. The invoking graph
+- `run` _function_ — Run the canonical verbs against each tier: real CLI invocations with the tier's db,
+- `snapshot` _function_ — Copy 0: the live db through SQLite's backup API (a consistent snapshot under a live
+- `stage_copy` _function_ — Re-key copy `copy` of the snapshot once: its rows (nodes, edges -- no indexes, the
+- `status` _function_ — What the bench holds for a lane: the snapshot, the staged copies, the built tiers.
+- `tree_rss_kb` _function_ — The tree's resident set, read from /proc (statm + each task's children). An invocation's
+- `verb_specs` _function_ — The canonical verbs for a lane: the configured `verbs` replace the default list (the
 
 ### `cjm_context_graph_projection.categories`
 
@@ -710,6 +732,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `begin_invocation` _function_ — Arm the instrument at the top of `main` -- everything before it is the launch and the
 - `end_to_end` _function_ — An invocation's whole cost as its caller waits for it: the in-process wall plus the
 - `fit` _function_ — Least squares of cost on one covariate -- the shape d7742c47 (b) reads. None when the
+- `growth` _function_ — A cost's growth exponent across the scale tiers (design detail 3bd8673d): least squares
 - `guards` _function_ — The design's guards, read off one event (681604c1): each row names the guard, what it
 - `invocation_graph` _function_ — The invocation's graph with its phases: the body runs as `verb`, and the covariates are
 - `invocation_parsed` _function_ — Name the run, record the parse, and keep it armed only when a ledger will take it.
@@ -720,6 +743,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `run_invocation` _function_ — Run the invocation and append its event, whatever its outcome -- a refusal or a crash
 - `self_times` _function_ — A phase's SELF time: its inclusive seconds less its direct children's.
 - `series_trend` _function_ — A positioned cost's trend: the mean cost per item in the last third of the bins over the
+- `tier_curves` _function_ — The scale harness's read (design detail 3bd8673d): per lane and canonical verb, the
 
 ### `cjm_context_graph_projection.postpage`
 
