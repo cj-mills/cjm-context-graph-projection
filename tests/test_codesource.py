@@ -633,3 +633,123 @@ def test_a_birth_with_a_duplicate_qualname_is_refused_by_name_and_journals_nothi
     res = flip_module(journal, str(repos), LIB, dup)
     assert "two definitions of test_a" in res["error"] and not res["captured"]
     assert _records(journal) == []
+
+
+# -- the verbs emit verbatim; bindings are the elements' (design detail 25c1fadc, ruling D) -------------
+def _born_state(*modules):
+    """A source state holding each (path, text) module born captured."""
+    state = SourceState()
+    for n, (mp, text) in enumerate(modules):
+        plans, _ = element_plan(state, [_emit(mp, text, born=True)])
+        for r in plans[0][0]:
+            state.apply({**r, "ts": 100.0 + n, "generation": 1})
+    return state
+
+
+def _land(state, emissions, op, ts=300.0):
+    """One write planned and applied; returns its plans."""
+    plans, _ = element_plan(state, emissions, op=op)
+    for i in sorted(plans):
+        for r in plans[i][0]:
+            state.apply({**r, "ts": ts, "generation": 1})
+    return plans
+
+
+def test_a_binding_its_element_stops_reading_drops_and_a_never_claimed_one_stays():
+    mp = "pkg/m.py"
+    head = 'import json\nimport os\nimport readline\nfrom pathlib import Path\n\n__all__ = ["Path"]\n\n\n'
+    state = _born_state((mp, head + 'def f():\n    return os.sep, json.dumps(1), Path(".")\n'))
+    plans = _land(state, [_emit(mp, head + "def f():\n    return 1\n")], {"op": "author"})
+    rep = plans[0][1]
+    assert rep["dropped"] == ["import json", "import os"]  # its element stopped reading them
+    text = state.latest_ops()[(LIB, mp)]["text"]
+    assert "import os" not in text and "import json" not in text
+    assert "import readline" in text  # never claimed: a side-effect import stays
+    assert "from pathlib import Path" in text  # an __all__ entry still reads it: a re-export stays
+
+
+def test_a_fixture_string_keeps_a_binding_its_element_stopped_reading():
+    # test_a stops requesting db, but test_b still names it in a fixture string: db stays (unclaimed
+    # from then on, as any binding no element claims). The drop is the write where an element stops
+    # reading a binding: pytest goes when the decorator that read it goes.
+    mp = "tests/test_m.py"
+    t0 = ('import pytest\n\nfrom conftest import db\n\n\ndef test_a(db):\n    assert db\n\n\n'
+          '@pytest.mark.usefixtures("db")\ndef test_b():\n    assert True\n')
+    state = _born_state((mp, t0))
+    t1 = t0.replace("def test_a(db):\n    assert db\n\n\n", "")
+    rep = _land(state, [_emit(mp, t1)], {"op": "author"})[0][1]
+    assert rep["dropped"] == [] and rep["unclaimed"] == ["db"]
+    assert "from conftest import db" in state.latest_ops()[(LIB, mp)]["text"]
+    t2 = 'import pytest\n\nfrom conftest import db\n\n\ndef test_b():\n    assert True\n'
+    rep = _land(state, [_emit(mp, t2)], {"op": "author"}, ts=301.0)[0][1]
+    assert rep["dropped"] == ["import pytest"] and rep["unclaimed"] == ["db"]
+
+
+UTIL_P, CORE_P, EXTRA_P = "pkg/util.py", "pkg/core.py", "pkg/extra.py"
+
+
+def test_a_move_imports_what_it_reads_from_the_module_it_left_however_ambiguous_the_name(tmp_path):
+    # Finding 73714120: helper is defined twice corpus-wide (util and core), so no USES edge says
+    # which one gamma reads; the move reads it from util's own definitions.
+    util = "def helper(x):\n    return x\n\n\ndef gamma(z):\n    return helper(z)\n"
+    state = _born_state((UTIL_P, util), (CORE_P, "def helper(x):\n    return -x\n"),
+                        (EXTRA_P, "def delta():\n    return 1\n"))
+    plans = _land(state, [_emit(UTIL_P, "def helper(x):\n    return x\n"),
+                          _emit(EXTRA_P, "def delta():\n    return 1\n\n\ndef gamma(z):\n    return helper(z)\n")],
+                  MOVE("gamma"))
+    assert plans[1][1]["derived"] == ["from pkg.util import helper"] and not plans[0][1]["derived"]
+    extra = state.latest_ops()[(LIB, EXTRA_P)]["text"]
+    assert extra.startswith("from pkg.util import helper\n") and "def gamma(z):" in extra
+    fold, nodes, _ = _fold(_records_of(state), tmp_path)
+    assert not fold.failures
+
+
+def test_a_move_imports_the_moved_def_back_where_the_source_still_reads_it():
+    util = "def helper(x):\n    return x\n\n\ndef use():\n    return helper(1)\n"
+    state = _born_state((UTIL_P, util), (EXTRA_P, "def delta():\n    return 1\n"))
+    plans = _land(state, [_emit(UTIL_P, "def use():\n    return helper(1)\n"),
+                          _emit(EXTRA_P, "def delta():\n    return 1\n\n\ndef helper(x):\n    return x\n")],
+                  MOVE("helper"))
+    assert plans[0][1]["derived"] == ["from pkg.extra import helper"]
+    assert state.latest_ops()[(LIB, UTIL_P)]["text"].startswith("from pkg.extra import helper\n")
+
+
+def test_a_move_never_mends_a_name_its_module_already_left_unbound():
+    # A NameError the source held before the write is not the move's to mend: only what it unbinds.
+    util = "def helper(x):\n    return x\n\n\ndef gamma(z):\n    return helper(z) + missing\n"
+    state = SourceState()
+    for r in capture_records(LIB, LIB, UTIL_P, "pkg.util", util)[0] + \
+            capture_records(LIB, LIB, EXTRA_P, "pkg.extra", "def missing():\n    return 0\n")[0]:
+        state.apply({**r, "ts": 100.0, "generation": 1})
+    plans, _ = element_plan(state, [_emit(UTIL_P, util + "\n\ndef other():\n    return missing\n")],
+                            op={"op": "author"})
+    assert "derived" in plans[0][1] and not plans[0][1]["derived"]
+
+
+def test_a_move_never_imports_a_local_name_and_keeps_the_source_block_but_what_left(tmp_path):
+    # Findings 0b7f935d and d95146af: a local assignment and a function-local import bind their names,
+    # so nothing is imported for them even where another module of the write defines the name; the
+    # source keeps its import block but for the binding only the moved def read.
+    util = ("import json\nimport os\n\n\ndef keep():\n    return os.sep\n\n\n"
+            "def moved(x):\n    from pathlib import Path\n    state = json.dumps(x)\n    return Path(state)\n")
+    extra = "state = 1\n\n\ndef delta():\n    return state\n"
+    state = _born_state((UTIL_P, util), (EXTRA_P, extra))
+    util_after = "import json\nimport os\n\n\ndef keep():\n    return os.sep\n"
+    extra_after = extra + "\n\n" + util[util.index("def moved"):]
+    plans = _land(state, [_emit(UTIL_P, util_after), _emit(EXTRA_P, extra_after)], MOVE("moved"))
+    assert not plans[0][1]["derived"] and not plans[1][1]["derived"]
+    assert state.latest_ops()[(LIB, UTIL_P)]["text"] == "import os\n\n\ndef keep():\n    return os.sep\n"
+    out = state.latest_ops()[(LIB, EXTRA_P)]["text"]
+    assert out.startswith("import json\n\nstate = 1\n")  # the moved def's own binding travelled
+    assert "from pathlib import Path" in out.split("def moved")[1]  # the lazy import stays in its body
+
+
+def _records_of(state):
+    """The element records a state was built from, re-derived as one born group per module."""
+    out = []
+    for mid, m in state.elements.modules.items():
+        if m.captured:
+            recs, _ = capture_records(m.repo_key, m.repo_key, m.module_path, m.import_name,
+                                      state.compose(mid))
+            out += [{**r, "ts": 500.0 + len(out), "generation": 1} for r in recs]
+    return out

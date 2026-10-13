@@ -3,12 +3,12 @@
 The EXECUTE half of the cohesion oracle ([[true-b-projected-structure-discussion]] N+1):
 `cohesion` proposes organizational changes (a grab-bag to split, a scattered helper, a
 dead module); these verbs carry them out. They ride the `move` machinery (the shared
-`_relocate` engine + imports-as-projection) so an under_split finding becomes `regroup`
-(extract symbols into a new module), an over_split/dead finding becomes `move` + `delete`.
+`_relocate` engine; the element regime lands the imports) so an under_split finding becomes
+`regroup` (extract symbols into a new module), an over_split/dead finding becomes `move` +
+`delete`.
 
-Persistence is Fork-1(a) (the file stays the source; `ingest` re-derives) — the same line
-`move`/`author` hold until the deliberate N+3 flip. All four ops are STRUCTURAL/import-level
-(safe at the verbatim-body line): they never rewrite a body. Symbol `rename` — which would
+All four ops are STRUCTURAL/import-level (safe at the verbatim-body line): they never rewrite
+a body. Symbol `rename` — which would
 push scoped identifier substitution INTO bodies (Ext-B) — is its own deliberate increment.
 
 The graph-mutation posture (design amendment 2cc81d3b, build B2 of leg B): every op lands
@@ -37,7 +37,7 @@ from .relive import apply_live
 from .runtime import GraphHandle
 from .seeds import repo_dir_name
 from .source_state import (birth_form, canonicalization_report, collect_appends, derive_import_name,
-                           is_test_module_path, journaled_emit, notebook_to_py_source)
+                           journaled_emit, notebook_to_py_source)
 
 
 def rewrite_module_import(
@@ -223,7 +223,7 @@ async def regroup(
     grab-bag into a cohesive module) or `over_split` (consolidate a scattered helper)
     finding. Creates the target module if it doesn't exist, then batch-relocates every
     symbol in ONE emit pass via `_relocate` (re-emitting each affected source module + the
-    target + the importers, imports re-derived). A NOT-yet-existing target is synthesized
+    target + the importers; the element regime lands the imports). A NOT-yet-existing target is synthesized
     in memory and born captured by the relocation's own records, so the code fold's step
     derives it with everything else."""
     target_id = code_module_node_id(repo_key, target_module_path)
@@ -285,8 +285,7 @@ async def rename_module(
     new_path = root + new_module_path
     new_import = new_import_name or derive_import_name(new_module_path)
 
-    text = emit_module_from_nodes(await _module_region_wires(gx, module_id),
-                                  module_node=M, derive_imports=not is_test_module_path(old_mp))
+    text = emit_module_from_nodes(await _module_region_wires(gx, module_id))
     files: List[Tuple[str, str]] = [(new_path, text)]
     dir_key = repo_dir_name(repo_key)
     renamed_emission: Dict[str, Any] = {"repo_key": dir_key, "module_path": new_module_path,

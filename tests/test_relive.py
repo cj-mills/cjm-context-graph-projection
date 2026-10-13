@@ -210,23 +210,32 @@ def test_live_code_verbs_equal_their_rebuild(tmp_path):
     core, util = code_module_node_id(LIB, CORE), code_module_node_id(LIB, UTIL)
     extra = code_module_node_id(LIB, "cjm_demo_lib/extra.py")
     tst, fm = code_module_node_id(LIB, TST), code_module_node_id(LIB, FORM)
-    # The batch: a body edit (an accessor chain's member too), new symbols, a module born on-graph,
-    # a keep-identity move, a name turned ambiguous corpus-wide (after the move: before it, the move
-    # is refused -- finding 73714120), a keep-identity rename / module rename, absorbed plain edits,
-    # births whole and empty, a delete -- on package and test modules alike.
+    # The batch: a body edit (an accessor chain's member too), new symbols, an import joined to the
+    # import block, a module born on-graph, a name turned ambiguous corpus-wide and then a keep-identity
+    # move of a def reading it (the move imports it from the module it left -- finding 73714120), a
+    # keep-identity rename / module rename, absorbed plain edits, births whole and empty, a delete --
+    # on package and test modules alike.
     step("author", code_symbol_node_id(core, "alpha"), "--edit", "helper(x) + 1", "helper(x) + 2", *R)
     step("author", code_symbol_node_id(fm, "Form.row"), "--edit", "self._row = i", "self._row = int(i)", *R)
     assert "@row.setter\n    def row(self, i):\n        self._row = int(i)\n" in (repos / LIB / FORM).read_text()
     step("add-symbol", util, "--body", "def gamma(z):\n    return helper(z)", *R)
+    step("add-text", util, "--body", "import json", *R)
+    assert (repos / LIB / UTIL).read_text().startswith("import json\n")  # joined the block, never below the code
     step("new-module", LIB, "cjm_demo_lib/extra.py", *R)
     step("add-symbol", extra, "--body", "def delta():\n    return 1", *R)
-    step("move", code_symbol_node_id(util, "gamma"), extra, *R)
     step("add-symbol", core, "--body", "def helper(x):\n    return -x", *R)
+    out = step("move", code_symbol_node_id(util, "gamma"), extra, *R)
+    assert (repos / LIB / "cjm_demo_lib/extra.py").read_text().startswith(
+        "from cjm_demo_lib.util import helper\n")  # read from util's own definitions
+    assert "imports derived in cjm_demo_lib/extra.py: from cjm_demo_lib.util import helper" in out
     step("rename-symbol", code_symbol_node_id(core, "beta"), "beta2", *R)
     step("rename-module", util, "cjm_demo_lib/tools.py", *R)
     (repos / LIB / CORE).write_text((repos / LIB / CORE).read_text() + "\n\ndef omega():\n    return 0\n")
     step("flip-module", LIB, CORE, *R)
     step("author", code_symbol_node_id(tst, "test_alpha"), "--edit", "== 2", "== 3", *R)
+    step("author", code_symbol_node_id(code_module_node_id(LIB, "tests/test_util.py"), "test_helper"),
+         "--edit", "helper(os.sep) and sys", "helper(os.sep)", *R)
+    assert "import sys" not in (repos / LIB / "tests/test_util.py").read_text()  # its element stopped reading it
     step("add-symbol", tst, "--body", "def test_beta():\n    assert beta2(1) == 6", "--import",
          "from cjm_demo_lib.core import beta2", *R)
     (repos / LIB / TST).write_text((repos / LIB / TST).read_text() + "\n\ndef test_three():\n    assert alpha(3)\n")
@@ -244,7 +253,7 @@ def test_live_code_verbs_equal_their_rebuild(tmp_path):
          "def test_empty():\n    assert True", *R)
     step("delete-module", extra, "--force", *R)
 
-    assert len(checks) == 19
+    assert len(checks) == 21
     assert "source" not in {json.loads(ln)["verb"] for ln in open(sj)}  # element records only
     # ... and not vacuously: the live db holds what the batch made, derived edges included.
     import sqlite3

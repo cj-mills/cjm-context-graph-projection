@@ -1198,13 +1198,10 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         ci = obj.get("caller_imports_rewritten", [])
         lines.append(f"caller imports rewritten: {', '.join(ci) if ci else '(none)'}")
         d = obj.get("diagnostic", {})
-        ti, si = d.get("target_imports_synthesized", []), d.get("source_imports_synthesized", [])
-        if ti:
-            lines.append(f"target imports synthesized from: {', '.join(ti)}")
-        if si:
-            lines.append(f"source imports synthesized from: {', '.join(si)} (it still uses the moved symbol)")
-        if d.get("zero_residual") and not (ti or si):
-            lines.append("zero residual: no cross-module imports needed beyond the bindings")
+        for mp, lines_ in sorted((d.get("derived") or {}).items()):
+            lines.append(f"imports derived in {mp}: {'; '.join(lines_)}")
+        for mp, lines_ in sorted((d.get("dropped") or {}).items()):
+            lines.append(f"imports dropped from {mp} (no element reads them): {'; '.join(lines_)}")
         return "\n".join(lines)
     if kind == "module":
         if obj.get("error"):

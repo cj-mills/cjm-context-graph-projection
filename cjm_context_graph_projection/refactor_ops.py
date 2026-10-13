@@ -22,13 +22,13 @@ import ast
 from typing import Any, Dict, List, Optional, Tuple
 
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
-from cjm_python_decompose_core.emit import emit_module_from_nodes, synth_import
+from cjm_python_decompose_core.emit import emit_module_from_nodes
 
 from . import factlayer as F
 from .authoring import _module_node, _module_region_wires, _source_emission, _stale_wires_error
 from .relive import apply_live
 from .runtime import GraphHandle
-from .source_state import collect_appends, is_test_module_path, journaled_emit, latest_source_ops
+from .source_state import collect_appends, journaled_emit, latest_source_ops
 
 
 def rewrite_symbol_import(
@@ -109,9 +109,10 @@ async def _relocate(
     module: the pre-op wires are read once, so naively looping the single move would
     re-read the original graph each time and resurrect already-moved symbols. Re-emits
     every affected source module (minus its moved symbols) + the target (with all moved
-    appended), and rewrites each importer's `from A import S` to point at B. ZERO-RESIDUAL
-    via the same USES-derived synthetics as the single move, with the override spanning
-    every moved subtree.
+    appended), VERBATIM, and rewrites each importer's `from A import S` to point at B. The
+    element regime lands the imports (design detail 25c1fadc, ruling D): a moved def's bindings
+    travel with it, a binding only it read leaves its source, and a name the move leaves unbound
+    that another module of the write defines is imported from it (finding 73714120).
 
     IDENTITY IS KEPT (36f649d3): the op rides the journal with `identity: keep`, so the
     moved symbols keep the ids they were born with, and the graph is updated LIVE from the
@@ -144,15 +145,9 @@ async def _relocate(
         by_src.setdefault(src_module_id, []).append((sid, node, p.get("qualname", "")))
 
     moved_ids = set(symbol_ids)
-    # The post-move membership override: every moved symbol + its DEFINES subtree -> target
-    # (a class moves with its methods), so USES-derived synthetics resolve in both directions.
-    override: Dict[str, str] = {}
-    for sid in symbol_ids:
-        override.update({x: target_module_id for x in await _moved_subtree(gx, sid)})
-
     files: List[Tuple[str, str]] = []
     emissions: List[Optional[Dict[str, Any]]] = []
-    # Each affected SOURCE module, re-emitted without its moved symbols (imports re-derived).
+    # Each affected SOURCE module, re-emitted without its moved symbols.
     for src_module_id, items in by_src.items():
         A = await _module_node(gx, src_module_id)
         a_wires = await _module_region_wires(gx, src_module_id)
@@ -162,11 +157,7 @@ async def _relocate(
         a_stale = _stale_wires_error(A, emit_module_from_nodes(a_wires), op_name)
         if a_stale:
             return {"error": a_stale, "written": False}
-        a_uses = await _uses_derived_imports(gx, src_module_id, override)
-        a_derive = not is_test_module_path(F.prop(A, "module_path", ""))
-        a_text = emit_module_from_nodes([w for w in a_wires if w["id"] not in moved_ids],
-                                        module_node=A, derive_imports=a_derive,
-                                        uses_derived=a_uses)
+        a_text = emit_module_from_nodes([w for w in a_wires if w["id"] not in moved_ids])
         files.append((F.prop(A, "path"), a_text))
         emissions.append(_emission_for(A, a_text))
 
@@ -179,11 +170,7 @@ async def _relocate(
     moved_wires = [_symbol_wire(node, target_module_id, max_order + 1 + i)
                    for i, sid in enumerate(symbol_ids)
                    for node in [await _get(gx, sid)]]
-    b_uses = await _uses_derived_imports(gx, target_module_id, override)
-    b_derive = not is_test_module_path(F.prop(B, "module_path", ""))
-    b_text = emit_module_from_nodes(b_wires + moved_wires,
-                                    module_node=B, derive_imports=b_derive,
-                                    uses_derived=b_uses)
+    b_text = emit_module_from_nodes(b_wires + moved_wires)
     files.append((F.prop(B, "path"), b_text))
     b_emission = _emission_for(B, b_text)
     if b_emission is not None and source_journal_path:
@@ -206,7 +193,7 @@ async def _relocate(
         importers = [src for src, tgt in import_pairs if tgt == src_module_id and src != src_module_id]
         for mid in dict.fromkeys(importers):
             if mid == target_module_id:
-                continue  # the target's own imports are handled by its re-derived block
+                continue  # the target's own imports are the element regime's (above)
             m = await _module_node(gx, mid)
             text = emit_module_from_nodes(await _module_region_wires(gx, mid))
             base_text = text
@@ -230,9 +217,6 @@ async def _relocate(
         "to_module": b_import,
         "caller_imports_rewritten": sorted(dict.fromkeys(caller_hits)),
         "cross_repo": sorted(f"{a} -> {b}" for a, b in cross_repo),
-        "diagnostic": {"zero_residual": True,
-                       "target_imports_synthesized": sorted({b["module"] for b in b_uses}),
-                       "source_imports_synthesized": sorted({b["module"] for b in a_uses})},
         "files": [f for f, _ in files], "written": False,
     }
     if any(e is None for e in emissions):
@@ -249,6 +233,9 @@ async def _relocate(
     if rec.get("error"):
         return {**result, "error": rec["error"]}
     result["journal"] = rec
+    # What the element regime derived and dropped, per module (the zero-residual receipt).
+    result["diagnostic"] = {k: {e["module_path"]: e[k] for e in rec.get("events", []) if e.get(k)}
+                            for k in ("derived", "dropped")}
     result["written"] = bool(write)
     if write:
         # Live: the code fold's step over this op's records — the moved symbols keep their
@@ -270,8 +257,8 @@ async def move(
 
     The one-symbol case of `_relocate` (the engine `regroup` batches over): re-emits the
     source module (without S) + the target (with S appended), and rewrites each importing
-    module's `from A import S` to point at B. The USES-derived synthetics make it
-    zero-residual; the next `ingest` re-derives (S's new id under B, CALLS re-resolved)."""
+    module's `from A import S` to point at B; the element regime lands the imports (see
+    `_relocate`), and the code fold's step re-derives the graph live."""
     res = await _relocate(gx, [symbol_id], target_module_id, write=write,
                           source_journal_path=source_journal_path, op_name="move",
                           repos_dir=repos_dir)
@@ -286,62 +273,6 @@ async def move(
 async def _get(gx: GraphHandle, node_id: str) -> Optional[Any]:
     from cjm_context_graph_layer.ops import graph_task
     return await graph_task(gx.queue, gx.graph_id, "get_node", node_id=node_id)
-
-
-async def _symbol_module_map(gx: GraphHandle) -> Dict[str, Tuple[str, str]]:
-    """symbol id -> (module_id, module import_name), for resolving cross-module call needs."""
-    modules = {F.nid(m): F.prop(m, "import_name", "") for m in await F.load_label(gx, DevNodeKinds.CODE_MODULE)}
-    out: Dict[str, Tuple[str, str]] = {}
-    for s in await F.load_label(gx, DevNodeKinds.CODE_SYMBOL):
-        mid = F.prop(s, "module_id")
-        out[F.nid(s)] = (mid, modules.get(mid, ""))
-    return out
-
-
-async def _uses_derived_imports(
-    gx: GraphHandle,
-    home_module_id: str,            # The module whose import block we are deriving
-    override: Dict[str, str],       # {symbol id: new module id} — the moved subtree's post-move membership
-) -> List[Dict[str, Any]]:  # Synthetic `from <mod> import <name>` for cross-module USES targets
-    """USES-derived intra-corpus imports for a module under a post-move membership override.
-
-    A reference that was SAME-module before the move has no import statement, so the frozen
-    bindings can't carry it; here we synthesize it from the live USES graph + the target's
-    (effective) defining module — closing the move residual in BOTH directions (B importing
-    what the moved symbol still needs from A; A importing the moved symbol if it still uses
-    it). Only TOP-LEVEL targets are importable (a method is reached via its class)."""
-    import_name = {F.nid(m): F.prop(m, "import_name", "")
-                   for m in await F.load_label(gx, DevNodeKinds.CODE_MODULE)}
-    idx: Dict[str, Dict[str, Any]] = {}
-    for s in await F.load_label(gx, DevNodeKinds.CODE_SYMBOL):
-        sid = F.nid(s)
-        eff = override.get(sid, F.prop(s, "module_id"))
-        qual = F.prop(s, "qualname", "") or ""
-        idx[sid] = {"name": qual.split(".")[-1], "module": eff,
-                    "import_name": import_name.get(eff, ""), "top": "." not in qual}
-    members = {sid for sid, info in idx.items() if info["module"] == home_module_id}
-    out: List[Dict[str, Any]] = []
-    seen: set = set()
-    for src, tgt in await F.load_edge_pairs(gx, DevRelations.USES):
-        t = idx.get(tgt)
-        if (src in members and t and t["top"] and t["import_name"]
-                and t["module"] != home_module_id and t["name"] not in seen):
-            seen.add(t["name"])
-            out.append(synth_import(t["name"], t["import_name"]))
-    return out
-
-
-async def _moved_subtree(gx: GraphHandle, symbol_id: str) -> set:
-    """The moved symbol + its DEFINES descendants (a class moves with its methods)."""
-    children: Dict[str, List[str]] = {}
-    for s, t in await F.load_edge_pairs(gx, DevRelations.DEFINES):
-        children.setdefault(s, []).append(t)
-    subtree, stack = set(), [symbol_id]
-    while stack:
-        x = stack.pop()
-        subtree.add(x)
-        stack.extend(children.get(x, []))
-    return subtree
 
 
 def _resolve_relative(

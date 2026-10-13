@@ -43,7 +43,7 @@ from .projection import ambiguity_error, resolve_node_ref
 from .relive import apply_live
 from .runtime import GraphHandle
 from .seeds import conceptual_key, repo_dir_name
-from .source_state import collect_appends, is_test_module_path, journaled_emit, symbol_identity_map
+from .source_state import collect_appends, journaled_emit, symbol_identity_map
 
 
 async def _resolve_node(
@@ -454,9 +454,7 @@ async def emit_artifact(
             stale = _stale_projection_error(module, wires, "emit --write")
             if stale:
                 return {"error": stale, "module_id": module_id, "written": False}
-        text = emit_module_from_nodes(
-            wires, module_node=module,
-            derive_imports=not is_test_module_path(F.prop(module, "module_path", "")))
+        text = emit_module_from_nodes(wires)
         artifact = "module"
     res = {"module_id": module_id, "artifact": artifact, "artifact_path": artifact_path,
            "emitted_bytes": len(text.encode("utf-8")), "text": text, "written": False}
@@ -655,10 +653,9 @@ async def author(
             return {"error": stale, "node_id": node_id, "label": label, "slot": slot,
                     "written": False}
 
-    # Re-derive the edited slot's bindings (2b6090dc): the author edit is the moment
-    # a code slot's references change, so the frozen import_bindings refresh HERE —
-    # the next canonical emit (add-symbol / move) derives from live bindings instead
-    # of the last ingest's. A CodeText import edit mints module-level bindings the
+    # Re-derive the edited slot's bindings (2b6090dc) for the unjournaled bare path, which
+    # persists the slot into the node itself; a journaled write re-derives every binding
+    # through the code fold's step. A CodeText import edit mints module-level bindings the
     # way add_text does. Nested/method edits inherit this via the owner routing.
     rebind: Dict[str, Any] = {}
     module_bindings_merged: Optional[List[Dict[str, Any]]] = None
@@ -833,12 +830,9 @@ async def add_symbol(
     if stale:
         return {"error": stale, "written": False}
     module_path = str(F.prop(module, "module_path") or "")
-    # The stale-wires guard (finding 889b3025): wires must reproduce the file (in either
-    # emission form) before this emit may treat them as current truth.
-    stale_w = _stale_wires_error(
-        module, emit_module_from_nodes(wires), "add-symbol",
-        converged_text=emit_module_from_nodes(
-            wires, module_node=module, derive_imports=not is_test_module_path(module_path)))
+    # The stale-wires guard (finding 889b3025): wires must reproduce the file before this emit
+    # may treat them as current truth.
+    stale_w = _stale_wires_error(module, emit_module_from_nodes(wires), "add-symbol")
     if stale_w:
         return {"error": stale_w, "written": False}
     dup = next((w for w in wires if w["label"] == DevNodeKinds.CODE_SYMBOL
@@ -880,9 +874,7 @@ async def add_symbol(
         **birth,
     )
     gn = sym.to_graph_node()
-    emitted = emit_module_from_nodes(
-        wires + [gn], module_node=module,
-        derive_imports=not is_test_module_path(module_path))
+    emitted = emit_module_from_nodes(wires + [gn])
     artifact_path = F.prop(module, "path")
     result = {
         "module_id": module_id, "symbol_id": sym.id, "qualname": qualname,
@@ -950,8 +942,8 @@ async def add_text(
     node's `import_bindings`, so the canonical emit renders them and later
     `add_symbol` calls bind refs against them — the fresh-module import bootstrap
     (without it, a born-on-graph module's derived import block stays empty no matter
-    what the region says). Canonical emit repositions the derived import block at the
-    top regardless of the region's order slot."""
+    what the region says). An import-only body JOINS the module's import region instead of
+    landing as a region of its own (`_join_import_region`)."""
     # Local imports: adding an import line to THIS module's imports region is the open
     # binding-table gap (47b256de) — stay self-contained until it closes.
     from cjm_python_decompose_core.parse import parse_regions
@@ -993,11 +985,7 @@ async def add_text(
     if stale:
         return {"error": stale, "written": False}
     # The stale-wires guard (finding 889b3025) — see add_symbol.
-    stale_w = _stale_wires_error(
-        module, emit_module_from_nodes(wires), "add-text",
-        converged_text=emit_module_from_nodes(
-            wires, module_node=module,
-            derive_imports=not is_test_module_path(str(F.prop(module, "module_path") or ""))))
+    stale_w = _stale_wires_error(module, emit_module_from_nodes(wires), "add-text")
     if stale_w:
         return {"error": stale_w, "written": False}
     dup = next((w for w in wires if w["label"] == DevNodeKinds.CODE_TEXT
@@ -1014,8 +1002,8 @@ async def add_text(
         order_index=order, path=str(F.prop(module, "path") or ""), kind=kind)
     gn = ct.to_graph_node()
 
-    # Fresh-module import bootstrap: merge the body's top-level import bindings into
-    # the module node so canonical emit + later add_symbol calls see them.
+    # Fresh-module import bootstrap: merge the body's top-level import bindings into the
+    # module node so later add_symbol calls bind refs against them (the bare path persists it).
     new_bindings: List[Dict[str, Any]] = []
     merged = list(F.prop(module, "import_bindings") or [])
     if any(isinstance(n, (ast.Import, ast.ImportFrom)) for n in tree.body):
@@ -1029,17 +1017,22 @@ async def add_text(
                     have.add(_bkey(b))
                     merged.append(b)
                     new_bindings.append(b)
-    module_wire = _as_wire(module, DevNodeKinds.CODE_MODULE)
-    if new_bindings:
-        module_wire["properties"]["import_bindings"] = merged
 
     module_path = str(F.prop(module, "module_path") or "")
-    emitted = emit_module_from_nodes(
-        wires + [gn], module_node=module_wire,
-        derive_imports=not is_test_module_path(module_path))
+    # An import-only body joins the module's import region (the import block the element regime
+    # composes, design detail 25c1fadc ruling D), as an import rider does -- never a region below
+    # the module's code; a body mixing imports with other statements lands verbatim where it is put
+    # (an import after a statement may depend on it).
+    joined: Optional[Dict[str, Any]] = None
+    if all(isinstance(n, (ast.Import, ast.ImportFrom)) for n in tree.body):
+        joined = _join_import_region(wires, module_id, [ln for ln in text.splitlines() if ln.strip()])
+        emitted = emit_module_from_nodes(wires)
+    else:
+        emitted = emit_module_from_nodes(wires + [gn])
     artifact_path = F.prop(module, "path")
     result = {
-        "module_id": module_id, "text_id": ct.id, "region_key": region.region_key,
+        "module_id": module_id, "text_id": joined["id"] if joined else ct.id,
+        "region_key": region.region_key, "joined_import_region": joined is not None,
         "kind": kind, "order_index": order, "actor": actor,
         "new_import_bindings": len(new_bindings),
         "artifact": "module", "artifact_path": artifact_path,
@@ -1073,9 +1066,12 @@ async def add_text(
             # region precedes its directory on disk.
             Path(artifact_path).parent.mkdir(parents=True, exist_ok=True)
             Path(artifact_path).write_text(emitted)
-        await graph_task(gx.queue, gx.graph_id, "add_nodes", nodes=[gn])
-        await graph_task(gx.queue, gx.graph_id, "add_edges", edges=[
-            make_edge(module_id, ct.id, DevRelations.CONTAINS)])
+        if joined is not None:
+            await _persist_rider_region(gx, joined)
+        else:
+            await graph_task(gx.queue, gx.graph_id, "add_nodes", nodes=[gn])
+            await graph_task(gx.queue, gx.graph_id, "add_edges", edges=[
+                make_edge(module_id, ct.id, DevRelations.CONTAINS)])
         if new_bindings:
             await graph_task(gx.queue, gx.graph_id, "update_node", node_id=module_id,
                              properties={"import_bindings": merged})
@@ -1410,6 +1406,16 @@ def _land_import_riders(
     if unused:
         return None, (f"import rider binds {', '.join(unused)}, which the body never references "
                       "— a rider lands only the imports its body uses")
+    return _join_import_region(wires, module_id, lines), None
+
+
+def _join_import_region(
+    wires: List[Dict[str, Any]],  # The module's region wires (mutated: the import region gains the lines)
+    module_id: str,               # The CodeModule the lines land in
+    lines: List[str],             # Import statement lines
+) -> Dict[str, Any]:  # The import-region wire that changed or was minted
+    """Join import lines to the module's import region (a CodeText of kind `imports`; minted after
+    a leading docstring when the module has none); a line the region already holds is not repeated."""
     texts = sorted((w for w in wires if w["label"] == DevNodeKinds.CODE_TEXT),
                    key=lambda w: w["properties"].get("order_index") or 0)
     region = next((w for w in texts if w["properties"].get("kind") == "imports"
@@ -1421,7 +1427,7 @@ def _land_import_riders(
         if new:
             region["properties"]["text"] = (str(region["properties"]["text"]).rstrip("\n")
                                             + "\n" + "\n".join(new) + "\n")
-        return region, None
+        return region
     orders = [w["properties"].get("order_index") or 0 for w in wires]
     first = texts[0] if texts and (texts[0]["properties"].get("order_index") or 0) == min(orders) else None
     lead_doc = first is not None and first["properties"].get("kind") == "docstring"
@@ -1431,7 +1437,7 @@ def _land_import_riders(
                              "order_index": ((first["properties"].get("order_index") or 0) + 0.5
                                              if lead_doc else (min(orders) if orders else 0) - 1)}}
     wires.append(region)
-    return region, None
+    return region
 
 
 async def _persist_rider_region(

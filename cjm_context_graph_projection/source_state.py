@@ -29,6 +29,7 @@ from cjm_context_graph_primitives.journal import (journal_segments, maybe_rotate
                                                   read_segment)
 from cjm_dev_graph_schema.identity import code_module_node_id, code_symbol_node_id
 from cjm_notebook_decompose_core.read import parse_notebook
+from cjm_python_decompose_core.elements import unresolved_names
 from cjm_python_decompose_core.parse import source_lines
 
 from .codesource import (absorb_records, CodeSourceError, element_canonical, ELEMENT_RETIRE,
@@ -289,6 +290,25 @@ def _top_level_names(
         return set()
     return {n.name for n in tree.body
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+
+
+def _defined_names(
+    text: str,  # A module's source text
+) -> set:  # The names its top level defines (defs, classes, assignments -- never imports)
+    """What a module defines for another to import: its top-level defs and classes and the names its
+    top-level statements assign (`X = ...`, `X: T = ...`, tuple targets)."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return set()
+    out = set()
+    for n in tree.body:
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            out.add(n.name)
+        elif isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            for t in (n.targets if isinstance(n, ast.Assign) else [n.target]):
+                out |= {x.id for x in ast.walk(t) if isinstance(x, ast.Name)}
+    return out
 
 
 def symbol_identity_map(
@@ -631,13 +651,33 @@ def element_plan(
     lost = [n for n in departures if not any(n in g for g in gains.values())]
     if lost:
         raise CodeSourceError(f"{', '.join(sorted(lost))} leaves its module for no module in the write")
+    # A move's imports between its modules (finding 73714120): a name the write leaves unbound in one
+    # module that exactly one other module of the write defines at its top level is imported from it --
+    # the moved def reading a helper its source keeps, the source reading the def that left. Read from
+    # the modules' own definitions, never from the corpus-wide edge derivation; only a name the write
+    # itself leaves unbound (a module's own earlier NameError is not the move's to mend).
+    imports_for: Dict[int, Dict[str, Dict[str, Any]]] = {}
+    if departures:
+        defined = {i: _defined_names(emissions[i]["text"]) for i in targets}
+        for i, (mid, _restate) in targets.items():
+            now = unresolved_names(emissions[i]["text"]) or set()
+            m = els.modules.get(mid)
+            before = (unresolved_names(state.compose(mid)) or set()) if m is not None and m.captured else set()
+            for n in sorted(now - before):
+                homes = [j for j in targets if j != i and n in defined[j]]
+                if len(homes) == 1:
+                    j, home = homes[0], els.modules.get(targets[homes[0]][0])
+                    module = emissions[j].get("import_name") or (home.import_name if home else "")
+                    if module:
+                        imports_for.setdefault(i, {})[n] = {"name": n, "kind": "from", "module": module,
+                                                            "imported": n, "alias": "", "level": 0}
     plans: Dict[int, Tuple[List[Dict[str, Any]], Dict[str, Any]]] = {}
     renames, authored = _op_hints(op)
     for i, (mid, restate) in targets.items():
         plans[i] = absorb_records(state, mid, emissions[i]["text"], renames=renames, authored=authored,
                                   departing={d[1] for d in departures.values() if d[2] == i},
                                   arrivals={n: departures[n][1] for n in gains[i]},
-                                  restate=restate)
+                                  restate=restate, imports_for=imports_for.get(i))
     return plans, absorbed
 
 
@@ -945,7 +985,8 @@ def journaled_emit(
                                   **{k: p["_report"][k] for k in ("records", "changed", "placed",
                                                                   "born", "retired", "renamed",
                                                                   "arrived", "departed",
-                                                                  "restated")}})
+                                                                  "restated", "dropped",
+                                                                  "derived")}})
     for r in retires:
         if (r["repo_key"], r["module_path"]) in absorbed:
             continue  # a re-stated captured module: its module record moved the key

@@ -43,9 +43,9 @@ from cjm_dev_graph_schema.nodes import CodeTextNode
 from cjm_dev_graph_schema.vocab import DevRelations
 from cjm_python_decompose_core.elements import (_parse_own, binding_union, CodeElement,
                                                 compose_module, element_names, import_slot, IMPORTS,
-                                                lift_imports, unresolved_names)
-from cjm_python_decompose_core.emit import (_looks_like_docstring, render_import_block,
-                                            sibling_modules)
+                                                lift_imports, string_reads, unresolved_names)
+from cjm_python_decompose_core.emit import (_looks_like_docstring, render_binding,
+                                            render_import_block, sibling_modules)
 from cjm_python_decompose_core.extract import _text_region_kind, decompose_text
 from cjm_python_decompose_core.parse import _text_region_key, parse_regions, SourceRegion
 
@@ -505,6 +505,7 @@ def absorb_records(
     departing: Optional[Set[str]] = None,  # Symbol elements leaving this module in this write (a move's; their members go with them)
     arrivals: Optional[Dict[str, str]] = None,  # Top-level qualname -> the element arriving from another captured module in this write
     restate: Optional[Dict[str, str]] = None,  # The module's own state as the write states it ({repo_key, module_path, import_name}): a rename-module, or a birth when `mid` is not journaled
+    imports_for: Optional[Dict[str, Dict[str, Any]]] = None,  # name -> the binding a move derives for it from another module of the write (`element_plan`)
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:  # (the element records for what changed, the report)
     """A write to a captured module, at element grain (abfc2829 (7)): the new text is lifted into
     elements and each is matched to the element it continues -- a symbol by its qualname (through the
@@ -517,15 +518,21 @@ def absorb_records(
     `element-retire` for an element the text no longer holds; a birth takes its address (design
     detail 6d35c07d (5)). THE BINDING CHECK (abfc2829 (2)): a write that leaves a name read that no
     binding, builtin or module-level name covers is refused -- the name it introduces, so a module
-    never holds a NameError between two writes; a binding no element claims is kept on the imports
-    element and reported (`unclaimed`), never pruned.
+    never holds a NameError between two writes. A binding its element stops reading is DROPPED
+    (design detail 25c1fadc, ruling D) -- unless an element still reads its name through a string
+    (`string_reads`: a fixture string, an `__all__` entry, a string annotation); a binding no element
+    ever claimed is kept on the imports element and reported (`unclaimed`): a re-export, a
+    side-effect import.
 
     A MOVE (design detail aba8ec79 (2)): an arrival keeps its element id and brings its members, its
     bindings travelling with it (those its text still names); a departure is never retired here, and
-    the bindings it owned leave with it rather than falling to this module's imports element. A
+    the bindings it owned leave with it rather than falling to this module's imports element. A name
+    the move leaves unbound that another module of the write defines is bound from that module
+    (`imports_for`, finding 73714120: read from the modules' own definitions, never from USES). A
     `restate` re-states the module's own path under its kept id (a rename-module, (4)) or, for a
-    module not yet journaled, gives birth to it captured: module record first, capture last (the
-    user's ruling bef8e6b8). A travelling binding lands only for a name the text binds nowhere else. Pure -- the caller appends; the records applied to the state must
+    module not yet journaled (or one a retire ended), gives birth to it captured: module record
+    first, capture last (the user's ruling bef8e6b8). A travelling binding lands only for a name the
+    text binds nowhere else. Pure -- the caller appends; the records applied to the state must
     compose the canonical text, or the write is refused."""
     fold = state.elements
     cur = fold.modules.get(mid)
@@ -662,8 +669,8 @@ def absorb_records(
             key = _text_region_key(e.text)
             ids[i] = _text_id(mid, f"{owner}: {key}" if owner else key, taken)
             taken.add(ids[i])
+    bkey = lambda b: tuple(sorted(b.items()))
     if arrived or departed:  # bindings travel with their element (aba8ec79 (2))
-        bkey = lambda b: tuple(sorted(b.items()))
         bound = {b.get("name") for e in new for b in e.bindings}
         for i, e in enumerate(new):
             if ids[i] in arrived:
@@ -676,6 +683,30 @@ def absorb_records(
                 owned = {bkey(b) for x in departed for b in old_el[x].bindings}
                 kept = {bkey(b) for b in old_el[old_imports].bindings} if old_imports else set()
                 e.bindings = [b for b in e.bindings if bkey(b) not in owned or bkey(b) in kept]
+    derived: Set[str] = set()
+    if imports_for:  # a move's imports between its modules (finding 73714120)
+        bound = {b.get("name") for e in new for b in e.bindings}
+        for e in new:
+            if e.kind == IMPORTS:
+                continue
+            names = element_names(e.text)
+            add = [b for n, b in sorted(imports_for.items()) if n in names and n not in bound]
+            if add:
+                e.bindings = e.bindings + add
+                derived |= {render_binding(b) for b in add}
+    dropped: Set[str] = set()
+    if not born_module:  # a binding its element stopped reading drops (ruling D)
+        claimed = {bkey(b) for eid, _p in outline if eid not in departed for b in old_el[eid].bindings}
+        kept_before = {bkey(b) for b in old_el[old_imports].bindings} if old_imports else set()
+        reads = set().union(*(string_reads(e.text) for e in new if e.kind != IMPORTS))
+        imports = next(e for e in new if e.kind == IMPORTS)
+        keep = []
+        for b in imports.bindings:
+            if bkey(b) in claimed and bkey(b) not in kept_before and b.get("name") not in reads:
+                dropped.add(render_binding(b))
+            else:
+                keep.append(b)
+        imports.bindings = keep
     try:
         canonical = compose_module(new, local)
         back = lift_imports(canonical).elements
@@ -747,6 +778,7 @@ def absorb_records(
               "arrived": sorted(arrived), "departed": sorted(departed),
               "restated": "born" if born_module else ("path" if restated else ""),
               "unclaimed": [b.get("name") for b in imports.bindings],
+              "dropped": sorted(dropped), "derived": sorted(derived),
               "binding_check": "unchecked (a star import)" if unresolved is None else "clean"}
     return recs, report
 
