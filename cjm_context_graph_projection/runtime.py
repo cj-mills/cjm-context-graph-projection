@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import AsyncIterator
 
+from cjm_context_graph_primitives.timings import span
 from cjm_substrate.core.manager import CapabilityManager
 from cjm_substrate.core.queue import JobQueue
 
@@ -46,29 +47,33 @@ async def open_graph(
     `readonly` rides the store's SG-41 mode (URI `mode=ro`: any write raises at the
     SQLite layer, and the db must pre-exist) — the guarantee the cross-graph seam
     (0154f5e4) rests on: a sibling graph is observed, never written."""
-    manager = CapabilityManager(search_paths=[Path(manifests_dir)])
-    manager.discover_manifests()
-    by_name = {m.name: m for m in manager.discovered}
-    if graph_id not in by_name:
-        raise RuntimeError(f"graph capability {graph_id!r} not found in {manifests_dir} "
-                           f"(discovered: {sorted(by_name)})")
-    config = {"db_path": str(graph_db_path)}
-    if readonly:
-        if not Path(graph_db_path).exists():
-            raise RuntimeError(f"read-only graph must pre-exist: {graph_db_path}")
-        config["readonly"] = True
-    if not manager.load_capability(by_name[graph_id], config=config):
-        raise RuntimeError(f"failed to load {graph_id} on {graph_db_path}")
-    if hasattr(manager, "set_observability_class"):
-        # Graph ops are AMBIENT work (DEC 8bf656c0): compute-light and
-        # re-derivable from the context-graph journals — their per-op success
-        # accounting must not grind the substrate journal at feed-poll /
-        # rebuild-storm cadence (hasattr: older substrate = pre-gate behavior).
-        manager.set_observability_class(graph_id, "ambient")
-    queue = JobQueue(deps=manager, max_history=max_history)
-    await queue.start()
+    # The instrument (design detail 681604c1): opening and closing the store are phases of
+    # every run that opens a graph -- the fixed cost an out-of-process store charges per run
+    with span("open_graph"):
+        manager = CapabilityManager(search_paths=[Path(manifests_dir)])
+        manager.discover_manifests()
+        by_name = {m.name: m for m in manager.discovered}
+        if graph_id not in by_name:
+            raise RuntimeError(f"graph capability {graph_id!r} not found in {manifests_dir} "
+                               f"(discovered: {sorted(by_name)})")
+        config = {"db_path": str(graph_db_path)}
+        if readonly:
+            if not Path(graph_db_path).exists():
+                raise RuntimeError(f"read-only graph must pre-exist: {graph_db_path}")
+            config["readonly"] = True
+        if not manager.load_capability(by_name[graph_id], config=config):
+            raise RuntimeError(f"failed to load {graph_id} on {graph_db_path}")
+        if hasattr(manager, "set_observability_class"):
+            # Graph ops are AMBIENT work (DEC 8bf656c0): compute-light and
+            # re-derivable from the context-graph journals — their per-op success
+            # accounting must not grind the substrate journal at feed-poll /
+            # rebuild-storm cadence (hasattr: older substrate = pre-gate behavior).
+            manager.set_observability_class(graph_id, "ambient")
+        queue = JobQueue(deps=manager, max_history=max_history)
+        await queue.start()
     try:
         yield GraphHandle(queue=queue, graph_id=graph_id)
     finally:
-        await queue.stop()
-        manager.unload_capability(graph_id)
+        with span("close_graph"):
+            await queue.stop()
+            manager.unload_capability(graph_id)

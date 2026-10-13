@@ -19,6 +19,7 @@ re-applying the log collides into verified no-ops.
 import json
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -26,6 +27,7 @@ from cjm_context_graph_layer.identity import derive_node_id
 from cjm_context_graph_layer.ops import observe_writes, PROVENANCE_TS
 from cjm_context_graph_primitives.journal import (append_write, journal_segments, read_journal,
                                                   read_segment)
+from cjm_context_graph_primitives.timings import record_series, timed
 from cjm_dev_graph_schema.identity import (code_module_node_id, entity_node_id, note_node_id,
                                            section_node_id, series_node_id, session_node_id)
 from cjm_dev_graph_schema.nodes import DecisionNode
@@ -518,6 +520,7 @@ async def _apply_op(
     return verb
 
 
+@timed("replay_journal")
 async def replay_journal(
     gx: GraphHandle,
     path: Optional[str],  # Journal file path (JSONL); None = no writes ops (a source-only replay)
@@ -570,9 +573,14 @@ async def replay_journal(
     genesis = [op for op in ops if op.get("verb") == "new-note"]
     srecs, spans = _source_spans(notes, source_offset)
     counts["source_groups"] = 0
+    positions = {id(op): offset + i for i, op in enumerate(ops)}  # each op's journal position
 
     async def apply(op):
+        t = time.perf_counter()
         verb = await _apply_op(gx, op, emit_root)
+        # The instrument (681604c1): a verb's cost against its journal position -- flat when
+        # healthy, rising when an op's cost grows with the history before it
+        record_series(f"replay:{op.get('verb')}", positions[id(op)], time.perf_counter() - t)
         if verb:
             counts[verb] += 1
         else:
@@ -997,6 +1005,7 @@ async def journal_window_view(
     return base
 
 
+@timed("journal_trace")
 def node_journal_trace(
     paths: List[str],  # Journal files to scan (the writes + source journals together)
     node_id: str,      # FULL node id to trace (the show verb passes a resolved id)
@@ -1084,6 +1093,7 @@ def _segment_touch_rows(seg: str) -> List[Dict[str, Any]]:
     return rows
 
 
+@timed("journal_touch_rows")
 def journal_touch_rows(path: str) -> List[Dict[str, Any]]:
     """A journal's touch rows across its whole segment family (cold first,
     live tail last — `read_journal` order), served from the segment cache."""

@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional
 
 from cjm_context_graph_layer.ops import extend_graph, graph_task
 from cjm_context_graph_primitives.journal import append_write, op_clock, op_now, read_journal
+from cjm_context_graph_primitives.timings import span
 
 from .authoring import add_symbol, author, emit_artifact, emit_post, read_node, read_slot
 from .code_edges import orphaned_edges
@@ -43,6 +44,8 @@ from .module_ops import (add_module, delete_module, flip_notebook_to_py, new_mod
                          rename_module)
 from .onboarding import project_onboarding
 from .oracle import run_version_oracle
+from .perf import (begin_invocation, invocation_graph, invocation_parsed, perf_report, render_perf,
+                   run_invocation)
 from .projection import (explore, full_graph_view, get_schema, grep, locate, relevant, show, state,
                          subgraph_view)
 from .propose import propose_updates
@@ -144,7 +147,7 @@ READ_COMMANDS = frozenset({
     "notes-coverage", "notes-overlap", "notes-check", "notes-promotion",
     "notes-staging-index", "series-order", "site-links", "coverage", "hardware", "claims",
     "library", "paths", "traffic", "inbound-links", "standing", "relocation-plan",
-    "rebuild-diff", "round-trip", "section-roles", "concepts", "session-cost",
+    "rebuild-diff", "round-trip", "section-roles", "concepts", "session-cost", "perf",
 })
 # A read verb whose named flag turns on a WRITE mode: with the flag given, the invocation
 # is a write (opened read-write, refused under --read-only) -- `notes-overlap --rows` lands
@@ -376,6 +379,15 @@ async def _dispatch(args) -> int:
                            port=args.port, manifests_dir=args.manifests_dir,
                            index_html=EXPLORER_HTML, hybrid_html=HYBRID_HTML)
         return 0
+    if args.command == "perf":
+        # The instrument's read (design detail 681604c1): the timings ledger alone, no graph
+        if not args.timings_path:
+            print("error: perf reads the timings ledger -- pass --timings-path (cg-read bakes it)",
+                  file=sys.stderr)
+            return 1
+        print(render_perf(perf_report(args.timings_path, verb=args.verb, runs=args.runs,
+                                      since=_parse_ts(args.since)), args.format))
+        return 0
     if args.command == "rebuild-diff":
         # The standing check (design 8f6f2343): opens BOTH graphs read-only itself, so it
         # doesn't ride the single-graph context below. Exit 3 = differences found.
@@ -408,8 +420,12 @@ async def _dispatch(args) -> int:
         return 1 if any(p.get("error") for p in pulls) else 0
     # One live write window per invocation (design amendment 9ee4e346): the site-link step
     # runs once at its close, inside the op clock, when the invocation moved an input.
-    async with open_graph(args.graph_db_path, args.manifests_dir,
-                          readonly=_reads_only(args)) as gx, \
+    # The instrument (681604c1): the graph's open and close, the verb between them, and the
+    # growth covariates measured before the close, when the invocation is timed.
+    journals = {"writes": args.journal_path, "source": args.source_journal_path,
+                "memory": (load_graph_config(args.graph_db_path) or {}).get("memory_journal_path")}
+    async with invocation_graph(open_graph(args.graph_db_path, args.manifests_dir,
+                                           readonly=_reads_only(args)), journals) as gx, \
             site_link_window(gx, report=_report_site_links):
         if args.command == "ingest":
             note_aliases = await note_alias_map(gx)  # confirmed link aliases heal drifted refs
@@ -3373,6 +3389,9 @@ def _add_notes_lane_parsers(sub) -> None:
 
 
 def main() -> int:
+    # The instrument (design detail 681604c1): armed first, so what ran before here is the
+    # launch and the import, and the parser's build and parse is the `parse` phase
+    run = begin_invocation()
     ap = argparse.ArgumentParser(prog="cjm-context-graph",
                                  description="Projection/navigation + write surface over a context graph.")
     ap.add_argument("--graph-db-path", required=True, help="Explicit sqlite db path (no default)")
@@ -3391,6 +3410,11 @@ def main() -> int:
                          "appends {verb, delivered ids, n, request, session} — a SEPARATE "
                          "prunable telemetry stream, never the write journal (DEC 45df767d). "
                          "No default (cg-read bakes it).")
+    ap.add_argument("--timings-path", default=None,
+                    help="The timings ledger (JSONL): given, the invocation appends ONE event -- "
+                         "its phases, storage calls by method, the growth covariates -- telemetry "
+                         "beside the db, never replayed (design detail 681604c1). No default (the "
+                         "wrappers bake <db stem>.timings.jsonl).")
     ap.add_argument("--read-only", action="store_true",
                     help="Refuse every verb outside the read class (READ_COMMANDS) -- the "
                          "read surface cg-read exposes; a read verb opens the db read-only "
@@ -3656,6 +3680,17 @@ def main() -> int:
     p_rd.add_argument("--path-map", action="append", default=None,
                       help="OLD=NEW path-prefix rewrite applied to every string on both sides "
                            "before comparing (repeatable; a corpus moved on disk)")
+
+    p_perf = sub.add_parser("perf",
+                            help="The instrument's read (design detail 681604c1): per verb the "
+                                 "latest / median / p90 wall and its heaviest phases, cost fitted "
+                                 "against the growth covariates, regressions, the guards, the "
+                                 "latest rebuild per lane -- from --timings-path, nothing stored")
+    p_perf.add_argument("--verb", default=None, help="Only this verb")
+    p_perf.add_argument("--runs", type=int, default=50, help="History per verb: the newest N runs")
+    p_perf.add_argument("--since", default=None,
+                        help="Only events at or after this time (unix seconds, a session key, "
+                             "or YYYY-MM-DD)")
 
     p_pf = sub.add_parser("portfolio",
                           help="Workbench front door: every role-asserted anchor + lock lead "
@@ -4715,9 +4750,11 @@ def main() -> int:
     p_vz.add_argument("--write", action="store_true", help="Write the HTML to --out")
 
     args = ap.parse_args()
+    invocation_parsed(run, args.command, args.timings_path, db=Path(args.graph_db_path).name,
+                      read_only=_reads_only(args))
     _apply_graph_config(args)
     configure_reads(args.reads_path, request=_read_request(args))
-    return asyncio.run(_dispatch_clocked(args))
+    return run_invocation(run, args.timings_path, lambda: asyncio.run(_dispatch_clocked(args)))
 
 
 # The __main__ dispatch was demoted from here to a TAIL region (2026-08-13): under
@@ -4750,7 +4787,8 @@ def render(kind: str, data, fmt: str) -> str:
     renders routes through here BY CONSTRUCTION (the 6124d8bf coverage doctrine:
     no per-verb call to forget), so a future verb is recorded the day it lands."""
     record_read(kind, data)
-    return _render_base(kind, data, fmt)
+    with span("render"):  # the instrument (681604c1)
+        return _render_base(kind, data, fmt)
 
 
 def _read_request(args) -> Dict[str, str]:

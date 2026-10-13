@@ -21,6 +21,7 @@ from cjm_context_graph_layer.grammar import make_edge
 from cjm_context_graph_layer.identity import derive_node_id
 from cjm_context_graph_layer.ops import extend_graph, graph_task, PROVENANCE_TS
 from cjm_context_graph_primitives.provenance import SourceRef
+from cjm_context_graph_primitives.timings import timed
 from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.aliases import resolve_subject_id
 from cjm_dev_graph_schema.identity import note_node_id, section_node_id
@@ -224,6 +225,7 @@ def _match_supersede_targets(
     return {"ids": ids, "unmatched": unmatched, "ambiguous": ambiguous}
 
 
+@timed("assert_value")
 async def assert_value(
     gx: GraphHandle,
     subject: str,        # Subject (node id / entity key / name / alias / term)

@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 
 from cjm_context_graph_layer.ops import graph_task
 from cjm_context_graph_primitives.query import EdgeQuery, NodeQuery
+from cjm_context_graph_primitives.timings import timed
 
 from . import factlayer as F
 from .display import annotate_display, first_clause, node_title
@@ -208,6 +209,7 @@ async def find_seeds(
 _ID_PREFIX_RE = re.compile(r"^[0-9a-fA-F][0-9a-fA-F-]{5,35}$")
 
 
+@timed("resolve_node_ref")
 async def resolve_node_ref(
     gx: GraphHandle,
     ref: str,  # A full node id, or a unique id PREFIX (>= 6 hex chars)

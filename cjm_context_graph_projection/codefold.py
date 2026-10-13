@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from cjm_context_graph_layer.grammar import make_edge
+from cjm_context_graph_primitives.timings import timed
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 from cjm_python_decompose_core.extract import decompose_text
 from cjm_python_decompose_core.ingest import resolve_import
@@ -520,6 +521,7 @@ class CodeFold:
         return sorted(k for k in self.live if not str(k[1]).endswith(".py"))
 
 
+@timed("code_fold")
 def fold_source_journal(
     source_journal_path: str,  # The source journal (segment family)
     repos_dir: str,            # The repos root

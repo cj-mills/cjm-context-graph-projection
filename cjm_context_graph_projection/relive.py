@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from cjm_context_graph_layer.ops import graph_task
 from cjm_context_graph_primitives.query import EdgeQuery, NodeQuery, PropertyPredicate
+from cjm_context_graph_primitives.timings import timed
 from cjm_dev_graph_schema.identity import code_module_node_id
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 
@@ -150,6 +151,7 @@ def _touched_keys(
     return list(out)
 
 
+@timed("apply_live")
 async def apply_live(
     gx: GraphHandle,
     source_journal_path: Optional[str],  # The source journal the records were appended to

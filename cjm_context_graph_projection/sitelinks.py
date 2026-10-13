@@ -26,6 +26,7 @@ from urllib.parse import urljoin, urlsplit
 
 from cjm_context_graph_layer.ops import extend_graph, graph_task, observe_writes
 from cjm_context_graph_primitives.query import EdgeQuery, PropertyPredicate
+from cjm_context_graph_primitives.timings import timed
 from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.nodes import site_link_edge
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
@@ -161,6 +162,7 @@ async def _retired_sources(
             if any(F.prop(a, "value") == P.PUBLISH_RETIRED for a in F.active_assertions(slot, pairs))}
 
 
+@timed("resolve_site_links")
 async def resolve_site_links(
     gx: GraphHandle,
     note_ids: Optional[List[str]] = None,  # Scope to these notes (None = every Note on the graph)
@@ -280,6 +282,7 @@ def touches_inputs(
     return False
 
 
+@timed("site_link_step")
 async def step_site_links(
     gx: GraphHandle,
     writes: List[Dict[str, Any]],  # The window's writes

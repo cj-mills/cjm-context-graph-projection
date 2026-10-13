@@ -25,8 +25,7 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Set, Tuple
 
-from cjm_context_graph_primitives.journal import (journal_segments, maybe_rotate, op_clock, op_now,
-                                                  read_segment)
+from cjm_context_graph_primitives.journal import maybe_rotate, op_clock, op_now, read_journal
 from cjm_dev_graph_schema.identity import code_module_node_id, code_symbol_node_id
 from cjm_notebook_decompose_core.read import parse_notebook
 from cjm_python_decompose_core.elements import unresolved_names
@@ -187,14 +186,9 @@ def read_source_journal(
     path: str,  # Source-journal file path (JSONL)
 ) -> List[Dict[str, Any]]:  # The recorded source ops, in append order
     """Read every `source` op across the rotated SEGMENT FAMILY (one JSON object per
-    line; missing files = []) — cold segments first, live tail last: append order."""
-    ops: List[Dict[str, Any]] = []
-    for seg in journal_segments(path):
-        for line in read_segment(seg).splitlines():
-            line = line.strip()
-            if line:
-                ops.append(json.loads(line))
-    return ops
+    line; missing files = []) — cold segments first, live tail last: append order. The
+    primitives' family read, so the instrument measures it (681604c1)."""
+    return read_journal(path)
 
 
 def latest_source_ops(

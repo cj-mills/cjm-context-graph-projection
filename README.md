@@ -56,6 +56,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - **`cjm_context_graph_projection.onboarding`** — Project the MEMORY onboarding surface from the graph's ASSERTED lead structure.
 - **`cjm_context_graph_projection.oracle`** — The version oracle: a programmatic Procedure that keeps `version` slots fresh.
 - **`cjm_context_graph_projection.paths`** — The path model (design ae698640, the walk 57287d1b, the refactor leg ad9bef5a): artifacts,
+- **`cjm_context_graph_projection.perf`** — THE INSTRUMENT's projection half: one timing event per CLI invocation, and the `perf` read.
 - **`cjm_context_graph_projection.postpage`** — The post page's projected parts (the post page of de808eae (2); its rest designed as 39c51c15
 - **`cjm_context_graph_projection.projection`** — The projection core: schema / show / relevance / state over a context graph.
 - **`cjm_context_graph_projection.propose`** — Triage proposals: an agent DRAFTS the update for a stale deliverable (work item bb015d12).
@@ -702,6 +703,23 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `step_view` _function_ — One step in context: its relations, what it continues from and what continues from it, its
 - `steps_of` _function_ — Every deliverable with relations, as a step: what it requires (artifact / environment ->
 - `transitions_error` _function_ — A stage's transitions (ae698640 (2)): each {in: [kinds], optional: [kinds], out: kind}, the
+
+### `cjm_context_graph_projection.perf`
+
+- `append_timing` _function_ — Append one timing event: O(1), dedup off (every run is one event), fail-open -- the
+- `begin_invocation` _function_ — Arm the instrument at the top of `main` -- everything before it is the launch and the
+- `end_to_end` _function_ — An invocation's whole cost as its caller waits for it: the in-process wall plus the
+- `fit` _function_ — Least squares of cost on one covariate -- the shape d7742c47 (b) reads. None when the
+- `guards` _function_ — The design's guards, read off one event (681604c1): each row names the guard, what it
+- `invocation_graph` _function_ — The invocation's graph with its phases: the body runs as `verb`, and the covariates are
+- `invocation_parsed` _function_ — Name the run, record the parse, and keep it armed only when a ledger will take it.
+- `journal_footprint` _function_ — A journal family's size as stored: segments and bytes on disk (a cold segment counts
+- `measure_covariates` _function_ — The growth covariates every event carries: nodes, edges and bytes of the store, nodes
+- `perf_report` _function_ — The ledger read: per verb the latest / median / p90 END-TO-END seconds (launch + import
+- `render_perf` _function_ — Render the perf read: tables for a person, the result as JSON for an agent.
+- `run_invocation` _function_ — Run the invocation and append its event, whatever its outcome -- a refusal or a crash
+- `self_times` _function_ — A phase's SELF time: its inclusive seconds less its direct children's.
+- `series_trend` _function_ — A positioned cost's trend: the mean cost per item in the last third of the bins over the
 
 ### `cjm_context_graph_projection.postpage`
 
