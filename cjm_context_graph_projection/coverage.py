@@ -76,6 +76,9 @@ ENTITY_FIELDS: Dict[str, Dict[str, type]] = {
     # The section roles (ruling 6a203252 (3)): the role judge's options, its criteria the
     # description and not-for line, its position the order the review lists them in
     P.ENTITY_SECTION_ROLE: {"description": str, "not_for": str, "position": int, "retired": bool},
+    # The performance target classes (ruling dba17ca8, design detail 2f5033bf (3)): the targets
+    # themselves are facts on the class (P.PERF_TARGETS, P.PERF_MEMBER), never record fields
+    P.ENTITY_PERF_CLASS: {"description": str, "position": int},
 }
 _REQUIRED = {P.ENTITY_TASK: ("position",), P.ENTITY_STAGE: ("position",),
              P.ENTITY_HARDWARE: ("device_class",), P.ENTITY_CLAIM: ("statement", "position"),
@@ -84,7 +87,8 @@ _REQUIRED = {P.ENTITY_TASK: ("position",), P.ENTITY_STAGE: ("position",),
              **{k: ("description", "not_for") for k in P.FACET_KINDS},
              P.ENTITY_ARTIFACT_KIND: ("description",), P.ENTITY_ARTIFACT: ("artifact_kind",),
              P.ENTITY_ENVIRONMENT: ("description",), P.ENTITY_CONCEPT: ("description", "not_for", "area"),
-             P.ENTITY_SECTION_ROLE: ("description", "not_for", "position")}
+             P.ENTITY_SECTION_ROLE: ("description", "not_for", "position"),
+             P.ENTITY_PERF_CLASS: ("description", "position")}
 _ALLOWED = {(P.ENTITY_HARDWARE, "device_class"): P.DEVICE_CLASSES,   # closed slates on a field
             (P.ENTITY_WORK, "form"): P.WORK_FORMS}
 TUTORIAL_KIND = "tutorial"   # the navigation kind (predicates.DELIVERABLE_KINDS) the matrix reads

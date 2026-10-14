@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Set, Tuple
 
 from cjm_context_graph_primitives.journal import maybe_rotate, op_clock, op_now, read_journal
+from cjm_context_graph_primitives.timings import record_append
 from cjm_dev_graph_schema.identity import code_module_node_id, code_symbol_node_id
 from cjm_notebook_decompose_core.read import parse_notebook
 from cjm_python_decompose_core.elements import unresolved_names
@@ -1084,6 +1085,7 @@ def _append_record(
     line = json.dumps(record, sort_keys=True)
     with p.open("a") as f:
         f.write(line + "\n")
+    record_append(path, len(line.encode("utf-8")) + 1)  # the instrument's logical bytes (2f5033bf (1))
     maybe_rotate(path)
     appended = _APPENDED.get()
     if appended is not None:

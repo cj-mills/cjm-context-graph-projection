@@ -5,14 +5,16 @@ the report); the end-to-end half runs real CLI invocations with --timings-path a
 events they appended."""
 
 import json
+import math
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 from cjm_context_graph_primitives.journal import append_op, read_journal
-from cjm_context_graph_projection.perf import (fit, guards, perf_report, render_perf, self_times,
-                                               series_trend)
+from cjm_context_graph_projection.perf import (fit, guards, io_row, load_report, net_written,
+                                               perf_report, render_perf, self_times, series_trend,
+                                               target_standing, tier_curves, tier_regressions)
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS
 
 
@@ -188,3 +190,96 @@ def test_a_gesture_writes_when_it_calls_a_store_write():
     assert not guards(ev)
     ev["storage"]["update_node"] = {"calls": 1, "s": 0.01}
     assert [g["guard"] for g in guards(ev)] == ["whole-scope-in-write"]
+
+
+def test_disk_figures_and_the_read_wrote_guard():
+    """Design detail 2f5033bf (1): net bytes (a cancelled write never reached the disk), the
+    journal bytes appended, the store's share, commits (one per store write call) and the
+    amplification; a read writing beyond its own appends trips read-wrote."""
+    ev = _event("assert", 1.0, 1, read_only=False,
+                io={"write_bytes": 40960, "cancelled_write_bytes": 8192, "read_bytes": 4096},
+                appended={"x.writes.jsonl": {"ops": 1, "bytes": 512}},
+                storage={"add_nodes": {"calls": 2, "s": 0.1, "io_write_bytes": 16384},
+                         "query_nodes": {"calls": 3, "s": 0.1, "io_write_bytes": 4096,
+                                         "io_cancelled_write_bytes": 4096}})
+    assert io_row(ev) == {"written": 32768, "read": 4096, "appended": 512, "store_written": 16384,
+                          "commits": 2, "amplification": 64.0}
+    assert net_written(None) is None and net_written({"write_bytes": 1, "cancelled_write_bytes": 5}) == 0
+    quiet = _event("show", 1.0, 2, io={"write_bytes": 4096}, appended={"r.jsonl": {"ops": 1, "bytes": 300}})
+    loud = _event("show", 1.0, 3, io={"write_bytes": 4 << 20})
+    assert not [g for g in guards(quiet) if g["guard"] == "read-wrote"]
+    assert [g["guard"] for g in guards(loud)] == ["read-wrote"]
+
+
+def _tier_runs(lane, verb, walls, outcome=0):
+    """A canonical verb's harness and CLI events at each tier (its answer grows with the tier)."""
+    out = []
+    for tier, wall in walls.items():
+        rid = f"{lane}-{verb}-{tier}"
+        a = {"lane": lane, "tier": tier}
+        out.append({"verb": verb, "kind": "bench", "run_id": rid, "ts": float(tier), "wall_s": wall,
+                    "outcome": outcome, "peak_rss_kb": 1000, "out_bytes": 100 * tier, "attrs": a})
+        out.append({"verb": verb, "kind": "cli", "run_id": rid, "ts": float(tier), "wall_s": wall,
+                    "outcome": outcome, "phases": {"verb": {"calls": 1, "s": wall}},
+                    "io": {"write_bytes": 0}, "attrs": a})
+    return out
+
+
+def test_target_standing_reads_shape_absolute_and_membership():
+    """Design detail 2f5033bf (3): each seat against its class -- a flat read passes, a linear
+    by-id read fails, a cost linear in a linear answer passes per answer, a seat in no class is
+    NO TARGET, a picker that timed out fails at x32 although it never ran there, and a class
+    carrying only load targets claims no seat (its load rows are unmeasured with no load run)."""
+    tiers = (1, 2, 4, 8, 16, 32)
+    events = (_tier_runs("dev", "read", {k: 0.01 for k in tiers})
+              + _tier_runs("dev", "show", {k: 0.05 * k for k in tiers})
+              + _tier_runs("dev", "locate", {k: 0.02 * k for k in tiers})
+              + _tier_runs("dev", "odd", {k: 0.01 for k in tiers})
+              + _tier_runs("dev", "picker", {1: 1.0, 2: 3.0, 4: 9.0, 8: 27.0})
+              + _tier_runs("dev", "picker", {16: 3600.0}, outcome="timeout"))
+    classes = [
+        {"key": "class-1", "targets": {"perf_b_max": "0.2", "perf_x32_s": "0.1", "perf_gates": "true"},
+         "members": ["read", "show"]},
+        {"key": "class-2", "targets": {"perf_b_max": "0.2", "perf_per_answer": "true"}, "members": ["locate"]},
+        {"key": "class-3", "targets": {"perf_b_max": "1.1", "perf_x32_s": "1", "perf_gates": "true"},
+         "members": ["picker"]},
+        {"key": "class-7", "targets": {"perf_load_p99_ratio": "2", "perf_gates": "true"},
+         "members": ["read", "show"]}]
+    st = target_standing(tier_curves(events), [], classes)
+    by = {s["seat"]: s for s in st["seats"]}
+    assert by["read"]["class"] == "class-1" and by["read"]["status"] == "pass" and by["read"]["gate"]
+    assert by["show"]["status"] == "fail" and not by["show"]["gate"]
+    assert by["locate"]["status"] == "pass"
+    assert by["odd"]["status"] == "no target"
+    assert by["picker"]["status"] == "fail"
+    assert any(c["target"] == "x32 s" and c["value"] == math.inf for c in by["picker"]["checks"])
+    assert [r["status"] for r in st["loads"]] == ["unmeasured"] and not st["ready"]
+
+
+def test_tier_regressions_and_the_load_read():
+    """Design detail 2f5033bf (2) / (3): a tier seat's latest reading against its best there;
+    a load run read per verb (p50 / p99 of the harness's seconds, the CLI's own beside them),
+    its throughput, failures by outcome, its clients' bytes and the load event's summary."""
+    def bench(rid, ts, wall):
+        return {"verb": "show", "kind": "bench", "run_id": rid, "ts": ts, "wall_s": wall,
+                "outcome": 0, "attrs": {"lane": "dev", "tier": 8}}
+    assert tier_regressions([bench("a", 1, 2.0), bench("b", 2, 1.0), bench("c", 3, 3.0)]) == [
+        {"lane": "dev", "verb": "show", "tier": 8, "latest_s": 3.0, "best_s": 1.0, "ratio": 3.0}]
+    events = []
+    for i, (verb, wall, outcome, ro) in enumerate([("show", 1.0, 0, True), ("show", 3.0, 0, True),
+                                                   ("decide", 2.0, 0, False), ("show", 0.5, 1, True)]):
+        a = {"lane": "dev", "tier": 1, "load": "L", "clients": 2, "client": i % 2}
+        events.append({"verb": verb, "kind": "bench", "run_id": f"L{i}", "ts": 10.0 + i,
+                       "wall_s": wall, "outcome": outcome, "attrs": a})
+        events.append({"verb": verb, "kind": "cli", "run_id": f"L{i}", "ts": 10.0 + i, "wall_s": wall,
+                       "outcome": outcome, "phases": {"verb": {"calls": 1, "s": wall / 2}},
+                       "io": {"write_bytes": 1000}, "attrs": {**a, "read_only": ro}})
+    events.append({"verb": "bench-load", "kind": "bench", "ts": 20.0, "wall_s": 5.0,
+                   "peak_rss_kb": 2048, "integrity": {"ok": True},
+                   "attrs": {"lane": "dev", "tier": 1, "load": "L", "clients": 2}})
+    (r,) = load_report(events)
+    assert (r["clients"], r["ops"], r["failures"], r["window_s"]) == (2, 4, {"1": 1}, 4.0)
+    show = next(v for v in r["verbs"] if v["verb"] == "show")
+    assert (show["n"], show["p50_s"], show["p99_s"], show["verb_p99_s"]) == (2, 1.0, 3.0, 1.5)
+    assert r["written"] == 3000 and r["peak_rss_kb"] == 2048 and r["integrity"] == {"ok": True}
+    assert r["writes_per_s"] == 0.25 and r["ops_per_s"] == 0.75

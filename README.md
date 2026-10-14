@@ -184,10 +184,15 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `bench_config` _function_ — The harness's settings as DATA; `bench_dir` has no default (a path on one machine is
 - `build` _function_ — Snapshot (once), stage the copies the tiers need (missing or from another snapshot, in
 - `env_python` _function_ — The interpreter of the env an app runs in (design detail 4389a579: a gesture driver runs
+- `extract_workload` _function_ — A recorded session as a WORKLOAD (design detail 2f5033bf (2)): its reads-ledger requests
 - `family_ops` _function_ — Ops in a tier's family as it stands: the cold segments counted at assembly (immutable),
 - `inside` _function_ — The path guard (design detail 3bd8673d (3)): every write resolves inside the bench.
+- `invert_request` _function_ — A recorded request back to its argv by the verb's OWN parser (design detail 2f5033bf (2)):
 - `lane_dir` _function_ — The lane's directory under the bench directory, refused if the lane's own graph or
+- `load` _function_ — THE CONCURRENT REPLAY MODE (design detail 2f5033bf (2)): at each tier and client count, N
+- `load_settings` _function_ — The concurrent replay mode's settings as DATA: the bench config's `load` object.
 - `measure` _function_ — Run one invocation under the limits: its peak RSS is the process tree's (the graph
+- `memory_ceiling_kb` _function_ — The machine guard (design detail 2f5033bf (2)): a load must never push the machine into
 - `placeholders_of` _function_ — The default targets of the canonical verbs, read off the snapshot once.
 - `rekeyer` _function_ — The copy's id map, applied to any value: a string has every UUID token replaced by
 - `render_bench` _function_ — Render a bench result: tables for a person, the result as JSON for an agent.
@@ -197,6 +202,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `stage_copy` _function_ — Re-key copy `copy` of the snapshot once: its rows (nodes, edges -- no indexes, the
 - `status` _function_ — What the bench holds for a lane: the snapshot, the staged copies, the built tiers.
 - `tree_rss_kb` _function_ — The tree's resident set, read from /proc (statm + each task's children). An invocation's
+- `verb_parser` _function_ — One verb's subparser, read off the parser's subcommands.
 - `verb_specs` _function_ — The canonical verbs for a lane: the configured `verbs` replace the default list (the
 
 ### `cjm_context_graph_projection.categories`
@@ -236,6 +242,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 
 ### `cjm_context_graph_projection.cli`
 
+- `build_parser` _function_ — The CLI's parser, built once per invocation -- factored out of `main` so the scale
 - `main` _function_
 - `render` _function_ — The read-delivery seam: tap the reads ledger, then delegate to the real
 
@@ -730,23 +737,30 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 ### `cjm_context_graph_projection.perf`
 
 - `append_timing` _function_ — Append one timing event: O(1), dedup off (every run is one event), fail-open -- the
+- `appended_bytes` _function_ — The run's journal appends, every file (design detail 2f5033bf (1)).
 - `begin_invocation` _function_ — Arm the instrument at the top of `main` -- everything before it is the launch and the
 - `end_to_end` _function_ — An invocation's whole cost as its caller waits for it: the in-process wall plus the
 - `fit` _function_ — Least squares of cost on one covariate -- the shape d7742c47 (b) reads. None when the
 - `gesture_cost` _function_ — What a gesture cost the store (design detail 4389a579): its wait on the loop and its
-- `growth` _function_ — A cost's growth exponent across the scale tiers (design detail 3bd8673d): least squares
+- `growth` _function_ — A measure's growth exponent across the scale tiers (design detail 3bd8673d): least
 - `guards` _function_ — The design's guards, read off one event (681604c1): each row names the guard, what it
 - `invocation_graph` _function_ — The invocation's graph with its phases: the body runs as `verb`, and the covariates are
 - `invocation_parsed` _function_ — Name the run, record the parse, and keep it armed only when a ledger will take it.
+- `io_row` _function_ — An event's disk figures (design detail 2f5033bf (1)): net bytes written and bytes read
 - `journal_footprint` _function_ — A journal family's size as stored: segments and bytes on disk (a cold segment counts
+- `load_report` _function_ — The concurrent replay mode's read (design detail 2f5033bf (2)): per load run -- its lane,
+- `load_targets` _function_ — The target classes (design detail 2f5033bf (3)): every perf_class Entity and its ACTIVE
 - `measure_covariates` _function_ — The growth covariates every event carries: the store half (nodes, edges and bytes of the
+- `net_written` _function_ — Bytes a run wrote to the disk (design detail 2f5033bf (1)): write_bytes less
 - `perf_report` _function_ — The ledger read: per verb the latest / median / p90 END-TO-END seconds (launch + import
 - `poll_rows` _function_ — A poll's cost per tick (design detail 4389a579): its rolling windows' ticks, the mean work
 - `render_perf` _function_ — Render the perf read: tables for a person, the result as JSON for an agent.
 - `run_invocation` _function_ — Run the invocation and append its event, whatever its outcome -- a refusal or a crash
 - `self_times` _function_ — A phase's SELF time: its inclusive seconds less its direct children's.
 - `series_trend` _function_ — A positioned cost's trend: the mean cost per item in the last third of the bins over the
+- `target_standing` _function_ — Each seat against its class's targets (ruling dba17ca8, design detail 2f5033bf (3)).
 - `tier_curves` _function_ — The scale harness's read (design detail 3bd8673d): per lane and canonical verb, the
+- `tier_regressions` _function_ — A seat's latest reading at a tier against its best there (design detail 2f5033bf (3)):
 
 ### `cjm_context_graph_projection.postpage`
 

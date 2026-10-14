@@ -44,8 +44,8 @@ from .module_ops import (add_module, delete_module, flip_notebook_to_py, new_mod
                          rename_module)
 from .onboarding import project_onboarding
 from .oracle import run_version_oracle
-from .perf import (begin_invocation, invocation_graph, invocation_parsed, perf_report, render_perf,
-                   run_invocation)
+from .perf import (begin_invocation, invocation_graph, invocation_parsed, load_targets, perf_report,
+                   render_perf, run_invocation)
 from .projection import (explore, full_graph_view, get_schema, grep, locate, relevant, show, state,
                          subgraph_view)
 from .propose import propose_updates
@@ -385,14 +385,25 @@ async def _dispatch(args) -> int:
             print("error: perf reads the timings ledger -- pass --timings-path (cg-read bakes it)",
                   file=sys.stderr)
             return 1
-        print(render_perf(perf_report(args.timings_path, verb=args.verb, runs=args.runs,
-                                      since=_parse_ts(args.since)), args.format))
+        targets = None
+        if args.check:  # 2f5033bf (3): the target classes are facts on the graph
+            async with open_graph(args.graph_db_path, args.manifests_dir, readonly=True) as gx:
+                targets = await load_targets(gx)
+        res = perf_report(args.timings_path, verb=args.verb, runs=args.runs,
+                          since=_parse_ts(args.since), targets=targets)
+        print(render_perf(res, args.format))
+        # the ratchet's gate: a regression (the targets' standing is reported, never an exit); the
+        # instrument's own read never gates itself -- its --check opens the graph a plain read does not
+        if args.check and ([r for r in res["regressions"] if r["verb"] != "perf"]
+                           or res["tier_regressions"]):
+            return 1
         return 0
     if args.command == "bench":
         # The scale harness (design detail 3bd8673d): its tiers live in the bench directory and
         # every measured run is its own CLI invocation against one -- no graph opens here
         from .bench import BenchRefusal, bench_config, render_bench, resolve_lane
         from .bench import build as bench_build, run as bench_run, status as bench_status
+        from .bench import extract_workload, load as bench_load
         try:
             settings = bench_config(args.graph_db_path)
             journals = {"writes": args.journal_path, "source": args.source_journal_path,
@@ -408,6 +419,17 @@ async def _dispatch(args) -> int:
                                        "--timings-path (cg-read bakes it)")
                 res = bench_run(lane, settings, args.timings_path, tiers=args.tier,
                                 verbs=args.verb, repeat=args.repeat)
+            elif args.action == "workload":
+                if not args.session:
+                    raise BenchRefusal("bench workload replays a recorded session -- pass --session")
+                res = extract_workload(lane, settings, args.session, actor=args.from_actor,
+                                       name=args.name)
+            elif args.action == "load":
+                if not args.timings_path:
+                    raise BenchRefusal("bench load records into the timings ledger -- pass "
+                                       "--timings-path (cg-read bakes it)")
+                res = bench_load(lane, settings, args.timings_path, tiers=args.tier,
+                                 clients=args.clients, workloads=args.workload, steps=args.steps)
             else:
                 res = bench_status(lane, settings)
         except BenchRefusal as e:
@@ -3424,10 +3446,10 @@ def _add_notes_lane_parsers(sub) -> None:
     p.add_argument("--actor", default=_DEFAULT_ACTOR)
 
 
-def main() -> int:
-    # The instrument (design detail 681604c1): armed first, so what ran before here is the
-    # launch and the import, and the parser's build and parse is the `parse` phase
-    run = begin_invocation()
+def build_parser() -> argparse.ArgumentParser:  # The CLI's parser, every verb
+    """The CLI's parser, built once per invocation -- factored out of `main` so the scale
+    harness's concurrent replay mode can invert it: a recorded request's keys are its argparse
+    dests (design detail 2f5033bf (2))."""
     ap = argparse.ArgumentParser(prog="cjm-context-graph",
                                  description="Projection/navigation + write surface over a context graph.")
     ap.add_argument("--graph-db-path", required=True, help="Explicit sqlite db path (no default)")
@@ -3727,6 +3749,10 @@ def main() -> int:
                                  "latest rebuild per lane -- from --timings-path, nothing stored")
     p_perf.add_argument("--verb", default=None, help="Only this verb")
     p_perf.add_argument("--runs", type=int, default=50, help="History per verb: the newest N runs")
+    p_perf.add_argument("--check", action="store_true",
+                        help="Read every seat against its target class (perf_class facts on the "
+                             "graph; design detail 2f5033bf (3)) and exit 1 on a regression -- a "
+                             "live verb's, or a tier seat's against its best there")
     p_perf.add_argument("--since", default=None,
                         help="Only events at or after this time (unix seconds, a session key, "
                              "or YYYY-MM-DD)")
@@ -3736,7 +3762,10 @@ def main() -> int:
                                   "of a lane's graph and journals in the bench directory, run the "
                                   "canonical verbs at each into the timings ledger (perf reads the "
                                   "curves), or show what the bench holds")
-    p_bench.add_argument("action", choices=("build", "run", "status"))
+    p_bench.add_argument("action", choices=("build", "run", "status", "workload", "load"),
+                         help="build / run / status the tiers; workload: a recorded session as a "
+                              "replayable workload; load: the concurrent replay mode (design "
+                              "detail 2f5033bf (2))")
     p_bench.add_argument("--lane", default=None,
                          help="A sibling_graphs key (default: the invoking graph)")
     p_bench.add_argument("--tier", type=int, action="append", default=None,
@@ -3747,6 +3776,18 @@ def main() -> int:
     p_bench.add_argument("--repeat", type=int, default=1, help="run: runs per verb per tier")
     p_bench.add_argument("--resnapshot", action="store_true",
                          help="build: take a fresh snapshot (every copy and tier rebuilds)")
+    p_bench.add_argument("--session", default=None,
+                         help="workload: the recorded session to replay (its key)")
+    p_bench.add_argument("--from-actor", default=None,
+                         help="workload: only this actor's steps (a sub-agent's trace)")
+    p_bench.add_argument("--name", default=None,
+                         help="workload: its name (default: the session, and the actor)")
+    p_bench.add_argument("--clients", type=int, action="append", default=None,
+                         help="load: a client count (repeatable; default: the load settings')")
+    p_bench.add_argument("--workload", action="append", default=None,
+                         help="load: a workload name (repeatable; default: the settings' set, else all)")
+    p_bench.add_argument("--steps", type=int, default=None,
+                         help="load: steps per client, at most (default: the load settings')")
 
     p_pf = sub.add_parser("portfolio",
                           help="Workbench front door: every role-asserted anchor + lock lead "
@@ -3822,10 +3863,11 @@ def main() -> int:
     p_ent = sub.add_parser("entity",
                            help="Mint/update a typed Entity (task | stage | hardware | claim | work | unit | "
                                 "output_class | tool | subject | model | artifact_kind | artifact | environment | "
-                                "concept | section_role) from its WHOLE record (journaled upsert by "
+                                "concept | section_role | perf_class) from its WHOLE record (journaled upsert by "
                                 "kind + key; a field or flag left off clears; designs 8cbdc883 / 4a4ef27e / 3c5cff97)")
     p_ent.add_argument("kind", help="The Entity sub-kind (task | stage | hardware | claim | work | unit | output_class "
-                                    "| tool | subject | model | artifact_kind | artifact | environment | concept | section_role)")
+                                    "| tool | subject | model | artifact_kind | artifact | environment | concept | section_role "
+                                    "| perf_class)")
     p_ent.add_argument("key", help="The durable key the teaches_* facts name (never renamed; --name is the display)")
     p_ent.add_argument("--name", required=True, help="The display name")
     p_ent.add_argument("--description", default="", help="One line on what the entry covers")
@@ -4804,6 +4846,14 @@ def main() -> int:
     p_vz.add_argument("--out", default=f"{DEFAULT_REPOS}/cjm-substrate/.cjm/graph-viz.html",
                       help="Where to write the HTML (with --write)")
     p_vz.add_argument("--write", action="store_true", help="Write the HTML to --out")
+    return ap
+
+
+def main() -> int:
+    # The instrument (design detail 681604c1): armed first, so what ran before here is the
+    # launch and the import, and the parser's build and parse is the `parse` phase
+    run = begin_invocation()
+    ap = build_parser()
 
     args = ap.parse_args()
     invocation_parsed(run, args.command, args.timings_path, db=Path(args.graph_db_path).name,

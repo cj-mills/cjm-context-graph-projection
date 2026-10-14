@@ -15,8 +15,10 @@ from pathlib import Path
 
 import pytest
 from cjm_context_graph_primitives.journal import journal_segments, read_journal, write_segment
-from cjm_context_graph_projection.bench import (bench_config, BenchRefusal, build, inside, lane_dir,
-                                                rekeyer, run, status, tree_rss_kb, UUID_RE)
+from cjm_context_graph_projection.bench import (_client_argv, _integrity, _normalized, bench_config,
+                                                BenchRefusal, build, DROP_KEYS, extract_workload,
+                                                inside, invert_request, lane_dir, load, rekeyer,
+                                                run, status, tree_rss_kb, UUID_RE)
 from cjm_context_graph_projection.perf import growth, perf_report, render_perf, tier_curves
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS
 
@@ -298,6 +300,94 @@ def test_a_driver_spec_runs_an_apps_gestures_at_each_tier(tmp_path, monkeypatch)
          "params": {"hub": "{hub}"}}]}}
     with pytest.raises(BenchRefusal):
         run(bad, settings, ledger)
+
+
+def test_a_request_inverts_by_the_verbs_own_parser():
+    """Design detail 2f5033bf (2): positionals in order, options by flag, a JSON-dumped list
+    decoded, a write op's envelope dropped and reported, a missing positional refused."""
+    from cjm_context_graph_projection.cli import build_parser
+    p = build_parser()
+    inv = invert_request(p, "link", {"source_id": A, "relation": "REFINES", "target_id": B,
+                                     "source_label": "X", "actor": "agent:session"}, DROP_KEYS)
+    assert inv["argv"] == ["link", A, "REFINES", B] and inv["dropped"] == ["actor", "source_label"]
+    assert invert_request(p, "decide", {"statement": "S", "title": "T", "supersedes": None})["argv"] == [
+        "decide", "S", "--title", "T"]
+    assert invert_request(p, "read", {"node_id": _normalized(f'["{A}", "{B}"]')})["argv"] == ["read", A, B]
+    assert invert_request(p, "journal-window", {"session": "s1"})["argv"] == ["journal-window", "--session", "s1"]
+    assert invert_request(p, "show", {})["argv"] is None
+    assert invert_request(p, "no-such-verb", {"x": 1})["argv"] is None
+    assert _normalized("[not json") == "[not json"
+
+
+def test_a_client_rekeys_marks_and_follows_its_own_mints():
+    """Design detail 2f5033bf (2): a client's ids re-keyed into its copy, its free text marked,
+    and a later step naming the trace's decision swapped for the one this client minted."""
+    from cjm_context_graph_projection.cli import build_parser
+    from cjm_dev_graph_schema.nodes import DecisionNode
+    p = build_parser()
+    orig = DecisionNode(statement="probe").id
+    decide = {"kind": "write", "verb": "decide", "request": {"statement": "probe"},
+              "drop": ["actor", "session"], "mints": orig}
+    link = {"kind": "write", "verb": "link", "drop": ["actor", "session"],
+            "request": {"source_id": orig, "relation": "REFERENCES", "target_id": A}}
+    rekey, minted, marker = rekeyer(2), {}, "[bench load L client 2]"
+    made = _client_argv(p, decide, rekey, minted, marker)
+    assert made["argv"] == ["decide", f"probe {marker}"]
+    assert made["mints"] == DecisionNode(statement=f"probe {marker}").id
+    assert _client_argv(p, link, rekey, minted, marker)["argv"] == [
+        "link", made["mints"], "REFERENCES", rekey(A)]
+
+
+def test_load_integrity_finds_torn_lines_lost_and_duplicated_ops(tmp_path):
+    """Design detail 2f5033bf (2): every line parses, each marked decide appears once in the
+    journal with its node in the db, no op of the load twice -- else the check fails."""
+    db = tmp_path / "g.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE nodes (id TEXT PRIMARY KEY)")
+    con.execute("INSERT INTO nodes VALUES ('d1')")
+    con.commit()
+    con.close()
+    live = tmp_path / "g.writes.jsonl"
+    lines = [json.dumps({"verb": "decide", "args": {"statement": "s [bench load L client 0]"}}),
+             json.dumps({"verb": "link", "args": {"source_id": "d1", "note": "[bench load L client 0]"}})]
+    live.write_text("\n".join(lines) + "\n")
+    tm = {"db": str(db), "journals": {"writes": {"live": str(live), "cold": []}}}
+    ok = _integrity(tm, "L", {0: ["d1"]})
+    assert ok["ok"] and (ok["decides"], ok["in_db"], ok["duplicated"], ok["bad_lines"]) == (1, 1, 0, 0)
+    live.write_text("\n".join(lines + [lines[1], '{"verb": "deci']) + "\n")
+    bad = _integrity(tm, "L", {0: ["d1", "d2"]})
+    assert not bad["ok"] and (bad["bad_lines"], bad["duplicated"], bad["in_db"]) == (1, 1, 1)
+
+
+def test_a_recorded_session_replays_as_a_concurrent_load(tmp_path):
+    """Design detail 2f5033bf (2), end to end: a session recorded through the CLI becomes a
+    workload; two clients replay it at two tiers as real invocations, their writes marked and
+    landing in the tier; the integrity check holds and perf reads each load run."""
+    src = tmp_path / "live"
+    src.mkdir()
+    db, journal = str(src / "g.db"), str(src / "g.writes.jsonl")
+    ledger = str(tmp_path / "g.timings.jsonl")
+    base = [sys.executable, "-m", "cjm_context_graph_projection.cli", "--graph-db-path", db,
+            "--journal-path", journal]
+    env = {**os.environ, "CJM_SESSION": "s1"}
+    for s in ("the widgets render lazily", "the widgets cache their layout"):
+        assert subprocess.run([*base, "decide", s], capture_output=True, env=env).returncode == 0
+    (src / "g.reads.jsonl").write_text(json.dumps(
+        {"verb": "locate", "request": {"term": "widgets"}, "session": "s1", "ts": time.time()}) + "\n")
+    settings = {"bench_dir": str(tmp_path / "bench"), "tiers": [2], "workers": 1,
+                "memory_limit_gb": 16, "timeout_s": 300, "replay_tail": 10}
+    lane = _lane(db, journal)
+    build(lane, settings, ledger=ledger)
+    w = extract_workload(lane, settings, "s1")
+    assert (w["reads"], w["writes"]) == (1, 2) and all(s.get("mints") for s in w["steps"] if s["verb"] == "decide")
+    res = load(lane, settings, ledger, tiers=[1, 2], clients=[2])
+    assert [(r["tier"], r["clients"], r["steps"], r["failed"]) for r in res["loads"]] == [(1, 2, 6, 0), (2, 2, 6, 0)]
+    assert all(r["integrity"]["ok"] and r["integrity"]["decides"] == 4 for r in res["loads"]), res["loads"]
+    assert len(read_journal(journal)) == 2  # the live journal untouched
+    rep = perf_report(ledger)
+    assert sorted((r["tier"], r["clients"]) for r in rep["load"]) == [(1, 2), (2, 2)]
+    assert not rep["tiers"] or all(v["verb"] != "decide" for t in rep["tiers"] for v in t["verbs"])
+    assert "### Load — g" in render_perf(rep)
 
 
 # The gesture leg's fixture driver (design detail 4389a579): a session that measures one gesture

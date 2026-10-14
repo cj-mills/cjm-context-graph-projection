@@ -22,6 +22,7 @@ the limits are DATA in the graph-sibling config's `bench` object; nothing here n
 this machine.
 """
 
+import argparse
 import json
 import os
 import re
@@ -36,7 +37,8 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from cjm_context_graph_primitives.journal import journal_segments, read_segment, write_segment
+from cjm_context_graph_primitives.journal import (journal_segments, read_journal, read_segment,
+                                                  write_segment)
 
 from .config import load_graph_config, sibling_graphs
 from .perf import append_timing
@@ -73,6 +75,22 @@ REPLAY_VERBS: Dict[str, List[Dict[str, Any]]] = {
 PROOF_VERBS: List[Dict[str, Any]] = [
     {"name": "rebuild-diff", "argv": ["rebuild-diff", "--against", "{db}"], "read": True},
 ]
+
+# The concurrent replay mode (design detail 2f5033bf (2)): its settings are DATA, the bench
+# config's `load` object overlaid on these.
+LOAD_DEFAULTS: Dict[str, Any] = {
+    "clients": [1, 8, 32],  # Client counts per load run (32 = the planning load, ruling dba17ca8)
+    "tiers": [1, 8, 32],    # Tiers a load runs at
+    "pace": 0.0,            # 0 = back to back (the stress bound); 1 = the recorded gaps
+    "steps": 50,            # Steps per client, at most
+    "verbs": ["show", "read", "locate", "grep", "list", "readiness", "journal-window", "relevant",
+              "link", "assert", "decide", "check"],  # The verbs a workload keeps
+    "workloads": [],        # The workload set (names in the lane's workloads directory); [] = all
+    "memory_ceiling_gb": None,  # The clients' summed RSS that aborts a run (None = 70% of this machine's RAM)
+}
+DROP_KEYS = frozenset({"actor", "session"})  # A write op's envelope: each client stamps its own actor, no session
+MARK_DESTS = ("statement", "text")           # Free text a client marks, so dedup never drops it
+HEX_RE = re.compile(r"^[0-9a-f]{6,32}$")     # An id prefix a request may name
 
 
 class BenchRefusal(Exception):
@@ -513,13 +531,14 @@ def _event(
     lane: Dict[str, Any],   # The lane
     tier: int,              # The tier (or copy) it measures
     extra: Dict[str, Any],  # Anything else the event carries
+    attrs: Optional[Dict[str, Any]] = None,  # More identifying context (a load run's load, clients, client)
     **fields,               # Top-level fields (run_id, outcome, ...)
 ) -> None:
     """One harness event in the lane's ledger (fail-open, like every timing append)."""
     if not ledger:
         return
     ev = {"verb": verb, "kind": "bench", "ts": time.time(), "wall_s": round(wall, 6),
-          "attrs": {"lane": lane["name"], "tier": tier}, **extra, **fields}
+          "attrs": {"lane": lane["name"], "tier": tier, **(attrs or {})}, **extra, **fields}
     append_timing(ledger, ev)
 
 
@@ -629,9 +648,13 @@ def measure(
         proc.returncode = os.waitstatus_to_exitcode(status)
     outcome: Any = "timeout" if timed_out else proc.returncode
     maxrss = usage.ru_maxrss if usage else None
+    # the tree's block I/O (design detail 2f5033bf (1)): wait4 counts every reaped descendant,
+    # GROSS -- a cancelled write still counts; the net figure is the invocation's own event
     return {"outcome": outcome, "wall_s": time.perf_counter() - t0,
             "peak_rss_kb": max(peak, maxrss or 0) or None, "maxrss_kb": maxrss,
-            "out_bytes": out_path.stat().st_size}
+            "out_bytes": out_path.stat().st_size,
+            "read_bytes": usage.ru_inblock * 512 if usage else None,
+            "write_bytes": usage.ru_oublock * 512 if usage else None}
 
 
 def run(
@@ -723,8 +746,445 @@ def run(
                 out["runs"].append(row)
                 _event(ledger, spec["name"], res["wall_s"], lane, k,
                        {"peak_rss_kb": res["peak_rss_kb"], "maxrss_kb": res["maxrss_kb"],
-                        "out_bytes": res["out_bytes"]},
+                        "out_bytes": res["out_bytes"], "read_bytes": res["read_bytes"],
+                        "write_bytes": res["write_bytes"]},
                        run_id=run_id, outcome=res["outcome"], **what)
+    return out
+
+
+def load_settings(settings: Dict[str, Any]) -> Dict[str, Any]:  # LOAD_DEFAULTS overlaid with `load`
+    """The concurrent replay mode's settings as DATA: the bench config's `load` object."""
+    return {**LOAD_DEFAULTS, **(settings.get("load") or {})}
+
+
+def verb_parser(
+    parser,     # The CLI's parser (`cli.build_parser()`)
+    verb: str,  # A verb
+):  # Its subparser, or None when the CLI has no such verb
+    """One verb's subparser, read off the parser's subcommands."""
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return action.choices.get(verb)
+    return None
+
+
+def invert_request(
+    parser,                    # The CLI's parser
+    verb: str,                 # The recorded verb
+    request: Dict[str, Any],   # Its recorded keys: argparse dests (a read's request, a write's args)
+    drop: frozenset = frozenset(),  # Keys never inverted (a write op's envelope: DROP_KEYS)
+) -> Dict[str, Any]:  # {argv, dropped, error}: argv None when it does not invert
+    """A recorded request back to its argv by the verb's OWN parser (design detail 2f5033bf (2)):
+    a key that is a dest of the verb lands as its positional (in order) or its option; a key no
+    argument takes is DROPPED (an envelope field: a label, an observation) and reported; a missing
+    required positional refuses the step -- never guessed."""
+    sub = verb_parser(parser, verb)
+    if sub is None:
+        return {"argv": None, "dropped": sorted(request), "error": f"no verb {verb!r}"}
+    actions = {a.dest: a for a in sub._actions if a.dest != "help"}
+    positional, options, dropped = [], [], []
+    for a in sub._actions:
+        if a.option_strings or a.dest == "help":
+            continue
+        v = request.get(a.dest)
+        if v in (None, "", []):
+            if a.nargs not in ("?", "*"):
+                return {"argv": None, "dropped": [], "error": f"missing {a.dest}"}
+            continue
+        positional += [str(x) for x in v] if isinstance(v, list) else [str(v)]
+    for k, v in request.items():
+        a = actions.get(k)
+        if k in drop or a is None:
+            dropped.append(k)
+            continue
+        if not a.option_strings or v in (None, "", [], False):
+            continue
+        if isinstance(v, str) and v.startswith("[") and (a.nargs in ("*", "+") or
+                                                          isinstance(a, argparse._AppendAction)):
+            try:
+                v = json.loads(v)  # the reads ledger JSON-dumps a list
+            except ValueError:
+                pass
+        flag = a.option_strings[-1]
+        if isinstance(a, (argparse._StoreTrueAction, argparse._StoreConstAction)):
+            options.append(flag)
+        elif isinstance(a, argparse._AppendAction):
+            for x in (v if isinstance(v, list) else [v]):
+                options += [flag, str(x)]
+        elif isinstance(v, list):
+            options += [flag, *[str(x) for x in v]]
+        else:
+            options += [flag, str(v)]
+    return {"argv": [verb, *positional, *options], "dropped": sorted(dropped), "error": None}
+
+
+def _normalized(
+    value: Any,  # A recorded request value
+) -> Any:  # The value, a JSON-dumped list decoded (the reads ledger dumps a non-string value)
+    if isinstance(value, str) and value.startswith("["):
+        try:
+            v = json.loads(value)
+            return v if isinstance(v, list) else value
+        except ValueError:
+            return value
+    return value
+
+
+def _expand_prefixes(
+    value: Any,               # A request value
+    con: sqlite3.Connection,  # The snapshot (read-only)
+) -> Any:  # The value with every whole-token id prefix expanded to its full id (unique matches only)
+    def one(s: str) -> str:
+        if not HEX_RE.match(s):
+            return s
+        rows = con.execute("SELECT id FROM nodes WHERE id >= ? AND id < ? LIMIT 2",
+                           (s, s + "g")).fetchall()
+        return rows[0][0] if len(rows) == 1 else s
+    if isinstance(value, list):
+        return [one(v) if isinstance(v, str) else v for v in value]
+    return one(value) if isinstance(value, str) else value
+
+
+def _unknown_ids(
+    request: Dict[str, Any],  # A step's request, prefixes expanded
+    con: sqlite3.Connection,  # The snapshot (read-only)
+    minted: set,              # Ids the trace minted before this step
+) -> List[str]:  # The ids it names that neither the snapshot nor the trace holds
+    out = []
+    for v in request.values():
+        for x in (v if isinstance(v, list) else [v]):
+            if not isinstance(x, str):
+                continue
+            if HEX_RE.match(x):
+                out.append(x)  # a prefix that matched no node (or several)
+            elif UUID_RE.fullmatch(x) and x not in minted and not con.execute(
+                    "SELECT 1 FROM nodes WHERE id = ?", (x,)).fetchone():
+                out.append(x)
+    return out
+
+
+def extract_workload(
+    lane: Dict[str, Any],       # `resolve_lane`'s result
+    settings: Dict[str, Any],   # `bench_config`'s result
+    session: str,               # The recorded session to replay
+    actor: Optional[str] = None,  # Only this actor's steps (a sub-agent's trace), else the session's all
+    name: Optional[str] = None,   # The workload's name (default: the session, and the actor)
+) -> Dict[str, Any]:  # The workload, written to <lane>/workloads/<name>.json
+    """A recorded session as a WORKLOAD (design detail 2f5033bf (2)): its reads-ledger requests
+    and writes-journal ops in ts order, the verbs the load settings keep, each step's request as
+    the verb's dests (inverted to argv at load time, per client), id prefixes expanded against
+    the snapshot so a client's re-keying reaches them; a decide records the id it minted (its
+    canonical statement's) so a later step naming it follows the client's own. Derived and
+    regenerable; what did not invert is counted, never guessed."""
+    from cjm_dev_graph_schema.nodes import DecisionNode
+    from .cli import build_parser
+    root = lane_dir(settings, lane)
+    base = _read_json(root / "base" / MANIFEST)
+    if not base:
+        raise BenchRefusal(f"no snapshot in {root} -- `bench build` first")
+    ls = load_settings(settings)
+    keep = set(ls["verbs"])
+    db = Path(lane["db"])
+    reads = db.with_name(db.stem + ".reads.jsonl")
+    rows = []
+    if reads.exists():
+        rows += [("read", e.get("verb"), e.get("request") or {}, e.get("ts") or 0, e.get("actor"))
+                 for e in read_journal(str(reads)) if e.get("session") == session]
+    if lane["journals"].get("writes"):
+        rows += [("write", e.get("verb"), e.get("args") or {}, e.get("ts") or 0,
+                  (e.get("args") or {}).get("actor") or e.get("actor"))
+                 for e in read_journal(lane["journals"]["writes"]) if e.get("session") == session]
+    rows = sorted((r for r in rows if actor is None or r[4] == actor), key=lambda r: r[3])
+    parser = build_parser()
+    con = sqlite3.connect(f"file:{root / 'base' / base['db']}?mode=ro", uri=True)
+    steps, skipped, dropped, minted = [], {}, {}, set()
+    try:
+        prev = None
+        for kind, verb, request, ts, _ in rows:
+            if verb not in keep:
+                skipped[f"{verb} (not kept)"] = skipped.get(f"{verb} (not kept)", 0) + 1
+                continue
+            request = {k: _normalized(v) for k, v in request.items()}
+            drop = DROP_KEYS if kind == "write" else frozenset()
+            inv = invert_request(parser, verb, request, drop)
+            if inv["argv"] is None:
+                skipped[f"{verb} ({inv['error']})"] = skipped.get(f"{verb} ({inv['error']})", 0) + 1
+                continue
+            for k in inv["dropped"]:
+                dropped[f"{verb}.{k}"] = dropped.get(f"{verb}.{k}", 0) + 1
+            req = {k: _expand_prefixes(v, con) for k, v in request.items() if k not in inv["dropped"]}
+            missing = _unknown_ids(req, con, minted)
+            if missing:  # a node newer than the snapshot: the step would fail at every tier
+                why = f"{verb} (names a node the snapshot lacks)"
+                skipped[why] = skipped.get(why, 0) + 1
+                continue
+            step = {"kind": kind, "verb": verb, "request": req, "drop": sorted(drop),
+                    "gap_s": round(ts - prev, 3) if prev is not None else 0.0}
+            if verb == "decide" and req.get("statement"):
+                step["mints"] = DecisionNode(statement=str(req["statement"])).id
+                minted.add(step["mints"])
+            steps.append(step)
+            prev = ts
+    finally:
+        con.close()
+    name = name or re.sub(r"[^A-Za-z0-9_.-]+", "_", session + (f"--{actor}" if actor else ""))
+    out = {"name": name, "lane": lane["name"], "base_id": base["base_id"],
+           "source": {"session": session, "actor": actor}, "steps": steps,
+           "reads": sum(1 for s in steps if s["kind"] == "read"),
+           "writes": sum(1 for s in steps if s["kind"] == "write"),
+           "skipped": skipped, "dropped": dropped, "made_at": time.time()}
+    (root / "workloads").mkdir(exist_ok=True)
+    _write_json(inside(root / "workloads" / f"{name}.json", root.parent), out)
+    return out
+
+
+def _client_argv(
+    parser,                  # The CLI's parser
+    step: Dict[str, Any],    # One workload step
+    rekey: Callable[[Any], Any],  # The client's copy's id map
+    minted: Dict[str, str],  # Ids the trace minted (re-keyed) -> the ids this client minted
+    marker: str,             # The client's run-unique marker
+) -> Dict[str, Any]:  # {argv, mints}: the step's argv for this client, and the id it will mint
+    """One step for one client: ids re-keyed into the client's copy, then any the trace minted
+    earlier swapped for the client's own; free text marked; a decide's new id computed from its
+    marked statement (the same identity rule)."""
+    from cjm_dev_graph_schema.nodes import DecisionNode
+
+    def remap(v: Any) -> Any:
+        if isinstance(v, list):
+            return [remap(x) for x in v]
+        if not isinstance(v, str):
+            return v
+        v = rekey(v)
+        return UUID_RE.sub(lambda m: minted.get(m.group(0), m.group(0)), v)
+    req = {k: remap(v) for k, v in step["request"].items()}
+    for k in MARK_DESTS:
+        if isinstance(req.get(k), str) and step["kind"] == "write":
+            req[k] = f"{req[k]} {marker}"
+    mints = None
+    if step.get("mints") and req.get("statement"):
+        mints = DecisionNode(statement=str(req["statement"])).id
+        minted[rekey(step["mints"])] = mints
+    return {"argv": invert_request(parser, step["verb"], req, frozenset(step.get("drop") or ()))["argv"],
+            "mints": mints}
+
+
+def _integrity(
+    tm: Dict[str, Any],         # The tier's manifest
+    load_id: str,               # The load run
+    decided: Dict[int, List[str]],  # Per client: the decision ids its successful decides minted
+) -> Dict[str, Any]:  # {ok, bad_lines, marked, in_journal, in_db, duplicated}
+    """The load's integrity check (design detail 2f5033bf (2)): every line of the writes family
+    parses; each client's marked decides appear EXACTLY once in the journal and their nodes are in
+    the db; no op of the load is duplicated -- a torn line or a lost op is a finding, never
+    absorbed."""
+    fam = tm["journals"].get("writes")
+    if not fam:
+        return {"ok": None, "reason": "no writes family"}
+    known = {c["name"] for c in fam["cold"]}
+    bad, seen, dup, marked = 0, set(), 0, {}
+    tag = f"[bench load {load_id} "
+    for seg in journal_segments(fam["live"]):
+        if Path(seg).name in known:
+            continue  # cold segments of the snapshot: immutable, never written by a load
+        for line in read_segment(seg).splitlines():
+            if not line.strip():
+                continue
+            try:
+                op = json.loads(line)
+            except ValueError:
+                bad += 1
+                continue
+            text = json.dumps(op.get("args") or {}, sort_keys=True)
+            if tag not in text:
+                continue
+            key = (op.get("verb"), text)
+            dup += key in seen
+            seen.add(key)
+            if op.get("verb") == "decide":
+                st = str((op.get("args") or {}).get("statement") or "")
+                marked[st] = marked.get(st, 0) + 1
+    want = [i for ids in decided.values() for i in ids]
+    con = sqlite3.connect(f"file:{tm['db']}?mode=ro", uri=True)
+    try:
+        in_db = sum(con.execute("SELECT COUNT(*) FROM nodes WHERE id = ?", (i,)).fetchone()[0]
+                    for i in want)
+    finally:
+        con.close()
+    once = sum(1 for n in marked.values() if n == 1)
+    return {"ok": bad == 0 and dup == 0 and in_db == len(want) and once == len(want) == len(marked),
+            "bad_lines": bad, "decides": len(want), "in_journal_once": once,
+            "in_journal": len(marked), "in_db": in_db, "duplicated": dup}
+
+
+def memory_ceiling_kb(
+    ls: Dict[str, Any],  # `load_settings`'s result
+) -> int:  # The clients' summed RSS (KB) that aborts a load run
+    """The machine guard (design detail 2f5033bf (2)): a load must never push the machine into
+    swap or the OOM killer -- the configured ceiling, else 70% of MemTotal."""
+    if ls.get("memory_ceiling_gb"):
+        return int(float(ls["memory_ceiling_gb"]) * 1024 ** 2)
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemTotal:"):
+                return int(int(line.split()[1]) * 0.7)
+    except (OSError, ValueError):
+        pass
+    return 16 * 1024 ** 2
+
+
+def _kill_descendants() -> None:
+    """SIGKILL every live descendant of this process (the load's clients and their workers)."""
+    import signal
+    stack, seen = [os.getpid()], set()
+    kids: List[int] = []
+    while stack:
+        p = stack.pop()
+        if p in seen:
+            continue
+        seen.add(p)
+        try:
+            for task in Path(f"/proc/{p}/task").iterdir():
+                c = [int(x) for x in (task / "children").read_text().split()]
+                kids += c
+                stack += c
+        except (OSError, ValueError):
+            continue
+    for k in kids:
+        try:
+            os.kill(k, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+def load(
+    lane: Dict[str, Any],       # `resolve_lane`'s result
+    settings: Dict[str, Any],   # `bench_config`'s result
+    ledger: str,                # The timings ledger every event lands in
+    tiers: Optional[List[int]] = None,    # Tiers (default: the load settings', those built)
+    clients: Optional[List[int]] = None,  # Client counts (default: the load settings')
+    workloads: Optional[List[str]] = None,  # Workload names (default: the settings' set, else all)
+    steps: Optional[int] = None,          # Steps per client, at most (default: the settings')
+) -> Dict[str, Any]:  # {lane, loads: [...]}
+    """THE CONCURRENT REPLAY MODE (design detail 2f5033bf (2)): at each tier and client count, N
+    clients each replay a workload (round robin over the set) as real CLI invocations under the
+    harness's limits -- every call a tier-tagged event carrying the load id, the client count and
+    the client (each its own actor, ids re-keyed into copy i mod k so clients act as distinct
+    projects; at x1 all share copy 0, the hot spot) -- the clients' summed RSS sampled throughout,
+    then the integrity check; one `bench-load` event per run carries the summary. Writes land in
+    the tier, as the canonical writes do. THE MACHINE GUARD: when the clients' summed RSS passes
+    the memory ceiling the run aborts (every client killed, no further step) and the event says
+    so -- itself a reading: the per-process shape cannot hold that many clients at that tier."""
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    from .cli import build_parser
+    root = lane_dir(settings, lane)
+    ls = load_settings(settings)
+    names = workloads or ls["workloads"] or sorted(p.stem for p in (root / "workloads").glob("*.json"))
+    loaded = [w for w in (_read_json(root / "workloads" / f"{n}.json") for n in names) if w]
+    if not loaded:
+        raise BenchRefusal(f"no workload in {root / 'workloads'} -- `bench workload --session` first")
+    built = sorted(int(p.name[1:]) for p in root.glob("x*") if p.name[1:].isdigit()
+                   and (p / MANIFEST).exists())
+    todo = [k for k in (tiers or ls["tiers"]) if k in built]
+    if not todo:
+        raise BenchRefusal(f"no built tier among {tiers or ls['tiers']} in {root}")
+    parser = build_parser()
+    limit = int(float(settings["memory_limit_gb"]) * 1024 ** 3)
+    cap = int(steps or ls["steps"])
+    pace = float(ls["pace"])
+    ceiling = memory_ceiling_kb(ls)
+    out: Dict[str, Any] = {"lane": lane["name"], "loads": []}
+    for k in todo:
+        tm = _read_json(root / f"x{k}" / MANIFEST)
+        tier = inside(root / f"x{k}", root.parent)
+        (tier / "runs").mkdir(exist_ok=True)
+        for n in clients or ls["clients"]:
+            load_id = str(uuid.uuid4())
+            decided: Dict[int, List[str]] = {}
+            rows: List[Dict[str, Any]] = []
+            lock = threading.Lock()
+
+            stop, aborted = threading.Event(), [None]
+
+            def client(i: int) -> None:
+                w = loaded[i % len(loaded)]
+                rekey, minted = rekeyer(i % k), {}
+                marker = f"[bench load {load_id} client {i}]"
+                for step in w["steps"][:cap]:
+                    if stop.is_set():
+                        break
+                    if pace and step.get("gap_s"):
+                        time.sleep(min(step["gap_s"] * pace, 60.0))
+                    made = _client_argv(parser, step, rekey, minted, marker)
+                    if made["argv"] is None:
+                        continue
+                    run_id = str(uuid.uuid4())
+                    env = {**os.environ, "CJM_RUN_ID": run_id, "CJM_BENCH_TIER": str(k),
+                           "CJM_BENCH_LANE": lane["name"], "CJM_BENCH_LOAD": load_id,
+                           "CJM_BENCH_CLIENTS": str(n), "CJM_BENCH_CLIENT": str(i),
+                           "CJM_ACTOR": f"bench:load:{i}", "CJM_T0": repr(time.time())}
+                    cmd = [sys.executable, "-m", "cjm_context_graph_projection.cli",
+                           "--graph-db-path", tm["db"], "--manifests-dir", lane["manifests_dir"],
+                           "--timings-path", ledger]
+                    for fam, flag in (("writes", "--journal-path"), ("source", "--source-journal-path")):
+                        if fam in tm["journals"]:
+                            cmd += [flag, tm["journals"][fam]["live"]]
+                    if step["kind"] == "read":
+                        cmd.append("--read-only")
+                    res = measure(cmd + made["argv"], env, limit, float(settings["timeout_s"]),
+                                  inside(tier / "runs" / f"{run_id}.out", root.parent))
+                    if res["outcome"] == 0:
+                        (tier / "runs" / f"{run_id}.out").unlink()
+                        if made["mints"]:
+                            with lock:
+                                decided.setdefault(i, []).append(made["mints"])
+                    _event(ledger, step["verb"], res["wall_s"], lane, k,
+                           {"peak_rss_kb": res["peak_rss_kb"], "out_bytes": res["out_bytes"],
+                            "read_bytes": res["read_bytes"], "write_bytes": res["write_bytes"]},
+                           attrs={"load": load_id, "clients": n, "client": i},
+                           run_id=run_id, outcome=res["outcome"], cli_verb=step["verb"])
+                    with lock:
+                        rows.append({"client": i, "verb": step["verb"], "outcome": res["outcome"],
+                                     "wall_s": res["wall_s"]})
+
+            peak, done = [0], threading.Event()
+
+            def sample() -> None:  # the clients' summed RSS: every live descendant of the harness
+                me = os.getpid()
+                page_kb = os.sysconf("SC_PAGE_SIZE") // 1024
+                while not done.is_set():
+                    try:
+                        own = int(Path(f"/proc/{me}/statm").read_text().split()[1]) * page_kb
+                    except (OSError, ValueError):
+                        own = 0
+                    peak[0] = max(peak[0], tree_rss_kb(me) - own)
+                    if peak[0] > ceiling and not stop.is_set():
+                        aborted[0] = (f"the clients' summed RSS {peak[0] / 1024 ** 2:.1f} GB passed the "
+                                      f"{ceiling / 1024 ** 2:.1f} GB ceiling")
+                        stop.set()
+                    if stop.is_set():
+                        _kill_descendants()
+                    done.wait(0.05)
+            sampler = threading.Thread(target=sample, daemon=True)
+            t0 = time.perf_counter()
+            sampler.start()
+            with ThreadPoolExecutor(max_workers=n) as pool:
+                for f in [pool.submit(client, i) for i in range(n)]:
+                    f.result()
+            done.set()
+            sampler.join()
+            wall = time.perf_counter() - t0
+            check = _integrity(tm, load_id, decided)
+            extra = {"peak_rss_kb": peak[0] or None, "integrity": check,
+                     "workloads": [w["name"] for w in loaded], "steps": len(rows),
+                     "aborted": aborted[0]}
+            _event(ledger, "bench-load", wall, lane, k, extra, attrs={"load": load_id, "clients": n})
+            out["loads"].append({"tier": k, "clients": n, "load": load_id, "wall_s": wall,
+                                 "steps": len(rows),
+                                 "failed": sum(1 for r in rows if r["outcome"] != 0),
+                                 "peak_rss_kb": peak[0] or None, "integrity": check,
+                                 "aborted": aborted[0]})
     return out
 
 
@@ -769,6 +1229,24 @@ def render_bench(
                        f"{_gb(rss)} | {_gb(r['out_bytes'])} |")
         for s in res["skipped"]:
             out.append(f"- skipped x{s['tier']} {s['verb']}: {s['reason']}")
+        return "\n".join(out)
+    if action == "workload":  # design detail 2f5033bf (2)
+        src = res["source"]
+        out.append(f"- workload `{res['name']}` from session {src['session']}"
+                   + (f" (actor {src['actor']})" if src.get("actor") else "")
+                   + f": {res['reads']} read(s) · {res['writes']} write(s)")
+        out += [f"- skipped {k}: {n}" for k, n in sorted(res["skipped"].items())]
+        out += [f"- dropped {k}: {n}" for k, n in sorted(res["dropped"].items())]
+        return "\n".join(out)
+    if action == "load":
+        out += ["| tier | clients | steps | failed | wall s | summed peak RSS | integrity |",
+                "|---:|---:|---:|---:|---:|---:|---|"]
+        for r in res["loads"]:
+            rss = r["peak_rss_kb"] and r["peak_rss_kb"] * 1024
+            check = r["integrity"] or {}
+            out.append(f"| x{r['tier']} | {r['clients']} | {r['steps']} | {r['failed']} | "
+                       f"{r['wall_s']:.1f} | {_gb(rss)} | {'ok' if check.get('ok') else check} |")
+        out += ["", "_perf reads each run: per verb p50 / p99, throughput, failures by outcome._"]
         return "\n".join(out)
     if res.get("base"):
         b = res["base"]
