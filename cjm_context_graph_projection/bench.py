@@ -561,6 +561,21 @@ def _fill(arg: str, values: Dict[str, Any]) -> Optional[str]:  # One argv item, 
     return None if missing else out
 
 
+def env_python(
+    env: Optional[str],  # A conda env's name (None = this interpreter's)
+) -> str:  # Its interpreter
+    """The interpreter of the env an app runs in (design detail 4389a579: a gesture driver runs
+    in its app's env), the envs root derived from this interpreter's sys.prefix -- never a path
+    on this machine (6dfe00e9). A missing env refuses loudly."""
+    if not env:
+        return sys.executable
+    py = Path(sys.prefix).parent / env / "bin" / "python"
+    if not py.exists():
+        raise BenchRefusal(f"no env {env!r} beside {sys.prefix} (a gesture driver's env is "
+                           "DATA in the lane's bench config)")
+    return str(py)
+
+
 def tree_rss_kb(
     pid: int,  # The root of a process tree
 ) -> int:  # Resident KB of the process and every live descendant now (0 when unreadable)
@@ -629,7 +644,13 @@ def run(
 ) -> Dict[str, Any]:  # {lane, runs: [...], skipped: [...]}
     """Run the canonical verbs against each tier: real CLI invocations with the tier's db,
     journals and config, the lane's ledger, the tier's tags in the environment, under the
-    address-space and wall limits; one harness event per invocation beside the CLI's own."""
+    address-space and wall limits; one harness event per invocation beside the CLI's own.
+
+    A spec naming a `driver` runs an app's canonical GESTURES instead (design detail 4389a579):
+    the kit's gesture runner in the app's `env`, the driver given the spec's filled `params`
+    plus the tier's db, manifests and journals; each gesture is one event from the session's
+    own seam (CJM_TIMINGS_PATH names the lane's ledger), the harness's event beside them
+    carrying the driver process's wall and peak RSS."""
     root = lane_dir(settings, lane)
     built = sorted(int(p.name[1:]) for p in root.glob("x*") if p.name[1:].isdigit()
                    and (p / MANIFEST).exists())
@@ -643,48 +664,67 @@ def run(
         tm = _read_json(root / f"x{k}" / MANIFEST)
         tier = inside(root / f"x{k}", root.parent)
         db = tm["db"]
+        fams = tm["journals"]
         values: Dict[str, Any] = {**tm.get("placeholders", {}),
                                   **(lane["settings"].get("placeholders") or {}), "db": db}
         for _ in range(max(1, repeat)):
             for spec in specs:
                 values["stamp"] = time.strftime("%Y-%m-%dT%H:%M:%S") + f" x{k}"
-                if "writes" in tm["journals"]:
-                    values["tail_offset"] = max(0, family_ops(tm["journals"]["writes"])
-                                                - int(settings["replay_tail"]))
-                argv = [_fill(a, values) for a in spec["argv"]]
-                if any(a is None for a in argv):
-                    out["skipped"].append({"tier": k, "verb": spec["name"],
-                                           "reason": "a placeholder did not resolve"})
-                    continue
-                run_id = str(uuid.uuid4())
-                cmd = [sys.executable, "-m", "cjm_context_graph_projection.cli",
-                       "--graph-db-path", db, "--manifests-dir", lane["manifests_dir"],
-                       "--timings-path", ledger]
-                fams = tm["journals"]
                 if "writes" in fams:
-                    cmd += ["--journal-path", fams["writes"]["live"]]
-                if "source" in fams:
-                    cmd += ["--source-journal-path", fams["source"]["live"]]
-                if spec.get("read"):
-                    cmd.append("--read-only")
-                if spec.get("format"):
-                    cmd += ["--format", spec["format"]]
+                    values["tail_offset"] = max(0, family_ops(fams["writes"])
+                                                - int(settings["replay_tail"]))
+                run_id = str(uuid.uuid4())
                 env = {**os.environ, "CJM_RUN_ID": run_id, "CJM_BENCH_TIER": str(k),
                        "CJM_BENCH_LANE": lane["name"], "CJM_ACTOR": "bench:harness",
                        "CJM_T0": repr(time.time())}
+                if spec.get("driver"):
+                    params = {key: _fill(v, values) if isinstance(v, str) else v
+                              for key, v in (spec.get("params") or {}).items()}
+                    if any(v is None for v in params.values()):
+                        out["skipped"].append({"tier": k, "verb": spec["name"],
+                                               "reason": "a placeholder did not resolve"})
+                        continue
+                    params.update({"db": db, "manifests_dir": lane["manifests_dir"],
+                                   "journals": {name: fam["live"] for name, fam in fams.items()}})
+                    cmd = [env_python(spec.get("env")), "-m", "cjm_substrate_qt_kit.gesturebench",
+                           spec["driver"], "--params", json.dumps(params)]
+                    env["CJM_TIMINGS_PATH"] = ledger
+                    what = {"driver": spec["driver"]}
+                else:
+                    argv = [_fill(a, values) for a in spec["argv"]]
+                    if any(a is None for a in argv):
+                        out["skipped"].append({"tier": k, "verb": spec["name"],
+                                               "reason": "a placeholder did not resolve"})
+                        continue
+                    cmd = [sys.executable, "-m", "cjm_context_graph_projection.cli",
+                           "--graph-db-path", db, "--manifests-dir", lane["manifests_dir"],
+                           "--timings-path", ledger]
+                    if "writes" in fams:
+                        cmd += ["--journal-path", fams["writes"]["live"]]
+                    if "source" in fams:
+                        cmd += ["--source-journal-path", fams["source"]["live"]]
+                    if spec.get("read"):
+                        cmd.append("--read-only")
+                    if spec.get("format"):
+                        cmd += ["--format", spec["format"]]
+                    cmd += argv
+                    what = {"cli_verb": argv[0]}
                 (tier / "runs").mkdir(exist_ok=True)
-                res = measure(cmd + argv, env, limit, float(settings["timeout_s"]),
+                res = measure(cmd, env, limit, float(settings["timeout_s"]),
                               inside(tier / "runs" / f"{run_id}.out", root.parent))
                 if spec.get("capture") and res["outcome"] == 0:
                     m = UUID_RE.search((tier / "runs" / f"{run_id}.out").read_text(errors="replace"))
                     values[spec["capture"]] = m.group(0) if m else None
-                (tier / "runs" / f"{run_id}.out").unlink()
                 row = {"tier": k, "verb": spec["name"], "run_id": run_id, **res}
+                if res["outcome"] == 0:
+                    (tier / "runs" / f"{run_id}.out").unlink()
+                else:  # a failed run keeps its output (the traceback is the diagnosis)
+                    row["out"] = str(tier / "runs" / f"{run_id}.out")
                 out["runs"].append(row)
                 _event(ledger, spec["name"], res["wall_s"], lane, k,
                        {"peak_rss_kb": res["peak_rss_kb"], "maxrss_kb": res["maxrss_kb"],
                         "out_bytes": res["out_bytes"]},
-                       run_id=run_id, outcome=res["outcome"], cli_verb=argv[0])
+                       run_id=run_id, outcome=res["outcome"], **what)
     return out
 
 

@@ -183,6 +183,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `assemble_tier` _function_ — Build tier xK: a fresh db holding the snapshot's rows plus copies 1 .. k-1 (plain row
 - `bench_config` _function_ — The harness's settings as DATA; `bench_dir` has no default (a path on one machine is
 - `build` _function_ — Snapshot (once), stage the copies the tiers need (missing or from another snapshot, in
+- `env_python` _function_ — The interpreter of the env an app runs in (design detail 4389a579: a gesture driver runs
 - `family_ops` _function_ — Ops in a tier's family as it stands: the cold segments counted at assembly (immutable),
 - `inside` _function_ — The path guard (design detail 3bd8673d (3)): every write resolves inside the bench.
 - `lane_dir` _function_ — The lane's directory under the bench directory, refused if the lane's own graph or
@@ -732,13 +733,15 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `begin_invocation` _function_ — Arm the instrument at the top of `main` -- everything before it is the launch and the
 - `end_to_end` _function_ — An invocation's whole cost as its caller waits for it: the in-process wall plus the
 - `fit` _function_ — Least squares of cost on one covariate -- the shape d7742c47 (b) reads. None when the
+- `gesture_cost` _function_ — What a gesture cost the store (design detail 4389a579): its wait on the loop and its
 - `growth` _function_ — A cost's growth exponent across the scale tiers (design detail 3bd8673d): least squares
 - `guards` _function_ — The design's guards, read off one event (681604c1): each row names the guard, what it
 - `invocation_graph` _function_ — The invocation's graph with its phases: the body runs as `verb`, and the covariates are
 - `invocation_parsed` _function_ — Name the run, record the parse, and keep it armed only when a ledger will take it.
 - `journal_footprint` _function_ — A journal family's size as stored: segments and bytes on disk (a cold segment counts
-- `measure_covariates` _function_ — The growth covariates every event carries: nodes, edges and bytes of the store, nodes
+- `measure_covariates` _function_ — The growth covariates every event carries: the store half (nodes, edges and bytes of the
 - `perf_report` _function_ — The ledger read: per verb the latest / median / p90 END-TO-END seconds (launch + import
+- `poll_rows` _function_ — A poll's cost per tick (design detail 4389a579): its rolling windows' ticks, the mean work
 - `render_perf` _function_ — Render the perf read: tables for a person, the result as JSON for an agent.
 - `run_invocation` _function_ — Run the invocation and append its event, whatever its outcome -- a refusal or a crash
 - `self_times` _function_ — A phase's SELF time: its inclusive seconds less its direct children's.

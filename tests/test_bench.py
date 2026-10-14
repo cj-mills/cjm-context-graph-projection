@@ -236,3 +236,96 @@ def test_a_run_measures_each_verb_at_each_tier_apart_from_the_live_history(tmp_p
     assert curves["lane"] == "g" and curves["tiers"] == [1, 2]
     assert {v["verb"] for v in curves["verbs"]} == {"locate", "decide", "link"}
     assert "### Scale tiers — g" in render_perf(rep)
+
+
+def test_tier_curves_carry_each_gesture_with_its_driver_peak():
+    """A canonical gesture is a row of its own (design detail 4389a579): its wall (a poll's per
+    tick), the peak RSS of the driver process that ran it, joined by run id."""
+    events = []
+    for k in (1, 2, 4):
+        events.append({"verb": "gestures:app", "kind": "bench", "run_id": f"d{k}", "ts": k,
+                       "wall_s": 9.0, "outcome": 0, "peak_rss_kb": 500 * k,
+                       "attrs": {"lane": "g", "tier": k}})
+        events.append({"verb": "app:node", "kind": "gesture", "run_id": f"d{k}", "ts": k,
+                       "wall_s": 0.1 * k, "outcome": "ok", "phases": {"queued": {"calls": 1, "s": 0.0}},
+                       "covariates": {"nodes": 100 * k}, "attrs": {"lane": "g", "tier": k}})
+        events.append({"verb": "app:feed", "kind": "gesture", "run_id": f"d{k}", "ts": k,
+                       "wall_s": 60.0, "outcome": "ok",
+                       "phases": {"tick": {"calls": 2, "s": 0.4 * k}},
+                       "attrs": {"lane": "g", "tier": k, "poll": True}})
+    (lane,) = tier_curves(events)
+    rows = {v["verb"]: v for v in lane["verbs"]}
+    assert set(rows) == {"gestures:app", "app:node", "app:feed"}
+    node = rows["app:node"]
+    assert [c["peak_rss_kb"] for c in node["cells"]] == [500, 1000, 2000]
+    assert [c["nodes"] for c in node["cells"]] == [100, 200, 400]
+    assert node["growth"]["b"] == pytest.approx(1.0)
+    assert [c["wall_s"] for c in rows["app:feed"]["cells"]] == pytest.approx([0.2, 0.4, 0.8])
+
+
+def test_a_driver_spec_runs_an_apps_gestures_at_each_tier(tmp_path, monkeypatch):
+    """A spec naming a driver runs the kit's gesture runner (design detail 4389a579): each
+    gesture lands in the lane's ledger tagged with its tier and joined to the harness's event;
+    a missing env refuses loudly."""
+    db, live = _graph(tmp_path)
+    drivers = tmp_path / "drivers"
+    drivers.mkdir()
+    (drivers / "probe_driver.py").write_text(DRIVER)
+    monkeypatch.setenv("PYTHONPATH", str(drivers))
+    ledger = str(tmp_path / "g.timings.jsonl")
+    settings = {"bench_dir": str(tmp_path / "bench"), "tiers": [2], "workers": 1,
+                "memory_limit_gb": 16, "timeout_s": 300, "replay_tail": 10}
+    lane = _lane(db, live, placeholders={"hub": A}, verbs=[
+        {"name": "gestures:probe", "driver": "probe_driver:drive", "params": {"hub": "{hub}"}},
+        {"name": "gestures:none", "driver": "probe_driver:drive", "params": {"hub": "{nope}"}}])
+    build(lane, settings, ledger=ledger)
+    res = run(lane, settings, ledger)
+    assert [(r["tier"], r["verb"], r["outcome"]) for r in res["runs"]] == [
+        (1, "gestures:probe", 0), (2, "gestures:probe", 0)], res
+    assert {s["verb"] for s in res["skipped"]} == {"gestures:none"}
+    events = read_journal(ledger)
+    gest = [e for e in events if e["kind"] == "gesture"]
+    assert {(e["attrs"]["tier"], e["verb"]) for e in gest} == {
+        (k, v) for k in (1, 2) for v in ("probe:open", "probe:node", "probe:close")}
+    harness = {e["run_id"] for e in events if e["kind"] == "bench" and e.get("driver")}
+    assert {e["run_id"] for e in gest} == harness
+    assert all(e["covariates"]["nodes"] == 3 for e in gest)
+    bad = {**lane, "settings": {**lane["settings"], "verbs": [
+        {"name": "x", "driver": "probe_driver:drive", "env": "no-such-env-anywhere",
+         "params": {"hub": "{hub}"}}]}}
+    with pytest.raises(BenchRefusal):
+        run(bad, settings, ledger)
+
+
+# The gesture leg's fixture driver (design detail 4389a579): a session that measures one gesture
+DRIVER = '''
+from cjm_substrate_qt_kit.loopthread import LoopThreadSession
+
+
+class Session(LoopThreadSession):
+    app = "probe"
+
+    def __init__(self, db):
+        super().__init__(timeout=30.0)
+        self.db = db
+
+    async def on_open(self):
+        await self.measure_into(self.db)
+
+    async def measure_covariates(self):
+        return {"nodes": 3}
+
+    async def node(self, ref):
+        return ref
+
+
+def drive(params):
+    s = Session(params["db"])
+    s.start()
+    try:
+        s.call(s.node(params["hub"]))
+    finally:
+        s.close()
+    assert params["journals"]["writes"].endswith("g.writes.jsonl"), params
+    return ["node"]
+'''

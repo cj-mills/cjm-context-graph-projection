@@ -132,3 +132,59 @@ def test_an_invocation_appends_one_event(tmp_path):
     assert decide["covariates"]["journals"]["writes"]["segments"] == 1
     out = _run("--graph-db-path", db, "--timings-path", ledger, "--read-only", "perf")
     assert out.returncode == 0 and "| decide | 1 |" in out.stdout
+
+
+def _gesture(name, wall, ts, write=False, poll=False, ticks=0, **extra):
+    """A synthetic gesture event, the shape the kit's seam appends (design detail 4389a579)."""
+    attrs = {"app": name.split(":")[0]}
+    if write:
+        attrs["write"] = True
+    if poll:
+        attrs["poll"] = True
+    phases = {"queued": {"calls": max(1, ticks), "s": 0.01 * max(1, ticks)}}
+    if poll:
+        phases["tick"] = {"calls": ticks, "s": wall * ticks}
+    ev = {"verb": name, "kind": "gesture", "run_id": f"g{ts}", "ts": ts, "wall_s": wall,
+          "outcome": "ok", "phases": phases,
+          "storage": {"query_nodes": {"calls": 2 * max(1, ticks), "s": 0.1, "rows_out": 10,
+                                      "bytes_in": 100, "bytes_out": 400}},
+          "covariates": {"nodes": 1000}, "attrs": attrs}
+    ev.update(extra)
+    return ev
+
+
+def test_report_reads_gestures_and_polls_apart_from_verbs(tmp_path):
+    """Gestures are their own section (queue wait, round trips, rows, bytes); a poll reads per
+    tick; a write gesture's whole-scope read trips the guard a read gesture's never does."""
+    ledger = str(tmp_path / "g.timings.jsonl")
+    evs = [_event("show", 1.0, 1),
+           _gesture("workbench:node", 0.2, 2), _gesture("workbench:node", 0.3, 3),
+           _gesture("workbench:decide", 0.5, 4, write=True,
+                    whole={"- :: query_nodes": {"calls": 1, "s": 0.4}}),
+           _gesture("workbench:search", 0.4, 5, whole={"- :: query_nodes": {"calls": 1, "s": 0.3}}),
+           _gesture("workbench:feed", 0.05, 6, poll=True, ticks=30),
+           _gesture("workbench:feed", 0.07, 7, poll=True, ticks=10)]
+    for e in evs:
+        append_op(ledger, e, dedup=False)
+    rep = perf_report(ledger)
+    assert [v["verb"] for v in rep["verbs"]] == ["show"]
+    node = {g["verb"]: g for g in rep["gestures"]}["workbench:node"]
+    assert node["runs"] == 2 and node["latest_s"] == 0.3 and node["queued_s"] == 0.01
+    assert node["round_trips"] == 2 and node["rows"] == 10 and node["bytes"] == 500
+    (feed,) = rep["polls"]
+    assert feed["gesture"] == "workbench:feed" and feed["windows"] == 2 and feed["ticks"] == 40
+    assert feed["tick_s"] == pytest.approx((0.05 * 30 + 0.07 * 10) / 40)
+    assert feed["latest_tick_s"] == pytest.approx(0.07) and feed["round_trips"] == 2
+    tripped = {(g["verb"], g["guard"]) for g in rep["guards"]}
+    assert ("workbench:decide", "whole-scope-in-write") in tripped
+    assert not any(v == "workbench:search" for v, _ in tripped)
+    text = render_perf(rep)
+    assert "### Gestures" in text and "### Polls (per tick" in text
+    assert "Qt-side delivery" in text
+
+
+def test_a_gesture_writes_when_it_calls_a_store_write():
+    ev = _gesture("correction:commit", 0.2, 1, whole={"- :: query_nodes": {"calls": 1, "s": 0.1}})
+    assert not guards(ev)
+    ev["storage"]["update_node"] = {"calls": 1, "s": 0.01}
+    assert [g["guard"] for g in guards(ev)] == ["whole-scope-in-write"]

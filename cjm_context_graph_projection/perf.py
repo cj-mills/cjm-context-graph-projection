@@ -19,16 +19,16 @@ import json
 import math
 import os
 import statistics
-import sys
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
-from cjm_context_graph_layer.ops import graph_task
-from cjm_context_graph_primitives.journal import append_op, journal_segments, read_journal
+from cjm_context_graph_layer.ops import graph_task, store_covariates, WRITE_METHODS
+from cjm_context_graph_primitives.journal import journal_segments, read_journal
 from cjm_context_graph_primitives.query import NodeQuery
-from cjm_context_graph_primitives.timings import begin_run, CURRENT_RUN, end_run, Run, span
+from cjm_context_graph_primitives.timings import (append_event, begin_run, CURRENT_RUN, end_run,
+                                                  Run, span)
 
 from .runtime import GraphHandle
 
@@ -53,10 +53,7 @@ def invocation_parsed(
     step = os.environ.get("CJM_RUN_STEP")
     run.attrs.update({k: v for k, v in attrs.items() if v is not None})
     if step:
-        run.attrs["step"] = step
-    tier = os.environ.get("CJM_BENCH_TIER")
-    if tier:  # a scale-harness run (design detail 3bd8673d): its tier, kept apart from live runs
-        run.attrs.update({"tier": int(tier), "lane": os.environ.get("CJM_BENCH_LANE")})
+        run.attrs["step"] = step  # a scale-harness run's tier rides from its birth (the Run's own)
     if not timings_path:
         end_run(run)
 
@@ -89,12 +86,9 @@ def append_timing(
     event: Dict[str, Any],  # One run's event
 ) -> None:
     """Append one timing event: O(1), dedup off (every run is one event), fail-open -- the
-    instrument must never break the work it measured."""
-    try:
-        append_op(path, event, dedup=False)
-    except Exception as e:
-        print(f"warning: timings-ledger append failed (the run itself completed): {e}",
-              file=sys.stderr)
+    instrument must never break the work it measured. The primitives' `append_event`, the one
+    append every recorder shares (an app's gestures too, design detail 4389a579)."""
+    append_event(path, event)
 
 
 def journal_footprint(
@@ -112,19 +106,20 @@ async def measure_covariates(
     gx: GraphHandle,                      # The open graph
     journals: Dict[str, Optional[str]],  # Journal family name -> live path
 ) -> Dict[str, Any]:  # {nodes, edges, db_bytes, kinds, repos, journals}
-    """The growth covariates every event carries: nodes, edges and bytes of the store, nodes
-    per kind, the repos on the graph (the code lane's distinct repo keys), and each journal
-    family's segments and bytes. Measured with the run DISARMED, so the storage table holds the
-    verb's calls alone; its cost is the `covariates` phase."""
+    """The growth covariates every event carries: the store half (nodes, edges and bytes of the
+    store, nodes per kind -- the layer's `store_covariates`, which an app's session measures
+    beside its gestures too, design detail 4389a579), the repos on the graph (the code lane's
+    distinct repo keys), and each journal family's segments and bytes. Measured with the run
+    DISARMED, so the storage table holds the verb's calls alone; its cost is the `covariates`
+    phase."""
     run = CURRENT_RUN.get()
     token = CURRENT_RUN.set(None)
     t = time.perf_counter()
     try:
-        schema = await graph_task(gx.queue, gx.graph_id, "get_schema")
-        kinds = dict(sorted((schema.get("counts") or {}).items()))
-        out: Dict[str, Any] = {"nodes": sum(kinds.values()), "edges": schema.get("edge_count"),
-                               "db_bytes": schema.get("db_bytes"), "kinds": kinds}
-        if kinds.get("CodeModule"):
+        out = await store_covariates(gx.queue, gx.graph_id)
+        if "error" in out:
+            return out
+        if out["kinds"].get("CodeModule"):
             mods = await graph_task(gx.queue, gx.graph_id, "query_nodes",
                                     query=NodeQuery(label="CodeModule", project=["repo_key"]).to_dict())
             out["repos"] = len({r.get("repo_key") for r in (mods.rows or []) if r.get("repo_key")})
@@ -234,10 +229,14 @@ def series_trend(
 
 def guards(ev: Dict[str, Any]) -> List[Dict[str, Any]]:  # The guard findings on one event
     """The design's guards, read off one event (681604c1): each row names the guard, what it
-    saw and where."""
+    saw and where. A gesture (design detail 4389a579) is a write when its session said so (an
+    `op_write` method) or when it called a write method of the store."""
     out: List[Dict[str, Any]] = []
     attrs = ev.get("attrs") or {}
-    writes = not attrs.get("read_only")
+    if ev.get("kind") == "gesture":
+        writes = bool(attrs.get("write")) or any(m in WRITE_METHODS for m in (ev.get("storage") or {}))
+    else:
+        writes = not attrs.get("read_only")
     if writes:
         for where, row in (ev.get("whole") or {}).items():
             out.append({"guard": "whole-scope-in-write", "where": where, "calls": row["calls"],
@@ -260,9 +259,52 @@ def guards(ev: Dict[str, Any]) -> List[Dict[str, Any]]:  # The guard findings on
                                   f"{trend['bins']} bins)"})
     nodes = _covariate(ev, "nodes")
     read = sum(row.get("rows_out", 0) for row in (ev.get("storage") or {}).values())
-    if writes and nodes and read / nodes >= GRAPH_SHARE and ev.get("kind") == "cli":
+    if writes and nodes and read / nodes >= GRAPH_SHARE and ev.get("kind") in ("cli", "gesture"):
         out.append({"guard": "read-most-of-the-graph", "where": ev.get("verb"),
                     "detail": f"{read:,} rows read over {int(nodes):,} nodes"})
+    return out
+
+
+def gesture_cost(
+    ev: Dict[str, Any],  # One gesture event (or a poll's rolling one)
+    per: int = 1,        # Divide by this many ticks (a poll's per-tick cost)
+) -> Dict[str, float]:  # {queued_s, round_trips, rows, bytes}
+    """What a gesture cost the store (design detail 4389a579): its wait on the loop and its
+    round trips, rows and wire bytes, read off its storage table -- per tick for a poll."""
+    storage = (ev.get("storage") or {}).values()
+    n = max(1, per)
+    return {"queued_s": ((ev.get("phases") or {}).get("queued") or {}).get("s", 0.0) / n,
+            "round_trips": sum(r.get("calls", 0) for r in storage) / n,
+            "rows": sum(r.get("rows_in", 0) + r.get("rows_out", 0) for r in storage) / n,
+            "bytes": sum(r.get("bytes_in", 0) + r.get("bytes_out", 0) for r in storage) / n}
+
+
+def poll_rows(
+    polls: Dict[str, List[Dict[str, Any]]],  # Poll name -> its rolling events
+    runs: int = 50,                          # Windows kept per poll (the newest N)
+) -> List[Dict[str, Any]]:  # Per poll: {gesture, windows, ticks, tick_s, failed, ...per-tick cost}
+    """A poll's cost per tick (design detail 4389a579): its rolling windows' ticks, the mean work
+    per tick and what each tick cost the store; the latest window's tick cost beside the mean."""
+    out = []
+    for name, evs in sorted(polls.items()):
+        evs = sorted(evs, key=lambda e: e.get("ts") or 0)[-runs:]
+        ticks = [((e.get("phases") or {}).get("tick") or {}) for e in evs]
+        n = sum(t.get("calls", 0) for t in ticks)
+        if not n:
+            continue
+        last = ticks[-1]
+        total = {"phases": {"queued": {"s": sum(((e.get("phases") or {}).get("queued") or {})
+                                                 .get("s", 0.0) for e in evs)}},
+                 "storage": {}}
+        for e in evs:
+            for m, r in (e.get("storage") or {}).items():
+                row = total["storage"].setdefault(m, {})
+                for k, v in r.items():
+                    row[k] = row.get(k, 0) + v
+        out.append({"gesture": name, "windows": len(evs), "ticks": n,
+                    "tick_s": sum(t.get("s", 0.0) for t in ticks) / n,
+                    "latest_tick_s": last.get("s", 0.0) / last["calls"] if last.get("calls") else None,
+                    "failed": sum(t.get("failed", 0) for t in ticks), **gesture_cost(total, n)})
     return out
 
 
@@ -284,20 +326,31 @@ def growth(
 
 
 def tier_curves(
-    events: List[Dict[str, Any]],  # The ledger's tier-tagged events (the harness's and the CLI's)
-    verb: Optional[str] = None,    # Only this canonical verb
+    events: List[Dict[str, Any]],  # The ledger's tier-tagged events (the harness's, the CLI's, the gestures')
+    verb: Optional[str] = None,    # Only this canonical verb or gesture
 ) -> List[Dict[str, Any]]:  # Per lane: {lane, tiers, verbs: [{verb, cells, growth}], builds}
     """The scale harness's read (design detail 3bd8673d): per lane and canonical verb, the
     latest run at each tier -- the harness's wall and peak RSS, joined by run id with the CLI's
     own event for its heaviest phases -- and the growth exponent across the tiers; beside them
-    the latest build wall per tier."""
+    the latest build wall per tier. Each canonical GESTURE is a row too (design detail
+    4389a579): its own wall (a poll's per tick), the peak RSS of the driver process that ran
+    it (joined by run id), its heaviest phases."""
     cli = {e.get("run_id"): e for e in events if e.get("kind") == "cli" and e.get("run_id")}
+    harness = {e.get("run_id"): e for e in events if e.get("kind") == "bench" and e.get("run_id")}
     latest: Dict[tuple, Dict[str, Any]] = {}
+    gestures: Dict[tuple, Dict[str, Any]] = {}
     builds: Dict[tuple, Dict[str, Any]] = {}
     for e in events:
+        a = e.get("attrs") or {}
+        if e.get("kind") == "gesture":
+            if verb and e.get("verb") != verb:
+                continue
+            key = (a.get("lane"), e.get("verb"), a.get("tier"))
+            if key not in gestures or (e.get("ts") or 0) > (gestures[key].get("ts") or 0):
+                gestures[key] = e
+            continue
         if e.get("kind") != "bench":
             continue
-        a = e.get("attrs") or {}
         if e.get("verb") == "bench-build":
             key = (a.get("lane"), a.get("tier"))
             if key not in builds or (e.get("ts") or 0) > (builds[key].get("ts") or 0):
@@ -316,6 +369,18 @@ def tier_curves(
             {"tier": tier, "wall_s": e.get("wall_s"), "peak_rss_kb": e.get("peak_rss_kb"),
              "outcome": e.get("outcome"), "nodes": _covariate(c, "nodes") if c else None,
              "top_phases": [{"phase": p, "self_s": s} for p, s in selfs[:3]]})
+    for (lane, name, tier), e in gestures.items():
+        h = harness.get(e.get("run_id")) or {}
+        phases = e.get("phases") or {}
+        tick = phases.get("tick") or {}
+        poll = (e.get("attrs") or {}).get("poll")
+        wall = tick.get("s", 0.0) / tick["calls"] if poll and tick.get("calls") else e.get("wall_s")
+        selfs = sorted(self_times(phases).items(), key=lambda kv: -kv[1])
+        lanes.setdefault(lane, {}).setdefault(name, []).append(
+            {"tier": tier, "wall_s": wall, "peak_rss_kb": h.get("peak_rss_kb"),
+             "outcome": 0 if e.get("outcome") == "ok" else e.get("outcome"),
+             "nodes": _covariate(e, "nodes"), "gesture": True,
+             "top_phases": [{"phase": p, "self_s": s} for p, s in selfs[:3]]})
     out: List[Dict[str, Any]] = []
     for lane in sorted(set(lanes) | {l for l, _ in builds}, key=str):
         verbs = []
@@ -330,24 +395,31 @@ def tier_curves(
 
 def perf_report(
     path: str,                   # The timings ledger
-    verb: Optional[str] = None,  # Only this verb
+    verb: Optional[str] = None,  # Only this verb (or app:gesture)
     runs: int = 50,              # History kept per verb (the newest N)
     since: Optional[float] = None,  # Only events at or after this unix time
-) -> Dict[str, Any]:  # {ledger, events, verbs, fits, regressions, guards, rebuilds, tiers, unmeasured}
+) -> Dict[str, Any]:  # {ledger, events, verbs, gestures, polls, fits, regressions, guards, rebuilds, tiers, unmeasured}
     """The ledger read: per verb the latest / median / p90 END-TO-END seconds (launch + import
-    + wall), the latest run's heaviest phases by self time and storage by method; fits of that
-    cost against each covariate; regressions; the guards on each verb's latest run; the latest
-    rebuild per lane; the scale harness's curves per lane (`tier_curves`)."""
+    + wall), the latest run's heaviest phases by self time and storage by method; per app
+    gesture the same over its wall, with its queue wait, round trips, rows and bytes, and per
+    poll its cost per tick (design detail 4389a579); fits of each cost against each covariate;
+    regressions; the guards on each verb's and gesture's latest run; the latest rebuild per
+    lane; the scale harness's curves per lane (`tier_curves`)."""
     events = [e for e in read_journal(path) if not since or (e.get("ts") or 0) >= since]
     # A scale-harness run (design detail 3bd8673d) carries its tier: its cost belongs to the
     # tier curves, never to a live verb's history, fits, regressions or guards
     tiered = [e for e in events if (e.get("attrs") or {}).get("tier") is not None]
     events = [e for e in events if (e.get("attrs") or {}).get("tier") is None]
     by_verb: Dict[str, List[Dict[str, Any]]] = {}
+    polls: Dict[str, List[Dict[str, Any]]] = {}
     for e in events:
-        if e.get("kind") == "cli" and (verb is None or e.get("verb") == verb):
+        if verb is not None and e.get("verb") != verb:
+            continue
+        if e.get("kind") == "gesture" and (e.get("attrs") or {}).get("poll"):
+            polls.setdefault(e.get("verb") or "?", []).append(e)
+        elif e.get("kind") in ("cli", "gesture"):
             by_verb.setdefault(e.get("verb") or "?", []).append(e)
-    verbs, fits, regressions, found = [], [], [], []
+    verbs, gestures, fits, regressions, found = [], [], [], [], []
     guarded = set()  # (run_id, verb, ts) of events whose guards are listed: each event once
     for name, evs in sorted(by_verb.items()):
         evs = sorted(evs, key=lambda e: e.get("ts") or 0)[-runs:]
@@ -355,12 +427,16 @@ def perf_report(
         latest = evs[-1]
         selfs = sorted(self_times(latest.get("phases") or {}).items(), key=lambda kv: -kv[1])
         q = statistics.quantiles(walls, n=10)[-1] if len(walls) >= 2 else walls[-1]
-        verbs.append({"verb": name, "runs": len(evs), "latest_s": walls[-1],
-                      "median_s": statistics.median(walls), "p90_s": q,
-                      "top_phases": [{"phase": p, "self_s": s} for p, s in selfs[:4]],
-                      "storage": {m: {"calls": r["calls"], "s": r["s"]}
-                                  for m, r in sorted((latest.get("storage") or {}).items(),
-                                                     key=lambda kv: -kv[1]["s"])[:4]}})
+        row = {"verb": name, "runs": len(evs), "latest_s": walls[-1],
+               "median_s": statistics.median(walls), "p90_s": q,
+               "top_phases": [{"phase": p, "self_s": s} for p, s in selfs[:4]],
+               "storage": {m: {"calls": r["calls"], "s": r["s"]}
+                           for m, r in sorted((latest.get("storage") or {}).items(),
+                                              key=lambda kv: -kv[1]["s"])[:4]}}
+        if latest.get("kind") == "gesture":
+            gestures.append({**row, "outcome": latest.get("outcome"), **gesture_cost(latest)})
+        else:
+            verbs.append(row)
         for cov in FIT_COVARIATES:
             pts = [(_covariate(e, cov), end_to_end(e)) for e in evs]
             pts = [(x, y) for x, y in pts if x is not None]
@@ -374,6 +450,9 @@ def perf_report(
                                     "ratio": walls[-1] / base})
         found += [{"verb": name, **g} for g in guards(latest)]
         guarded.add((latest.get("run_id"), latest.get("verb"), latest.get("ts")))
+    for name, evs in sorted(polls.items()):
+        latest = max(evs, key=lambda e: e.get("ts") or 0)
+        found += [{"verb": name, **g} for g in guards(latest)]
     rebuilds: Dict[str, Dict[str, Any]] = {}
     for e in events:
         if e.get("kind") == "rebuild":
@@ -394,11 +473,13 @@ def perf_report(
         rebuild_rows.append({"lane": lane, "ts": e.get("ts"), "wall_s": e.get("wall_s"),
                              "outcome": e.get("outcome"), "phases": e.get("phases"),
                              "steps": step_rows})
-    return {"ledger": path, "events": len(events), "verbs": verbs, "fits": fits,
+    return {"ledger": path, "events": len(events), "verbs": verbs, "gestures": gestures,
+            "polls": poll_rows(polls, runs=runs), "fits": fits,
             "regressions": regressions, "guards": found, "rebuilds": rebuild_rows,
             "tiers": tier_curves(tiered, verb=verb),
             "unmeasured": ["journal op counts per family (B's journal index)",
-                           "app gestures (the Qt kit's loop-thread seam)",
+                           "Qt-side delivery and paint (the shell's, after its migration; "
+                           "design detail 4389a579)",
                            "code writes at scale (the sandbox repo tier, work item 29318333)",
                            "the synthetic replay tier (deferred, design detail 3bd8673d)"]}
 
@@ -424,15 +505,38 @@ def render_perf(
     if fmt == "agent":
         return json.dumps(res, indent=1, default=str)
     out = [f"## Perf — {Path(res['ledger']).name} · {res['events']} event(s)", ""]
-    if not res["verbs"] and not res["rebuilds"] and not res.get("tiers"):
-        return "\n".join(out + ["(no events yet -- the wrappers record one per invocation)"])
-    out += ["### Verbs (seconds end to end: launch + import + the run)", "",
-            "| verb | runs | latest | median | p90 | heaviest phases, latest run (self s) |",
-            "|---|---:|---:|---:|---:|---|"]
+    if not (res["verbs"] or res.get("gestures") or res.get("polls") or res["rebuilds"]
+            or res.get("tiers")):
+        return "\n".join(out + ["(no events yet -- the wrappers record one per invocation, "
+                                "an app one per gesture)"])
+    if res["verbs"]:
+        out += ["### Verbs (seconds end to end: launch + import + the run)", "",
+                "| verb | runs | latest | median | p90 | heaviest phases, latest run (self s) |",
+                "|---|---:|---:|---:|---:|---|"]
     for v in res["verbs"]:
         phases = " · ".join(f"{p['phase']} {_s(p['self_s'])}" for p in v["top_phases"])
         out.append(f"| {v['verb']} | {v['runs']} | {_s(v['latest_s'])} | {_s(v['median_s'])} | "
                    f"{_s(v['p90_s'])} | {phases} |")
+    if res.get("gestures"):
+        out += ["", "### Gestures (seconds in the session's loop, queued + work; latest run's "
+                    "round trips = storage calls, rows and wire bytes)", "",
+                "| gesture | runs | latest | median | p90 | queued | round trips | rows | bytes | "
+                "heaviest phases, latest run (self s) |",
+                "|---|---:|---:|---:|---:|---:|---:|---:|---:|---|"]
+        for g in res["gestures"]:
+            phases = " · ".join(f"{p['phase']} {_s(p['self_s'])}" for p in g["top_phases"])
+            failed = "" if g.get("outcome") in (None, "ok") else f" **{g['outcome']}**"
+            out.append(f"| {g['verb']}{failed} | {g['runs']} | {_s(g['latest_s'])} | "
+                       f"{_s(g['median_s'])} | {_s(g['p90_s'])} | {_s(g['queued_s'])} | "
+                       f"{g['round_trips']:,.0f} | {g['rows']:,.0f} | {g['bytes']:,.0f} | {phases} |")
+    if res.get("polls"):
+        out += ["", "### Polls (per tick; one rolling event per window)", "",
+                "| poll | windows | ticks | per tick | latest tick | queued | round trips | rows | "
+                "bytes | failed |", "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
+        for p in res["polls"]:
+            out.append(f"| {p['gesture']} | {p['windows']} | {p['ticks']} | {_s(p['tick_s'])} | "
+                       f"{_s(p['latest_tick_s'])} | {_s(p['queued_s'])} | {p['round_trips']:,.1f} | "
+                       f"{p['rows']:,.0f} | {p['bytes']:,.0f} | {p['failed']} |")
     if res["regressions"]:
         out += ["", "### Regressions", ""]
         out += [f"- **{r['verb']}** {_s(r['latest_s'])} s vs median {_s(r['median_s'])} s "
