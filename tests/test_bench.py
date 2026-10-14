@@ -359,6 +359,7 @@ def test_load_integrity_finds_torn_lines_lost_and_duplicated_ops(tmp_path):
     assert not bad["ok"] and (bad["bad_lines"], bad["duplicated"], bad["in_db"]) == (1, 1, 1)
 
 
+@needs_capability
 def test_a_recorded_session_replays_as_a_concurrent_load(tmp_path):
     """Design detail 2f5033bf (2), end to end: a session recorded through the CLI becomes a
     workload; two clients replay it at two tiers as real invocations, their writes marked and
