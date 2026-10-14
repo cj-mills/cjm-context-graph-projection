@@ -4,6 +4,7 @@ The tier half is pinned on a synthetic graph (the store's own tables and indexes
 family of one cold segment and a live tail; the run half drives the real CLI through the harness
 against a tier and reads the ledger the way `perf` does."""
 
+import importlib.util
 import json
 import os
 import sqlite3
@@ -263,6 +264,8 @@ def test_tier_curves_carry_each_gesture_with_its_driver_peak():
     assert [c["wall_s"] for c in rows["app:feed"]["cells"]] == pytest.approx([0.2, 0.4, 0.8])
 
 
+@pytest.mark.skipif(importlib.util.find_spec("cjm_substrate_qt_kit") is None,
+                    reason="the gesture runner lives in cjm-substrate-qt-kit, not a projection dependency")
 def test_a_driver_spec_runs_an_apps_gestures_at_each_tier(tmp_path, monkeypatch):
     """A spec naming a driver runs the kit's gesture runner (design detail 4389a579): each
     gesture lands in the lane's ledger tagged with its tier and joined to the harness's event;
