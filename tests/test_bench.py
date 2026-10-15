@@ -265,7 +265,9 @@ def test_a_run_measures_each_verb_at_each_tier_apart_from_the_live_history(tmp_p
     assert {s["verb"] for s in res["skipped"]} == {"nothing"}
     # the writes landed in the tier's journal, never the live one
     assert len(read_journal(journal)) == 2
-    assert len(read_journal(str(tmp_path / "bench" / "g" / "x2" / "journals" / "g.writes.jsonl"))) == 6
+    # x2's two copies' ops, then decide cold and warm (two mints) and link (the warm repeat's
+    # identical op dedups): b7b3976f (B) runs every verb cold, then warm
+    assert len(read_journal(str(tmp_path / "bench" / "g" / "x2" / "journals" / "g.writes.jsonl"))) == 7
     events = read_journal(ledger)
     cli = [e for e in events if e["kind"] == "cli" and (e.get("attrs") or {}).get("tier")]
     assert {(e["attrs"]["tier"], e["verb"]) for e in cli} == {
@@ -322,8 +324,8 @@ def test_a_driver_spec_runs_an_apps_gestures_at_each_tier(tmp_path, monkeypatch)
         {"name": "gestures:none", "driver": "probe_driver:drive", "params": {"hub": "{nope}"}}])
     build(lane, settings, ledger=ledger)
     res = run(lane, settings, ledger)
-    assert [(r["tier"], r["verb"], r["outcome"]) for r in res["runs"]] == [
-        (1, "gestures:probe", 0), (2, "gestures:probe", 0)], res
+    assert [(r["tier"], r["verb"], r["outcome"], r["cache"]) for r in res["runs"]] == [
+        (k, "gestures:probe", 0, c) for k in (1, 2) for c in ("cold", "warm")], res
     assert {s["verb"] for s in res["skipped"]} == {"gestures:none"}
     events = read_journal(ledger)
     gest = [e for e in events if e["kind"] == "gesture"]

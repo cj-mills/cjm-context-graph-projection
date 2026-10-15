@@ -303,6 +303,32 @@ def test_a_write_seat_is_held_to_its_amplification_and_a_read_seat_to_the_mb_cei
     assert "the build x3.0" in render_perf(res)
 
 
+def test_a_tier_reads_its_warm_run_and_shows_the_cold_one_beside(tmp_path):
+    """Ruling b7b3976f (B): the harness labels each run cold or warm; a seat's reading at a tier
+    is its warm run (an unlabelled older run stands in until one exists), the cold one rides
+    beside it with its block-layer reads, and a cold run is never a tier regression."""
+    def runs(cache, wall, ts, read_bytes):
+        rid = f"{cache}-{ts}"
+        a = {"lane": "dev", "tier": 8, **({"cache": cache} if cache else {})}
+        return [{"verb": "locate", "kind": "bench", "run_id": rid, "ts": ts, "wall_s": wall,
+                 "outcome": 0, "attrs": a},
+                {"verb": "locate", "kind": "cli", "run_id": rid, "ts": ts, "wall_s": wall,
+                 "outcome": 0, "phases": {"verb": {"calls": 1, "s": wall}},
+                 "io": {"write_bytes": 0, "read_bytes": read_bytes}, "attrs": a}]
+    old = runs(None, 25.0, 1.0, 0)
+    (lane,) = tier_curves(old)
+    assert lane["verbs"][0]["cells"][0]["wall_s"] == 25.0 and lane["verbs"][0]["cells"][0]["cold"] is None
+    events = old + runs("cold", 74.0, 2.0, 6 << 30) + runs("warm", 22.0, 3.0, 0)
+    (cell,) = tier_curves(events)[0]["verbs"][0]["cells"]
+    assert cell["wall_s"] == 22.0
+    assert cell["cold"]["wall_s"] == 74.0 and cell["cold"]["block_read"] == 6 << 30
+    assert tier_regressions(events) == []          # 74 s cold vs a 25 s best: shown, not compared
+    ledger = str(tmp_path / "g.timings.jsonl")
+    for e in events:
+        append_op(ledger, e, dedup=False)
+    assert "cold 74.0 s" in render_perf(perf_report(ledger))
+
+
 def test_tier_regressions_and_the_load_read():
     """Design detail 2f5033bf (2) / (3): a tier seat's latest reading against its best there;
     a load run read per verb (p50 / p99 of the harness's seconds, the CLI's own beside them),

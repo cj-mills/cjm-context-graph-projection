@@ -105,6 +105,29 @@ def test_link_resolves_id_prefixes_and_journals_resolved_ids(tmp_path):
     assert len([o for o in read_journal(journal) if o["verb"] == "link"]) == 1
 
 
+def test_assert_resolves_evidence_prefixes_and_journals_full_ids(tmp_path):
+    # Finding 0ccdca26: `--evidence <prefix>` was journaled raw and its EVIDENCED_BY edge
+    # dropped live and on replay. A prefix resolves to the full id before the op is journaled;
+    # one matching nothing refuses the write; prose lands no edge and says so on stderr.
+    db = str(tmp_path / "dev.db")
+    journal = str(tmp_path / "writes.jsonl")
+    base = ("--graph-db-path", db, "--journal-path", journal, "--format", "agent")
+    item = json.loads(_run(*base, "decide", "WORK ITEM: e").stdout)["decision_id"]
+    proof = json.loads(_run(*base, "decide", "proof decision").stdout)["decision_id"]
+    r = _run(*base, "assert", item[:8], "task_state", "done", "--evidence", proof[:8])
+    assert r.returncode == 0, r.stderr or r.stdout
+    op = [o for o in read_journal(journal) if o["verb"] == "assert"][-1]
+    assert op["args"]["evidence"] == [proof]
+    con = sqlite3.connect(db)
+    assert con.execute("SELECT count(*) FROM edges WHERE target_id = ? AND relation_type = "
+                       "'EVIDENCED_BY'", (proof,)).fetchone()[0] == 1
+    n = len(read_journal(journal))
+    miss = _run(*base, "assert", item, "task_state", "done", "--evidence", "deadbeef")
+    assert miss.returncode != 0 and len(read_journal(journal)) == n  # refused, never journaled
+    prose = _run(*base, "assert", item, "note_kind", "x", "--evidence", "because I said so")
+    assert prose.returncode == 0 and "is not a node id" in prose.stderr
+
+
 def test_decide_capture_asserts_capture_state_and_links_the_ridden_item(tmp_path):
     """a3d196c6 shape (a): `decide --capture` journals decide + assert capture_state in one
     invocation; `riding:<prefix>` resolves the item, journals the FULL id in the value and

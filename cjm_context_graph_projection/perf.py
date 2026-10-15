@@ -390,6 +390,33 @@ def growth(
     return {"b": sxy / sxx, "r2": (sxy * sxy) / (sxx * syy) if syy else 1.0, "n": len(pts)}
 
 
+def _keep_latest(
+    table: Dict[tuple, Dict[str, Any]],  # (lane, verb, tier) -> the reading kept
+    key: tuple,                          # The seat at its tier
+    e: Dict[str, Any],                   # A candidate event
+) -> None:
+    """Keep a seat's reading at a tier (ruling b7b3976f (B)): a WARM run before an unlabelled one
+    (a run from before the harness labelled its cache condition), then the latest."""
+    def rank(ev: Dict[str, Any]) -> tuple:
+        return ((ev.get("attrs") or {}).get("cache") == "warm", ev.get("ts") or 0)
+    if key not in table or rank(e) > rank(table[key]):
+        table[key] = e
+
+
+def _cold_cell(
+    e: Optional[Dict[str, Any]],               # The seat's cold reading at the tier, or None
+    cli: Dict[Optional[str], Dict[str, Any]],  # The CLI events by run id
+) -> Optional[Dict[str, Any]]:  # {wall_s, verb_s, block_read, outcome}, or None
+    """A tier's COLD reading, shown beside the warm one and gating nothing (ruling b7b3976f (B)):
+    its seconds and the bytes its run read from the block layer -- the evidence it ran cold."""
+    if e is None:
+        return None
+    c = cli.get(e.get("run_id")) or (e if e.get("kind") == "gesture" else {})
+    return {"wall_s": e.get("wall_s"), "outcome": e.get("outcome"),
+            "verb_s": ((c.get("phases") or {}).get("verb") or {}).get("s"),
+            "block_read": (c.get("io") or {}).get("read_bytes")}
+
+
 def tier_curves(
     events: List[Dict[str, Any]],  # The ledger's tier-tagged events (the harness's, the CLI's, the gestures')
     verb: Optional[str] = None,    # Only this canonical verb or gesture
@@ -405,14 +432,14 @@ def tier_curves(
     latest: Dict[tuple, Dict[str, Any]] = {}
     gestures: Dict[tuple, Dict[str, Any]] = {}
     builds: Dict[tuple, Dict[str, Any]] = {}
+    colds: Dict[tuple, Dict[str, Any]] = {}  # b7b3976f (B): each seat's cold reading, beside the warm
     for e in events:
         a = e.get("attrs") or {}
         if e.get("kind") == "gesture":
             if verb and e.get("verb") != verb:
                 continue
-            key = (a.get("lane"), e.get("verb"), a.get("tier"))
-            if key not in gestures or (e.get("ts") or 0) > (gestures[key].get("ts") or 0):
-                gestures[key] = e
+            _keep_latest(colds if a.get("cache") == "cold" else gestures,
+                         (a.get("lane"), e.get("verb"), a.get("tier")), e)
             continue
         if e.get("kind") != "bench":
             continue
@@ -423,9 +450,8 @@ def tier_curves(
             continue
         if not e.get("run_id") or (verb and e.get("verb") != verb):
             continue
-        key = (a.get("lane"), e.get("verb"), a.get("tier"))
-        if key not in latest or (e.get("ts") or 0) > (latest[key].get("ts") or 0):
-            latest[key] = e
+        _keep_latest(colds if a.get("cache") == "cold" else latest,
+                     (a.get("lane"), e.get("verb"), a.get("tier")), e)
     lanes: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
     for (lane, name, tier), e in latest.items():
         c = cli.get(e.get("run_id"))
@@ -441,6 +467,7 @@ def tier_curves(
              "read_only": (c.get("attrs") or {}).get("read_only") if c else None,
              "logical": logical_bytes(c) if c else None,
              "amplification": io_row(c)["amplification"] if c else None,
+             "cold": _cold_cell(colds.get((lane, name, tier)), cli),
              "top_phases": [{"phase": p, "self_s": s} for p, s in selfs[:3]]})
     for (lane, name, tier), e in gestures.items():
         h = harness.get(e.get("run_id")) or {}
@@ -456,6 +483,7 @@ def tier_curves(
              "written": net_written(e.get("io")),  # process-wide: an upper bound (2f5033bf (1))
              "read_only": None, "logical": logical_bytes(e),  # a gesture writes when it appends
              "amplification": io_row(e)["amplification"],
+             "cold": _cold_cell(colds.get((lane, name, tier)), cli),
              "top_phases": [{"phase": p, "self_s": s} for p, s in selfs[:3]]})
     out: List[Dict[str, Any]] = []
     for lane in sorted(set(lanes) | {l for l, _ in builds}, key=str):
@@ -484,6 +512,8 @@ def tier_regressions(
     runs: Dict[tuple, List[Dict[str, Any]]] = {}
     for e in events:
         a = e.get("attrs") or {}
+        if a.get("cache") == "cold":
+            continue  # b7b3976f (B): a cold reading is shown, never compared
         if e.get("kind") == "bench" and e.get("run_id") and e.get("outcome") == 0:
             pass
         elif e.get("kind") == "gesture" and e.get("outcome") == "ok" and not a.get("poll"):
@@ -885,8 +915,10 @@ def _tier_cell(c: Optional[Dict[str, Any]]) -> str:  # One tier's cell: seconds,
     if c.get("outcome") != 0:
         return f"**{c.get('outcome')}**"
     rss = c.get("peak_rss_kb")
+    cold = c.get("cold") or {}
     return (f"{_s(c.get('wall_s'))} s" + (f" · {rss / 1024 ** 2:.2f} GB" if rss else "")
-            + (f" · w {_bytes_text(c['written'])}" if c.get("written") is not None else ""))
+            + (f" · w {_bytes_text(c['written'])}" if c.get("written") is not None else "")
+            + (f" · cold {_s(cold['wall_s'])} s" if cold.get("wall_s") is not None else ""))
 
 
 def _check_cell(c: Dict[str, Any]) -> str:  # One target check: reading / target, a miss marked

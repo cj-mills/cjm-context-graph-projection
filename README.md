@@ -750,6 +750,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `journal_footprint` _function_ — A journal family's size as stored: segments and bytes on disk (a cold segment counts
 - `load_report` _function_ — The concurrent replay mode's read (design detail 2f5033bf (2)): per load run -- its lane,
 - `load_targets` _function_ — The target classes (design detail 2f5033bf (3)): every perf_class Entity and its ACTIVE
+- `logical_bytes` _function_ — The denominator of a run's write amplification (ruling 9af0e42e (1) / (3)): the journal
 - `measure_covariates` _function_ — The growth covariates every event carries: the store half (nodes, edges and bytes of the
 - `net_written` _function_ — Bytes a run wrote to the disk (design detail 2f5033bf (1)): write_bytes less
 - `perf_report` _function_ — The ledger read: per verb the latest / median / p90 END-TO-END seconds (launch + import

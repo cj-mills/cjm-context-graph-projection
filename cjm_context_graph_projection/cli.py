@@ -191,6 +191,12 @@ async def _assert_journaled(
     must not re-attempt it. The bound content hash rides the op (design 40622922) so replay
     re-lands the SAME approval; `superseded_by` rides it only when set, so every other assert
     op keeps its journaled shape."""
+    evidence, err, prose = await _resolve_evidence(gx, evidence)
+    if err:
+        return {"error": err}
+    for p in prose:
+        print(f"⚠ evidence {p[:60]!r} is not a node id — no EVIDENCED_BY edge lands "
+              "(finding 0ccdca26)", file=sys.stderr)
     res = await assert_value(gx, subject, predicate, value, actor=actor, evidence=evidence,
                              supersede=supersede, superseded_by=superseded_by)
     if journal_path and not res.get("error"):
@@ -288,6 +294,36 @@ async def _resolve_capture(
         full = node.get("id") if isinstance(node, dict) else getattr(node, "id", None)
         return {"value": f"riding:{full}", "rides": full}, None
     return None, f"--capture expects seed | deferred | riding:<item> (got {spec!r})"
+
+
+async def _resolve_evidence(
+    gx,        # The open graph handle
+    evidence,  # An assert's evidence values (a list; a bare string is ONE value)
+):  # -> (values | None, error | None, prose values) — the _resolve_capture shape
+    """Resolve an assert's evidence before its op is journaled (finding 0ccdca26): an
+    id-shaped value (a full id, or a unique prefix of >= 6 hex) becomes its full id, so the
+    op carries what the EVIDENCED_BY edge needs and live and replay land it alike; one that
+    resolves to nothing or to several refuses the write. A value that is not id-shaped is
+    PROSE: kept as given (no edge can land) and returned so the caller warns. A bare string is
+    one value, never a sequence of characters."""
+    from .projection import _ID_PREFIX_RE, ambiguity_error, resolve_node_ref
+    if evidence is None:
+        return None, None, []
+    out, prose = [], []
+    for v in ([evidence] if isinstance(evidence, str) else list(evidence)):
+        v = str(v).strip()
+        if not _ID_PREFIX_RE.match(v):
+            out.append(v)
+            prose.append(v)
+            continue
+        r = await resolve_node_ref(gx, v)
+        if "candidates" in r:
+            return None, ambiguity_error(v, r["candidates"]), []
+        node = r.get("node")
+        if node is None:
+            return None, f"--evidence: no node `{v}` — mint it first, then cite it", []
+        out.append(node.get("id") if isinstance(node, dict) else getattr(node, "id", v))
+    return out, None, prose
 
 
 async def _resolve_module_ref(

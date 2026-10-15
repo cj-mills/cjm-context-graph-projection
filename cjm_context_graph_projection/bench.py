@@ -696,8 +696,10 @@ def run(
         fams = tm["journals"]
         values: Dict[str, Any] = {**tm.get("placeholders", {}),
                                   **(lane["settings"].get("placeholders") or {}), "db": db}
-        for _ in range(max(1, repeat)):
-            for spec in specs:
+        # ruling b7b3976f (B): each verb runs COLD at the tier (its first run, after whatever ran
+        # before it) and then warm, the repeats at once; perf reads the warm reading
+        for spec in specs:
+            for cache in ["cold"] + ["warm"] * max(1, repeat):
                 values["stamp"] = time.strftime("%Y-%m-%dT%H:%M:%S") + f" x{k}"
                 if "writes" in fams:
                     values["tail_offset"] = max(0, family_ops(fams["writes"])
@@ -705,14 +707,14 @@ def run(
                 run_id = str(uuid.uuid4())
                 env = {**os.environ, "CJM_RUN_ID": run_id, "CJM_BENCH_TIER": str(k),
                        "CJM_BENCH_LANE": lane["name"], "CJM_ACTOR": "bench:harness",
-                       "CJM_T0": repr(time.time())}
+                       "CJM_BENCH_CACHE": cache, "CJM_T0": repr(time.time())}
                 if spec.get("driver"):
                     params = {key: _fill(v, values) if isinstance(v, str) else v
                               for key, v in (spec.get("params") or {}).items()}
                     if any(v is None for v in params.values()):
                         out["skipped"].append({"tier": k, "verb": spec["name"],
                                                "reason": "a placeholder did not resolve"})
-                        continue
+                        break  # nor will it on the warm repeat
                     params.update({"db": db, "manifests_dir": lane["manifests_dir"],
                                    "journals": {name: fam["live"] for name, fam in fams.items()}})
                     cmd = [env_python(spec.get("env")), "-m", "cjm_substrate_qt_kit.gesturebench",
@@ -724,7 +726,7 @@ def run(
                     if any(a is None for a in argv):
                         out["skipped"].append({"tier": k, "verb": spec["name"],
                                                "reason": "a placeholder did not resolve"})
-                        continue
+                        break  # nor will it on the warm repeat
                     cmd = [sys.executable, "-m", "cjm_context_graph_projection.cli",
                            "--graph-db-path", db, "--manifests-dir", lane["manifests_dir"],
                            "--timings-path", ledger]
@@ -744,7 +746,7 @@ def run(
                 if spec.get("capture") and res["outcome"] == 0:
                     m = UUID_RE.search((tier / "runs" / f"{run_id}.out").read_text(errors="replace"))
                     values[spec["capture"]] = m.group(0) if m else None
-                row = {"tier": k, "verb": spec["name"], "run_id": run_id, **res}
+                row = {"tier": k, "verb": spec["name"], "run_id": run_id, "cache": cache, **res}
                 if res["outcome"] == 0:
                     (tier / "runs" / f"{run_id}.out").unlink()
                 else:  # a failed run keeps its output (the traceback is the diagnosis)
@@ -753,7 +755,7 @@ def run(
                 _event(ledger, spec["name"], res["wall_s"], lane, k,
                        {"peak_rss_kb": res["peak_rss_kb"], "maxrss_kb": res["maxrss_kb"],
                         "out_bytes": res["out_bytes"], "read_bytes": res["read_bytes"],
-                        "write_bytes": res["write_bytes"]},
+                        "write_bytes": res["write_bytes"]}, attrs={"cache": cache},
                        run_id=run_id, outcome=res["outcome"], **what)
     return out
 

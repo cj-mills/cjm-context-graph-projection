@@ -146,9 +146,9 @@ async def mint_pulled_messages(
     res = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
     fact: Optional[Dict[str, Any]] = None
     if cc_session_uuid:
-        fact = await assert_value(
-            gx, sess.id, "cc_session_uuid", cc_session_uuid, actor=actor,
-            evidence=f"derived by pull-transcript for session {session_key}")
+        # no evidence: the journaled pull-transcript op is the provenance -- a prose string
+        # here landed one dropped edge per character on every tick (finding 0ccdca26)
+        fact = await assert_value(gx, sess.id, "cc_session_uuid", cc_session_uuid, actor=actor)
     return {"session_id": sess.id, "session_key": session_key,
             "cc_session_uuid": cc_session_uuid, "minted": len(messages),
             "nodes_added": res.nodes_added, "edges_added": res.edges_added,
