@@ -27,7 +27,7 @@ from cjm_context_graph_layer.identity import derive_node_id
 from cjm_context_graph_layer.ops import observe_writes, PROVENANCE_TS
 from cjm_context_graph_primitives.journal import (append_write, journal_segments, read_journal,
                                                   read_segment)
-from cjm_context_graph_primitives.timings import record_series, timed
+from cjm_context_graph_primitives.timings import record_replay, record_series, timed
 from cjm_dev_graph_schema.identity import (code_module_node_id, entity_node_id, note_node_id,
                                            section_node_id, series_node_id, session_node_id)
 from cjm_dev_graph_schema.nodes import DecisionNode
@@ -577,6 +577,7 @@ async def replay_journal(
 
     async def apply(op):
         t = time.perf_counter()
+        record_replay(path, op)  # the replay's logical size (ruling 9af0e42e (3))
         verb = await _apply_op(gx, op, emit_root)
         # The instrument (681604c1): a verb's cost against its journal position -- flat when
         # healthy, rising when an op's cost grows with the history before it

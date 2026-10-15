@@ -202,8 +202,8 @@ def test_disk_figures_and_the_read_wrote_guard():
                 storage={"add_nodes": {"calls": 2, "s": 0.1, "io_write_bytes": 16384},
                          "query_nodes": {"calls": 3, "s": 0.1, "io_write_bytes": 4096,
                                          "io_cancelled_write_bytes": 4096}})
-    assert io_row(ev) == {"written": 32768, "read": 4096, "appended": 512, "store_written": 16384,
-                          "commits": 2, "amplification": 64.0}
+    assert io_row(ev) == {"written": 32768, "read": 4096, "appended": 512, "replayed": 0,
+                          "store_written": 16384, "commits": 2, "amplification": 64.0}
     assert net_written(None) is None and net_written({"write_bytes": 1, "cancelled_write_bytes": 5}) == 0
     quiet = _event("show", 1.0, 2, io={"write_bytes": 4096}, appended={"r.jsonl": {"ops": 1, "bytes": 300}})
     loud = _event("show", 1.0, 3, io={"write_bytes": 4 << 20})
@@ -254,6 +254,53 @@ def test_target_standing_reads_shape_absolute_and_membership():
     assert by["picker"]["status"] == "fail"
     assert any(c["target"] == "x32 s" and c["value"] == math.inf for c in by["picker"]["checks"])
     assert [r["status"] for r in st["loads"]] == ["unmeasured"] and not st["ready"]
+
+
+def test_a_write_seat_is_held_to_its_amplification_and_a_read_seat_to_the_mb_ceiling(tmp_path):
+    """Ruling 9af0e42e: one class mixes reads and writes -- a write seat (write mode, or journal
+    bytes appended or replayed) takes the x32 amplification and never the MB ceiling, a read-only
+    seat the ceiling and never the amplification; a replay's logical size is what it replayed;
+    the full build is a seat per lane, its build phase's bytes over the db it produced."""
+    tiers = (1, 2, 4, 8, 16, 32)
+    events = (_tier_runs("dev", "read", {k: 0.01 for k in tiers})
+              + _tier_runs("dev", "decide", {k: 0.01 for k in tiers})
+              + _tier_runs("dev", "replay-tail", {k: 0.01 for k in tiers}))
+    shapes = {"read": ({"read_only": True}, {"write_bytes": 64 * 1024}, {}),
+              "decide": ({"read_only": False}, {"write_bytes": 1024 ** 2},  # 1 MB: over the ceiling
+                         {"appended": {"w.jsonl": {"ops": 1, "bytes": 64 * 1024}}}),
+              "replay-tail": ({"read_only": False}, {"write_bytes": 500_000},
+                              {"replayed": {"w.jsonl": {"ops": 100, "bytes": 50_000}}})}
+    for e in events:
+        if e["kind"] == "cli":
+            mode, io, logical = shapes[e["verb"]]
+            e.update({"attrs": {**e["attrs"], **mode}, "io": io, **logical})
+    assert io_row(events[-1])["amplification"] == pytest.approx(10.0)  # over the ops replayed
+    ledger = str(tmp_path / "g.timings.jsonl")
+    for e in events:
+        append_op(ledger, e, dedup=False)
+    append_op(ledger, {"verb": "cg-rebuild", "kind": "rebuild", "run_id": "rb", "ts": 50.0,
+                       "wall_s": 9.0, "outcome": 0, "attrs": {"lane": "dev", "mode": "swap"},
+                       "phases": {"backup": {"s": 0.1, "write_bytes": 10 * 1024 ** 2},
+                                  "build": {"s": 8.0, "write_bytes": 300 * 1024 ** 2}}}, dedup=False)
+    append_op(ledger, {"verb": "ingest", "kind": "cli", "run_id": "rb", "ts": 51.0, "wall_s": 8.0,
+                       "outcome": 0, "attrs": {"step": "build"},
+                       "covariates": {"db_bytes": 100 * 1024 ** 2}}, dedup=False)
+    classes = [
+        {"key": "class-1", "members": ["read", "decide"],
+         "targets": {"perf_x32_write_mb": "0.25", "perf_write_amp_max": "32"}},
+        {"key": "class-6", "members": ["replay-tail"], "targets": {"perf_write_amp_max": "32"}},
+        {"key": "class-6-verifier", "members": ["cg-rebuild"], "targets": {"perf_write_amp_max": "2"}}]
+    res = perf_report(ledger, targets=classes)
+    (rb,) = res["rebuilds"]
+    assert rb["build_amplification"] == pytest.approx(3.0) and rb["amplification"] == pytest.approx(3.1)
+    by = {s["seat"]: s for s in res["standing"]["seats"]}
+    names = {k: [c["target"] for c in s["checks"]] for k, s in by.items()}
+    assert names["read"] == ["x32 written MB"] and by["read"]["status"] == "pass"
+    assert names["decide"] == ["x32 amplification"] and by["decide"]["status"] == "pass"
+    assert by["decide"]["checks"][0]["value"] == pytest.approx(16.0)
+    assert names["replay-tail"] == ["x32 amplification"] and by["replay-tail"]["checks"][0]["value"] == pytest.approx(10.0)
+    assert by["cg-rebuild"]["class"] == "class-6-verifier" and by["cg-rebuild"]["status"] == "fail"
+    assert "the build x3.0" in render_perf(res)
 
 
 def test_tier_regressions_and_the_load_read():

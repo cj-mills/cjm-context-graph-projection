@@ -161,6 +161,7 @@ REGRESSION_FLOOR_S = 0.25  # ... and at least this much slower
 SLOPE_RATIO = 2.0          # a replay verb's late-bin mean cost over its early-bin mean
 GRAPH_SHARE = 0.5          # a write's rows read over the graph's nodes
 READ_WROTE_SLACK = 256 * 1024  # bytes a read-only run may write net beyond its own journal appends
+PAGE_BYTES = 4096  # a disk write's grain: a written-bytes curve's floor, so a zero is a reading (634fa576)
 
 
 def _covariate(ev: Dict[str, Any], name: str) -> Optional[float]:  # One covariate of an event
@@ -189,25 +190,33 @@ def appended_bytes(
     return sum(int(r.get("bytes", 0)) for r in (ev.get("appended") or {}).values())
 
 
+def logical_bytes(
+    ev: Dict[str, Any],  # One event
+) -> int:  # The run's logical change in bytes
+    """The denominator of a run's write amplification (ruling 9af0e42e (1) / (3)): the journal
+    bytes it appended (a write) plus the journal bytes of the ops it replayed (a replay)."""
+    return appended_bytes(ev) + sum(int(r.get("bytes", 0)) for r in (ev.get("replayed") or {}).values())
+
+
 def io_row(
     ev: Dict[str, Any],  # One event
-) -> Dict[str, Any]:  # {written, read, appended, store_written, commits, amplification}
+) -> Dict[str, Any]:  # {written, read, appended, replayed, store_written, commits, amplification}
     """An event's disk figures (design detail 2f5033bf (1)): net bytes written and bytes read
     from the disk (the process's, its graph worker included once reaped), the journal bytes it
-    appended (the logical size), the store's own share (the worker's per-call I/O), its commits
-    (one per store write call: each is one unit of write work in the store) and the write
-    amplification -- net bytes written over bytes appended."""
+    appended and replayed (the logical size), the store's own share (the worker's per-call
+    I/O), its commits (one per store write call: each is one unit of write work in the store)
+    and the write amplification -- net bytes written over the logical size."""
     io = ev.get("io") or {}
-    written, appended = net_written(io), appended_bytes(ev)
+    written, appended, logical = net_written(io), appended_bytes(ev), logical_bytes(ev)
     storage = ev.get("storage") or {}
     store = None
     if any("io_write_bytes" in r for r in storage.values()):
         store = max(0, sum(int(r.get("io_write_bytes", 0)) - int(r.get("io_cancelled_write_bytes", 0))
                            for r in storage.values()))
     return {"written": written, "read": io.get("read_bytes"), "appended": appended,
-            "store_written": store,
+            "replayed": logical - appended, "store_written": store,
             "commits": sum(int(r.get("calls", 0)) for m, r in storage.items() if m in WRITE_METHODS),
-            "amplification": written / appended if written is not None and appended else None}
+            "amplification": written / logical if written is not None and logical else None}
 
 
 def self_times(
@@ -358,15 +367,22 @@ def poll_rows(
 def growth(
     cells: List[Dict[str, Any]],  # One verb's cells across the tiers ({tier, wall_s, outcome, ...})
     key: str = "wall_s",          # The measure fitted: seconds, or peak RSS, bytes written, answer bytes
+    floor: Optional[float] = None,  # A measure whose zero is a reading: its grain (bytes written: a page)
 ) -> Optional[Dict[str, float]]:  # {b, r2, n}: measure ~ tier^b, or None under three good tiers
     """A measure's growth exponent across the scale tiers (design detail 3bd8673d): least
     squares of log(measure) on log(tier) over the runs that succeeded. b ~ 0 is flat, ~ 1
     linear, ~ 2 quadratic -- the shape d7742c47 (b) reads, against a size the harness controls;
-    any measure a cell carries (2f5033bf (1): bytes written beside seconds and RSS)."""
-    pts = [(math.log(c["tier"]), math.log(c[key])) for c in cells
-           if c.get("outcome") == 0 and (c.get(key) or 0) > 0 and (c.get("tier") or 0) >= 1]
-    if len({x for x, _ in pts}) < 3:
+    any measure a cell carries (2f5033bf (1): bytes written beside seconds and RSS). A measure
+    given a `floor` keeps its zero cells as data (finding 634fa576): zero at every tier is the
+    flattest reading there is (b 0, r2 n/a), and any other curve fits log(measure + floor) --
+    never unmeasured, never a slope over the non-zero tiers alone."""
+    good = [c for c in cells if c.get("outcome") == 0 and (c.get("tier") or 0) >= 1
+            and c.get(key) is not None and (floor is not None or c[key] > 0)]
+    if len({c["tier"] for c in good}) < 3:
         return None
+    if floor is not None and all(c[key] == 0 for c in good):
+        return {"b": 0.0, "r2": None, "n": len(good)}
+    pts = [(math.log(c["tier"]), math.log(c[key] + (floor or 0))) for c in good]
     mx, my = statistics.fmean(x for x, _ in pts), statistics.fmean(y for _, y in pts)
     sxx = sum((x - mx) ** 2 for x, _ in pts)
     sxy = sum((x - mx) * (y - my) for x, y in pts)
@@ -421,6 +437,10 @@ def tier_curves(
              # bytes written (the CLI's own counters, its worker included), its answer's size
              "verb_s": (((c.get("phases") or {}).get("verb") or {}).get("s") if c else None),
              "written": net_written(c.get("io")) if c else None, "out_bytes": e.get("out_bytes"),
+             # 9af0e42e: a write seat is held to its amplification, a read-only one to the MB ceiling
+             "read_only": (c.get("attrs") or {}).get("read_only") if c else None,
+             "logical": logical_bytes(c) if c else None,
+             "amplification": io_row(c)["amplification"] if c else None,
              "top_phases": [{"phase": p, "self_s": s} for p, s in selfs[:3]]})
     for (lane, name, tier), e in gestures.items():
         h = harness.get(e.get("run_id")) or {}
@@ -434,6 +454,8 @@ def tier_curves(
              "outcome": 0 if e.get("outcome") == "ok" else e.get("outcome"),
              "nodes": _covariate(e, "nodes"), "gesture": True, "verb_s": wall,
              "written": net_written(e.get("io")),  # process-wide: an upper bound (2f5033bf (1))
+             "read_only": None, "logical": logical_bytes(e),  # a gesture writes when it appends
+             "amplification": io_row(e)["amplification"],
              "top_phases": [{"phase": p, "self_s": s} for p, s in selfs[:3]]})
     out: List[Dict[str, Any]] = []
     for lane in sorted(set(lanes) | {l for l, _ in builds}, key=str):
@@ -443,7 +465,7 @@ def tier_curves(
             verbs.append({"verb": name, "cells": cells, "growth": growth(cells),
                           "growth_verb": growth(cells, "verb_s"),
                           "growth_rss": growth(cells, "peak_rss_kb"),
-                          "growth_written": growth(cells, "written"),
+                          "growth_written": growth(cells, "written", floor=PAGE_BYTES),
                           "growth_answer": growth(cells, "out_bytes")})
         built = {t: e.get("wall_s") for (l, t), e in builds.items() if l == lane}
         tiers = sorted({c["tier"] for v in verbs for c in v["cells"]} | set(built))
@@ -589,6 +611,7 @@ def target_standing(
     tiers: List[Dict[str, Any]],    # `tier_curves`'s result
     loads: List[Dict[str, Any]],    # `load_report`'s result
     classes: List[Dict[str, Any]],  # `load_targets`'s result: [{key, name, position, targets, members}]
+    rebuilds: Optional[List[Dict[str, Any]]] = None,  # `perf_report`'s rebuild rows (the full build's seat)
 ) -> Dict[str, Any]:  # {seats, loads, counts, ready}
     """Each seat against its class's targets (ruling dba17ca8, design detail 2f5033bf (3)).
     SHAPE targets read the growth exponents across the tiers -- the cost's (the verb's own
@@ -598,7 +621,11 @@ def target_standing(
     them. LOAD targets read the load runs: each member verb's p99 at the most clients over its
     p99 at one, the summed RSS's growth in N, write throughput at the most clients. A target not
     set is not checked; a set one with no reading is UNMEASURED. A seat in no class is NO TARGET
-    -- shown, never silently passed (6752db0a (9)). Promotion reads every gate holding."""
+    -- shown, never silently passed (6752db0a (9)). Promotion reads every gate holding.
+    Ruling 9af0e42e: a WRITE seat (a run in write mode, or one that appended or replayed journal
+    bytes) is held to its x32 write amplification and never to the MB ceiling, which holds the
+    read-only seats; the full build (`cg-rebuild`, a seat per lane) to its build phase's bytes
+    over the db it produced."""
     load_preds = (P.PERF_LOAD_P99_RATIO, P.PERF_LOAD_RSS_B_MAX, P.PERF_LOAD_WRITES_MIN)
     by_seat: Dict[str, Dict[str, Any]] = {}
     for c in classes:  # a class carrying only load targets names the verbs its load rows read
@@ -632,16 +659,32 @@ def target_standing(
                     return None
                 val = x32.get(key)
                 return None if val is None else val / scale
+            writes = any(c.get("read_only") is False or (c.get("logical") or 0) > 0 for c in v["cells"])
             checks = [c for c in (
                 _target_check("b", shape, t.get(P.PERF_B_MAX), "shape"),
                 _target_check("RSS b", (v.get("growth_rss") or {}).get("b"), t.get(P.PERF_RSS_B_MAX), "shape"),
                 _target_check("written b", (v.get("growth_written") or {}).get("b"), t.get(P.PERF_WRITE_B_MAX), "shape"),
                 _target_check("x32 s", at32("verb_s"), t.get(P.PERF_X32_S), "absolute"),
                 _target_check("x32 RSS MB", at32("peak_rss_kb", 1024.0), t.get(P.PERF_X32_RSS_MB), "absolute"),
-                _target_check("x32 written MB", at32("written", 1024.0 ** 2), t.get(P.PERF_X32_WRITE_MB), "absolute"),
+                None if writes else _target_check("x32 written MB", at32("written", 1024.0 ** 2),
+                                                  t.get(P.PERF_X32_WRITE_MB), "absolute"),
+                _target_check("x32 amplification", at32("amplification"), t.get(P.PERF_WRITE_AMP_MAX),
+                              "absolute") if writes else None,
             ) if c]
             seats.append({**row, "checks": checks,
                           **_target_verdict(checks, str(t.get(P.PERF_GATES, "")).lower() == "true")})
+    for r in rebuilds or []:  # the full build: its build phase's bytes over the db it produced
+        row = {"lane": r["lane"], "seat": "cg-rebuild"}
+        cls = by_seat.get(f"{r['lane']}/cg-rebuild") or by_seat.get("cg-rebuild")
+        if cls is None:
+            seats.append({**row, "class": None, "checks": [], "status": "no target", "gate": False})
+            continue
+        t = cls["targets"]
+        amp = r.get("build_amplification") if r.get("outcome") == 0 else math.inf
+        checks = [c for c in (
+            _target_check("build amplification", amp, t.get(P.PERF_WRITE_AMP_MAX), "absolute"),) if c]
+        seats.append({**row, "class": cls["key"], "checks": checks,
+                      **_target_verdict(checks, str(t.get(P.PERF_GATES, "")).lower() == "true")})
     load_rows = []
     for cls in classes:
         t = cls["targets"]
@@ -803,15 +846,19 @@ def perf_report(
         written = [net_written(ph) for ph in (e.get("phases") or {}).values()]
         written = sum(w for w in written if w is not None) if any(w is not None for w in written) else None
         db_bytes = max([_covariate(s, "db_bytes") or 0 for s in steps] or [0]) or None
+        built = net_written((e.get("phases") or {}).get("build"))  # the full build (9af0e42e (3))
         rebuild_rows.append({"lane": lane, "ts": e.get("ts"), "wall_s": e.get("wall_s"),
                              "outcome": e.get("outcome"), "phases": e.get("phases"),
                              "steps": step_rows, "written": written, "db_bytes": db_bytes,
-                             "amplification": written / db_bytes if written and db_bytes else None})
+                             "amplification": written / db_bytes if written and db_bytes else None,
+                             "build_written": built,
+                             "build_amplification": built / db_bytes if built is not None and db_bytes else None})
     return {"ledger": path, "events": len(events), "verbs": verbs, "gestures": gestures,
             "polls": poll_rows(polls, runs=runs), "fits": fits,
             "regressions": regressions, "guards": found, "rebuilds": rebuild_rows,
             "tiers": curves, "tier_regressions": tier_regressions(tiered), "load": loads,
-            "standing": target_standing(curves, loads, targets) if targets is not None else None,
+            "standing": (target_standing(curves, loads, targets, rebuild_rows)
+                         if targets is not None else None),
             "unmeasured": ["journal op counts per family (B's journal index)",
                            "Qt-side delivery and paint (the shell's, after its migration; "
                            "design detail 4389a579)",
@@ -876,7 +923,8 @@ def render_perf(
                    f"{_bytes_text(v.get('appended'))} | {amp} | {phases} |")
     if res["verbs"]:
         out += ["", "_written / read = net bytes to / from the disk (the run's process, its worker "
-                    "included); appended = journal bytes (the logical size); x = written over appended._"]
+                    "included); appended = journal bytes appended; x = written over the logical size "
+                    "(journal bytes appended + replayed)._"]
     if res.get("gestures"):
         out += ["", "### Gestures (seconds in the session's loop, queued + work; latest run's "
                     "round trips = storage calls, rows and wire bytes)", "",
@@ -918,6 +966,8 @@ def render_perf(
         if r.get("written") is not None:
             disk = f" · wrote {_bytes_text(r['written'])}" + (f" over a {_bytes_text(r['db_bytes'])} db (x{r['amplification']:.1f})"
                                                     if r.get("amplification") else "")
+            if r.get("build_amplification") is not None:
+                disk += f" · the build x{r['build_amplification']:.1f}"
         out += ["", f"### Rebuild — {r['lane']} lane · {_s(r['wall_s'])} s · outcome {r['outcome']}{disk}",
                 "", f"- phases: {phases}"]
         for s in r["steps"]:

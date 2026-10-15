@@ -31,6 +31,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from concurrent.futures import ProcessPoolExecutor
@@ -629,9 +630,13 @@ def measure(
     def limit():
         resource.setrlimit(resource.RLIMIT_AS, (limit_bytes, limit_bytes))
     t0 = time.perf_counter()
+    # the answer reaches the harness through a pipe, as a caller's does, and the HARNESS writes
+    # the file: the measured process's disk bytes are its own, never its answer's (7345f40d)
     with open(out_path, "wb") as out:
-        proc = subprocess.Popen(argv, env=env, stdout=out, stderr=subprocess.STDOUT,
+        proc = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 preexec_fn=limit)
+        drain = threading.Thread(target=shutil.copyfileobj, args=(proc.stdout, out), daemon=True)
+        drain.start()
         status, usage, timed_out, peak = None, None, False, 0
         while True:
             peak = max(peak, tree_rss_kb(proc.pid))
@@ -645,6 +650,7 @@ def measure(
                 timed_out = True
                 break
             time.sleep(0.02)
+        drain.join(5.0 if timed_out else None)  # a killed run's orphans may hold the pipe
         proc.returncode = os.waitstatus_to_exitcode(status)
     outcome: Any = "timeout" if timed_out else proc.returncode
     maxrss = usage.ru_maxrss if usage else None

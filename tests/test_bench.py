@@ -17,9 +17,10 @@ import pytest
 from cjm_context_graph_primitives.journal import journal_segments, read_journal, write_segment
 from cjm_context_graph_projection.bench import (_client_argv, _integrity, _normalized, bench_config,
                                                 BenchRefusal, build, DROP_KEYS, extract_workload,
-                                                inside, invert_request, lane_dir, load, rekeyer,
-                                                run, status, tree_rss_kb, UUID_RE)
-from cjm_context_graph_projection.perf import growth, perf_report, render_perf, tier_curves
+                                                inside, invert_request, lane_dir, load, measure,
+                                                rekeyer, run, status, tree_rss_kb, UUID_RE)
+from cjm_context_graph_projection.perf import (growth, PAGE_BYTES, perf_report, render_perf,
+                                               tier_curves)
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS
 
 A, B, C = ("11111111-1111-5111-8111-111111111111", "22222222-2222-5222-8222-222222222222",
@@ -188,6 +189,42 @@ def test_growth_reads_the_exponent_and_tier_curves_join_the_cli_event():
     assert [c["nodes"] for c in show["cells"]] == [100, 200, 400]
     assert show["cells"][0]["top_phases"][0]["phase"] == "verb"
     assert show["growth"]["b"] == pytest.approx(1.0)
+
+
+def test_a_zero_written_curve_is_flat_and_a_partly_zero_one_fits_over_the_page_floor():
+    # Finding 634fa576: a seat that writes nothing at every tier is the flattest reading there
+    # is, never unmeasured; a curve with some zero tiers fits every tier over the page floor,
+    # never only its non-zero ones.
+    zero = [{"tier": k, "written": 0, "outcome": 0} for k in (1, 2, 4, 8)]
+    assert growth(zero, "written") is None                            # no floor: zero is absence
+    assert growth(zero, "written", floor=PAGE_BYTES) == {"b": 0.0, "r2": None, "n": 4}
+    partly = [{"tier": k, "written": w, "outcome": 0} for k, w in ((1, 0), (2, 0), (4, 8192), (8, 8192))]
+    g = growth(partly, "written", floor=PAGE_BYTES)
+    assert growth(partly, "written") is None                          # two non-zero tiers: unmeasured
+    assert g["n"] == 4 and 0 < g["b"] < 1
+    assert growth([*zero[:2], {"tier": 4, "written": None, "outcome": 0}], "written", floor=PAGE_BYTES) is None
+    events = []
+    for k in (1, 2, 4):
+        events.append({"verb": "list", "kind": "bench", "run_id": f"r{k}", "ts": k, "wall_s": 0.4,
+                       "outcome": 0, "attrs": {"lane": "g", "tier": k}})
+        events.append({"verb": "list", "kind": "cli", "run_id": f"r{k}", "ts": k, "wall_s": 0.3,
+                       "io": {"write_bytes": 0}, "attrs": {"lane": "g", "tier": k}})
+    (lane,) = tier_curves(events)
+    assert lane["verbs"][0]["growth_written"]["b"] == 0.0
+
+
+def test_a_measured_run_hands_its_answer_through_a_pipe_never_writing_it(tmp_path):
+    # Finding 7345f40d: the harness writes the answer's file itself, so the measured process's
+    # disk bytes are its own -- a 300 KB answer written by the child would read as a 300 KB write
+    code = ("import os, sys; sys.stdout.write('x' * 300_000); sys.stdout.flush(); "
+            "io = dict(l.split(': ') for l in open('/proc/self/io').read().splitlines()); "
+            "sys.stderr.write(' wb=' + io['write_bytes'])")
+    out = tmp_path / "answer.txt"
+    res = measure([sys.executable, "-c", code], dict(os.environ), 4 << 30, 60, out)
+    text = out.read_text()
+    assert res["outcome"] == 0 and res["out_bytes"] == len(text) and text.startswith("x" * 300_000)
+    if " wb=" in text:  # Linux: the child dirtied no page with its answer
+        assert int(text.rsplit(" wb=", 1)[1]) < 300_000
 
 
 needs_capability = pytest.mark.skipif(
