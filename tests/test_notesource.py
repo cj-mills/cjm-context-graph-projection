@@ -227,7 +227,6 @@ def test_cutover_authoring_and_absorb_keep_live_equal_to_rebuild(tmp_path):
     ok(cli("source-check"), "CLEAN")
 
 
-@pytest.mark.skipif(not _HAVE_GRAPH, reason="needs the graph capability")
 def test_a_commitless_note_replays_as_a_window_and_holds_no_git_path():
     # Ruling 48c4c34d (2): a born post's capture group (no commit) is never folded at ingest
     from cjm_context_graph_projection.notesource import cutover_freeze
@@ -259,6 +258,7 @@ def test_the_render_owns_the_body_below_its_marker():
     assert render_owned(plain, pn.id, section_node_id(pn.id, "one"), "## One\n\nx") is None
 
 
+@pytest.mark.skipif(not _HAVE_GRAPH, reason="needs the graph capability")
 def test_a_born_draft_is_born_cut_over_and_the_genesis_drafts_cut_over(tmp_path):
     # Ruling 48c4c34d: on the notes graph (an archive + its drafts) a born post's source is the notes
     # source journal, its file an emit; level is placement; a draft the writes journal's genesis op
