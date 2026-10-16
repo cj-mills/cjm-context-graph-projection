@@ -39,7 +39,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import unquote, urlsplit
 
 import yaml
-from cjm_context_graph_layer.ops import extend_graph
+from cjm_context_graph_layer.ops import extend_graph, graph_task
 from cjm_context_graph_primitives.journal import op_now
 from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.nodes import ReferenceNode
@@ -52,6 +52,7 @@ from .sitelinks import site_path_key
 
 RELOCATE_VERB = "relocate"   # The journaled op: a page's repo copy (its web Reference + RELOCATED_TO)
 COPY_FILE = "README.md"      # The copy's file: GitHub renders it as the directory's page too
+RAW_BASE = "https://raw.githubusercontent.com"  # Where the land check reads a copy back (relocation.raw_base overrides)
 COPY_LABEL = "repo copy"     # The copy Reference's foreign label
 BLOCK_START = "<!-- relocated-posts:start (projected by the relocate verb; never edit by hand) -->"
 BLOCK_END = "<!-- relocated-posts:end -->"
@@ -165,6 +166,7 @@ def relocation_config(
     rel = dict(cfg.get("relocation") or {})
     errors = [f"relocation.{k} is missing" for k in ("retired_repo",) if not rel.get(k)]
     out = {"retired_repo": str(rel.get("retired_repo") or ""), "retired_dir": str(rel.get("retired_dir") or "posts"),
+           "raw_base": str(rel.get("raw_base") or RAW_BASE),
            "companion_dir": str(rel.get("companion_dir") or "retired-post"),
            "chrome_includes": [str(c) for c in rel.get("chrome_includes") or []]}
     return {"config": out, "errors": errors}
@@ -236,9 +238,10 @@ def copy_url(
     branch: str,   # The default branch
     directory: str,  # The copy's directory
     raw: bool = False,  # The raw file (the land check reads it) rather than the rendered page
+    raw_base: str = RAW_BASE,  # The raw files' host (relocation.raw_base: DATA, so a proof serves its own)
 ) -> str:
     if raw:
-        return f"https://raw.githubusercontent.com/{repo}/{branch}/{directory}/{COPY_FILE}"
+        return f"{raw_base.rstrip('/')}/{repo}/{branch}/{directory}/{COPY_FILE}"
     return f"https://github.com/{repo}/blob/{branch}/{directory}/{COPY_FILE}"
 
 
@@ -605,6 +608,7 @@ async def load_pages(
     gx: GraphHandle,
     website_root: str,  # The website clone
     journal_path: Optional[str] = None,  # The notes journal (a retired page's commit and path)
+    resumable: bool = False,  # Also a removed page retired with no destination yet (land resumes it, ruling 547f4123)
 ) -> Dict[str, Any]:  # {rows: {id: row}, retired: {id: retire op args}, retired_on: {id: ISO date}, threads}
     """Every page leaving or gone (the standing rows), with its paths, its source, its retire
     record and its comment thread."""
@@ -628,7 +632,8 @@ async def load_pages(
     rows: Dict[str, Dict[str, Any]] = {}
     # a page retired to its successor stays while it holds a path (its redirect is the build's)
     ids = [r["id"] for r in standing["rows"] if r["pending"] or r["relocated_to"]
-           or (r["standing"] == P.PUBLISH_RETIRED and r["superseded_by"] and r["id"] in plan["pages"])]
+           or (r["standing"] == P.PUBLISH_RETIRED and r["superseded_by"] and r["id"] in plan["pages"])
+           or (resumable and r["standing"] == P.PUBLISH_RETIRED and r["currency"] == P.CURRENCY_REMOVED)]
     nodes = await F.load_nodes(gx, ids) if ids else {}
     root = Path(website_root).resolve()
     for nid in ids:
@@ -848,12 +853,30 @@ async def apply_relocation(
     observed_at: Optional[float] = None,  # When it was read
     title: str = "",           # The copy's display title
     actor: str = "agent:session",
+    write: bool = True,        # False = PLAN only (ruling 547f4123): every refusal, the op under "op" (None = the edge stands)
 ) -> Dict[str, Any]:  # record_relation's result + {reference_id}
     """The copy's web Reference (what was read at landing rides the op) and the page's
-    RELOCATED_TO edge to it -- the journaled `relocate` op, replayed as written."""
-    from .paths import record_relation
+    RELOCATED_TO edge to it -- the journaled `relocate` op, replayed as written.
+
+    THE PLAN (write=False): the page must be a RELOCATED_TO source -- checked BEFORE the Reference
+    is minted, so a refusal leaves nothing behind -- and an edge already standing to this copy's
+    Reference is no change."""
+    from .paths import endpoint_kind, record_relation
+    from cjm_dev_graph_schema.nodes import relation_edge
     ref = ReferenceNode(graph=ReferenceNode.WEB, foreign_id=url, foreign_label=COPY_LABEL, title=title or url,
                         observed_hash=observed_hash, observed_at=observed_at)
+    srcs = P.RELATION_ENDPOINTS[DevRelations.RELOCATED_TO][0]
+    sk = await endpoint_kind(gx, note)
+    if sk not in srcs:
+        return {"error": f"{DevRelations.RELOCATED_TO} runs from {' | '.join(srcs)}, never from "
+                         f"{'a ' + sk if sk else 'a missing node'} (`{note}`)", "written": False}
+    if not write:
+        edge = relation_edge(DevRelations.RELOCATED_TO, note, ref.id)
+        noop = await graph_task(gx.queue, gx.graph_id, "get_edge", edge_id=edge["id"]) is not None
+        return {"edge_id": edge["id"], "source_id": note, "target_id": ref.id, "reference_id": ref.id,
+                "written": False, "noop": noop,
+                "op": None if noop else {"note": note, "url": url, "observed_hash": observed_hash,
+                                         "observed_at": observed_at, "title": title, "actor": actor}}
     await extend_graph(gx.queue, gx.graph_id, [ref.to_graph_node()], [])
     res = await record_relation(gx, DevRelations.RELOCATED_TO, note, ref.id, actor=actor)
     return {**res, "reference_id": ref.id}
@@ -861,32 +884,41 @@ async def apply_relocation(
 
 async def land_relocations(
     gx: GraphHandle,
+    writes: Any,                         # The invocation's writes-journal unit of work (writes.InvocationWrites)
     posts: List[str],                    # The pages to land (slugs or ids)
     *,
     website_root: str,
     config: Dict[str, Any],
     into: Optional[str] = None,          # The clone their copies were projected into (None = successor pages only)
-    journal_path: Optional[str] = None,
-    journal: Optional[Callable[[str, Dict[str, Any]], None]] = None,  # Appends one op (verb, args)
     fetch: Callable[[str], Tuple[int, bytes]] = http_fetch,
     actor: str = "agent:session",
-) -> Dict[str, Any]:  # {landed: [...], errors}
+) -> Dict[str, Any]:  # {landed: [...], unchanged: [...], errors}
     """Land each page's destination (design 3d5ee659 (6)): a page a public successor supersedes
     retires to it; any other page's copy is read back from GitHub and must equal the clone's,
-    then the page retires and the `relocate` op lands its copy. Each op is journaled right after
-    its write; a refusal leaves nothing behind for that page."""
+    then the page retires and the `relocate` op lands its copy.
+
+    THE CHAIN (ruling 547f4123 (1)): each op planned against the db the previous one left, then
+    appended and applied through the replay's applier; every refusal is a read before the page's
+    first op. A page whose destination already stands is no change, and a page retired with no
+    destination yet (a crashed land between its two ops) resumes: its retire plans nothing, its
+    relocate lands."""
     from .archive import retire_source
-    loaded = await load_pages(gx, website_root, journal_path)
+    await writes.begin()
+    loaded = await load_pages(gx, website_root, writes.journal_path, resumable=True)
     rows = loaded["rows"]
     ids, missing = _pick(rows, posts)
     errors = [{"ref": m, "why": "no page pending relocation or relocated"} for m in missing]
     dest = clone_repo(into) if into else None
     if dest and dest.get("error"):
-        return {"landed": [], "errors": errors + [{"why": dest["error"]}]}
-    landed = []
+        return {"landed": [], "unchanged": [], "errors": errors + [{"why": dest["error"]}]}
+    landed, unchanged = [], []
     for nid in ids:
         r = rows[nid]
-        if not r["pending"]:
+        retired = r["standing"] == P.PUBLISH_RETIRED
+        if retired and r["relocated_to"]:
+            unchanged.append({"id": nid, "slug": r["slug"], "destination": "repo"})
+            continue
+        if not r["pending"] and not retired:
             errors.append({"ref": r["slug"], "why": f"not pending relocation (standing {r['standing']})"})
             continue
         if r["superseded_by"]:
@@ -895,14 +927,14 @@ async def land_relocations(
                 errors.append({"ref": r["slug"], "why": "two public successors supersede it -- name one"})
                 continue
             res = await retire_source(gx, nid, reason=f"superseded by its public successor {succ['slug']}",
-                                      successor=succ["id"], website_root=website_root, actor=actor)
+                                      successor=succ["id"], website_root=website_root, actor=actor, write=False)
             if res.get("error"):
                 errors.append({"ref": r["slug"], "why": res["error"]})
                 continue
-            if journal:
-                journal(RETIRE_VERB, {"note": res["note_id"], "slug": res["slug"], "path": res["path"],
-                                      "commit": res["commit"], "reason": res["reason"],
-                                      "successor": res["successor_id"], "actor": actor})
+            if not res["op"]:
+                unchanged.append({"id": nid, "slug": r["slug"], "destination": "successor"})
+                continue
+            res = (await writes.write(RETIRE_VERB, res["op"])).result
             landed.append({"id": nid, "slug": r["slug"], "destination": "successor", "to": succ["slug"],
                            "source": posixpath.dirname(res["path"])})
             continue
@@ -914,7 +946,8 @@ async def land_relocations(
         if not local.exists():
             errors.append({"ref": r["slug"], "why": f"no projected copy at {local} -- project it first"})
             continue
-        status, body = fetch(copy_url(dest["repo"], dest["branch"], cdir, raw=True))
+        status, body = fetch(copy_url(dest["repo"], dest["branch"], cdir, raw=True,
+                                      raw_base=config.get("raw_base") or RAW_BASE))
         if status != 200:
             errors.append({"ref": r["slug"], "why": f"its copy is not live on GitHub (HTTP {status}) -- push it first"})
             continue
@@ -923,23 +956,25 @@ async def land_relocations(
                                                     "push the clone's copy (or re-project)"})
             continue
         url = copy_url(dest["repo"], dest["branch"], cdir)
-        res = await retire_source(gx, nid, reason=f"relocated to its repo copy {url}", website_root=website_root,
-                                  actor=actor)
-        if res.get("error"):
-            errors.append({"ref": r["slug"], "why": res["error"]})
+        ret = await retire_source(gx, nid, reason=f"relocated to its repo copy {url}", website_root=website_root,
+                                  actor=actor, write=False)
+        if ret.get("error"):
+            errors.append({"ref": r["slug"], "why": ret["error"]})
             continue
-        if journal:
-            journal(RETIRE_VERB, {"note": res["note_id"], "slug": res["slug"], "path": res["path"],
-                                  "commit": res["commit"], "reason": res["reason"], "successor": None,
-                                  "actor": actor})
         obs = {"observed_hash": "sha256:" + hashlib.sha256(body).hexdigest(), "observed_at": op_now(),
                "title": r["title"]}
-        rel = await apply_relocation(gx, nid, url, actor=actor, **obs)
+        rel = await apply_relocation(gx, nid, url, actor=actor, write=False, **obs)
         if rel.get("error"):
-            errors.append({"ref": r["slug"], "why": f"retired, but its RELOCATED_TO refused: {rel['error']}"})
+            errors.append({"ref": r["slug"], "why": rel["error"]})
             continue
-        if journal:
-            journal(RELOCATE_VERB, {"note": nid, "url": url, **obs, "actor": actor})
+        if not ret["op"] and not rel["op"]:
+            unchanged.append({"id": nid, "slug": r["slug"], "destination": "repo"})
+            continue
+        if ret["op"]:
+            ret = (await writes.write(RETIRE_VERB, ret["op"])).result
+        if rel["op"]:   # planned again against the db the retirement left (it reads only the page's kind)
+            rel = await apply_relocation(gx, nid, url, actor=actor, write=False, **obs)
+            await writes.write(RELOCATE_VERB, rel["op"])
         landed.append({"id": nid, "slug": r["slug"], "destination": "repo", "to": url,
-                       "source": posixpath.dirname(res["path"])})
-    return {"landed": landed, "errors": errors}
+                       "source": posixpath.dirname(ret.get("path") or r["rel_path"])})
+    return {"landed": landed, "unchanged": unchanged, "errors": errors}

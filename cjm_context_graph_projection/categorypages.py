@@ -466,6 +466,9 @@ async def plan_descriptions(
         if v is None:
             errors.append(f"{r['entry']}: no live facet entry")
             continue
+        if r["text"] and r["text"] == str(v.get("page_description") or "") and not description_stale(v):
+            counts["unchanged"] += 1   # the row already stands (a crashed review's retry): no change, never a refusal (24fa72c2 (2))
+            continue
         if description_basis(v) != r["basis"]:
             errors.append(f"{r['entry']}: the entry changed since the document was written "
                           "(write a fresh one with describe-categories --out)")
@@ -490,9 +493,11 @@ async def describe_categories(
     apply_text: Optional[str] = None,    # An edited document to land; None = write a fresh one
     dry_run: bool = False,               # With apply_text: plan and check only
     actor: str = "agent:session",
+    writes: Any = None,                  # With apply_text and not dry_run: the invocation's writes-journal unit of work the batch lands through
 ) -> Dict[str, Any]:  # {document, counts} | {counts, rows, errors, landed: [records], written}
     """The description verb (amendment e38d403c (5)): the document, or one landed review -- the
-    changed records go through mint_entities, checked whole, one `entity` op each."""
+    changed records go through mint_entities, checked whole, one `entity` op each, each planned
+    then appended and applied through the invocation's writes (ruling 547f4123 (1))."""
     from .coverage import mint_entities
     if apply_text is None:
         if not website_root:
@@ -508,7 +513,7 @@ async def describe_categories(
                            "landed": [], "written": False}
     if plan["errors"]:
         return {**out, "error": f"{len(plan['errors'])} section(s) refused -- nothing written"}
-    res = await mint_entities(gx, plan["records"], apply=not dry_run, actor=actor)
+    res = await mint_entities(gx, plan["records"], writes=None if dry_run else writes, actor=actor)
     if res["errors"]:
         return {**out, "errors": res["errors"], "error": "the batch was refused -- nothing written"}
     return {**out, "landed": res["landed"], "written": res["written"]}

@@ -418,6 +418,8 @@ async def assert_value(
               "subject_content_hash": assertion.subject_content_hash}
         if backfill_ids:
             op["superseded_by"] = backfill_ids
+        if method:  # replay passes it back: an oracle's assertion keeps its method + last_verified
+            op["method"] = method
         if batch is not None and not standing:
             batch.landed(nodes, edges)
         return {"subject": subject, "subject_id": subject_id, "slot_id": slot.id,
@@ -531,11 +533,30 @@ async def decide(
     supersedes: Optional[List[str]] = None,  # Prior Decision ids this one replaces
     session: Optional[str] = None,           # Session key this was decided in
     title: Optional[str] = None,             # Explicit display title (tier-1 override; else the first-clause extractor)
+    write: bool = True,                      # False = PLAN only (design detail 65f4a6c9 (1)): refs resolved, every refusal, the op under "op" (None = changes nothing)
 ) -> Dict[str, Any]:  # The write result
     """Record a Decision + its `SUPPORTED_BY` premise edges (reasoning substrate).
 
     Minimal in the cut: bank the premise edges now; the premise-drift checker is
-    deferred. Idempotent on the canonical statement."""
+    deferred. Idempotent on the canonical statement.
+
+    THE PLAN (write=False; ruling 547f4123): `supports` / `supersedes` resolve to full ids --
+    a unique prefix journaled as its full id, an unknown or ambiguous one refused (finding
+    0ccdca26's class) -- and a decision whose node, session and every edge already stand is
+    no change (extend_graph never updates a standing node's properties, so nothing else could
+    change). Replay passes the journaled ids through the write path unresolved."""
+    if not write:
+        resolved: Dict[str, List[str]] = {}
+        for flag, refs in (("supports", supports), ("supersedes", supersedes)):
+            resolved[flag] = []
+            for ref in refs or []:
+                r = await resolve_node_ref(gx, ref)
+                if "candidates" in r:
+                    return {"error": ambiguity_error(ref, r["candidates"]), "statement": statement}
+                if r.get("node") is None:
+                    return {"error": f"--{flag} `{ref}` resolves to no node", "statement": statement}
+                resolved[flag].append(F.nid(r["node"]))
+        supports, supersedes = resolved["supports"], resolved["supersedes"]
     decision = DecisionNode(statement=statement, actor=actor)
     node = decision.to_graph_node()
     if title:
@@ -547,6 +568,17 @@ async def decide(
         sess = SessionNode(key=session)
         nodes.append(sess.to_graph_node())
         edges.append(decision.decided_in_edge(sess.id))
+    if not write:
+        stands = (all([await graph_task(gx.queue, gx.graph_id, "get_node", node_id=n["id"]) is not None
+                       for n in nodes])
+                  and all([await graph_task(gx.queue, gx.graph_id, "get_edge", edge_id=e["id"]) is not None
+                           for e in edges]))
+        return {"decision_id": decision.id, "statement": statement, "actor": actor,
+                "supports": supports, "supersedes": supersedes, "session": session, "title": title,
+                "nodes_added": 0, "edges_added": 0, "noop": stands,
+                "op": None if stands else {"statement": statement, "actor": actor, "supports": supports or None,
+                                           "supersedes": supersedes or None, "session": session,
+                                           "title": title}}
     res = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
     return {"decision_id": decision.id, "statement": statement, "actor": actor,
             "supports": supports or [], "supersedes": supersedes or [],
@@ -797,6 +829,7 @@ async def author_section(
     raw: str,                      # The section's verbatim heading-inclusive `raw` STATE (not a diff)
     *,
     actor: str = "agent:session",  # Who authored it (deliberate `author` vs `reconcile:absorb`)
+    write: bool = True,            # False = PLAN only (ruling 547f4123): the refusal, then the op under "op" (None = the raw already stands)
 ) -> Dict[str, Any]:  # The write result (incl. error when the section is absent)
     """Apply a memory section's verbatim `raw` STATE to the graph — the born-on-graph leg
     behind M2b (true-B for memory): new memory content lives in the write JOURNAL and the
@@ -824,6 +857,9 @@ async def author_section(
     unchanged = str(F.prop(existing, "raw", "")) == raw
     res: Dict[str, Any] = {"slug": slug, "anchor": anchor, "section_id": section_id,
                            "actor": actor, "unchanged": unchanged, "written": True}
+    if not write:
+        return {**res, "written": False, "noop": unchanged,
+                "op": None if unchanged else {"slug": slug, "anchor": anchor, "raw": raw, "actor": actor}}
     if unchanged:
         return res
     note_node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=note_id)
@@ -898,6 +934,7 @@ async def confirm_proposal(
     proposal: str,                 # The Proposal node (id, or a unique id prefix)
     *,
     actor: str = "user:cli",       # Who confirmed (the human — confirmation IS the re-approval)
+    write: bool = True,            # False = PLAN only (ruling 547f4123 (1)): the proposal resolved, the section leg planned; the CLI writes the chain
 ) -> Dict[str, Any]:  # {proposal_id, deliverable_id, section, approval, section_op, written} or {error}
     """CONFIRM a proposal: apply its drafted section raw to the deliverable, then re-assert
     the stale approval on the NEW content (work item bb015d12 (b)).
@@ -927,12 +964,16 @@ async def confirm_proposal(
     p = F.props(node)
     pid, deliverable_id = F.nid(node), str(p.get("deliverable_id") or "")
     slug, anchor, raw = str(p.get("slug") or ""), str(p.get("anchor") or ""), str(p.get("raw") or "")
-    section = await author_section(gx, slug, anchor, raw, actor=actor)
+    section = await author_section(gx, slug, anchor, raw, actor=actor, write=write)
     if section.get("error"):
         return {"error": section["error"], "proposal_id": pid, "written": False}
     pred = str(p.get("approval_predicate") or P.PUBLISH_STATE)
     value = str(p.get("approval_value") or "")
     approval: Dict[str, Any] = {}
+    if not write:   # the approval is planned after the section applied: it binds the NEW content's hash
+        return {"proposal_id": pid, "deliverable_id": deliverable_id, "key": p.get("key"),
+                "section": section, "approval": approval, "approval_predicate": pred,
+                "approval_value": value, "written": False}
     if value:
         approval = await assert_value(gx, deliverable_id, pred, value, actor=actor, evidence=[pid])
     return {"proposal_id": pid, "deliverable_id": deliverable_id, "key": p.get("key"),
@@ -1090,6 +1131,7 @@ async def mint_procedure(
     *,
     actor: str = "programmatic",   # The procedure's actor class (trust gradient: programmatic > human > LLM)
     root_kind: str = "asserted",   # The value-source root kind the procedure feeds
+    write: bool = True,            # False = PLAN only (ruling 547f4123): the op under "op" (None = the procedure already stands)
 ) -> Dict[str, Any]:  # {procedure_id, method, name, nodes_added, written}
     """Upsert a Procedure node by deterministic (method) id — the programmatic value-source
     an oracle's assertions cite as evidence.
@@ -1102,6 +1144,12 @@ async def mint_procedure(
             "properties": {"name": name, "method": method, "actor": actor,
                            "root_kind": root_kind},
             "sources": []}
+    if not write:  # extend_graph never updates a standing node, so a standing procedure is no change
+        noop = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=node["id"]) is not None
+        return {"procedure_id": node["id"], "method": method, "name": name, "nodes_added": 0,
+                "written": False, "noop": noop,
+                "op": None if noop else {"method": method, "name": name, "actor": actor,
+                                         "root_kind": root_kind}}
     res = await extend_graph(gx.queue, gx.graph_id, [node], [])
     return {"procedure_id": node["id"], "method": method, "name": name,
             "nodes_added": getattr(res, "nodes_added", 0), "written": True}

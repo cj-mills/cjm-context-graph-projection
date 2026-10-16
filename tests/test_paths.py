@@ -19,6 +19,7 @@ from cjm_context_graph_projection.paths import flywheel_cycles, path_reads, reco
 from cjm_context_graph_projection.render import render
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
 from cjm_context_graph_projection.write import assert_value
+from cjm_context_graph_projection.writes import InvocationWrites
 from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.identity import entity_node_id, note_node_id, section_node_id
 from cjm_markdown_decompose_core.extract import note_from_text
@@ -186,7 +187,8 @@ async def _walk(gx):
     notes = [note_from_text(f"/c/posts/{s}/index.md", _post(s), corpus_root="/c/posts", lossless=True) for s in _POSTS]
     nodes, edges = corpus_graph_elements(notes)
     await extend_graph(gx.queue, gx.graph_id, nodes, edges)
-    res = await mint_entities(gx, [{"kind": k, "key": key, "name": key, "fields": f} for k, key, f in _VOCAB], apply=True)
+    res = await mint_entities(gx, [{"kind": k, "key": key, "name": key, "fields": f} for k, key, f in _VOCAB],
+                              writes=InvocationWrites(gx, None))
     assert not res["errors"], res["errors"]
     for key, fields in _ARTIFACTS:
         r = await mint_entity(gx, "artifact", key, name=key, fields=fields)
@@ -355,7 +357,8 @@ def test_a_two_loop_flywheel_is_two_kind_level_cycles(tmp_path):
             res = await mint_entities(gx, [{"kind": "artifact_kind", "key": k, "name": k,
                                             "fields": {"description": k, "position": i}}
                                            for i, k in enumerate(("dataset", "checkpoint", "exported_model",
-                                                                  "predictions"), 1)], apply=True)
+                                                                  "predictions"), 1)],
+                                writes=InvocationWrites(gx, None))
             assert not res["errors"]
             for key, fields in _FLY:
                 assert (await mint_entity(gx, "artifact", key, name=key, fields=fields))["written"]
@@ -468,3 +471,22 @@ def test_a_rebuild_reproduces_the_path_model(tmp_path):
     assert _run("--graph-db-path", fresh, "paths").stdout == report.stdout
     step = [_run("--graph-db-path", db, "paths", "step", "deploy").stdout for db in (live, fresh)]
     assert step[0] == step[1] and "continues from" in step[0]
+
+
+@pytestmark_graph
+def test_an_entity_plan_reads_an_omitted_field_as_cleared(tmp_path):
+    # Ruling 547f4123: a node extend_graph minted stores no key for an omitted field, so the plan's
+    # no-change test reads absent as None; a changed field, or a record edge to land, is a change
+    async def go():
+        async with open_graph(str(tmp_path / "g.db")) as gx:
+            w = InvocationWrites(gx, None)
+            first = await mint_entity(gx, "task", "a-task", name="T", fields={"position": 1}, write=False)
+            await mint_entities(gx, [{"kind": "task", "key": "a-task", "name": "T", "fields": {"position": 1}}], writes=w)
+            same = await mint_entity(gx, "task", "a-task", name="T", fields={"position": 1}, write=False)
+            moved = await mint_entity(gx, "task", "a-task", name="T", fields={"position": 2}, write=False)
+            pending = await mint_entity(gx, "concept", "c", name="C", write=False, pending={("subject", "s")},
+                                        fields={"description": "d", "not_for": "n", "area": "subject:s"})
+            return first, same, moved, pending
+    first, same, moved, pending = asyncio.run(go())
+    assert first["op"] and same["noop"] and same["op"] is None and moved["op"]["fields"] == {"position": 2}
+    assert pending["op"] and not pending.get("error")   # a subject planned earlier in its batch counts as landed

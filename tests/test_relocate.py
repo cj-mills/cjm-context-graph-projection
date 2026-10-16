@@ -252,12 +252,11 @@ def test_project_land_redirect_and_rebuild(tmp_path):
         return go
 
     def land(posts, fetcher, into=str(clone)):
-        from cjm_context_graph_primitives.journal import append_write
+        from cjm_context_graph_projection.writes import InvocationWrites
 
         async def go():
-            async with open_graph(live) as gx:
-                return await land_relocations(gx, posts, website_root=str(site), config=_CFG, into=into,
-                                              journal_path=journal, journal=lambda v, a: append_write(journal, v, a),
+            async with open_graph(live) as gx, InvocationWrites(gx, journal) as writes:
+                return await land_relocations(gx, writes, posts, website_root=str(site), config=_CFG, into=into,
                                               fetch=fetcher)
         return asyncio.run(go())
 
@@ -300,3 +299,20 @@ def test_project_land_redirect_and_rebuild(tmp_path):
     assert r.returncode == 0, r.stdout + r.stderr
     assert _ids(fresh) == _ids(live)
     assert asyncio.run(read(fresh))[1]["stubs"] == plan["stubs"]
+
+
+@pytest.mark.skipif(not _HAVE_GRAPH, reason="needs the graph capability")
+def test_a_refused_relocation_leaves_no_reference_behind(tmp_path):
+    # Ruling 547f4123: the page's kind is checked BEFORE the copy's Reference is minted, so a refusal
+    # (here: no such page) leaves nothing on the graph; a plan writes nothing either
+    from cjm_context_graph_projection import factlayer as F
+    from cjm_context_graph_projection.relocate import apply_relocation
+
+    async def go():
+        async with open_graph(str(tmp_path / "g.db")) as gx:
+            refused = await apply_relocation(gx, note_node_id("nowhere"), "https://github.com/o/r/blob/main/x/README.md")
+            planned = await apply_relocation(gx, note_node_id("nowhere"), "https://github.com/o/r/blob/main/x/README.md",
+                                             write=False)
+            return refused, planned, await F.load_label(gx, "Reference")
+    refused, planned, refs = asyncio.run(go())
+    assert "never from a missing node" in refused["error"] and planned.get("error") and refs == []

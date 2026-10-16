@@ -16,7 +16,7 @@ import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from cjm_context_graph_layer.ops import extend_graph, graph_task
 from cjm_context_graph_primitives.journal import append_write, op_clock, read_journal
@@ -234,19 +234,6 @@ def _drafts_dir(
         return None
     staging_root = Path(cfg["emit_root"]).expanduser().resolve().parent
     return staging_root.relative_to(Path(args.website_root).resolve()).as_posix()
-
-
-def _journal_entities(
-    journal_path: Optional[str],     # The write journal (None = unjournaled)
-    landed: List[Dict[str, Any]],    # mint_entities' landed whole records
-    actor: str,
-) -> None:
-    """One journaled `entity` op per landed record: the whole record, so replay converges."""
-    if not journal_path:
-        return
-    for r in landed:
-        append_write(journal_path, "entity", {"kind": r["kind"], "key": r["key"], "name": r["name"],
-                                              "fields": r["fields"], "actor": actor})
 
 
 async def _category_paths_journaled(
@@ -1017,54 +1004,44 @@ async def _dispatch(args) -> int:
                 if cerr:
                     print(f"error: {cerr}", file=sys.stderr)
                     return 1
+            # THE CHAIN (ruling 547f4123 (1)): the decide op planned (supports / supersedes
+            # resolved to ids, a decision already standing no change) and written; each
+            # follow-on planned against the db the previous op left -- an assert planned before
+            # its decision applied would mint a term for the unknown id (resolve_subject)
             res = await decide(gx, statement, actor=args.actor, supports=args.supports,
                                supersedes=args.supersedes, session=args.session,
-                               title=args.title)
+                               title=args.title, write=False)
+            if res.get("op"):
+                res = (await writes.write("decide", res["op"])).result
             # Mint-time near-duplicate surfacing (ff4e275e shape (a)): propose-only —
             # the mint always lands; the fresh decision carries no task_state yet so
             # it never matches itself. Replay bypasses this branch (rebuilds stay flat).
             if not res.get("error"):
                 res["near_duplicates"] = await near_duplicates(gx, statement)
             print(render("decide", res, args.format))
-            if args.journal_path:
-                append_write(args.journal_path, "decide",
-                             {"statement": statement, "actor": args.actor,
-                              "supports": args.supports, "supersedes": args.supersedes,
-                              "session": args.session, "title": args.title})
+            if res.get("error"):
+                return 1
             # --state open: the frontier-visibility enforcement — a freshly minted work
             # item is INVISIBLE to readiness until task_state is asserted, so mint +
             # assert land in ONE invocation (explicit flag, not title-pattern magic).
-            if args.state and not res.get("error"):
-                st = await assert_value(gx, res["decision_id"], "task_state", args.state,
-                                        actor=args.actor)
-                print(render("assert", st, args.format))
-                if args.journal_path and not st.get("error"):
-                    append_write(args.journal_path, "assert",
-                                 {"subject": res["decision_id"], "predicate": "task_state",
-                                  "value": args.state, "actor": args.actor,
-                                  "evidence": None, "supersede": False})
             # --capture: the AUTHORED capture_state (a3d196c6 shape (a)) lands beside the
-            # mint like --state does, and a riding capture REFERENCES the item it rides —
-            # both journaled, so a rebuild keeps the capture visible to `readiness --captures`.
-            if capture and not res.get("error"):
-                st = await assert_value(gx, res["decision_id"], "capture_state",
-                                        capture["value"], actor=args.actor)
+            # mint like --state does, and a riding capture REFERENCES the item it rides.
+            facts = ([("task_state", args.state)] if args.state else []) + \
+                    ([("capture_state", capture["value"])] if capture else [])
+            for predicate, value in facts:
+                st = await _assert_journaled(gx, writes, res["decision_id"], predicate, value,
+                                             actor=args.actor)
                 print(render("assert", st, args.format))
-                if args.journal_path and not st.get("error"):
-                    append_write(args.journal_path, "assert",
-                                 {"subject": res["decision_id"], "predicate": "capture_state",
-                                  "value": capture["value"], "actor": args.actor,
-                                  "evidence": None, "supersede": False})
-                if capture.get("rides"):
-                    lk = await link(gx, res["decision_id"], capture["rides"], "REFERENCES",
-                                    actor=args.actor)
-                    print(render("link", lk, args.format))
-                    if args.journal_path and lk.get("written"):
-                        append_write(args.journal_path, "link",
-                                     {"source_id": lk["source_id"], "target_id": lk["target_id"],
-                                      "relation": "REFERENCES", "actor": args.actor,
-                                      "source_label": lk.get("source_label"),
-                                      "target_label": lk.get("target_label")})
+                if st.get("error"):
+                    return 1
+            if capture and capture.get("rides"):
+                lk = await link(gx, res["decision_id"], capture["rides"], "REFERENCES",
+                                actor=args.actor, write=False)
+                if lk.get("op"):
+                    lk = (await writes.write("link", lk["op"])).result
+                print(render("link", lk, args.format))
+                if lk.get("error"):
+                    return 1
         elif args.command == "uncaptured":
             from .source_state import journal_repos, uncaptured_modules
             cfg = load_graph_config(args.graph_db_path)
@@ -1190,14 +1167,14 @@ async def _dispatch(args) -> int:
                 from .categorypages import description_criteria
                 fields["page_description_basis"] = description_criteria(
                     {"entity_kind": args.kind, "key": args.key, "name": args.name, **fields})
+            # THE CHAIN (ruling 547f4123 (1)): the entity op planned (a record the graph already
+            # holds whole is no change) and written; its category path planned after it applied
             res = await mint_entity(gx, args.kind, args.key, name=args.name, fields=fields,
-                                    actor=args.actor)
+                                    actor=args.actor, write=False)
+            if res.get("op"):
+                res = (await writes.write("entity", res["op"])).result
             print(render("entity", res, args.format))
-            if args.journal_path and res.get("written"):
-                append_write(args.journal_path, "entity",
-                             {"kind": args.kind, "key": args.key, "name": args.name,
-                              "fields": fields, "actor": args.actor})
-            if res.get("written"):   # a facet entry's URL lands with it (design a62f2499 (1))
+            if not res.get("error"):   # a facet entry's URL lands with it (design a62f2499 (1))
                 paths = await _category_paths_journaled(gx, writes, args.actor, apply=True,
                                                         only={f"{args.kind}:{args.key}"})
                 if paths["landed"]:
@@ -1208,10 +1185,11 @@ async def _dispatch(args) -> int:
         elif args.command == "entity-batch":
             # A vocabulary batch (amendment 3c5cff97): a JSON list of whole entity records,
             # checked WHOLE -- any error refuses the batch with nothing written -- then one
-            # journaled `entity` op per landed record, so replay needs nothing new.
+            # `entity` op per changing record, each planned, appended and applied in turn
+            # (ruling 547f4123 (1)), so replay needs nothing new.
             from .coverage import mint_entities
-            res = await mint_entities(gx, json.loads(Path(args.table).read_text()), apply=args.apply,
-                                      actor=args.actor)
+            res = await mint_entities(gx, json.loads(Path(args.table).read_text()),
+                                      writes=writes if args.apply else None, actor=args.actor)
             if res["errors"]:
                 for e in res["errors"]:
                     print(f"error: {e}", file=sys.stderr)
@@ -1223,11 +1201,13 @@ async def _dispatch(args) -> int:
             if not args.apply:
                 print("_(dry run — pass --apply to land it)_")
                 return 0
-            _journal_entities(args.journal_path, res["landed"], args.actor)
             print(f"landed: {len(res['landed'])} entity op(s)")
-            # the landed facet entries' URLs (design a62f2499 (1))
+            # the batch's facet entries' URLs (design a62f2499 (1)): every record's row, so a
+            # crashed batch's retry lands the paths its first run never reached
             paths = await _category_paths_journaled(gx, writes, args.actor, apply=True,
-                                                    only={f"{r['kind']}:{r['key']}" for r in res["landed"]})
+                                                    only={f"{p['kind']}:{p['key']}" for p in res["plan"]})
+            if not res["landed"] and not paths["landed"]:
+                print("  no change: the graph already holds this batch (nothing journaled)")
             if paths["landed"]:
                 print(f"category paths: {paths['landed']} assert op(s)")
             return 1 if paths["errors"] else 0
@@ -1239,7 +1219,8 @@ async def _dispatch(args) -> int:
             from .categorypages import describe_categories
             text = Path(args.apply).read_text() if args.apply else None
             res = await describe_categories(gx, website_root=args.website_root, drafts_dir=_drafts_dir(args),
-                                            apply_text=text, dry_run=args.dry_run, actor=args.actor)
+                                            apply_text=text, dry_run=args.dry_run, actor=args.actor,
+                                            writes=writes)
             for e in res.get("errors") or []:
                 print(f"error: {e.get('why', e) if isinstance(e, dict) else e}", file=sys.stderr)
             if res.get("error"):
@@ -1260,8 +1241,9 @@ async def _dispatch(args) -> int:
             if args.dry_run:
                 print("_(dry run — nothing written)_")
                 return 0
-            _journal_entities(args.journal_path, res["landed"], args.actor)
             print(f"landed: {len(res['landed'])} entity op(s)")
+            if not res["landed"]:
+                print("  no change: the graph already holds these descriptions (nothing journaled)")
             return 0
         elif args.command == "derived-from":
             # An archive deliverable's provenance (design leg 4a4ef27e (2)): the op names the
@@ -1279,7 +1261,6 @@ async def _dispatch(args) -> int:
             # The reviewed archive survey (design 5de7fae9 (5)): planned and checked WHOLE -- any
             # error refuses the batch with nothing written -- then landed through the single
             # verbs' write paths, one journaled `entity` / `derived-from` op each.
-            from .coverage import mint_entity
             from .library import check_survey_targets, plan_survey, read_survey, record_provenance
             from cjm_dev_graph_schema import predicates as P
             plan = plan_survey(read_survey(args.table))
@@ -1294,34 +1275,38 @@ async def _dispatch(args) -> int:
             if not args.apply:
                 print("_(dry run — pass --apply to land it)_")
                 return 0
-            landed = {"entity": 0, "derived-from": 0, "unchanged": 0}
-            for kind, recs in ((P.ENTITY_WORK, plan["works"]), (P.ENTITY_UNIT, plan["units"])):
-                for rec in recs:
-                    res = await mint_entity(gx, kind, rec["key"], name=rec["name"], fields=rec["fields"],
-                                            actor=args.actor)
-                    if res.get("error"):
-                        print(f"error: {kind} `{rec['key']}`: {res['error']}", file=sys.stderr)
-                        return 1
-                    if args.journal_path:
-                        append_write(args.journal_path, "entity",
-                                     {"kind": kind, "key": rec["key"], "name": rec["name"],
-                                      "fields": rec["fields"], "actor": args.actor})
-                    landed["entity"] += 1
+            # THE CHAIN (ruling 547f4123 (1)): the works and units land as one checked entity batch,
+            # then each provenance edge is planned against the db they left -- every refusal a
+            # read, so the edges' whole check runs before the first append (pending: the batch)
+            from .coverage import land_entities, mint_entities
+            records = [{"kind": kind, **rec} for kind, recs in ((P.ENTITY_WORK, plan["works"]),
+                                                                (P.ENTITY_UNIT, plan["units"])) for rec in recs]
+            batch = await mint_entities(gx, records, actor=args.actor)
+            pending = {(r["kind"], r["key"]) for r in records}
+            errors = batch["errors"] + [
+                f"`{e['deliverable']}`: {r['error']}" for e in plan["edges"]
+                for r in [await record_provenance(gx, e["deliverable"], e["source"], actor=args.actor,
+                                                  write=False, pending=pending)] if r.get("error")]
+            if errors:
+                for e in errors:
+                    print(f"error: {e}", file=sys.stderr)
+                print(f"library-survey: REFUSED — {len(errors)} error(s), nothing written")
+                return 1
+            landed = {"entity": len(await land_entities(gx, writes, batch["records"], actor=args.actor)),
+                      "derived-from": 0, "unchanged": 0}
             for e in plan["edges"]:
-                res = await record_provenance(gx, e["deliverable"], e["source"], actor=args.actor)
-                if res.get("error"):
-                    print(f"error: `{e['deliverable']}`: {res['error']}", file=sys.stderr)
-                    return 1
-                if res.get("unchanged"):
+                res = await record_provenance(gx, e["deliverable"], e["source"], actor=args.actor, write=False)
+                if res.get("error"):   # checked whole above, so a refusal here is a defect, never data
+                    raise RuntimeError(f"`{e['deliverable']}`: {res['error']}")
+                if not res["op"]:
                     landed["unchanged"] += 1
                     continue
-                if args.journal_path:
-                    append_write(args.journal_path, "derived-from",
-                                 {"deliverable": res["deliverable_id"], "source": e["source"],
-                                  "retract": False, "actor": args.actor})
+                await writes.write("derived-from", res["op"])
                 landed["derived-from"] += 1
             print(f"landed: {landed['entity']} entity op(s) · {landed['derived-from']} provenance edge(s) · "
                   f"{landed['unchanged']} unchanged")
+            if not landed["entity"] and not landed["derived-from"]:
+                print("  no change: the graph already holds this survey (nothing journaled)")
             return 0
         elif args.command == "work-member":
             # A metabolized source's place in its work (design leg 4a4ef27e (2)): the op names the
@@ -1495,7 +1480,8 @@ async def _dispatch(args) -> int:
                     d = json.loads(f.read_text())
                     drafts += d if isinstance(d, list) else [d]
             res = await review_concepts(gx, vocab=args.vocab, drafts=drafts, apply_text=text, dry_run=args.dry_run,
-                                        only=args.only, series=args.series, actor=args.actor, write=False)
+                                        only=args.only, series=args.series, actor=args.actor, write=False,
+                                        writes=writes)
             if not args.vocab:
                 res = await _land_run(writes, "review-concepts", res)
             if text is None and args.out:
@@ -1503,14 +1489,18 @@ async def _dispatch(args) -> int:
                 Path(args.out).write_text(res["document"])
                 res["out"] = args.out
             print(render("review-concepts", res, args.format))
-            if args.vocab and res.get("written"):
-                _journal_entities(args.journal_path, res["landed"], args.actor)
-                subjects = {f"{r['kind']}:{r['key']}" for r in res["landed"] if r["kind"] == "subject"}
-                if subjects:   # a landed subject's category URL lands with it (design a62f2499 (1))
+            if args.vocab and text is not None and not args.dry_run and not res.get("error"):
+                # every reviewed subject's category URL (design a62f2499 (1)), planned after the
+                # batch applied -- a crashed review's retry lands the paths its first run never reached
+                subjects = {f"{p['kind']}:{p['key']}" for p in res.get("plan") or [] if p["kind"] == "subject"}
+                paths = {"landed": 0}
+                if subjects:
                     paths = await _category_paths_journaled(gx, writes, args.actor, apply=True,
                                                             only=subjects)
                     if paths["errors"]:
                         return 1
+                if not res.get("landed") and not paths["landed"]:
+                    print("  no change: the graph already holds this vocabulary (nothing journaled)")
             return 1 if res.get("error") else 0
         elif args.command == "concepts":
             # The concept vocabulary read (ruling ad37f62a (1)): each live concept with its subject
@@ -1656,10 +1646,9 @@ async def _dispatch(args) -> int:
                 if not args.journal_path:
                     print("error: relocate land journals every write -- it needs --journal-path", file=sys.stderr)
                     return 1
-                res = await land_relocations(gx, args.posts, website_root=args.website_root, config=rc["config"],
-                                             into=args.into, journal_path=args.journal_path,
-                                             journal=lambda verb, op: append_write(args.journal_path, verb, op),
-                                             actor=args.actor)
+                res = await land_relocations(gx, writes, args.posts, website_root=args.website_root,
+                                             config=rc["config"], into=args.into, actor=args.actor)
+                res["noop"] = not res["landed"] and not res["errors"]
             res["action"] = args.action
             print(render("relocate", res, args.format))
             return 1 if res.get("errors") else 0
@@ -1885,10 +1874,10 @@ async def _dispatch(args) -> int:
                 print(res["text"])
             return 0
         elif args.command == "oracle":
-            # Journal-first (b744b28e): the Procedure mint + every changed assertion ride
-            # the writes journal so a rebuild keeps the oracle's facts (cg-write bakes it).
-            res = await run_version_oracle(gx, repos_dir=args.repos_dir, only=args.only,
-                                           journal_path=args.journal_path)
+            # Journal-first (b744b28e): the Procedure op + every changing assertion, each planned
+            # then appended and applied through the replay's applier (ruling 547f4123 (4))
+            res = await run_version_oracle(gx, writes, repos_dir=args.repos_dir, only=args.only)
+            res["noop"] = not res["journaled"]
             print(render("oracle", res, args.format))
             return 0
         elif args.command == "link":
@@ -1959,26 +1948,33 @@ async def _dispatch(args) -> int:
             print(render("propose", res, args.format))
             return 0
         elif args.command == "confirm-proposal":
-            res = await confirm_proposal(gx, args.proposal, actor=args.actor)
-            print(render("confirm-proposal", res, args.format))
+            # THE CHAIN (ruling 547f4123 (1)): the section STATE the draft applies (no change when it
+            # already stands), then the re-approval assert planned against the db it left -- so it
+            # binds the NEW content's hash -- each appended and applied through the replay's applier;
+            # the deliverable's .md refreshed after. A cut-over deliverable's source is its lane's
+            # journal, never this one: refused until C3 routes the leg there (ruling 547f4123 (2)).
+            res = await confirm_proposal(gx, args.proposal, actor=args.actor, write=False)
+            if not res.get("error"):
+                from .memorysource import note_lane
+                from .notesource import _cut_over_note
+                if (await _cut_over_note(gx, note_lane(load_graph_config(args.graph_db_path) or {}),
+                                         res["deliverable_id"]))[0] is not None:
+                    res = {**res, "error": "the deliverable is cut over -- its source is its lane's journal, so a "
+                                           "confirmation lands through journal-first authoring (eeda5977 L2c slice "
+                                           "C3, ruling 547f4123 (2)); nothing written"}
             if res.get("error"):
+                print(render("confirm-proposal", res, args.format))
                 return 1
-            # The confirmation is two ordinary journaled ops: the section STATE the draft
-            # applied (skipped when already applied) and the re-approval assert with its
-            # bound hash — exactly what `author` and `assert` journal at this seam.
-            if args.journal_path:
-                so = res["section_op"]
-                if not (res.get("section") or {}).get("unchanged"):
-                    append_write(args.journal_path, "section",
-                                 {"slug": so["slug"], "anchor": so["anchor"], "raw": so["raw"],
-                                  "actor": args.actor})
-                ap = res.get("approval") or {}
-                if ap and not ap.get("error"):
-                    append_write(args.journal_path, "assert",
-                                 {"subject": res["deliverable_id"], "predicate": res["approval_predicate"],
-                                  "value": res["approval_value"], "actor": args.actor,
-                                  "evidence": [res["proposal_id"]], "supersede": None,
-                                  "subject_content_hash": ap.get("subject_content_hash")})
+            if res["section"]["op"]:
+                res["section"] = (await writes.write("section", res["section"]["op"])).result
+            if res["approval_value"]:
+                res["approval"] = await _assert_journaled(gx, writes, res["deliverable_id"], res["approval_predicate"],
+                                                          res["approval_value"], actor=args.actor,
+                                                          evidence=[res["proposal_id"]])
+            res["noop"] = res["section"].get("unchanged") and not (res["approval"] and not res["approval"].get("noop"))
+            print(render("confirm-proposal", res, args.format))
+            if (res["approval"] or {}).get("error"):
+                return 1
             # The graph is the source; refresh the deliverable's emitted .md (the backup).
             em = await emit_artifact(gx, res["deliverable_id"], write=True)
             if em.get("error"):

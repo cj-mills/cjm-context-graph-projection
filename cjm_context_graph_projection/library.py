@@ -18,7 +18,7 @@ verbs, one journaled op each, so replay needs no survey verb."""
 
 import csv
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from cjm_context_graph_layer.ops import extend_graph, graph_task
 from cjm_context_graph_primitives.query import EdgeQuery
@@ -51,6 +51,7 @@ async def record_provenance(
     retract: bool = False,   # Remove the deliverable's provenance edge
     actor: str = "agent:session",
     write: bool = True,      # False = PLAN only (design detail 65f4a6c9 (1)): every refusal, then the op under "op" (None = changes nothing), nothing written
+    pending: Optional[Set[Tuple[str, str]]] = None,  # (kind, key) entities planned earlier in the same batch (they land first; ruling 547f4123 (1))
 ) -> Dict[str, Any]:  # {edge_id, deliverable_id, source_id, source, replaced, written} | {error, written: False}
     """Write an ARCHIVE deliverable's one DERIVED_FROM edge to its work or unit (journaled
     `derived-from`), or retract it. One per deliverable, so a restatement re-lands it on its
@@ -83,7 +84,7 @@ async def record_provenance(
                          "a born deliverable's provenance is the rollup of the points it places", "written": False}
     kind, sid = source_entity_id(source)
     node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=sid)
-    if node is None or F.prop(node, "entity_kind") != kind:
+    if (kind, source) not in (pending or set()) and (node is None or F.prop(node, "entity_kind") != kind):
         return {"error": f"no {kind} `{source}` -- mint it first (`entity {kind} {source} ...`)", "written": False}
     edge = work_provenance_edge(did, sid)
     out = {"edge_id": edge["id"], "deliverable_id": did, "source_id": sid, "source": source}

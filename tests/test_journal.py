@@ -389,49 +389,62 @@ def test_procedure_verb_is_journaled_and_replays_through_mint(tmp_path, monkeypa
     assert asserted == [("e1", "version", "0.0.2", "version-oracle/v1")]
 
 
-def test_version_oracle_journals_procedure_and_changed_assertions(tmp_path, monkeypatch):
-    """The oracle's writes are journal-first (b744b28e): one `procedure` op (deduped on
-    re-run) + one `assert` op per assertion that CHANGED the graph; an unchanged read
-    and a born-superseded value journal nothing (replay would no-op)."""
+def test_version_oracle_writes_the_procedure_then_each_changing_assertion(monkeypatch):
+    """The oracle's writes are planned, then written through the invocation's writes (ruling
+    547f4123 (1) + (4)): one `procedure` op while the Procedure is absent, one `assert` op per
+    reading that changes the graph -- carrying the oracle's method -- and nothing for an unchanged
+    read or an OLDER reading (ruling 547f4123 (3): reported, never written)."""
     import asyncio
     import cjm_context_graph_projection.oracle as oracle_mod
-    from cjm_context_graph_primitives.journal import read_journal
 
     def repo(key):
         return {"id": f"e-{key}", "label": "Entity",
                 "properties": {"entity_kind": "repo", "key": f"cjm-{key}", "name": f"cjm-{key}"}}
 
-    entities = [repo("new"), repo("same"), repo("old")]
-    outcomes = {"e-new": {"nodes_added": 2, "superseded": [], "born_superseded": False},
-                "e-same": {"nodes_added": 0, "superseded": [], "born_superseded": False},
-                "e-old": {"nodes_added": 1, "superseded": [], "born_superseded": True}}
+    entities = [repo("new"), repo("bump"), repo("same"), repo("old")]
+    plans = {"e-new": {"superseded": [], "born_superseded": False, "op": {"subject": "e-new"}},
+             "e-bump": {"superseded": ["a-prior"], "born_superseded": False, "op": {"subject": "e-bump"}},
+             "e-same": {"superseded": [], "born_superseded": False, "op": None},
+             "e-old": {"superseded": [], "born_superseded": True, "op": {"subject": "e-old"}}}
+    standing = {"procedure": False}
 
     async def fake_load_label(gx, label):
         return entities
 
-    async def fake_mint(gx, method, name, **kw):
-        return {"procedure_id": "proc-1"}
+    async def fake_mint(gx, method, name, *, write=True, **kw):
+        assert not write
+        return {"procedure_id": "proc-1", "op": None if standing["procedure"] else {"method": method}}
 
-    async def fake_assert(gx, subject, predicate, value, **kw):
-        return {"assertion_id": f"a-{subject}", **outcomes[subject]}
+    async def fake_assert(gx, subject, predicate, value, *, write=True, method=None, evidence=None, **kw):
+        assert not write and method == oracle_mod.ORACLE_METHOD and evidence == ["proc-1"]
+        return {"assertion_id": f"a-{subject}", **plans[subject]}
+
+    class Writes:
+        def __init__(self):
+            self.ops = []
+
+        async def begin(self):
+            return self
+
+        async def write(self, verb, args):
+            self.ops.append((verb, args))
 
     monkeypatch.setattr(oracle_mod.F, "load_label", fake_load_label)
     monkeypatch.setattr(oracle_mod, "mint_procedure", fake_mint)
     monkeypatch.setattr(oracle_mod, "assert_value", fake_assert)
     monkeypatch.setattr(oracle_mod, "read_repo_version", lambda name, repos_dir=None: "1.2.3")
-    p = str(tmp_path / "writes.jsonl")
-    res = asyncio.run(oracle_mod.run_version_oracle(None, journal_path=p))
-    ops = read_journal(p)
-    assert [o["verb"] for o in ops] == ["procedure", "assert"]
-    assert ops[0]["args"]["method"] == oracle_mod.ORACLE_METHOD
-    assert ops[1]["args"] == {"subject": "e-new", "predicate": "version", "value": "1.2.3",
-                              "actor": oracle_mod.ORACLE_ACTOR, "evidence": ["proc-1"],
-                              "supersede": None, "method": oracle_mod.ORACLE_METHOD}
-    assert res["journaled"] == 2 and res["counts"]["journaled"] == 2
-    assert res["counts"]["unchanged"] == 1 and res["counts"]["skipped"] == 1
-    res2 = asyncio.run(oracle_mod.run_version_oracle(None, journal_path=p))
-    assert res2["journaled"] == 0 and len(read_journal(p)) == 2  # exact-dup dedup: quiet re-run
-    assert asyncio.run(oracle_mod.run_version_oracle(None))["journaled"] == 0  # no path = unjournaled
+    w = Writes()
+    res = asyncio.run(oracle_mod.run_version_oracle(None, w))
+    assert w.ops == [("procedure", {"method": oracle_mod.ORACLE_METHOD}), ("assert", {"subject": "e-new"}),
+                     ("assert", {"subject": "e-bump"})]
+    assert res["journaled"] == 3 and res["counts"] == {"bumped": 1, "first_seen": 1, "unchanged": 1,
+                                                       "skipped": 1, "journaled": 3}
+    assert res["skipped"] == [{"repo": "cjm-old", "version": "1.2.3", "assertion_id": "a-e-old",
+                               "reason": "older than current active"}]
+    standing["procedure"] = True
+    plans["e-new"]["op"] = plans["e-bump"]["op"] = None
+    w2 = Writes()
+    assert asyncio.run(oracle_mod.run_version_oracle(None, w2))["journaled"] == 0 and w2.ops == []
 
 
 def test_journal_window_verb_filters(tmp_path):

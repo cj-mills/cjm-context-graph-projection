@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from cjm_context_graph_layer.identity import derive_node_id
-from cjm_context_graph_primitives.journal import append_write, op_now
 from cjm_dev_graph_schema.vocab import DevNodeKinds
 
 from . import factlayer as F
@@ -61,9 +60,9 @@ def read_repo_version(
 
 async def run_version_oracle(
     gx: GraphHandle,
+    writes: Any,                      # The invocation's writes-journal unit of work (writes.InvocationWrites)
     repos_dir: Optional[str] = None,  # Active repos dir (for the on-disk version fallback)
     only: Optional[List[str]] = None,  # Restrict to these repo keys/names (None = every repo entity)
-    journal_path: Optional[str] = None,  # The write journal — the Procedure mint + every CHANGED assertion land here (None = unjournaled: preview/test only)
 ) -> Dict[str, Any]:  # {procedure_id, bumped, first_seen, unchanged, skipped, journaled, counts}
     """Refresh `version` slots for repo entities; report what changed.
 
@@ -71,31 +70,27 @@ async def run_version_oracle(
     Procedure). Semver ordering means a bump auto-supersedes the old value and a
     same-version read is a verified no-op.
 
-    Journal-first (finding b744b28e): the Procedure mint rides a `procedure` op and
-    each assertion that CHANGED the graph (first-seen / bumped) rides an `assert` op
-    carrying the oracle's actor/evidence/method, so a rebuild replays both instead of
-    dropping every oracle write until the next run (the pre-fix state: zero oracle ops
-    in the journal's whole history — the Procedure AND every `version` fact died on
-    each swap). Unchanged reads and born-superseded values journal nothing (replay
-    would no-op), and `append_write`'s exact-duplicate dedup keeps a re-run quiet."""
+    THE CHAIN (ruling 547f4123 (1) + (4)): the Procedure op, then one `assert` op per repo
+    whose reading changes the graph, each planned against the db the previous op left, then
+    appended and applied through the replay's applier (finding b744b28e's journal-first, now
+    by construction). A same-version read plans nothing; a reading OLDER than the active value
+    is reported and never written (ruling 547f4123 (3)) -- the rebuild never held it."""
     proc = procedure_node()
     props = proc["properties"]
-    minted = await mint_procedure(gx, ORACLE_METHOD, props["name"], actor=props["actor"],
-                                  root_kind=props["root_kind"])
-    proc_id = minted["procedure_id"]
+    await writes.begin()
     journaled = 0
-    if journal_path:
-        journaled += int(append_write(journal_path, "procedure",
-                                      {"method": ORACLE_METHOD, "name": props["name"],
-                                       "actor": props["actor"],
-                                       "root_kind": props["root_kind"]}))
+    plan = await mint_procedure(gx, ORACLE_METHOD, props["name"], actor=props["actor"],
+                                root_kind=props["root_kind"], write=False)
+    proc_id = plan["procedure_id"]
+    if plan["op"]:
+        await writes.write("procedure", plan["op"])
+        journaled += 1
 
     entities = await F.load_label(gx, DevNodeKinds.ENTITY)
     repos = [e for e in entities if F.prop(e, "entity_kind") == "repo"]
     only_l = {o.lower() for o in only} if only else None
 
     bumped, first_seen, unchanged, skipped = [], [], [], []
-    now = op_now()
     for e in repos:
         key, name = F.prop(e, "key"), F.prop(e, "name")
         if only_l and key.lower() not in only_l and (name or "").lower() not in only_l:
@@ -105,24 +100,20 @@ async def run_version_oracle(
             skipped.append({"repo": name or key})
             continue
         res = await assert_value(gx, F.nid(e), "version", version, actor=ORACLE_ACTOR,
-                                 method=ORACLE_METHOD, asserted_at=now, evidence=[proc_id])
+                                 method=ORACLE_METHOD, evidence=[proc_id], write=False)
         rec = {"repo": name or key, "version": version, "assertion_id": res["assertion_id"]}
         if res["born_superseded"]:
             skipped.append({**rec, "reason": "older than current active"})
             continue
-        if res["superseded"]:
-            bumped.append({**rec, "superseded": res["superseded"]})
-        elif res["nodes_added"]:
-            first_seen.append(rec)
-        else:
+        if res["op"] is None:
             unchanged.append(rec)
             continue
-        if journal_path:
-            journaled += int(append_write(journal_path, "assert",
-                                          {"subject": F.nid(e), "predicate": "version",
-                                           "value": version, "actor": ORACLE_ACTOR,
-                                           "evidence": [proc_id], "supersede": None,
-                                           "method": ORACLE_METHOD}))
+        await writes.write("assert", res["op"])
+        journaled += 1
+        if res["superseded"]:
+            bumped.append({**rec, "superseded": res["superseded"]})
+        else:
+            first_seen.append(rec)
 
     return {"procedure_id": proc_id, "bumped": bumped, "first_seen": first_seen,
             "unchanged": unchanged, "skipped": skipped, "journaled": journaled,

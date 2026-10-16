@@ -253,7 +253,10 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         lines.append("_re-`ingest` to heal the references; the link drops off `worklist`_")
         return "\n".join(lines)
     if kind == "decide":
-        lines = [f"**decided:** {obj.get('statement')}", f"`{obj.get('decision_id')}`",
+        if obj.get("error"):
+            return f"⚠ {obj['error']}"
+        head = "already decided" if obj.get("noop") else "decided"
+        lines = [f"**{head}:** {obj.get('statement')}", f"`{obj.get('decision_id')}`",
                  f"_actor {obj.get('actor')}_"]
         if obj.get("supports"):
             lines.append(f"supported by {len(obj['supports'])} premise(s)")
@@ -417,6 +420,8 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             lines += [f"- `{x['slug']}` retired → {x['to']}"
                       + (f" · its source leaves the website clone: `git rm -r {x['source']}`" if x.get("source") else "")
                       for x in obj.get("landed") or []]
+            lines += [f"- `{x['slug']}` already at its destination ({x['destination']})"
+                      for x in obj.get("unchanged") or []]
         lines += [f"⚠ {('`' + e['ref'] + '` ') if e.get('ref') else ''}{e['why']}" for e in obj.get("errors") or []]
         return "\n".join(lines)
     if kind == "retire-source":
@@ -2263,7 +2268,9 @@ RUN_VERBS = ("judge-related", "judge-facets", "judge-roles", "judge-concepts", "
              "review-concepts", "harvest-discussions")
 
 # The own-shape verbs' no-change line (ruling 24fa72c2 (4)-(7)): what the graph already holds
-NOCHANGE_HOLDS = {"ingest-evidence": "this snapshot", "notes-render": "this render", "propose": "every draft"}
+NOCHANGE_HOLDS = {"ingest-evidence": "this snapshot", "notes-render": "this render", "propose": "every draft",
+                  "decide": "this decision", "oracle": "every version read", "entity": "this record",
+                  "relocate": "every page's destination", "confirm-proposal": "this confirmation"}
 
 
 def _ingest_verb(obj: Dict[str, Any]) -> str:  # An evidence snapshot's receipt verb

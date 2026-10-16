@@ -357,6 +357,7 @@ def test_category_pages_earn_a_page_or_redirect(tmp_path):
                                                            entry_record, plan_category_paths)
     from cjm_context_graph_projection.facetjudge import load_facet_vocab
     from cjm_context_graph_projection.facetreview import review_state
+    from cjm_context_graph_projection.writes import InvocationWrites
     site = tmp_path / "site"
     _site(site)
 
@@ -385,9 +386,12 @@ def test_category_pages_earn_a_page_or_redirect(tmp_path):
             doc = (await describe_categories(gx, website_root=str(site)))["document"]
             edited = doc.replace("\nPage description:\n", "\nPage description: Posts that build\nwith PyTorch.\n")
             dry = await describe_categories(gx, apply_text=edited, dry_run=True)
-            described = await describe_categories(gx, apply_text=edited)
+            described = await describe_categories(gx, apply_text=edited, writes=InvocationWrites(gx, None))
             stale = (await review_state(gx))["stale"]   # a description re-judges nothing
-            again = await describe_categories(gx, apply_text=edited)   # its basis moved: refused
+            again = (   # the landed document again: its rows stand, no change (24fa72c2 (2)); an edit on its moved basis: refused
+                await describe_categories(gx, apply_text=edited, writes=InvocationWrites(gx, None)),
+                await describe_categories(gx, apply_text=edited.replace("Posts that build", "Posts built"),
+                                          writes=InvocationWrites(gx, None)))
             pub = await site_build(gx, str(site), "public")
             out = site / "_site"
             got = {k: (out / k).read_text() for k in ("categories/vision/index.html", "series/notes/topic.html",
@@ -405,7 +409,7 @@ def test_category_pages_earn_a_page_or_redirect(tmp_path):
                               fields={**rec["fields"], "description": "PyTorch as the framework"})
             moved = await page_plan(gx, str(site), "public", (await redirect_plan(gx))["pages"])
             flagged = (await describe_categories(gx, website_root=str(site)))["document"]
-            reconfirmed = await describe_categories(gx, apply_text=flagged)
+            reconfirmed = await describe_categories(gx, apply_text=flagged, writes=InvocationWrites(gx, None))
             settled = await page_plan(gx, str(site), "public", (await redirect_plan(gx))["pages"])
             # a rename re-draws the entry's path, superseding the old one
             await mint_entity(gx, "subject", "vision", name="Computer vision",
@@ -434,7 +438,8 @@ def test_category_pages_earn_a_page_or_redirect(tmp_path):
         "page_description_basis": description_criteria({"entity_kind": "tool", "key": "pytorch", "name": "PyTorch",
                                                          "description": "PyTorch", "not_for": "a mention"})}
     assert stale == {}
-    assert again.get("error") and "changed since" in again["errors"][0] and not again["written"]
+    assert not again[0].get("error") and again[0]["counts"]["unchanged"] == 1 and not again[0]["written"]
+    assert again[1].get("error") and "changed since" in again[1]["errors"][0] and not again[1]["written"]
     assert not moved["errors"] and moved["stale_descriptions"] == ["tool:pytorch"]
     assert "⚠ The criteria changed since this description was written" in flagged and "1 to re-read" in flagged
     assert reconfirmed["counts"] == {"changed": 0, "reconfirmed": 1, "unchanged": 0, "blank": 0}

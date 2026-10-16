@@ -225,18 +225,28 @@ async def land_record_edges(
 ) -> Dict[str, int]:  # {landed, removed}
     """Reconcile the edges a record owns with the record: the ones it no longer implies go, the new
     ones land, so the append-ordered `entity` ops converge on the last record's edges."""
+    stale, new = await record_edge_delta(gx, kind, key, fields)
+    if stale:
+        await graph_task(gx.queue, gx.graph_id, "delete_edges", edge_ids=stale)
+    if new:
+        await extend_graph(gx.queue, gx.graph_id, [], new)
+    return {"landed": len(new), "removed": len(stale)}
+
+
+async def record_edge_delta(
+    gx: GraphHandle,
+    kind: str,               # The Entity sub-kind
+    key: str,                # Its key
+    fields: Dict[str, Any],  # Its record's fields
+) -> Tuple[List[str], List[Dict[str, Any]]]:  # (stale edge ids, new edges): both empty = the record's edges stand
+    """What landing a record's edges would change -- read-only, so a plan can tell an `entity`
+    op that changes nothing (ruling 547f4123) and land_record_edges applies exactly it."""
     eid = entity_node_id(kind, key)
     want = {e["id"]: e for e in record_edges(kind, key, fields)}
     have = set()
     for rel in (DevRelations.DERIVED_FROM, SpineRelations.PART_OF, DevRelations.REQUIRES):
         have |= {str(e["id"]) for e in await _edges(gx, rel, where=[PropertyPredicate("record", "eq", eid)])}
-    stale = sorted(have - set(want))
-    if stale:
-        await graph_task(gx.queue, gx.graph_id, "delete_edges", edge_ids=stale)
-    new = [e for i, e in want.items() if i not in have]
-    if new:
-        await extend_graph(gx.queue, gx.graph_id, [], new)
-    return {"landed": len(new), "removed": len(stale)}
+    return sorted(have - set(want)), [e for i, e in want.items() if i not in have]
 
 
 async def endpoint_kind(

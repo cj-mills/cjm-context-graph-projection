@@ -27,7 +27,7 @@ gaps, and the REFUSALS -- a tutorial with no task fact is unsurveyed, a value na
 vocabulary entry is unknown, an on-grid task with no stage is unstaged; each is refused
 rather than silently dropped from the page (6752db0a (9))."""
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from cjm_context_graph_layer.ops import extend_graph, graph_task
 from cjm_context_graph_primitives.query import EdgeQuery
@@ -180,11 +180,19 @@ async def mint_entity(
     name: str,                              # The display name (a rename is a re-mint)
     fields: Optional[Dict[str, Any]] = None,  # The kind's extra fields (ENTITY_FIELDS)
     actor: str = "agent:session",
+    write: bool = True,                     # False = PLAN only (ruling 547f4123): every refusal, the op under "op" (None = changes nothing)
+    pending: Optional[Set[Tuple[str, str]]] = None,  # (kind, key) records planned earlier in the same batch (they land first)
 ) -> Dict[str, Any]:  # {entity_id, kind, key, updated, written} | {error, written: False}
     """Mint or update a typed Entity from its WHOLE record (journaled `entity`; upsert by
     (kind, key)). A field left out clears, so replaying the append-ordered ops converges on
-    the last one; the id is (kind, key)-derived, so a rename keeps every fact pointing home."""
+    the last one; the id is (kind, key)-derived, so a rename keeps every fact pointing home.
+
+    THE PLAN (write=False; ruling 547f4123): every refusal first -- a record naming one
+    planned earlier in its batch (`pending`) passes, since that one lands first -- then no
+    change when the node already holds the whole record (an omitted field reads as cleared)
+    and its owned edges and a unit's PART_OF stand."""
     fields = dict(fields or {})
+    pending = pending or set()
     err = validate_entity(kind, key, name, fields)
     if err:
         return {"error": err, "written": False}
@@ -193,21 +201,34 @@ async def mint_entity(
         work_key = key.partition(P.UNIT_KEY_SEP)[0]
         work_id = entity_node_id(P.ENTITY_WORK, work_key)
         work = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=work_id)
-        if work is None or F.prop(work, "entity_kind") != P.ENTITY_WORK:
+        if (P.ENTITY_WORK, work_key) not in pending and (
+                work is None or F.prop(work, "entity_kind") != P.ENTITY_WORK):
             return {"error": f"no work `{work_key}` -- mint it first (`entity work {work_key} ...`)",
                     "written": False}
-    from .paths import check_record_refs, land_record_edges   # the path model's records (ae698640)
-    err = await check_record_refs(gx, kind, key, fields)
+    from .paths import check_record_refs, land_record_edges, record_edge_delta   # the path model's records (ae698640)
+    err = await check_record_refs(gx, kind, key, fields, pending=pending)
     if err:
         return {"error": err, "written": False}
     props = {f: fields[f] for f in ENTITY_FIELDS[kind] if f in fields}
     node = EntityNode(kind=kind, key=key, name=name, properties=props).to_graph_node()
     eid = node["id"]
     existing = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=eid)
+    whole = dict(node["properties"])
+    for f in ENTITY_FIELDS[kind]:
+        whole.setdefault(f, None)   # an omitted field clears (the whole-record rule)
+    if not write:
+        shown = None if existing is None else {"properties": {**dict.fromkeys(ENTITY_FIELDS[kind]),
+                                                               **F.props(existing)}}
+        stale, new = await record_edge_delta(gx, kind, key, props)
+        noop = (F.holds(shown, whole) and not stale and not new
+                and (work_id is None or await graph_task(gx.queue, gx.graph_id, "get_edge",
+                                                         edge_id=unit_part_of_edge(eid, work_id)["id"])
+                     is not None))
+        return {"entity_id": eid, "kind": kind, "key": key, "name": name, "fields": props,
+                "updated": existing is not None, "written": False, "noop": noop,
+                "op": None if noop else {"kind": kind, "key": key, "name": name, "fields": fields,
+                                         "actor": actor}}
     if existing is not None:
-        whole = dict(node["properties"])
-        for f in ENTITY_FIELDS[kind]:
-            whole.setdefault(f, None)   # an omitted field clears (the whole-record rule)
         await graph_task(gx.queue, gx.graph_id, "update_node", node_id=eid, properties=whole)
     else:
         await extend_graph(gx.queue, gx.graph_id, [node], [])
@@ -223,58 +244,65 @@ async def mint_entities(
     gx: GraphHandle,
     records: List[Dict[str, Any]],   # Whole entity records: [{kind, key, name, fields}]
     *,
-    apply: bool = False,             # Land the batch; else check and plan only
+    writes: Any = None,              # The invocation's writes-journal unit of work (writes.InvocationWrites): land the batch through it; None = check and plan only
     actor: str = "agent:session",
-) -> Dict[str, Any]:  # {errors, plan: [{kind, key, action}], landed: [records], written}
+) -> Dict[str, Any]:  # {errors, plan: [{kind, key, action}], records: [to land], landed: [records], written}
     """A vocabulary batch (amendment 3c5cff97), checked WHOLE before anything lands, as the
     library survey is: an invalid record, a repeated (kind, key) or a unit whose work is
-    neither live nor earlier in the batch refuses the batch with nothing written. A record
-    equal to its live Entity is `unchanged` and lands no op; every other one goes through
-    mint_entity, so the journal carries one `entity` op per landed record."""
+    neither live nor earlier in the batch refuses the batch with nothing written. Each record
+    is planned by mint_entity's own plan (ruling 547f4123 (1)), one earlier in the batch
+    counting as landed; a record the graph already holds whole is `unchanged` and lands no op.
+    With `writes`, the rest land through land_entities, one `entity` op each."""
     errors: List[str] = []
     plan: List[Dict[str, Any]] = []
     todo: List[Dict[str, Any]] = []
-    seen = set()
+    seen: Set[Tuple[str, str]] = set()
     for i, r in enumerate(records):
         kind, key, name = str(r.get("kind") or ""), str(r.get("key") or ""), str(r.get("name") or "")
         fields = dict(r.get("fields") or {})
-        err = validate_entity(kind, key, name, fields)
-        if not err and (kind, key) in seen:
-            err = "repeats an earlier record"
-        if not err and kind == P.ENTITY_UNIT:
-            work_key = key.partition(P.UNIT_KEY_SEP)[0]
-            work = await graph_task(gx.queue, gx.graph_id, "get_node",
-                                    node_id=entity_node_id(P.ENTITY_WORK, work_key))
-            if (P.ENTITY_WORK, work_key) not in seen and (
-                    work is None or F.prop(work, "entity_kind") != P.ENTITY_WORK):
-                err = f"no work `{work_key}` live or earlier in the batch"
-        if not err:   # the path model's references, live or earlier in the batch (ae698640)
-            from .paths import check_record_refs
-            err = await check_record_refs(gx, kind, key, fields, pending=seen)
-        if err:
-            errors.append(f"record {i + 1} ({kind} `{key}`): {err}")
+        if (kind, key) in seen:
+            errors.append(f"record {i + 1} ({kind} `{key}`): repeats an earlier record")
+            continue
+        res = await mint_entity(gx, kind, key, name=name, fields=fields, actor=actor, write=False,
+                                pending=seen)
+        if res.get("error"):
+            errors.append(f"record {i + 1} ({kind} `{key}`): {res['error']}")
             continue
         seen.add((kind, key))
-        node = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=entity_node_id(kind, key))
-        if node is None:
-            action = "new"
-        elif F.prop(node, "name") == name and all(F.prop(node, f) == fields.get(f) for f in ENTITY_FIELDS[kind]):
-            action = "unchanged"
-        else:
-            action = "updated"
+        action = "unchanged" if res["noop"] else "updated" if res["updated"] else "new"
         plan.append({"kind": kind, "key": key, "action": action})
         if action != "unchanged":
             todo.append({"kind": kind, "key": key, "name": name, "fields": fields})
-    out: Dict[str, Any] = {"errors": errors, "plan": plan, "landed": [], "written": False}
-    if errors or not apply:
+    out: Dict[str, Any] = {"errors": errors, "plan": plan, "records": todo, "landed": [], "written": False}
+    if errors or writes is None:
         return out
-    for r in todo:
-        res = await mint_entity(gx, r["kind"], r["key"], name=r["name"], fields=r["fields"], actor=actor)
-        if res.get("error"):   # checked above, so a refusal here is a defect, never data
-            raise RuntimeError(f"{r['kind']} `{r['key']}`: {res['error']}")
-        out["landed"].append(r)
+    out["landed"] = await land_entities(gx, writes, todo, actor=actor)
     out["written"] = bool(out["landed"])
     return out
+
+
+async def land_entities(
+    gx: GraphHandle,
+    writes: Any,                     # The invocation's writes-journal unit of work (writes.InvocationWrites)
+    records: List[Dict[str, Any]],   # Whole entity records a whole-batch check already passed, in landing order
+    *,
+    actor: str = "agent:session",
+) -> List[Dict[str, Any]]:  # The records whose `entity` op was written
+    """Land a checked batch one op at a time (ruling 547f4123 (1)): each record planned against the
+    db the previous op left, appended, applied through the replay's applier. The batch was checked
+    whole first, so a refusal here is a defect, never data; a record standing by now (a crashed
+    batch's retry) is no change."""
+    await writes.begin()
+    landed = []
+    for r in records:
+        res = await mint_entity(gx, r["kind"], r["key"], name=r["name"], fields=r["fields"], actor=actor,
+                                write=False)
+        if res.get("error"):
+            raise RuntimeError(f"{r['kind']} `{r['key']}`: {res['error']}")
+        if res["op"]:
+            await writes.write("entity", res["op"])
+            landed.append(r)
+    return landed
 
 
 async def check_coverage_value(

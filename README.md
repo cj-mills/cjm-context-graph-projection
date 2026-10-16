@@ -361,6 +361,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `check_coverage_value` _function_ — A coverage value must name a live vocabulary entry of the predicate's kind, so a
 - `coverage_matrix` _function_ — The Tutorials matrix over the graph: every deliverable whose type's kind is
 - `field_format_error` _function_ — The formats some fields carry beyond their type (design leg 4a4ef27e): `published` is an
+- `land_entities` _function_ — Land a checked batch one op at a time (ruling 547f4123 (1)): each record planned against the
 - `load_coverage_facts` _function_ — Every subject's ACTIVE coverage values (both predicates, supersession applied).
 - `load_hardware` _function_ — Every hardware Entity with its ACTIVE standing (None if never asserted; two active
 - `load_verifications` _function_ — The verification edges (deliverable -> device) with their evidence.
@@ -732,6 +733,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `load_path_graph` _function_ — The path model's slice of the graph as plain data: the Entities it names (by id: their
 - `path_reads` _function_ — The `paths` read verb: one derived read, or all of them, with every node it mentions named.
 - `prepares_for` _function_ — What a work, a unit or a deliverable PREPARES YOU FOR (e2b3a414): the deliverables that
+- `record_edge_delta` _function_ — What landing a record's edges would change -- read-only, so a plan can tell an `entity`
 - `record_edges` _function_ — The edges a record lands: an artifact's lineage, an environment's parts and requirements,
 - `record_field_error` _function_ — The SHAPE of a path-model record field (pure; the live references are checked by
 - `record_refs` _function_ — The Entities a record names (its references), from its fields.

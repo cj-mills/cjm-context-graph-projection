@@ -249,3 +249,25 @@ def test_backfill_journals_and_replays_to_the_same_history(tmp_path):
     a = asyncio.run(shape(str(tmp_path / "a.db"), live))
     b = asyncio.run(shape(str(tmp_path / "b.db"), replayed))
     assert a == b and a[2] == ["/posts/x/"] and len(a[1]) == 2
+
+
+def test_decide_plan_resolves_its_refs_and_a_standing_decision_is_no_change(tmp_path):
+    # Ruling 547f4123: the plan journals supports / supersedes as full ids (a prefix resolved, an
+    # unknown one refused before anything lands), and a decision whose node, session and edges
+    # all stand plans no op
+    async def go():
+        async with open_graph(str(tmp_path / "g.db")) as gx:
+            prior = await _mint(gx, "FINDING: the prior one")
+            unknown = await decide(gx, "WORK ITEM: cites a ghost", supports=["deadbeef99"], write=False)
+            plan = await decide(gx, "WORK ITEM: the planned one", supersedes=[prior[:8]], session="2026-01-01_00-00-00",
+                                write=False)
+            planned_only = await F.load_label(gx, "Decision")
+            await decide(gx, **{k: plan["op"][k] for k in ("statement", "supersedes", "session")})
+            again = await decide(gx, "WORK ITEM: the planned one", supersedes=[prior], session="2026-01-01_00-00-00",
+                                 write=False)
+            return unknown, plan, planned_only, again
+    unknown, plan, planned_only, again = asyncio.run(go())
+    assert "resolves to no node" in unknown["error"]
+    assert plan["op"]["supersedes"] == [plan["supersedes"][0]] and len(plan["supersedes"][0]) == 36
+    assert len(planned_only) == 1   # a plan writes nothing
+    assert again["noop"] and again["op"] is None

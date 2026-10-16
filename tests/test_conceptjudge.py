@@ -26,6 +26,7 @@ from cjm_context_graph_projection.library import record_provenance
 from cjm_context_graph_projection.purenotes import mint_deliverable_type
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
 from cjm_context_graph_projection.write import assert_value
+from cjm_context_graph_projection.writes import InvocationWrites
 from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.identity import entity_node_id, note_node_id
 from cjm_markdown_decompose_core.extract import note_from_text
@@ -155,9 +156,9 @@ def test_draft_confirm_judge_review_measure(tmp_path):
             empty = await judge_concepts(gx, ask=_ask)                              # no vocabulary yet
             vdoc = (await review_concepts(gx, vocab=True, drafts=_DRAFTS))
             dropped = _check(vdoc["document"], "concept `drop-me`", " ")
-            refused_subject = await review_concepts(gx, vocab=True, apply_text=dropped)
+            refused_subject = await review_concepts(gx, vocab=True, apply_text=dropped, writes=InvocationWrites(gx, None))
             ok_doc = _check(dropped, "subject `gpu-programming`")
-            minted = await review_concepts(gx, vocab=True, apply_text=ok_doc)
+            minted = await review_concepts(gx, vocab=True, apply_text=ok_doc, writes=InvocationWrites(gx, None))
             dry = await judge_concepts(gx, dry_run=True, ask=_ask)
             only = await judge_concepts(gx, dry_run=True, only=["c-notes"], ask=_ask)
             missing = await judge_concepts(gx, dry_run=True, only=["no-such-post"], ask=_ask)

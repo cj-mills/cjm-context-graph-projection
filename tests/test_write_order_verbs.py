@@ -13,8 +13,10 @@ NOTES) gets the sibling graph a cross-graph link observes, and one keyed in FILE
 its run. A step whose first element is a function is a HARNESS action (a git commit, a journal written
 by an earlier release, a review document written), run in both runs alike and never counted; a step
 marked NOCHANGE is a write whose plan finds the graph already there -- it journals nothing (ruling
-24fa72c2). A step marked with a tuple of verbs writes those ops in that order: run B crashes its first
-and the retry's plan writes the rest. The run verbs ask a local JUDGE double ({judge}) and a fake `gh`
+24fa72c2). A step marked with a tuple of verbs writes those ops in that order: a scenario whose longest
+tuple has n ops runs n crashed variants, variant k killing each marked step at its k-th op
+(CJM_JOURNAL_FAULT=after_append@k; a shorter step dies at its last), and the retry heals that op while
+its plan writes the rest -- so a chain completes from every boundary (ruling 547f4123 (1)). The run verbs ask a local JUDGE double ({judge}) and a fake `gh`
 on the run's PATH; a scenario keyed in CONFIG gets that graph config, and one in SOURCED carries the
 code lane -- its CLI calls name a source journal and its rebuild ingests that journal before the
 replay."""
@@ -319,9 +321,122 @@ def _code(
     return capture
 
 
+# The C-class chains (ruling 547f4123): a decide with its follow-ons, the entity batches, a survey, the
+# version oracle, a relocation read back from a local copy host, a confirmed proposal
+CHAIN, CAPTURE, CITES = "WORK ITEM: a chained mint", "CAPTURE: a riding one", "FINDING: a citing one"
+BATCH = json.dumps([{"kind": "work", "key": "a-book", "name": "A Book", "fields": {"form": "book"}},
+                    {"kind": "unit", "key": "a-book/ch1", "name": "Chapter 1", "fields": {"position": 1}},
+                    {"kind": "tool", "key": "onnx", "name": "onnx", "fields": {"description": "ONNX", "not_for": "a mention"}}])
+SURVEY = "\t".join(("note_id", "work_key", "work_name", "form", "author", "subtitle", "published", "isbn", "unit_key",
+                    "unit_name", "unit_position", "unit_part", "unit_isbn")) + "\n" + "\t".join(
+    (note_node_id("arch-note"), "a-book", "A Book", "book", "", "", "", "", "ch1", "Chapter 1", "1", "", "")) + "\n"
+VOCAB_DOC = ("- [x] subject `vision` · Vision <!-- vocab subject -->\n  - description: Seeing\n  - not_for: a mention\n"
+             "- [x] concept `nms` · NMS <!-- vocab concept -->\n  - description: Dropping boxes\n  - not_for: IoU\n"
+             "  - area: subject:vision\n")
+REPO = "cjm-proof"   # a repo the ingest's repo map mints (an Entity of kind repo)
+
+
+def _version(
+    v: str,  # The repo's __version__
+) -> object:  # A harness action writing {run}/repos/cjm-proof/cjm_proof/__init__.py
+    def write(run: Path, jp: str) -> None:
+        init = run / "repos" / REPO / REPO.replace("-", "_") / "__init__.py"
+        init.parent.mkdir(parents=True, exist_ok=True)
+        init.write_text(f'__version__ = "{v}"\n')
+    return write
+
+
+def _repo(
+    run: Path,  # This run's directory
+    jp: str,    # Its writes journal
+) -> None:
+    """A committed cjm-* repo under {run}/repos, folded into the live db by an ingest that keeps the
+    repo map -- the oracle reads repo Entities, and only the ingest mints them."""
+    _version("0.0.2")(run, jp)
+    env = {**os.environ, "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z", "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z",
+           "GIT_AUTHOR_NAME": "proof", "GIT_AUTHOR_EMAIL": "proof@example.invalid",
+           "GIT_COMMITTER_NAME": "proof", "GIT_COMMITTER_EMAIL": "proof@example.invalid"}
+    repo = str(run / "repos" / REPO)
+    for cmd in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "born"]):
+        subprocess.run(["git", "-C", repo, *cmd], check=True, env=env, capture_output=True)
+    r = _cli(str(run / "live.db"), jp, "ingest", "--memory-dir", str(run / "no-memory"), "--no-seed",
+             "--repos-dir", str(run / "repos"))
+    assert r.returncode == 0, r.stderr or r.stdout
+
+
+def _described(
+    run: Path,  # This run's directory
+    jp: str,    # Its writes journal (unused)
+) -> None:
+    """The category description document, edited: the onnx entry's section against its live record."""
+    from cjm_context_graph_projection.categorypages import description_basis
+    from cjm_context_graph_projection.facetjudge import load_facet_vocab
+
+    async def basis():
+        async with open_graph(str(run / "live.db")) as gx:
+            return description_basis((await load_facet_vocab(gx))["tool:onnx"])
+    (run / "describe.md").write_text(f"## onnx · tool `onnx` · 0 posts <!-- category tool:onnx {asyncio.run(basis())} -->\n\n"
+                                     "Page description: Posts that run models through ONNX.\n")
+
+
+def _proposal(
+    run: Path,  # This run's directory
+    jp: str,    # Its writes journal
+) -> None:
+    """The drafted proposal's id ({proposal} in a later step): derived from its journaled op."""
+    from cjm_context_graph_layer.identity import derive_node_id
+    a = next(o["args"] for o in reversed(read_journal(jp)) if o["verb"] == "propose")
+    (run / "proposal.txt").write_text(derive_node_id("proposal", a["deliverable_id"], a["section_id"], a["key"]))
+
+
+class _Static(BaseHTTPRequestHandler):
+    def do_GET(self):   # a raw-file host: the URL's path is the file's absolute path
+        p = Path(self.path)
+        body = p.read_bytes() if p.is_file() else None
+        self.send_response(200 if body is not None else 404)
+        self.send_header("Content-Length", str(len(body or b"")))
+        self.end_headers()
+        self.wfile.write(body or b"")
+
+    def log_message(self, *a):
+        pass
+
+
+_RAW: list = []   # the module's one raw-file host, started on first use
+
+
+def _raw_url() -> str:
+    if not _RAW:
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _Static)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        _RAW.append(f"http://127.0.0.1:{server.server_address[1]}")
+    return _RAW[0]
+
+
+def _copy(
+    run: Path,  # This run's directory
+    jp: str,    # Its writes journal (unused)
+) -> None:
+    """arch-note's projected copy in a clone of o/retired-posts, and the same bytes on the raw host."""
+    clone = run / "clone"
+    (clone / "posts" / "arch-note").mkdir(parents=True)
+    for cmd in (["init", "-q", "-b", "main"], ["remote", "add", "origin", "https://github.com/o/retired-posts.git"]):
+        subprocess.run(["git", "-C", str(clone), *cmd], check=True, capture_output=True)
+    text = "# Arch note\n\nKept as it was written.\n"
+    (clone / "posts" / "arch-note" / "README.md").write_text(text)
+    served = run / "served" / "o" / "retired-posts" / "main" / "posts" / "arch-note" / "README.md"
+    served.parent.mkdir(parents=True)
+    served.write_text(text)
+
+
 CONFIG = {"ingest-evidence": {"evidence": {"root": "{run}/evidence", "host": HOST}},
-          "propose": {"notes_profile": "quarto_post", "emit_root": "{run}/staging"}}
-SOURCED = {"propose"}   # scenarios on the code lane
+          "propose": {"notes_profile": "quarto_post", "emit_root": "{run}/staging"},
+          "confirm-proposal": {"notes_profile": "quarto_post", "emit_root": "{run}/staging"},
+          "relocate": {"relocation": {"retired_repo": "o/retired-posts", "raw_base": "{raw}{run}/served"}}}
+FILES.update({"entity-batch": {"batch.json": BATCH}, "library-survey": {"survey.tsv": SURVEY},
+              "review-concepts-vocab": {"vocab.md": VOCAB_DOC}, "relocate": FILES["retire-source"]})
+SOURCED = {"propose", "confirm-proposal", "oracle"}   # scenarios on the code lane (their rebuild is an ingest)
+REPO_MAP = {"oracle"}   # ... whose ingest keeps the repo map
 
 # Every scenario runs after the seed; a True step writes exactly ONE op and is the one crashed
 # between its append and its apply in run B (a False step may write several: an Entity's category
@@ -446,6 +561,46 @@ SCENARIOS = {
                 (("link", section_node_id(note_node_id("tutorial"), "use"), "REFERENCES", SYM_ID), False),
                 (("assert", note_node_id("tutorial"), "publish_state", "published"), False),
                 (_code(NEW_F, edited=True), False), (("propose",), True), (("propose",), NOCHANGE)],
+    "decide": [(("decide", CHAIN, "--state", "open"), ("decide", "assert")),
+               (("decide", CHAIN, "--state", "open"), NOCHANGE),
+               (("decide", CAPTURE, "--capture", f"riding:{ITEM_ID[:8]}"), ("decide", "assert", "link")),
+               (("decide", CITES, "--supports", ITEM_ID[:8], "--supersedes", OTHER_ID[:8]), True)],
+    "entity": [(("entity", "tool", "onnx", "--name", "onnx", "--description", "ONNX", "--not-for", "a mention"),
+                ("entity", "assert")),
+               (("entity", "tool", "onnx", "--name", "onnx", "--description", "ONNX", "--not-for", "a mention"),
+                NOCHANGE)],
+    "entity-batch": [(("entity-batch", "{run}/batch.json", "--apply"), ("entity", "entity", "entity", "assert")),
+                     (("entity-batch", "{run}/batch.json", "--apply"), NOCHANGE)],
+    "describe-categories": FACET_VOCAB[:1] + [(_described, False),
+                                              (("describe-categories", "--apply", "{run}/describe.md"), ("entity",)),
+                                              (("describe-categories", "--apply", "{run}/describe.md"), NOCHANGE)],
+    "review-concepts-vocab": [(("review-concepts", "--vocab", "--apply", "{run}/vocab.md"),
+                               ("entity", "entity", "assert")),
+                              (("review-concepts", "--vocab", "--apply", "{run}/vocab.md"), NOCHANGE)],
+    "library-survey": DELIVERABLE + [
+        (("notes-type", "archive-notes", "--title", "Archive", "--kind", "notes", "--origin", "archive"), False),
+        (("assert", note_node_id("arch-note"), "deliverable_type", "archive-notes"), False),
+        (("library-survey", "{run}/survey.tsv", "--apply"), ("entity", "entity", "derived-from")),
+        (("library-survey", "{run}/survey.tsv", "--apply"), NOCHANGE)],
+    "oracle": [(_repo, False),
+               (("oracle", "--repos-dir", "{run}/repos"), ("procedure", "assert")),
+               (("oracle", "--repos-dir", "{run}/repos"), NOCHANGE), (_version("0.0.3"), False),
+               (("oracle", "--repos-dir", "{run}/repos"), ("assert",)), (_version("0.0.1"), False),
+               (("oracle", "--repos-dir", "{run}/repos"), NOCHANGE)],
+    "relocate": [(("new-note", "--path", "{run}/site/posts/arch.md", "--content", ARCH), False),
+                 (("notes-type", "archive-notes", "--title", "Archive", "--kind", "notes", "--origin", "archive"), False),
+                 (("assert", note_node_id("arch-note"), "deliverable_type", "archive-notes"), False),
+                 (("assert", note_node_id("arch-note"), P.CURRENCY, "removed"), False),
+                 (_commit_site, False), (_copy, False),
+                 (("relocate", "land", "arch-note", "--into", "{run}/clone", "--website-root", "{run}/site"),
+                  ("retire-source", "relocate")),
+                 (("relocate", "land", "arch-note", "--into", "{run}/clone", "--website-root", "{run}/site"), NOCHANGE)],
+    "confirm-proposal": [(_code(OLD_F), False), (("new-note", "--slug", "tutorial", "--content", TUTORIAL), False),
+                         (("link", section_node_id(note_node_id("tutorial"), "use"), "REFERENCES", SYM_ID), False),
+                         (("assert", note_node_id("tutorial"), "publish_state", "published"), False),
+                         (_code(NEW_F, edited=True), False), (("propose",), False), (_proposal, False),
+                         (("confirm-proposal", "{proposal}"), ("section", "assert")),
+                         (("confirm-proposal", "{proposal}"), NOCHANGE)],
     "transfer-path": [(("assert", ITEM_ID, "site_path", "/a/"), False),
                       (("transfer-path", ITEM_ID[:8], OTHER_ID[:8]), True),
                       (("transfer-path", OTHER_ID, ITEM_ID), True),
@@ -457,14 +612,14 @@ def _cli(
     db: str,       # The graph db
     journal: str,  # Its writes journal
     *args: str,    # The verb and its arguments
-    crash: bool = False,  # Arm the crash between append and apply
+    crash: int = 0,  # Arm the crash between append and apply at the invocation's crash-th write (0 = none)
 ) -> subprocess.CompletedProcess:
     # Every call sees the run's harness: the judge's key and the run's bin/ (a fake gh) ahead of PATH,
     # and on the code lane (a run with repos/) its source journal
     run = Path(db).parent
     sourced = ("--source-journal-path", str(run / "source.jsonl")) if (run / "repos").exists() else ()
     env = {**os.environ, "TYPESAFE_API_KEY": "test-key", "PATH": f"{run / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}",
-           **({JOURNAL_FAULT_ENV: "after_append"} if crash else {})}
+           **({JOURNAL_FAULT_ENV: f"after_append@{crash}"} if crash else {})}
     proc = subprocess.Popen([sys.executable, "-m", "cjm_context_graph_projection.cli",
                              "--graph-db-path", db, "--journal-path", journal, *sourced, *args],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
@@ -513,7 +668,7 @@ def _ops(
 def _run(
     run: Path,       # This run's directory
     scenario: str,
-    crash: bool,     # Crash (then retry) every marked step
+    crash: int,      # Crash (then retry) every marked step at this op of it (0 = uncrashed; a shorter step at its last)
 ) -> tuple:  # (the journal as (verb, args) with the run's directory and clock abstracted, each step's op count)
     (run / "memory").mkdir(parents=True)
     (run / "no-memory").mkdir()
@@ -522,7 +677,8 @@ def _run(
     if scenario in NOTES or any(a.startswith("tx:") for args, _ in steps if not callable(args) for a in args):
         _sibling(run, notes=scenario in NOTES)
     if scenario in CONFIG:
-        (run / "graph.config.json").write_text(json.dumps(CONFIG[scenario]).replace("{run}", str(run)))
+        (run / "graph.config.json").write_text(json.dumps(CONFIG[scenario]).replace("{raw}", _raw_url())
+                                               .replace("{run}", str(run)))
     for rel, text in FILES.get(scenario, {}).items():
         (run / rel).parent.mkdir(parents=True, exist_ok=True)
         (run / rel).write_text(text)
@@ -531,7 +687,9 @@ def _run(
         if callable(args):
             args(run, jp)
             continue
-        args = [a.replace("{run}", str(run)).replace("{judge}", _judge_url()) for a in args]
+        proposal = (run / "proposal.txt").read_text() if (run / "proposal.txt").exists() else ""
+        args = [a.replace("{run}", str(run)).replace("{judge}", _judge_url()).replace("{proposal}", proposal)
+                for a in args]
         before = len(_ops(jp))
         if crash_it == NOCHANGE:
             r = _cli(db, jp, *args)
@@ -539,7 +697,7 @@ def _run(
             assert "no change" in r.stdout, f"{args}: {r.stdout}"
             continue
         if crash and crash_it:
-            r = _cli(db, jp, *args, crash=True)
+            r = _cli(db, jp, *args, crash=min(crash, len(crash_it) if isinstance(crash_it, tuple) else 1))
             assert r.returncode == FAULT_EXIT, f"{args}: no crash ({r.returncode}): {r.stderr or r.stdout}"
         r = _cli(db, jp, *args)
         assert r.returncode == 0, f"{args}: {r.stderr or r.stdout}"
@@ -551,8 +709,9 @@ def _run(
             assert [o["verb"] for o in new] == want, f"{args}: the step journals {want}: {new}"
         counts.append(len(new))
     rebuilt = str(run / "rebuilt.db")
-    r = (_cli(rebuilt, jp, "ingest", "--memory-dir", str(run / "no-memory"), "--no-repo-map", "--no-seed",
-              "--repos-dir", str(run / "repos")) if scenario in SOURCED else _cli(rebuilt, jp, "replay"))
+    r = (_cli(rebuilt, jp, "ingest", "--memory-dir", str(run / "no-memory"),
+              *(() if scenario in REPO_MAP else ("--no-repo-map",)), "--no-seed", "--repos-dir", str(run / "repos"))
+         if scenario in SOURCED else _cli(rebuilt, jp, "replay"))
     assert r.returncode == 0, r.stderr or r.stdout
     r = subprocess.run([sys.executable, "-m", "cjm_context_graph_projection.cli",
                         "--graph-db-path", db, "rebuild-diff", "--against", rebuilt],
@@ -562,15 +721,21 @@ def _run(
     for o in read_journal(jp):
         args = json.loads(json.dumps(o["args"]).replace(str(run), "{run}"))
         for obs in ([args["observation"]] if isinstance(args.get("observation"), dict) else []) + list(
-                args.get("observations") or []):   # an observation's time is its run's own clock
-            obs["observed_at"] = "{clock}"
+                args.get("observations") or []) + ([args] if o["verb"] == "relocate" else []):
+            obs["observed_at"] = "{clock}"   # an observation's time is its run's own clock
         ops.append((o["verb"], args))
     return ops, counts
 
 
-@pytest.mark.parametrize("scenario", sorted(SCENARIOS))
-def test_a_crashed_write_heals_to_the_uncrashed_run(tmp_path, scenario):
-    uncrashed, counts = _run(tmp_path / "a", scenario, crash=False)
-    crashed, crashed_counts = _run(tmp_path / "b", scenario, crash=True)
+def _variants(
+    scenario: str,
+) -> range:  # The op boundaries its chains are crashed at: 1 .. its longest marked step
+    return range(1, max([len(m) for _, m in SCENARIOS[scenario] if isinstance(m, tuple)] + [1]) + 1)
+
+
+@pytest.mark.parametrize("scenario,k", [(s, k) for s in sorted(SCENARIOS) for k in _variants(s)])
+def test_a_crashed_write_heals_to_the_uncrashed_run(tmp_path, scenario, k):
+    uncrashed, counts = _run(tmp_path / "a", scenario, crash=0)
+    crashed, crashed_counts = _run(tmp_path / "b", scenario, crash=k)
     assert all(counts), f"a step journaled nothing: {counts}"
     assert crashed_counts == counts and crashed == uncrashed

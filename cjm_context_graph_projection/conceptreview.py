@@ -204,9 +204,11 @@ async def apply_vocab(
     *,
     dry_run: bool = False,
     actor: str = "agent:session",
+    writes: Any = None,   # Not dry_run: the invocation's writes-journal unit of work the batch lands through
 ) -> Dict[str, Any]:  # {counts, errors, plan, landed, written}
     """Land the checked blocks as one entity batch (subjects first, so a concept may name a subject
-    the same file confirms); any error refuses the whole file."""
+    the same file confirms); any error refuses the whole file. Each record is planned, then
+    appended and applied through the invocation's writes (ruling 547f4123 (1))."""
     from .coverage import mint_entities
     parsed = parse_vocab(text)
     errors = list(parsed["errors"])
@@ -229,7 +231,7 @@ async def apply_vocab(
     if errors:
         return {"counts": counts, "errors": errors, "plan": [], "landed": [], "written": False,
                 "error": f"{len(errors)} error(s) -- nothing written"}
-    res = await mint_entities(gx, records, apply=not dry_run, actor=actor)
+    res = await mint_entities(gx, records, writes=None if dry_run else writes, actor=actor)
     if res["errors"]:
         return {"counts": counts, "errors": res["errors"], "plan": res["plan"], "landed": [], "written": False,
                 "error": f"{len(res['errors'])} record(s) refused -- nothing written"}
@@ -480,12 +482,14 @@ async def review_concepts(
     series: Optional[List[str]] = None,
     actor: str = "agent:session",
     write: bool = True,   # False = PLAN only (ruling 24fa72c2): a relation review's op under "op" (None = changes nothing), nothing written
+    writes: Any = None,   # A vocabulary review's batch lands through the invocation's writes (ruling 547f4123); None = checked only
 ) -> Dict[str, Any]:
     """The review verb: either review's document, or one landed (or refused) review."""
     if vocab:
         if apply_text is None:
             return {"vocab": True, **(await vocab_document(gx, drafts or [])), "written": False}
-        return {"vocab": True, **(await apply_vocab(gx, apply_text, dry_run=dry_run, actor=actor))}
+        return {"vocab": True, **(await apply_vocab(gx, apply_text, dry_run=dry_run, actor=actor,
+                                                    writes=writes))}
     if apply_text is None:
         rs = await relation_state(gx, only=only, series=series)
         counts = {s: sum(1 for r in rs["rows"] if r["section"] == s) for s in SECTIONS}
