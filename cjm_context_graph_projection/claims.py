@@ -76,9 +76,14 @@ async def record_support(
     note: str = "",          # Why this deliverable backs the claim, in one line
     retract: bool = False,   # Remove this (deliverable, claim) support
     actor: str = "agent:session",
+    write: bool = True,      # False = PLAN only (design detail 65f4a6c9 (1)): every refusal, then the op under "op" (None = changes nothing), nothing written
 ) -> Dict[str, Any]:  # {edge_id, deliverable_id, claim_id, written} | {error, written: False}
     """Write one SUPPORTS edge with its kind (journaled `supports`), or retract it. A pair has
-    one kind, so a restatement replaces it (the journal keeps the history)."""
+    one kind, so a restatement replaces it (the journal keeps the history).
+
+    THE PLAN (write=False): the deliverable resolved to its id, and the op -- or None when the
+    support already stands with this kind and note (ruling 17daa86b), or a retraction finds nothing
+    standing."""
     from .coverage import resolve_deliverable
     if not retract and kind not in P.SUPPORT_KINDS:
         return {"error": f"kind must be one of {', '.join(P.SUPPORT_KINDS)} (got {kind!r})", "written": False}
@@ -91,14 +96,25 @@ async def record_support(
         return {"error": f"no claim `{claim}` — mint it first (`entity claim {claim} ...`)", "written": False}
     edge = supports_edge(did, cid, kind=kind, note=note)
     standing = [e for e in await load_supports(gx) if str(e["id"]) == edge["id"]]
+    op = {"deliverable": did, "claim": claim, "kind": kind, "note": note, "actor": actor,
+          **({"retract": True} if retract else {})}
+    if retract:
+        out = {"edge_id": edge["id"], "deliverable_id": did, "claim_id": cid, "retracted": bool(standing)}
+        if not standing:   # nothing to retract is no change (unlink's rule): a crashed retract's retry lands here
+            return {**out, "written": False, "noop": True, "op": None}
+        if not write:
+            return {**out, "written": False, "noop": False, "op": op}
+        await graph_task(gx.queue, gx.graph_id, "delete_edges", edge_ids=[edge["id"]])
+        return {**out, "written": True}
+    out = {"edge_id": edge["id"], "deliverable_id": did, "claim_id": cid, "claim": claim, "kind": kind}
+    if standing and F.edge_holds(standing[0], edge):
+        return {**out, "replaced": False, "unchanged": True, "written": False, "noop": True, "op": None}
+    if not write:
+        return {**out, "replaced": bool(standing), "written": False, "noop": False, "op": op}
     if standing:
         await graph_task(gx.queue, gx.graph_id, "delete_edges", edge_ids=[edge["id"]])
-    if retract:
-        return {"edge_id": edge["id"], "deliverable_id": did, "claim_id": cid, "retracted": bool(standing),
-                "written": bool(standing), **({} if standing else {"error": "no such support to retract"})}
     await extend_graph(gx.queue, gx.graph_id, [], [edge])
-    return {"edge_id": edge["id"], "deliverable_id": did, "claim_id": cid, "claim": claim, "kind": kind,
-            "replaced": bool(standing), "written": True}
+    return {**out, "replaced": bool(standing), "written": True}
 
 
 def project_claims(

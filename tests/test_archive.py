@@ -111,9 +111,12 @@ def test_retire_restore_and_transfer_survive_a_rebuild(tmp_path):
     assert retired.returncode == 0, retired.stdout + retired.stderr
     moved = _run(*base, "transfer-path", page[:8], lens[:8])
     assert moved.returncode == 0, moved.stdout + moved.stderr
-    # The source holds no active path now, and a target that holds one is refused
+    # The transfer standing, a repeat is no change (ruling 17daa86b); a source holding no active path
+    # refuses any other transfer, and a target that holds one is refused
     again = _run(*base, "transfer-path", page, lens)
-    assert again.returncode == 1 and "holds 0 active" in again.stdout
+    assert again.returncode == 0 and "already transferred" in again.stdout, again.stdout
+    pathless = _run(*base, "transfer-path", page, note_node_id("a"))
+    assert pathless.returncode == 1 and "holds 0 active" in pathless.stdout
     taken = _run(*base, "transfer-path", lens, note_node_id("a"))
     assert taken.returncode == 1 and "already holds /posts/a/" in taken.stdout
     # A page MERGED into another (design ce17606b (6)): the target keeps its active path and the

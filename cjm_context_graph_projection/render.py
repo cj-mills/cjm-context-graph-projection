@@ -372,9 +372,12 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
     if kind == "verified-on":
         if obj.get("error"):
             return f"⚠ {obj['error']}"
-        if obj.get("retracted"):
-            return f"**retracted** verification `{obj['edge_id']}`"
-        return (f"**{'re-verified' if obj.get('replaced') else 'verified'}** `{str(obj['deliverable_id'])[:8]}` "
+        if "retracted" in obj:
+            return (f"**retracted** verification `{obj['edge_id']}`" if obj["retracted"]
+                    else "no such verification to retract (nothing journaled)")
+        head = ("unchanged (nothing journaled)" if obj.get("noop")
+                else "re-verified" if obj.get("replaced") else "verified")
+        return (f"**{head}** `{str(obj['deliverable_id'])[:8]}` "
                 f"on `{obj.get('hardware')}` · os {obj.get('os') or 'unknown'} · {obj.get('date')} · "
                 f"basis {obj.get('basis')} `{obj['edge_id']}`")
     if kind == "relocation-plan":   # design 3d5ee659 (6): the worklist with each page's copy
@@ -425,6 +428,9 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
     if kind == "transfer-path":
         if obj.get("error"):
             return f"⚠ {obj['error']}"
+        if obj.get("noop"):
+            return (f"**already transferred** {obj['value']} from `{str(obj['from_id'])[:8]}` to "
+                    f"`{str(obj['to_id'])[:8]}` (nothing journaled)")
         if obj.get("merged"):
             return (f"**merged** {obj['value']} from `{str(obj['from_id'])[:8]}` into `{str(obj['to_id'])[:8]}`'s "
                     f"page (its active path `{str(obj['assertion_id'])[:8]}` supersedes "
@@ -434,9 +440,11 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
     if kind == "work-member":
         if obj.get("error"):
             return f"⚠ {obj['error']}"
-        if obj.get("retracted"):
-            return f"**retracted** work membership `{obj['edge_id']}`"
-        verb = "unchanged" if obj.get("unchanged") else "moved" if obj.get("replaced") else "placed"
+        if "retracted" in obj:
+            return (f"**retracted** work membership `{obj['edge_id']}`" if obj["retracted"]
+                    else "no work membership to retract (nothing journaled)")
+        verb = ("unchanged (nothing journaled)" if obj.get("unchanged")
+                else "moved" if obj.get("replaced") else "placed")
         return f"**{verb}** `{str(obj['reference_id'])[:8]}` PART_OF `{obj.get('target')}` `{obj['edge_id']}`"
     if kind == "library":
         if obj.get("error"):
@@ -466,24 +474,32 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
     if kind == "derived-from":
         if obj.get("error"):
             return f"⚠ {obj['error']}"
-        if obj.get("retracted"):
-            return f"**retracted** provenance `{obj['edge_id']}`"
-        verb = "unchanged" if obj.get("unchanged") else "restated" if obj.get("replaced") else "derived"
+        if "retracted" in obj:
+            return (f"**retracted** provenance `{obj['edge_id']}`" if obj["retracted"]
+                    else "no provenance edge to retract (nothing journaled)")
+        verb = ("unchanged (nothing journaled)" if obj.get("unchanged")
+                else "restated" if obj.get("replaced") else "derived")
         return f"**{verb}** `{str(obj['deliverable_id'])[:8]}` → `{obj.get('source')}` `{obj['edge_id']}`"
     if kind == "supports":
         if obj.get("error"):
             return f"⚠ {obj['error']}"
-        if obj.get("retracted"):
-            return f"**retracted** support `{obj['edge_id']}`"
-        return (f"**{'restated' if obj.get('replaced') else 'supports'}** `{str(obj['deliverable_id'])[:8]}` "
+        if "retracted" in obj:
+            return (f"**retracted** support `{obj['edge_id']}`" if obj["retracted"]
+                    else "no such support to retract (nothing journaled)")
+        head = ("unchanged (nothing journaled)" if obj.get("noop")
+                else "restated" if obj.get("replaced") else "supports")
+        return (f"**{head}** `{str(obj['deliverable_id'])[:8]}` "
                 f"→ claim `{obj.get('claim')}` as _{obj.get('kind')}_ `{obj['edge_id']}`")
     if kind == "relate":
         if obj.get("error"):
             return f"⚠ {obj['error']}"
-        if obj.get("retracted"):
-            return f"**retracted** {obj['relation']} `{obj['edge_id']}`"
+        if "retracted" in obj:
+            return (f"**retracted** {obj['relation']} `{obj['edge_id']}`" if obj["retracted"]
+                    else f"no such {obj['relation']} edge to retract (nothing journaled)")
         extra = " · ".join(f"{k} {obj[k]}" for k in ("strength", "note") if obj.get(k))
-        return (f"**{'restated' if obj.get('replaced') else 'related'}** `{str(obj['source_id'])[:8]}` "
+        head = ("unchanged (nothing journaled)" if obj.get("noop")
+                else "restated" if obj.get("replaced") else "related")
+        return (f"**{head}** `{str(obj['source_id'])[:8]}` "
                 f"{obj['relation']} `{str(obj['target_id'])[:8]}`" + (f" · {extra}" if extra else "")
                 + f" `{obj['edge_id']}`")
     if kind == "paths":

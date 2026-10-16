@@ -175,7 +175,8 @@ def test_works_units_provenance_and_the_output_class(tmp_path):
     assert derived == [(note_node_id("arch"), entity_node_id("unit", "fastai-book/chapter-1"))]
     assert "not an archive deliverable" in born["error"] and "rollup" in born["error"]
     assert "no work `nope`" in nowork["error"]
-    assert gone["retracted"] and "no provenance edge" in twice["error"]
+    # a second retraction finds nothing standing: no change, never a refusal (unlink's rule)
+    assert gone["retracted"] and twice["noop"] and not twice["retracted"] and not twice["written"]
 
 
 @pytestmark_graph

@@ -158,13 +158,18 @@ async def mint_deliverable_type(
     kind: Optional[str] = None,                 # The navigation kind (P.DELIVERABLE_KINDS; design amendment c64e07e7)
     origin: Optional[str] = None,               # archive | born (P.DELIVERABLE_ORIGINS)
     output_class: Optional[str] = None,         # The Library's output class: an output_class Entity's key (design leg 4a4ef27e (3))
+    write: bool = True,                         # False = PLAN only (design detail 65f4a6c9 (1)): every refusal, then the op under "op" (None = changes nothing), nothing written
 ) -> Dict[str, Any]:  # {type_id, key, created|updated, args, written} | {error, written: False}
     """UPSERT a DeliverableType by slug (the display-rule pattern: last journaled op wins).
     A field left off keeps the type's current value, so declaring one field (an output class)
     never resets the profile; a type not yet minted falls back to the code-carried defaults of
     the two built-in profiles: `pure-notes` (a7262fe7) and `work-page` (ebb77107). A kind or
     origin outside its vocabulary, or an output class naming no output_class Entity, refuses
-    the whole write."""
+    the whole write.
+
+    THE PLAN (write=False): the op is the MERGED WHOLE profile (a field left off reads the db),
+    so replay re-lands it field for field -- or None when the type already holds every property
+    (factlayer.holds, ruling 17daa86b: update_node restamps, so an unchanged upsert is a write)."""
     from cjm_dev_graph_schema.identity import entity_node_id
     if kind and kind not in P.DELIVERABLE_KINDS:
         return {"error": f"kind `{kind}` is not one of {', '.join(P.DELIVERABLE_KINDS)}", "written": False}
@@ -198,18 +203,23 @@ async def mint_deliverable_type(
         actor=actor, kind=kind or base.kind, origin=origin or base.origin,
         output_class=output_class or base.output_class)
     wire = node.to_graph_node()
-    if existing is None:
-        await extend_graph(gx.queue, gx.graph_id, [wire], [])
-        state = "created"
-    else:
-        await graph_task(gx.queue, gx.graph_id, "update_node", node_id=node.id, properties=wire["properties"])
-        state = "updated"
     args = {"key": key, "title": node.title, "description": node.description,
             "information_policy": node.information_policy, "presentation_policy": node.presentation_policy,
             "production_procedure": node.production_procedure, "actor": actor}
     for f in ("kind", "origin", "output_class"):   # only once declared, so every earlier op keeps its shape
         if getattr(node, f):
             args[f] = getattr(node, f)
+    if not write:
+        noop = F.holds(existing, wire["properties"])
+        state = "unchanged (nothing journaled)" if noop else "updated" if existing is not None else "created"
+        return {"type_id": node.id, "key": key, "state": state, "args": args, "written": False,
+                "noop": noop, "op": None if noop else args}
+    if existing is None:
+        await extend_graph(gx.queue, gx.graph_id, [wire], [])
+        state = "created"
+    else:
+        await graph_task(gx.queue, gx.graph_id, "update_node", node_id=node.id, properties=wire["properties"])
+        state = "updated"
     return {"type_id": node.id, "key": key, "state": state, "args": args, "written": True}
 
 

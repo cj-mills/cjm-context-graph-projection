@@ -573,9 +573,14 @@ async def record_verification(
     note: str = "",                            # What ran there
     retract: bool = False,                     # Remove this (deliverable, device, os) verification
     actor: str = "agent:session",
+    write: bool = True,                        # False = PLAN only (design detail 65f4a6c9 (1)): every refusal, then the op under "op" (None = changes nothing), nothing written
 ) -> Dict[str, Any]:  # {edge_id, deliverable_id, hardware_id, written} | {error, written: False}
     """Write one VERIFIED_ON edge with its evidence (journaled `verified-on`), or retract it.
-    A re-verification under the same OS replaces the evidence (the journal keeps the history)."""
+    A re-verification under the same OS replaces the evidence (the journal keeps the history).
+
+    THE PLAN (write=False): the deliverable resolved to its id, and the op -- or None when the
+    verification already stands with this evidence (ruling 17daa86b), or a retraction finds nothing
+    standing."""
     if basis not in P.VERIFICATION_BASES:
         return {"error": f"basis must be one of {', '.join(P.VERIFICATION_BASES)} (got {basis!r})",
                 "written": False}
@@ -590,11 +595,23 @@ async def record_verification(
                 "written": False}
     edge = verified_on_edge(did, hid, os=os, date=date, basis=basis, versions=versions, note=note)
     standing = [e for e in await load_verifications(gx) if str(e["id"]) == edge["id"]]
+    op = {"deliverable": did, "hardware": hardware, "os": os, "date": date, "basis": basis,
+          "versions": dict(versions or {}), "note": note, "actor": actor, **({"retract": True} if retract else {})}
+    if retract:
+        out = {"edge_id": edge["id"], "deliverable_id": did, "hardware_id": hid, "retracted": bool(standing)}
+        if not standing:   # nothing to retract is no change (unlink's rule): a crashed retract's retry lands here
+            return {**out, "written": False, "noop": True, "op": None}
+        if not write:
+            return {**out, "written": False, "noop": False, "op": op}
+        await graph_task(gx.queue, gx.graph_id, "delete_edges", edge_ids=[edge["id"]])
+        return {**out, "written": True}
+    out = {"edge_id": edge["id"], "deliverable_id": did, "hardware_id": hid, "hardware": hardware,
+           "os": os, "date": date, "basis": basis}
+    if standing and F.edge_holds(standing[0], edge):
+        return {**out, "replaced": False, "unchanged": True, "written": False, "noop": True, "op": None}
+    if not write:
+        return {**out, "replaced": bool(standing), "written": False, "noop": False, "op": op}
     if standing:
         await graph_task(gx.queue, gx.graph_id, "delete_edges", edge_ids=[edge["id"]])
-    if retract:
-        return {"edge_id": edge["id"], "deliverable_id": did, "hardware_id": hid, "retracted": bool(standing),
-                "written": bool(standing), **({} if standing else {"error": "no such verification to retract"})}
     await extend_graph(gx.queue, gx.graph_id, [], [edge])
-    return {"edge_id": edge["id"], "deliverable_id": did, "hardware_id": hid, "hardware": hardware,
-            "os": os, "date": date, "basis": basis, "replaced": bool(standing), "written": True}
+    return {**out, "replaced": bool(standing), "written": True}

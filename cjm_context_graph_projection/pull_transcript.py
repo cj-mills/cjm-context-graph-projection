@@ -162,18 +162,29 @@ async def edit_message(
     *,
     properties: Optional[Dict[str, Any]] = None,  # Extra property updates (e.g. role/source — the 47b83adb retro-sweep)
     actor: str = "user:scratchpad",
+    write: bool = True,  # False = PLAN only (design detail 65f4a6c9 (1)): the refusal, then the op under "op" (None = changes nothing), nothing written
 ) -> Dict[str, Any]:  # The write result
     """In-place body edit of a Message — the journaled edit-op half of the
     correction flow (DEC 91c47b4a pts 3-4: no SUPERSEDES ceremony for drafts;
     the journal op is the durable record, the node converges by last-op-wins).
     Replay tolerates a missing node (the mint op precedes it in append order).
     `properties` widens the same op to facet corrections (finding 47b83adb):
-    extra keys ride the update alongside the body, last-op-wins identically."""
+    extra keys ride the update alongside the body, last-op-wins identically.
+
+    THE PLAN (write=False): the op -- or None when the Message already carries this body and
+    every property (ruling 17daa86b: update_node restamps, so an unchanged edit is a write)."""
     node_id = MessageNode(source_uuid=source_uuid, role="", text="").id
     existing = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=node_id)
     if existing is None:
         return {"error": f"no Message node for source uuid {source_uuid}",
                 "written": False}
+    if not write:
+        from .factlayer import holds
+        noop = holds(existing, {"text": text, **(properties or {})})
+        op = {"source_uuid": source_uuid, "text": text, "actor": actor,
+              **({"properties": dict(properties)} if properties else {})}
+        return {"message_id": node_id, "source_uuid": source_uuid, "written": False, "noop": noop,
+                "op": None if noop else op}
     await graph_task(gx.queue, gx.graph_id, "update_node", node_id=node_id,
                      properties={"text": text, **(properties or {})})
     return {"message_id": node_id, "source_uuid": source_uuid, "written": True}

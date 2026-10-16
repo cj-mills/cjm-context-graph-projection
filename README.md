@@ -466,6 +466,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `active_assertions` _function_ — The active assertions in a slot under append-only supersession.
 - `alias_index` _function_ — Build the entity alias index + an id->entity lookup (rename-stable subjects).
 - `count_label` _function_ — Count nodes of a label (optionally predicate-filtered) — `NodeQuery(count=True)`.
+- `edge_holds` _function_ — Whether re-landing an edge would change nothing -- a restatement verb's PLAN no-change test
 - `group_by_slot` _function_ — Group assertion nodes by their `slot_id` property.
 - `holds` _function_ — Whether an upsert would change nothing -- the PLAN's no-change test (ruling 17daa86b).
 - `label` _function_ — A node's label / kind (typed GraphNode or wire dict) — the sibling of `nid`/`props`.

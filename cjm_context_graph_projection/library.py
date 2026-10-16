@@ -50,10 +50,14 @@ async def record_provenance(
     *,
     retract: bool = False,   # Remove the deliverable's provenance edge
     actor: str = "agent:session",
+    write: bool = True,      # False = PLAN only (design detail 65f4a6c9 (1)): every refusal, then the op under "op" (None = changes nothing), nothing written
 ) -> Dict[str, Any]:  # {edge_id, deliverable_id, source_id, source, replaced, written} | {error, written: False}
     """Write an ARCHIVE deliverable's one DERIVED_FROM edge to its work or unit (journaled
     `derived-from`), or retract it. One per deliverable, so a restatement re-lands it on its
-    new target (the journal keeps the history)."""
+    new target (the journal keeps the history).
+
+    THE PLAN (write=False): the deliverable resolved to its id, and the op -- or None when the edge
+    already stands on this source (ruling 17daa86b), or a retraction finds nothing standing."""
     from .purenotes import note_types
     did = await resolve_deliverable(gx, deliverable)
     if did is None:
@@ -64,11 +68,15 @@ async def record_provenance(
     raw = getattr(res, "edges", None) or getattr(res, "rows", None) or []
     standing = [e for e in (r.to_dict() if hasattr(r, "to_dict") else dict(r) for r in raw)
                 if str(e["id"]) == edge["id"]]
+    op = {"deliverable": did, "source": source, "retract": bool(retract), "actor": actor}
     if retract:
-        if standing:
-            await graph_task(gx.queue, gx.graph_id, "delete_edges", edge_ids=[edge["id"]])
-            return {"edge_id": edge["id"], "deliverable_id": did, "retracted": True, "written": True}
-        return {"error": "no provenance edge to retract", "written": False}
+        out = {"edge_id": edge["id"], "deliverable_id": did, "retracted": bool(standing)}
+        if not standing:   # nothing to retract is no change (unlink's rule): a crashed retract's retry lands here
+            return {**out, "written": False, "noop": True, "op": None}
+        if not write:
+            return {**out, "written": False, "noop": False, "op": op}
+        await graph_task(gx.queue, gx.graph_id, "delete_edges", edge_ids=[edge["id"]])
+        return {**out, "written": True}
     origin = ((await note_types(gx)).get(did) or {}).get("origin")
     if origin != P.ORIGIN_ARCHIVE:
         return {"error": f"`{deliverable}` is not an archive deliverable (origin {origin or 'undeclared'}) -- "
@@ -78,14 +86,15 @@ async def record_provenance(
     if node is None or F.prop(node, "entity_kind") != kind:
         return {"error": f"no {kind} `{source}` -- mint it first (`entity {kind} {source} ...`)", "written": False}
     edge = work_provenance_edge(did, sid)
+    out = {"edge_id": edge["id"], "deliverable_id": did, "source_id": sid, "source": source}
+    if standing and F.edge_holds(standing[0], edge):
+        return {**out, "replaced": False, "unchanged": True, "written": False, "noop": True, "op": None}
+    if not write:
+        return {**out, "replaced": bool(standing), "written": False, "noop": False, "op": op}
     if standing:
-        if str(standing[0].get("target_id")) == sid:
-            return {"edge_id": edge["id"], "deliverable_id": did, "source_id": sid, "source": source,
-                    "replaced": False, "unchanged": True, "written": False}
         await graph_task(gx.queue, gx.graph_id, "delete_edges", edge_ids=[edge["id"]])
     await extend_graph(gx.queue, gx.graph_id, [], [edge])
-    return {"edge_id": edge["id"], "deliverable_id": did, "source_id": sid, "source": source,
-            "replaced": bool(standing), "written": True}
+    return {**out, "replaced": bool(standing), "written": True}
 
 
 async def record_work_member(
@@ -95,10 +104,15 @@ async def record_work_member(
     *,
     retract: bool = False,   # Remove the Reference's place in its work
     actor: str = "agent:session",
+    write: bool = True,      # False = PLAN only (design detail 65f4a6c9 (1)): every refusal, then the op under "op" (None = changes nothing), nothing written
 ) -> Dict[str, Any]:  # {edge_id, reference_id, target_id, target, replaced, written} | {error, written: False}
     """Place a metabolized source in its work (journaled `work-member`): a Source Reference
     PART_OF its unit, or its work when the work has no units; a Collection Reference PART_OF
-    its work, never a unit. One place per Reference, so a restatement re-lands it."""
+    its work, never a unit. One place per Reference, so a restatement re-lands it.
+
+    THE PLAN (write=False): the op -- or None when the Reference already stands in this place
+    (ruling 17daa86b), or a retraction finds nothing standing. The Reference is named by its full id
+    (an exact read, never a prefix)."""
     from cjm_dev_graph_schema.nodes import work_member_edge
     ref = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=reference)
     label = F.prop(ref, "foreign_label") if ref is not None else None
@@ -110,11 +124,15 @@ async def record_work_member(
     raw = getattr(res, "edges", None) or getattr(res, "rows", None) or []
     standing = [e for e in (r.to_dict() if hasattr(r, "to_dict") else dict(r) for r in raw)
                 if str(e["id"]) == edge["id"]]
+    op = {"reference": reference, "target": target, "retract": bool(retract), "actor": actor}
     if retract:
-        if standing:
-            await graph_task(gx.queue, gx.graph_id, "delete_edges", edge_ids=[edge["id"]])
-            return {"edge_id": edge["id"], "reference_id": reference, "retracted": True, "written": True}
-        return {"error": "no work membership to retract", "written": False}
+        out = {"edge_id": edge["id"], "reference_id": reference, "retracted": bool(standing)}
+        if not standing:   # nothing to retract is no change (unlink's rule): a crashed retract's retry lands here
+            return {**out, "written": False, "noop": True, "op": None}
+        if not write:
+            return {**out, "written": False, "noop": False, "op": op}
+        await graph_task(gx.queue, gx.graph_id, "delete_edges", edge_ids=[edge["id"]])
+        return {**out, "written": True}
     kind, tid = source_entity_id(target)
     if label == "Collection" and kind != P.ENTITY_WORK:
         return {"error": "a Collection is PART_OF its work, never a unit", "written": False}
@@ -122,14 +140,15 @@ async def record_work_member(
     if node is None or F.prop(node, "entity_kind") != kind:
         return {"error": f"no {kind} `{target}` -- mint it first (`entity {kind} {target} ...`)", "written": False}
     edge = work_member_edge(reference, tid)
+    out = {"edge_id": edge["id"], "reference_id": reference, "target_id": tid, "target": target}
+    if standing and F.edge_holds(standing[0], edge):
+        return {**out, "replaced": False, "unchanged": True, "written": False, "noop": True, "op": None}
+    if not write:
+        return {**out, "replaced": bool(standing), "written": False, "noop": False, "op": op}
     if standing:
-        if str(standing[0].get("target_id")) == tid:
-            return {"edge_id": edge["id"], "reference_id": reference, "target_id": tid, "target": target,
-                    "replaced": False, "unchanged": True, "written": False}
         await graph_task(gx.queue, gx.graph_id, "delete_edges", edge_ids=[edge["id"]])
     await extend_graph(gx.queue, gx.graph_id, [], [edge])
-    return {"edge_id": edge["id"], "reference_id": reference, "target_id": tid, "target": target,
-            "replaced": bool(standing), "written": True}
+    return {**out, "replaced": bool(standing), "written": True}
 
 
 def read_survey(

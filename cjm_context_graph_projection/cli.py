@@ -1251,14 +1251,14 @@ async def _dispatch(args) -> int:
         elif args.command == "derived-from":
             # An archive deliverable's provenance (design leg 4a4ef27e (2)): the op names the
             # resolved deliverable id, so replay re-lands the same edge.
+            # THE PLAN (design detail 65f4a6c9): the edge already standing on this source
+            # journals nothing (ruling 17daa86b).
             from .library import record_provenance
             res = await record_provenance(gx, args.deliverable, args.source or "", retract=args.retract,
-                                          actor=args.actor)
+                                          actor=args.actor, write=False)
+            if res.get("op"):
+                res = (await writes.write("derived-from", res["op"])).result
             print(render("derived-from", res, args.format))
-            if args.journal_path and res.get("written"):
-                append_write(args.journal_path, "derived-from",
-                             {"deliverable": res["deliverable_id"], "source": args.source or "",
-                              "retract": bool(args.retract), "actor": args.actor})
             return 1 if res.get("error") else 0
         elif args.command == "library-survey":
             # The reviewed archive survey (design 5de7fae9 (5)): planned and checked WHOLE -- any
@@ -1313,12 +1313,10 @@ async def _dispatch(args) -> int:
             # Reference id and the unit / work key, so replay re-lands the same edge.
             from .library import record_work_member
             res = await record_work_member(gx, args.reference, args.target or "", retract=args.retract,
-                                           actor=args.actor)
+                                           actor=args.actor, write=False)
+            if res.get("op"):
+                res = (await writes.write("work-member", res["op"])).result
             print(render("work-member", res, args.format))
-            if args.journal_path and res.get("written"):
-                append_write(args.journal_path, "work-member",
-                             {"reference": args.reference, "target": args.target or "",
-                              "retract": bool(args.retract), "actor": args.actor})
             return 1 if res.get("error") else 0
         elif args.command == "library":
             from .library import library_index
@@ -1348,43 +1346,30 @@ async def _dispatch(args) -> int:
                 versions[k] = v
             res = await record_verification(gx, args.deliverable, args.hardware, os=args.os,
                                             date=args.date, basis=args.basis, versions=versions,
-                                            note=args.note, retract=args.retract, actor=args.actor)
+                                            note=args.note, retract=args.retract, actor=args.actor, write=False)
+            if res.get("op"):
+                res = (await writes.write("verified-on", res["op"])).result
             print(render("verified-on", res, args.format))
-            if args.journal_path and res.get("written"):
-                op = {"deliverable": res["deliverable_id"], "hardware": args.hardware, "os": args.os,
-                      "date": args.date, "basis": args.basis, "versions": versions, "note": args.note,
-                      "actor": args.actor}
-                if args.retract:
-                    op["retract"] = True
-                append_write(args.journal_path, "verified-on", op)
             return 1 if res.get("error") else 0
         elif args.command == "supports":
             # One support of a claim with its kind (amendment 98e99fe5 (2)): the op carries the
             # resolved deliverable id, so replay never depends on slug resolution; --retract compensates.
             from .claims import record_support
             res = await record_support(gx, args.deliverable, args.claim, kind=args.kind, note=args.note,
-                                       retract=args.retract, actor=args.actor)
+                                       retract=args.retract, actor=args.actor, write=False)
+            if res.get("op"):
+                res = (await writes.write("supports", res["op"])).result
             print(render("supports", res, args.format))
-            if args.journal_path and res.get("written"):
-                op = {"deliverable": res["deliverable_id"], "claim": args.claim, "kind": args.kind,
-                      "note": args.note, "actor": args.actor}
-                if args.retract:
-                    op["retract"] = True
-                append_write(args.journal_path, "supports", op)
             return 1 if res.get("error") else 0
         elif args.command == "relate":
             # One path-model relation (design ae698640 (5)): the op carries the resolved node ids, so
             # replay never depends on slug or key resolution; --retract compensates.
             from .paths import record_relation
             res = await record_relation(gx, args.relation, args.source, args.target, strength=args.strength,
-                                        note=args.note, retract=args.retract, actor=args.actor)
+                                        note=args.note, retract=args.retract, actor=args.actor, write=False)
+            if res.get("op"):
+                res = (await writes.write("relate", res["op"])).result
             print(render("relate", res, args.format))
-            if args.journal_path and res.get("written"):
-                op = {"relation": args.relation, "source": res["source_id"], "target": res["target_id"],
-                      "strength": args.strength, "note": args.note, "actor": args.actor}
-                if args.retract:
-                    op["retract"] = True
-                append_write(args.journal_path, "relate", op)
             return 1 if res.get("error") else 0
         elif args.command == "paths":
             # The path model's derived reads (design ae698640 (6), ad9bef5a (2)): nothing stored
@@ -1616,12 +1601,11 @@ async def _dispatch(args) -> int:
             # A page's active path moves to another holder (e916a4b9 (4)): the op carries the
             # resolved ids, so replay never depends on prefix resolution.
             from .archive import transfer_site_path
-            res = await transfer_site_path(gx, args.source, args.target, actor=args.actor, merge=args.merge)
+            res = await transfer_site_path(gx, args.source, args.target, actor=args.actor, merge=args.merge,
+                                           write=False)
+            if res.get("op"):
+                res = (await writes.write("transfer-path", res["op"])).result
             print(render("transfer-path", res, args.format))
-            if args.journal_path and res.get("written"):
-                append_write(args.journal_path, "transfer-path",
-                             {"from": res["from_id"], "to": res["to_id"], "actor": args.actor,
-                              **({"merge": True} if args.merge else {})})
             return 1 if res.get("error") else 0
         elif args.command == "category-paths":
             # Every category's URL (design a62f2499 (1)): a live facet entry without one takes
@@ -1710,22 +1694,18 @@ async def _dispatch(args) -> int:
             slugs = list(args.slugs)
             if args.from_file:
                 slugs += [s.strip() for s in Path(args.from_file).read_text().splitlines() if s.strip()]
-            res = await set_series_members(gx, args.key, slugs, actor=args.actor)
+            res = await set_series_members(gx, args.key, slugs, actor=args.actor, write=False)
+            if res.get("op"):
+                res = (await writes.write("series-members", res["op"])).result
             print(render("series-members", res, args.format))
-            if args.journal_path and res.get("written"):
-                append_write(args.journal_path, "series-members",
-                             {"key": args.key, "slugs": slugs, "actor": args.actor})
             return 1 if res.get("error") else 0
         elif args.command == "place-in-series":
             # One member spliced: insert / move (--after SLUG | --first) or --remove.
             res = await place_in_series(gx, args.key, args.slug, after=args.after, first=args.first,
-                                        remove=args.remove, actor=args.actor)
+                                        remove=args.remove, actor=args.actor, write=False)
+            if res.get("op"):
+                res = (await writes.write("place-in-series", res["op"])).result
             print(render("place-in-series", res, args.format))
-            if args.journal_path and res.get("written"):
-                append_write(args.journal_path, "place-in-series",
-                             {"key": args.key, "slug": args.slug, "after": args.after,
-                              "first": bool(args.first), "remove": bool(args.remove),
-                              "actor": args.actor})
             return 1 if res.get("error") else 0
         elif args.command == "series-order":
             res = await series_order(gx, args.key)
@@ -1865,19 +1845,17 @@ async def _dispatch(args) -> int:
                 k, v = kv.split("=", 1)
                 props[k] = v
             res = await edit_message(gx, args.source_uuid, text,
-                                     properties=props or None, actor=args.actor)
+                                     properties=props or None, actor=args.actor, write=False)
             if res.get("error"):
                 print(f"error: {res['error']}", file=sys.stderr)
                 return 1
+            if res.get("noop"):
+                print(f"**unchanged** Message `{res['message_id'][:8]}` (nothing journaled)")
+                return 0
+            res = (await writes.write("edit-message", res["op"])).result
             print(f"**edited** Message `{res['message_id'][:8]}` (source uuid "
                   f"`{args.source_uuid}`"
                   + (f"; set {', '.join(sorted(props))}" if props else "") + ")")
-            if args.journal_path:
-                op = {"source_uuid": args.source_uuid,
-                      "text": text, "actor": args.actor}
-                if props:
-                    op["properties"] = props
-                append_write(args.journal_path, "edit-message", op)
             return 0
         elif args.command == "export-session":
             # The exporter lens (5ab24c57): read-only projection — no journal op.
@@ -2707,13 +2685,13 @@ async def _notes_lane_command(
             presentation_policy=overrides.get("presentation_policy"),
             production_procedure=overrides.get("production_procedure"), actor=args.actor,
             kind=overrides.get("kind") or args.kind, origin=overrides.get("origin") or args.origin,
-            output_class=overrides.get("output_class") or args.output_class)
+            output_class=overrides.get("output_class") or args.output_class, write=False)
         if res.get("error"):
             print(f"error: {res['error']}", file=sys.stderr)
             return 1
+        if res.get("op"):
+            res = (await writes.write("deliverable-type", res["op"])).result
         print(render("notes-type", res, args.format))
-        if args.journal_path and res.get("written"):
-            append_write(args.journal_path, "deliverable-type", res["args"])
         return 0
     if cmd == "notes-pack":
         key = _sibling_key(args.sibling)

@@ -65,6 +65,21 @@ def holds(
     return all(k in cur and cur[k] == v for k, v in properties.items())
 
 
+def edge_holds(
+    standing: Any,          # The standing edge (typed or wire dict), or None when absent
+    edge: Dict[str, Any],   # The edge wire dict the write would land under the same id
+) -> bool:  # It stands between the same endpoints carrying exactly the same properties
+    """Whether re-landing an edge would change nothing -- a restatement verb's PLAN no-change test
+    (ruling 17daa86b). Those verbs delete the standing edge and land it again, so a restatement
+    with the same data is still a write: caught here, it is neither applied nor journaled."""
+    if standing is None:
+        return False
+    s = standing if isinstance(standing, dict) else standing.to_dict()
+    return (str(s.get("source_id")) == str(edge["source_id"])
+            and str(s.get("target_id")) == str(edge["target_id"])
+            and props(s) == (edge.get("properties") or {}))
+
+
 async def load_label(
     gx: GraphHandle,
     label: str,  # Node label to load

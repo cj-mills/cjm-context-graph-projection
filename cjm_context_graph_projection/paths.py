@@ -289,11 +289,16 @@ async def record_relation(
     note: str = "",         # One line on the pair
     retract: bool = False,  # Remove this (relation, source, target) edge
     actor: str = "agent:session",
+    write: bool = True,     # False = PLAN only (design detail 65f4a6c9 (1)): every refusal, then the op under "op" (None = changes nothing), nothing written
 ) -> Dict[str, Any]:  # {edge_id, relation, source_id, target_id, written} | {error, written: False}
     """Write one path-model relation (journaled `relate`), or retract it. The endpoints' kinds must
     be ones RELATION_ENDPOINTS allows, a target Entity live and unretired; an environment's own
     requirements are its record's. A pair holds one edge per relation, so a restatement replaces
-    it (the journal keeps the history)."""
+    it (the journal keeps the history).
+
+    THE PLAN (write=False): both endpoints resolved to their ids, and the op -- or None when the
+    edge already stands with this strength and note (ruling 17daa86b), or a retraction finds nothing
+    standing."""
     if relation not in P.RELATION_ENDPOINTS:
         return {"error": f"no relation `{relation}` ({', '.join(P.RELATION_ENDPOINTS)})", "written": False}
     sid, tid = await resolve_endpoint(gx, source), await resolve_endpoint(gx, target)
@@ -325,12 +330,23 @@ async def record_relation(
     except ValueError as exc:
         return {"error": str(exc), "written": False}
     standing = [e for e in await _edges(gx, relation, source_id=sid) if str(e["id"]) == edge["id"]]
+    base = {"edge_id": edge["id"], "relation": relation, "source_id": sid, "target_id": tid}
+    op = {"relation": relation, "source": sid, "target": tid, "strength": strength, "note": note,
+          "actor": actor, **({"retract": True} if retract else {})}
+    if retract:
+        if not standing:   # nothing to retract is no change (unlink's rule): a crashed retract's retry lands here
+            return {**base, "retracted": False, "written": False, "noop": True, "op": None}
+        if not write:
+            return {**base, "retracted": True, "written": False, "noop": False, "op": op}
+        await graph_task(gx.queue, gx.graph_id, "delete_edges", edge_ids=[edge["id"]])
+        return {**base, "retracted": True, "written": True}
+    if standing and F.edge_holds(standing[0], edge):
+        return {**base, **edge["properties"], "replaced": False, "unchanged": True, "written": False,
+                "noop": True, "op": None}
+    if not write:
+        return {**base, **edge["properties"], "replaced": bool(standing), "written": False, "noop": False, "op": op}
     if standing:
         await graph_task(gx.queue, gx.graph_id, "delete_edges", edge_ids=[edge["id"]])
-    base = {"edge_id": edge["id"], "relation": relation, "source_id": sid, "target_id": tid}
-    if retract:
-        return {**base, "retracted": bool(standing), "written": bool(standing),
-                **({} if standing else {"error": f"no such {relation} edge to retract"})}
     await extend_graph(gx.queue, gx.graph_id, [], [edge])
     return {**base, **edge["properties"], "replaced": bool(standing), "written": True}
 

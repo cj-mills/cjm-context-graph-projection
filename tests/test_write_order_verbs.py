@@ -6,22 +6,27 @@ Every verb planned -> appended -> applied is held to one proof, driven through t
   (CJM_JOURNAL_FAULT=after_append, exit 86), then that step RETRIED: the retry's writer heals the
   journaled op, and its plan finds the db already there and journals nothing (ruling 17daa86b);
 - each live db equals the replay of its own journal ELEMENT FOR ELEMENT (`rebuild-diff`, ruling
-  f8b9c728), and the two journals hold the same ops in the same order -- one op per step, an
-  A -> B -> A sequence kept whole.
-A verb joins the proof by adding its scenario to SCENARIOS."""
+  f8b9c728), and the two journals hold the same ops in the same order -- a crashed step journals
+  exactly ONE op, every step the same count in both runs, an A -> B -> A sequence kept whole.
+A verb joins the proof by adding its scenario to SCENARIOS; a scenario naming `tx:` gets the
+sibling graph a cross-graph link observes, and one keyed in FILES gets those files in its run."""
 
+import asyncio
 import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import psutil
 import pytest
+from cjm_context_graph_layer.ops import extend_graph
 from cjm_context_graph_primitives.journal import read_journal
 from cjm_context_graph_primitives.writer import FAULT_EXIT, JOURNAL_FAULT_ENV
-from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS
-from cjm_dev_graph_schema.nodes import DecisionNode
+from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
+from cjm_dev_graph_schema.identity import note_node_id
+from cjm_dev_graph_schema.nodes import DecisionNode, ReferenceNode
 
 # Drives the real CLI, which needs the graph-storage worker capability installed.
 pytestmark = pytest.mark.skipif(
@@ -35,9 +40,29 @@ KEY = "2026-01-01_00-00-00"
 NOTE = "---\nname: canon-note\ndescription: d\n---\n\nbody\n"
 LENS = json.dumps({"params": [{"name": "kind", "type": "string", "required": True}],
                    "selection": [{"verb": "list", "args": {"label": "{kind}"}}]})
+ARCH = "---\nname: arch-note\ndescription: d\n---\n\nbody\n"
+SOURCE = "5f0c0a1e-0000-4000-8000-000000000001"   # the sibling graph's one Source
+REF_ID = ReferenceNode(graph="tx", foreign_id=SOURCE, foreign_label="Source", title="").id
+DELIVERABLE = [(("new-note", "--path", "{run}/memory/arch.md", "--content", ARCH), False)]
+WORKS = [(("entity", "work", w, "--name", w, "--form", "book"), False) for w in ("a-book", "b-book")]
+POSTS = [(("new-note", "--path", f"{{run}}/memory/{s}.md", "--content",
+           f"---\nname: {s}\ndescription: d\n---\n\nbody\n"), False) for s in ("p1", "p2", "p3")]
+SERIES = [(("series", "a-series", "--title", "A"), False)]
+# A harness transcript booted just after KEY's mint (the key is LOCAL time, a record's stamp UTC)
+BOOT = (datetime.strptime(KEY, "%Y-%m-%d_%H-%M-%S").astimezone() + timedelta(seconds=5)).astimezone(timezone.utc)
+TRANSCRIPT = "".join(json.dumps(r) + "\n" for r in (
+    {"type": "user", "isSidechain": False, "uuid": "u-boot", "parentUuid": None,
+     "timestamp": BOOT.isoformat().replace("+00:00", "Z"),
+     "message": {"role": "user", "content": "Resume. New session minted in-scratchpad."}},
+    {"type": "assistant", "isSidechain": False, "uuid": "u-reply", "parentUuid": "u-boot",
+     "timestamp": (BOOT + timedelta(seconds=4)).isoformat().replace("+00:00", "Z"),
+     "message": {"role": "assistant", "content": [{"type": "text", "text": "On it."}]}}))
+FILES = {"edit-message": {"transcripts/aaaa1111-2222-3333-4444-555566667777.jsonl": TRANSCRIPT}}
+JOURNALED_AS = {"notes-type": "deliverable-type"}   # a CLI verb whose op journals under another name
 
-# Every scenario runs after the seed; each step writes exactly ONE op, and a True step is the
-# one crashed between its append and its apply in run B ({run} = the run's own directory)
+# Every scenario runs after the seed; a True step writes exactly ONE op and is the one crashed
+# between its append and its apply in run B (a False step may write several: an Entity's category
+# path rides its op) ({run} = the run's own directory)
 SEED = [(("decide", ITEM), False), (("decide", OTHER), False)]
 SCENARIOS = {
     "link-unlink-relink": [(("link", ITEM_ID, "REFERENCES", OTHER_ID), True),
@@ -60,6 +85,46 @@ SCENARIOS = {
     "series": [(("series", "a-series", "--title", "A", "--category", "x", "--category", "y"), True),
                (("series", "a-series", "--title", "A", "--category", "x"), True),
                (("series", "a-series", "--title", "A", "--category", "x", "--category", "y"), True)],
+    "derived-from": DELIVERABLE + [
+        (("notes-type", "archive-notes", "--title", "Archive", "--kind", "notes", "--origin", "archive"), False),
+        (("assert", note_node_id("arch-note"), "deliverable_type", "archive-notes"), False)] + WORKS + [
+        (("derived-from", "arch-note", "a-book"), True), (("derived-from", "arch-note", "b-book"), True),
+        (("derived-from", "arch-note", "a-book"), True), (("derived-from", "arch-note", "--retract"), True)],
+    "work-member": [(("link", ITEM_ID, "REFERENCES", f"tx:{SOURCE}"), False)] + WORKS + [
+        (("work-member", REF_ID, "a-book"), True), (("work-member", REF_ID, "b-book"), True),
+        (("work-member", REF_ID, "a-book"), True), (("work-member", REF_ID, "--retract"), True)],
+    "verified-on": DELIVERABLE + [
+        (("entity", "hardware", "a-gpu", "--name", "A GPU", "--device-class", "gpu"), False)] + [
+        (("verified-on", "arch-note", "a-gpu", "--os", "linux", "--date", d), True)
+        for d in ("2024-01-01", "2024-02-02", "2024-01-01")] + [
+        (("verified-on", "arch-note", "a-gpu", "--os", "linux", "--retract"), True)],
+    "supports": DELIVERABLE + [
+        (("entity", "claim", "a-claim", "--name", "A claim", "--statement", "It works", "--position", "1"), False)] + [
+        (("supports", "arch-note", "a-claim", "--kind", k), True) for k in ("outcome", "method", "outcome")] + [
+        (("supports", "arch-note", "a-claim", "--retract"), True)],
+    "relate": DELIVERABLE + [
+        (("entity", "task", "a-task", "--name", "T", "--position", "1"), False),
+        (("entity", "concept", "a-concept", "--name", "C", "--description", "d", "--not-for", "n",
+          "--area", "task:a-task"), False)] + [
+        (("relate", "ASSUMES", "arch-note", "concept:a-concept", "--strength", s), True)
+        for s in ("required", "recommended", "required")] + [
+        (("relate", "ASSUMES", "arch-note", "concept:a-concept", "--retract"), True)],
+    "series-members": POSTS + SERIES + [
+        (("series-members", "a-series", *order), True)
+        for order in (("p1", "p2", "p3"), ("p3", "p2", "p1"), ("p1", "p2", "p3"))],
+    "place-in-series": POSTS + SERIES + [(("series-members", "a-series", "p1", "p2", "p3"), False),
+                                         (("place-in-series", "a-series", "p3", "--first"), True),
+                                         (("place-in-series", "a-series", "p3", "--after", "p2"), True),
+                                         (("place-in-series", "a-series", "p3", "--first"), True),
+                                         (("place-in-series", "a-series", "p2", "--remove"), True)],
+    "edit-message": [(("pull-transcript", KEY, "--transcript-dir", "{run}/transcripts"), False)] + [
+        (("edit-message", "u-boot", "--text", t), True) for t in ("T1", "T2", "T1")] + [
+        (("edit-message", "u-boot", "--text", "T1", "--set", "flag=1"), True)],
+    "notes-type": [(("notes-type", "a-type", "--title", t, "--kind", "notes"), True) for t in ("A", "B", "A")],
+    "transfer-path": [(("assert", ITEM_ID, "site_path", "/a/"), False),
+                      (("transfer-path", ITEM_ID[:8], OTHER_ID[:8]), True),
+                      (("transfer-path", OTHER_ID, ITEM_ID), True),
+                      (("transfer-path", ITEM_ID, OTHER_ID), True)],
 }
 
 
@@ -92,16 +157,43 @@ def _reap(pid: int) -> None:
                 p.kill()
 
 
+def _sibling(
+    run: Path,  # This run's directory
+) -> None:
+    """The sibling graph a cross-graph link observes -- one Source -- named in the run's config.
+    Replay reads the observation off the op, never the sibling."""
+    async def mint():
+        async with open_graph(str(run / "sibling.db")) as sg:
+            await extend_graph(sg.queue, sg.graph_id,
+                               [{"id": SOURCE, "label": "Source", "properties": {"title": "Chapter 1"}}], [])
+    asyncio.run(mint())
+    (run / "graph.config.json").write_text(json.dumps({"sibling_graphs": {"tx": str(run / "sibling.db")}}))
+
+
+def _ops(
+    jp: str,  # A writes journal
+) -> list:  # Its records (none before the first write)
+    return read_journal(jp) if Path(jp).exists() else []
+
+
 def _run(
     run: Path,       # This run's directory
     scenario: str,
     crash: bool,     # Crash (then retry) every marked step
-) -> list:  # The journal as (verb, args) with the run's directory abstracted
+) -> tuple:  # (the journal as (verb, args) with the run's directory and clock abstracted, each step's op count)
     (run / "memory").mkdir(parents=True)
     (run / "no-memory").mkdir()
     db, jp = str(run / "live.db"), str(run / "writes.jsonl")
-    for args, crash_it in SEED + SCENARIOS[scenario]:
+    steps = SEED + SCENARIOS[scenario]
+    if any(a.startswith("tx:") for args, _ in steps for a in args):
+        _sibling(run)
+    for rel, text in FILES.get(scenario, {}).items():
+        (run / rel).parent.mkdir(parents=True, exist_ok=True)
+        (run / rel).write_text(text)
+    counts = []
+    for args, crash_it in steps:
         args = [a.replace("{run}", str(run)) for a in args]
+        before = len(_ops(jp))
         if crash and crash_it:
             r = _cli(db, jp, *args, crash=True)
             assert r.returncode == FAULT_EXIT, f"{args}: no crash ({r.returncode}): {r.stderr or r.stdout}"
@@ -109,6 +201,11 @@ def _run(
         assert r.returncode == 0, f"{args}: {r.stderr or r.stdout}"
         if crash and crash_it:
             assert "healed: 1 journaled op(s)" in r.stderr, f"{args}: the retry healed nothing"
+        new = _ops(jp)[before:]
+        if crash_it:
+            assert [o["verb"] for o in new] == [JOURNALED_AS.get(args[0], args[0])], \
+                f"{args}: a crashed step journals ONE op: {new}"
+        counts.append(len(new))
     rebuilt = str(run / "rebuilt.db")
     r = _cli(rebuilt, jp, "replay")
     assert r.returncode == 0, r.stderr or r.stdout
@@ -116,13 +213,18 @@ def _run(
                         "--graph-db-path", db, "rebuild-diff", "--against", rebuilt],
                        capture_output=True, text=True)
     assert r.returncode == 0, f"live != its replay:\n{r.stdout}{r.stderr}"
-    return [(o["verb"], json.loads(json.dumps(o["args"]).replace(str(run), "{run}")))
-            for o in read_journal(jp)]
+    ops = []
+    for o in read_journal(jp):
+        args = json.loads(json.dumps(o["args"]).replace(str(run), "{run}"))
+        if isinstance(args.get("observation"), dict):   # an observation's time is its run's own clock
+            args["observation"]["observed_at"] = "{clock}"
+        ops.append((o["verb"], args))
+    return ops, counts
 
 
 @pytest.mark.parametrize("scenario", sorted(SCENARIOS))
 def test_a_crashed_write_heals_to_the_uncrashed_run(tmp_path, scenario):
-    uncrashed = _run(tmp_path / "a", scenario, crash=False)
-    crashed = _run(tmp_path / "b", scenario, crash=True)
-    assert [v for v, _ in uncrashed] == [args[0] for args, _ in SEED + SCENARIOS[scenario]]
-    assert crashed == uncrashed
+    uncrashed, counts = _run(tmp_path / "a", scenario, crash=False)
+    crashed, crashed_counts = _run(tmp_path / "b", scenario, crash=True)
+    assert all(counts), f"a step journaled nothing: {counts}"
+    assert crashed_counts == counts and crashed == uncrashed

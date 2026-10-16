@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from cjm_context_graph_layer.grammar import make_edge, SpineRelations
-from cjm_context_graph_layer.ops import extend_graph
+from cjm_context_graph_layer.ops import extend_graph, graph_task
 from cjm_context_graph_primitives.query import PropertyPredicate
 from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
@@ -227,13 +227,19 @@ async def transfer_site_path(
     *,
     actor: str = "agent:session",
     merge: bool = False,   # The target keeps its own active path: the source's page merges into it
+    write: bool = True,    # False = PLAN only (design detail 65f4a6c9 (1)): every refusal, then the op under "op", nothing written
 ) -> Dict[str, Any]:  # {from_id, to_id, value, assertion_id, superseded, merged?, written} | {error, written: False}
     """Move a page's ACTIVE site_path to another node (journaled `transfer-path`): the target
     asserts the value, and that assertion SUPERSEDES the source's across slots, so the source
     holds no active path and its whole history reads as the target's (`path_owners`). The
     target must hold no active path of its own -- a page has exactly one -- unless the source's
     page MERGES into the target's (design ce17606b (6)): then the target's one active path
-    supersedes the source's, and the source's URL redirects to the target's page."""
+    supersedes the source's, and the source's URL redirects to the target's page.
+
+    THE PLAN (write=False): both ends resolved to their ids, the target's assert planned (its
+    refusal is the transfer's), and the op -- or None when the transfer already stands: the source
+    holds no active path and the target's active one supersedes the source's (ruling 17daa86b; a
+    crashed transfer's retry lands here)."""
     from .projection import resolve_node_ref
     from .write import assert_value
     ids = []
@@ -251,6 +257,12 @@ async def transfer_site_path(
     supers = await F.load_supersedes(gx)
     active = F.active_assertions(slot, supers)
     have = {sid: [a for a in active if str(F.prop(a, "subject_id")) == sid] for sid in (src, dst)}
+    if not have[src]:   # already transferred (or merged): the target's active path supersedes the source's
+        pairs, mine = set(supers), {str(F.nid(a)) for a in slot if str(F.prop(a, "subject_id")) == src}
+        done = [k for k in have[dst] if any((str(F.nid(k)), a) in pairs for a in mine)]
+        if done:
+            return {"from_id": src, "to_id": dst, "value": str(F.prop(done[0], "value")),
+                    "assertion_id": str(F.nid(done[0])), "written": False, "noop": True, "op": None}
     if len(have[src]) != 1:
         return {"error": f"the source holds {len(have[src])} active site_path value(s) — a transfer "
                          "moves exactly one", "written": False}
@@ -262,20 +274,41 @@ async def transfer_site_path(
                          "active path", "written": False}
     old = have[src][0]
     value = str(F.prop(old, "value"))
+    out = {"from_id": src, "to_id": dst, "value": value, "superseded": str(F.nid(old))}
+    if not write:
+        if not merge:
+            plan = await assert_value(gx, dst, P.SITE_PATH, value, actor=actor, write=False)
+            if plan.get("error"):
+                return {"error": plan["error"], "written": False}
+        return {**out, **({"merged": True} if merge else {}), "written": False, "noop": False,
+                "op": {"from": src, "to": dst, "actor": actor, **({"merge": True} if merge else {})}}
     if merge:
-        keep = have[dst][0]
-        await extend_graph(gx.queue, gx.graph_id, [],
-                           [make_edge(str(F.nid(keep)), str(F.nid(old)), DevRelations.SUPERSEDES)])
-        return {"from_id": src, "to_id": dst, "value": value, "assertion_id": str(F.nid(keep)),
-                "superseded": str(F.nid(old)), "merged": True, "written": True}
+        keep = str(F.nid(have[dst][0]))
+        await _supersede_across(gx, keep, str(F.nid(old)), supers)
+        return {**out, "assertion_id": keep, "merged": True, "written": True}
     # The site-link step resolves the moved path once, at the write window's close (9ee4e346).
     res = await assert_value(gx, dst, P.SITE_PATH, value, actor=actor)
     if res.get("error"):
         return {"error": res["error"], "written": False}
-    await extend_graph(gx.queue, gx.graph_id, [],
-                       [make_edge(res["assertion_id"], str(F.nid(old)), DevRelations.SUPERSEDES)])
-    return {"from_id": src, "to_id": dst, "value": value, "assertion_id": res["assertion_id"],
-            "superseded": str(F.nid(old)), "written": True}
+    await _supersede_across(gx, res["assertion_id"], str(F.nid(old)), supers)
+    return {**out, "assertion_id": res["assertion_id"], "written": True}
+
+
+async def _supersede_across(
+    gx: GraphHandle,
+    newer: str,                        # The assertion taking the path
+    older: str,                        # The assertion it supersedes, on another slot
+    supers: List[Tuple[str, str]],     # The SUPERSEDES pairs as the transfer read them
+) -> None:
+    """Land a transfer's cross-slot SUPERSEDES edge. A path moved BACK lands on the target's own
+    earlier assertion of it (identity (slot, value, actor)), which the very assertion it now
+    supersedes still DEMOTES: that edge is lifted first, else the two edges form a cycle and
+    neither path resolves active -- assert_value's same-slot reinstatement lift, across slots.
+    Replay re-reads the same pairs from the same op, so it lands the same lift."""
+    if (older, newer) in set(supers):
+        await graph_task(gx.queue, gx.graph_id, "delete_edges",
+                         edge_ids=[make_edge(older, newer, DevRelations.SUPERSEDES)["id"]])
+    await extend_graph(gx.queue, gx.graph_id, [], [make_edge(newer, older, DevRelations.SUPERSEDES)])
 
 
 async def archive_round_trip(

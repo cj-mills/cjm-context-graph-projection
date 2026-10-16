@@ -927,8 +927,8 @@ def test_cli_pure_notes_lane_end_to_end_and_replay(tmp_path):
     r = _run(*base, "notes-type", "pure-notes")
     assert r.returncode == 0 and "created" in r.stdout, r.stderr or r.stdout
     r = _run(*base, "notes-type", "pure-notes")
-    assert "updated" in r.stdout
-    assert len([o for o in read_journal(pj) if o["verb"] == "deliverable-type"]) == 1   # identical op deduped
+    assert r.returncode == 0 and "unchanged (nothing journaled)" in r.stdout, r.stdout
+    assert len([o for o in read_journal(pj) if o["verb"] == "deliverable-type"]) == 1   # no change, caught at plan (17daa86b)
     # pack refuses before the type exists for an unknown type
     r = _run(*base, "notes-pack", "--source", "Seven Dangerous", "--type", "essay")
     assert r.returncode == 1 and "not minted" in r.stderr

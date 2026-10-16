@@ -144,6 +144,7 @@ async def _apply_chain(
     series_id: str,
     standing: Dict[str, Dict[str, Any]],  # note id -> standing edge
     chain: Dict[str, str],                # note id -> after, the WHOLE desired membership
+    write: bool = True,                   # False = the counts alone, nothing written (all zero = no change)
 ) -> Dict[str, int]:  # {added, moved, removed}
     """Land a desired membership: delete + extend only the edges whose `after` changed."""
     drop: List[str] = []
@@ -160,9 +161,9 @@ async def _apply_chain(
         if m not in standing:
             land.append(series_member_edge(m, series_id, a))
             added += 1
-    if drop:
+    if write and drop:
         await graph_task(gx.queue, gx.graph_id, "delete_edges", edge_ids=sorted(drop))
-    if land:
+    if write and land:
         await extend_graph(gx.queue, gx.graph_id, [], land)
     return {"added": added, "moved": moved, "removed": len(drop) - moved}
 
@@ -173,12 +174,16 @@ async def set_series_members(
     slugs: List[str],  # The member notes' slugs, IN ORDER
     *,
     actor: str = "agent:session",
+    write: bool = True,  # False = PLAN only (design detail 65f4a6c9 (1)): every refusal, then the op under "op" (None = changes nothing), nothing written
 ) -> Dict[str, Any]:  # {series_id, members, added, moved, removed, written} | {error}
     """Set a series' WHOLE ordered membership (journaled `series-members`).
 
     Seeds a series from its page's listing, or re-states it: each slug follows the one
     before it, the first follows "". Refused whole (nothing written) when the series is
-    unknown, a slug repeats, or a slug names no Note."""
+    unknown, a slug repeats, or a slug names no Note.
+
+    THE PLAN (write=False): the op -- or None when every member already follows the one the
+    order names (ruling 17daa86b). Slugs are identity, so they journal as given."""
     sid = series_node_id(key)
     if await graph_task(gx.queue, gx.graph_id, "get_node", node_id=sid) is None:
         return {"error": f"no series `{key}` (mint it with `series` first)", "written": False}
@@ -191,8 +196,13 @@ async def set_series_members(
     if missing:
         return {"error": f"no note for: {', '.join(missing)}", "written": False}
     chain = {i: (ids[n - 1] if n else "") for n, i in enumerate(ids)}
-    res = await _apply_chain(gx, sid, await _members(gx, sid), chain)
-    return {"series_id": sid, "key": key, "members": len(ids), **res, "written": True}
+    res = await _apply_chain(gx, sid, await _members(gx, sid), chain, write=write)
+    out = {"series_id": sid, "key": key, "members": len(ids), **res}
+    if not write:
+        noop = not any(res.values())
+        return {**out, "written": False, "noop": noop,
+                "op": None if noop else {"key": key, "slugs": list(slugs), "actor": actor}}
+    return {**out, "written": True}
 
 
 async def place_in_series(
@@ -204,13 +214,17 @@ async def place_in_series(
     first: bool = False,          # Place it at the head
     remove: bool = False,         # Take it out of the series
     actor: str = "agent:session",
+    write: bool = True,           # False = PLAN only (design detail 65f4a6c9 (1)): every refusal, then the op under "op" (None = changes nothing), nothing written
 ) -> Dict[str, Any]:  # {series_id, note_id, added, moved, removed, written} | {error}
     """Splice ONE member (journaled `place-in-series`): insert, move, or remove.
 
     Exactly one of `after` / `first` / `remove`. The member first leaves its place (its
     follower now follows its predecessor), then enters the new one (the member that followed
     the new predecessor now follows it) — so an insert touches two edges, a move at most
-    three, and nothing renumbers."""
+    three, and nothing renumbers.
+
+    THE PLAN (write=False): the op -- or None when the member already stands where it is
+    placed, or a removal finds it gone (ruling 17daa86b)."""
     if sum([after is not None, bool(first), bool(remove)]) != 1:
         return {"error": "pass exactly one of --after SLUG / --first / --remove", "written": False}
     sid = series_node_id(key)
@@ -221,8 +235,9 @@ async def place_in_series(
         return {"error": f"no note `{slug}`", "written": False}
     standing = await _members(gx, sid)
     chain = {m: str((e.get("properties") or {}).get("after") or "") for m, e in standing.items()}
-    if remove and nid not in chain:
-        return {"error": f"`{slug}` is not in series `{key}`", "written": False}
+    if remove and nid not in chain:   # nothing to remove is no change (unlink's rule): a crashed remove's retry lands here
+        return {"series_id": sid, "key": key, "note_id": nid, "added": 0, "moved": 0, "removed": 0,
+                "written": False, "noop": True, "op": None}
     if nid in chain:  # leave the current place
         prev = chain.pop(nid)
         for m, a in chain.items():
@@ -240,8 +255,14 @@ async def place_in_series(
             if a == anchor:
                 chain[m] = nid
         chain[nid] = anchor
-    res = await _apply_chain(gx, sid, standing, chain)
-    return {"series_id": sid, "key": key, "note_id": nid, **res, "written": True}
+    res = await _apply_chain(gx, sid, standing, chain, write=write)
+    out = {"series_id": sid, "key": key, "note_id": nid, **res}
+    if not write:
+        noop = not any(res.values())
+        return {**out, "written": False, "noop": noop,
+                "op": None if noop else {"key": key, "slug": slug, "after": after, "first": bool(first),
+                                         "remove": bool(remove), "actor": actor}}
+    return {**out, "written": True}
 
 
 async def series_order(
