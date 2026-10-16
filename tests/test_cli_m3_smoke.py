@@ -7,6 +7,7 @@ dispatch path's imports are exercised for real.
 """
 
 import json
+import re
 import sqlite3
 import subprocess
 import sys
@@ -295,7 +296,10 @@ def test_assert_batch_cli_validates_first_then_journals_one_assert_per_line(tmp_
     ops = read_journal(journal)
     assert [o["verb"] for o in ops] == ["assert", "assert"]
     assert "superseded_by" not in ops[0]["args"]
-    assert ops[1]["args"]["superseded_by"] == ["/posts/x/"]
+    # the back-fill target is journaled RESOLVED -- the slot's assertion id, never the raw value
+    # replay would re-resolve against another db (design detail 65f4a6c9 (1))
+    sb = ops[1]["args"]["superseded_by"]
+    assert len(sb) == 1 and re.fullmatch(r"[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}", sb[0])
 
 
 def test_born_post_location_derives_from_emit_root_on_replay(tmp_path):

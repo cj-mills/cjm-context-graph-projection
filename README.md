@@ -101,6 +101,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - **`cjm_context_graph_projection.workbench`** — Workbench lens layer: the front-door / pin-tree / session-feed derived views.
 - **`cjm_context_graph_projection.worklist`** — The propose/confirm worklist: candidate fixes that need a human decision.
 - **`cjm_context_graph_projection.write`** — The write surface: `assert` a slot value, `decide` a conclusion.
+- **`cjm_context_graph_projection.writes`** — THE WRITE ORDER ON A PROJECTION GRAPH: plan -> append -> apply -> advance (design detail
 
 ## API
 
@@ -537,6 +538,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 
 ### `cjm_context_graph_projection.journal`
 
+- `apply_write_op` _function_ — Apply one journaled op through its core verb -- THE applier, live and on rebuild (design
 - `journal_sourced_note_paths` _function_ — The memory `.md` files `ingest` must NOT read — they're journal-sourced now.
 - `journal_touch_rows` _function_ — A journal's touch rows across its whole segment family (cold first,
 - `journal_window` _function_ — The journal-window projection: which nodes a window/session touched, when, how.
@@ -1303,6 +1305,13 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `resolve_subject` _function_ — Resolve a subject to an entity id (rename-stable), minting a `term` entity
 - `retract_session` _function_ — RETRACT a Session spine node — the write dual of `register_session`, on
 - `unlink` _function_ — RETRACT a deliberate edge — the write dual of `link` (finding 2f1d9382).
+
+### `cjm_context_graph_projection.writes`
+
+- `InvocationWrites` _class_ — One invocation's unit of work on its graph's writes journal (65f4a6c9): `begin()` before
+- `Written` _class_ — What one write did: the core verb's result, and whether its op was appended (False only
+- `adopt_cursor` _function_ — The one-time adoption of a db written before the cursor existed (65f4a6c9 (2c)): its
+- `cursor_report` _function_ — A READER's view of the write order (65f4a6c9 (2d)): where the db's cursor stands and how
 
 ## Dependencies
 

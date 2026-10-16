@@ -20,14 +20,17 @@ import json
 import re
 import sys
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from cjm_context_graph_layer.identity import derive_node_id
-from cjm_context_graph_layer.ops import observe_writes, PROVENANCE_TS
+from cjm_context_graph_layer.ops import GraphCursorStore, observe_writes, PROVENANCE_TS
 from cjm_context_graph_primitives.journal import (append_write, journal_segments, read_journal,
                                                   read_segment)
 from cjm_context_graph_primitives.timings import record_replay, record_series, timed
+from cjm_context_graph_primitives.writer import (CursorMismatch, family_lock, family_name, ORIGIN,
+                                                 read_tail)
 from cjm_dev_graph_schema.identity import (code_module_node_id, entity_node_id, note_node_id,
                                            section_node_id, series_node_id, session_node_id)
 from cjm_dev_graph_schema.nodes import DecisionNode
@@ -183,13 +186,16 @@ def journal_sourced_note_paths(
     return out
 
 
-async def _apply_op(
+async def apply_write_op(
     gx: GraphHandle,
     op: Dict[str, Any],
     emit_root: Optional[str] = None,  # The notes graph's emit root: a born post's file location derives from it
-) -> str:
-    """Apply one journaled op through its core verb; return the verb ('' = skipped)."""
+) -> Tuple[str, Any]:  # (the verb applied, "" = skipped; the core verb's result)
+    """Apply one journaled op through its core verb -- THE applier, live and on rebuild (design
+    detail 65f4a6c9 (1)): replay runs it per op, and a live write runs it after the op's append
+    (`InvocationWrites`), so what a live write prints is what its op applied."""
     verb, a = op.get("verb"), op.get("args", {})
+    res: Any = None
     if verb == "new-note":
         # M3 genesis: MINT a whole note (Note + Section nodes) from journaled baseline text,
         # graph-only (extend_graph), so a note no longer read from its `.md` is reconstructed
@@ -203,15 +209,15 @@ async def _apply_op(
         path = a.get("path")
         if a.get("slug"):
             path = born_post_path(emit_root, a["slug"]) if emit_root else ""
-        await reconstruct_note(gx, path, a["content"],
-                               profile=a.get("profile"), slug=a.get("slug"))
+        res = await reconstruct_note(gx, path, a["content"],
+                                     profile=a.get("profile"), slug=a.get("slug"))
     elif verb == "decide":
-        await decide(gx, a["statement"], actor=a.get("actor", "agent:session"),
-                     supports=a.get("supports"), supersedes=a.get("supersedes"),
-                     session=a.get("session"), title=a.get("title"))
+        res = await decide(gx, a["statement"], actor=a.get("actor", "agent:session"),
+                           supports=a.get("supports"), supersedes=a.get("supersedes"),
+                           session=a.get("session"), title=a.get("title"))
     elif verb == "alias":
-        await alias(gx, a["drifted"], a["canonical"], actor=a.get("actor", "agent:session"),
-                    evidence=a.get("evidence"))
+        res = await alias(gx, a["drifted"], a["canonical"], actor=a.get("actor", "agent:session"),
+                          evidence=a.get("evidence"))
     elif verb == "assert":
         # asserted_at rides the op's journaled ts (0d50b921 companion): the one
         # property-level verb-time stamp in the schema — without the override a
@@ -219,122 +225,122 @@ async def _apply_op(
         # back to the verb's now() default. Oracle refreshes keep last_verified.
         # subject_content_hash rides the op too (design 40622922): replay carries the SAME
         # bound hash the live write recorded, never one recomputed from post-hoc content.
-        await assert_value(gx, a["subject"], a["predicate"], a["value"],
-                           actor=a.get("actor", "agent:session"),
-                           evidence=a.get("evidence"), supersede=a.get("supersede"),
-                           superseded_by=a.get("superseded_by"),
-                           asserted_at=op.get("ts"), method=a.get("method"),
-                           subject_content_hash=a.get("subject_content_hash"))
+        res = await assert_value(gx, a["subject"], a["predicate"], a["value"],
+                                 actor=a.get("actor", "agent:session"),
+                                 evidence=a.get("evidence"), supersede=a.get("supersede"),
+                                 superseded_by=a.get("superseded_by"),
+                                 asserted_at=op.get("ts"), method=a.get("method"),
+                                 subject_content_hash=a.get("subject_content_hash"))
     elif verb == "link":
         # A cross-graph link (0154f5e4) carries its OBSERVATION: replay rebuilds the
         # Reference stand-in from the journaled hash/label/title — the sibling graph is
         # never opened on a rebuild, so a rebuild is reproducible with the sibling absent.
         # A Source's locator + citation ride the same op (722a8232): replay lands them as observed.
-        await link(gx, a["source_id"], a["target_id"], a["relation"],
-                   actor=a.get("actor", "agent:session"), observation=a.get("observation"),
-                   source_facts=a.get("source_facts"))
+        res = await link(gx, a["source_id"], a["target_id"], a["relation"],
+                         actor=a.get("actor", "agent:session"), observation=a.get("observation"),
+                         source_facts=a.get("source_facts"))
     elif verb == "unlink":
         # Edge retraction (2f1d9382): replayed in append order AFTER the link it
         # retracts, so a rebuild converges with the edge absent. A missing edge
         # is a tolerated no-op (deterministic edge id; idempotent re-application).
-        await unlink(gx, a["source_id"], a["target_id"], a["relation"],
-                     actor=a.get("actor", "agent:session"))
+        res = await unlink(gx, a["source_id"], a["target_id"], a["relation"],
+                           actor=a.get("actor", "agent:session"))
     elif verb == "check":
         # DoD gradient: re-attach a check (deterministic (item, text) id -> verified
         # no-op on rebuild). Replaying its `task_state=open` after a later journaled
         # `done` lands born-superseded (ordered predicate), so replay converges.
-        await add_check(gx, a["item_id"], a["text"], actor=a.get("actor", "agent:session"))
+        res = await add_check(gx, a["item_id"], a["text"], actor=a.get("actor", "agent:session"))
     elif verb == "section":
         # M2b: re-apply a section's verbatim raw STATE (update_node; idempotent). A missing
         # section is a tolerated no-op. The audit-only `replaces`/ts fields are ignored.
-        await author_section(gx, a["slug"], a["anchor"], a["raw"],
-                             actor=a.get("actor", "agent:session"))
+        res = await author_section(gx, a["slug"], a["anchor"], a["raw"],
+                                   actor=a.get("actor", "agent:session"))
     elif verb == "add-section":
         # M2a structural add, replayed GRAPH-ONLY (write_md=False): re-splice the section from
         # the journaled slug/raw/after against the CURRENT graph. Runs in pass 2 (append order)
         # so it lands after its note's genesis (pass 1) and composes with interleaved `section`
         # STATE ops in the exact causal order they were journaled. Idempotent: `add_section`
         # no-ops when the target anchor already exists, so a rebuild never duplicates it.
-        await add_section(gx, a["slug"], a["raw"], after=a.get("after"),
-                          write=True, write_md=False)
+        res = await add_section(gx, a["slug"], a["raw"], after=a.get("after"),
+                                write=True, write_md=False)
     elif verb == "display-rule":
         # Presentation vocabulary: upsert by deterministic per-kind id, so replaying
         # the append-ordered ops converges on the LAST authored rule per kind.
-        await set_display_rule(gx, a["for_label"], a.get("title_template"),
-                               a.get("gloss_template"), actor=a.get("actor", "agent:session"))
+        res = await set_display_rule(gx, a["for_label"], a.get("title_template"),
+                                     a.get("gloss_template"), actor=a.get("actor", "agent:session"))
     elif verb == "set-lens":
         # Lens vocabulary (tier 2): upsert by deterministic per-slug id — replay
         # converges on the LAST authored spec per slug, like display-rule.
-        await set_lens(gx, a["slug"], a["spec"], title=a.get("title"),
-                       description=a.get("description"), actor=a.get("actor", "agent:session"),
-                       date=a.get("date"))
+        res = await set_lens(gx, a["slug"], a["spec"], title=a.get("title"),
+                             description=a.get("description"), actor=a.get("actor", "agent:session"),
+                             date=a.get("date"))
     elif verb == "session":
         # Session spine: upsert the timestamp-keyed Session node (started_at/title are
         # last-op-wins on replay, like display-rule — sessions are data, not content).
-        await register_session(gx, a["key"], started_at=a.get("started_at"),
-                               title=a.get("title"), actor=a.get("actor", "agent:session"))
+        res = await register_session(gx, a["key"], started_at=a.get("started_at"),
+                                     title=a.get("title"), actor=a.get("actor", "agent:session"))
     elif verb == "retract-session":
         # Session retraction (unlink's compensating-op pattern): replayed in append
         # order AFTER the registrations it retracts, so a rebuild converges with the
         # spine node absent. A missing node is a tolerated no-op (idempotent).
-        await retract_session(gx, a["key"], actor=a.get("actor", "agent:session"))
+        res = await retract_session(gx, a["key"], actor=a.get("actor", "agent:session"))
     elif verb == "pull-transcript":
         # Scratchpad-v2 pull (fc6a0cdc): re-mint the journaled NEW-message payload —
         # self-contained (transcripts are prunable external files; the journal alone
         # reconstructs the graph). Idempotent: Message ids derive from capture-record
         # uuids, chain edges from each payload message's own prev_uuid.
         from .pull_transcript import mint_pulled_messages
-        await mint_pulled_messages(gx, a["session_key"], a.get("cc_session_uuid", ""),
-                                   a.get("messages") or [],
-                                   actor=a.get("actor", "agent:session"))
+        res = await mint_pulled_messages(gx, a["session_key"], a.get("cc_session_uuid", ""),
+                                         a.get("messages") or [],
+                                         actor=a.get("actor", "agent:session"))
     elif verb == "mint-messages":
         # Composer-born Message payload (DEC 93e3e881 pt 5): the same
         # source-agnostic mint machinery as pull-transcript, minus the CC
         # pairing fact — the payload's own `source` stamps provenance.
         from .pull_transcript import mint_pulled_messages
-        await mint_pulled_messages(gx, a["session_key"], "", a.get("messages") or [],
-                                   actor=a.get("actor", "user:scratchpad"))
+        res = await mint_pulled_messages(gx, a["session_key"], "", a.get("messages") or [],
+                                         actor=a.get("actor", "user:scratchpad"))
     elif verb == "edit-message":
         # In-place Message body edit (DEC 91c47b4a pt 3): last-op-wins on
         # replay, like `section` STATE ops; a missing node is a tolerated
         # no-op (its mint op precedes it in append order).
         from .pull_transcript import edit_message
-        await edit_message(gx, a["source_uuid"], a["text"],
-                           properties=a.get("properties"),
-                           actor=a.get("actor", "user:scratchpad"))
+        res = await edit_message(gx, a["source_uuid"], a["text"],
+                                 properties=a.get("properties"),
+                                 actor=a.get("actor", "user:scratchpad"))
     elif verb == "derive-message":
         # Compose-send reconciliation (DEC fc6a0cdc pt 5): DERIVED_FROM edges
         # sent-message -> parts, order on edge properties. Deterministic edge
         # ids converge on replay.
         from .pull_transcript import derive_message
-        await derive_message(gx, a["sent_uuid"], a.get("part_uuids") or [],
-                             actor=a.get("actor", "user:scratchpad"))
+        res = await derive_message(gx, a["sent_uuid"], a.get("part_uuids") or [],
+                                   actor=a.get("actor", "user:scratchpad"))
     elif verb == "procedure":
         # Programmatic value-source (b744b28e): upsert the Procedure by deterministic
         # per-method id so a rebuild keeps an oracle's evidence node — the `assert`
         # ops citing it follow in append order.
-        await mint_procedure(gx, a["method"], a["name"],
-                             actor=a.get("actor", "programmatic"),
-                             root_kind=a.get("root_kind", "asserted"))
+        res = await mint_procedure(gx, a["method"], a["name"],
+                                   actor=a.get("actor", "programmatic"),
+                                   root_kind=a.get("root_kind", "asserted"))
     elif verb == "propose":
         # Triage proposal (bb015d12): re-mint the agent's draft from the journaled args
         # VERBATIM (deterministic id over deliverable/section/key -> a verified no-op on
         # rebuild); the confirm lands as ordinary `section` + `assert` ops after it.
-        await mint_proposal(gx, a["deliverable_id"], a["section_id"], a["key"], a["raw"],
-                            slug=a.get("slug", ""), anchor=a.get("anchor", ""),
-                            upstream_ids=a.get("upstream_ids") or [], summary=a.get("summary", ""),
-                            approval=a.get("approval"), actor=a.get("actor", "agent:session"))
+        res = await mint_proposal(gx, a["deliverable_id"], a["section_id"], a["key"], a["raw"],
+                                  slug=a.get("slug", ""), anchor=a.get("anchor", ""),
+                                  upstream_ids=a.get("upstream_ids") or [], summary=a.get("summary", ""),
+                                  approval=a.get("approval"), actor=a.get("actor", "agent:session"))
     elif verb == "deliverable-type":
         # The type profile as data (a7262fe7): upsert by slug, last op wins.
         from .purenotes import mint_deliverable_type
-        await mint_deliverable_type(gx, a["key"], title=a.get("title", ""),
-                                    description=a.get("description", ""),
-                                    information_policy=a.get("information_policy"),
-                                    presentation_policy=a.get("presentation_policy"),
-                                    production_procedure=a.get("production_procedure"),
-                                    actor=a.get("actor", "agent:session"),
-                                    kind=a.get("kind"), origin=a.get("origin"),
-                                    output_class=a.get("output_class"))
+        res = await mint_deliverable_type(gx, a["key"], title=a.get("title", ""),
+                                          description=a.get("description", ""),
+                                          information_policy=a.get("information_policy"),
+                                          presentation_policy=a.get("presentation_policy"),
+                                          production_procedure=a.get("production_procedure"),
+                                          actor=a.get("actor", "agent:session"),
+                                          kind=a.get("kind"), origin=a.get("origin"),
+                                          output_class=a.get("output_class"))
     elif verb == "accept-point":
         # Substance (a7262fe7): re-land the Point + its References from the journaled
         # observations — self-contained; the sibling graph is never opened on replay.
@@ -342,35 +348,35 @@ async def _apply_op(
         # The op NAMES the owner (96be1528 (P)): `point_set` lands substance under the
         # (Source, unit)'s PointSet; an op from before the re-home has none and lands under
         # the Note as it did live, for the journaled `rehome-points` op to move.
-        await accept_point(gx, a["slug"], a["point"], observations=a.get("observations") or [],
-                           actor=a.get("actor", "user:cli"),
-                           proposal_set_id=a.get("proposal_set_id", ""),
-                           point_set=a.get("point_set"))
+        res = await accept_point(gx, a["slug"], a["point"], observations=a.get("observations") or [],
+                                 actor=a.get("actor", "user:cli"),
+                                 proposal_set_id=a.get("proposal_set_id", ""),
+                                 point_set=a.get("point_set"))
     elif verb == "retract-point":
         # The compensating op: replayed after the accept it undoes; missing = tolerated no-op.
         from .purenotes import retract_point
-        await retract_point(gx, a["point_id"], actor=a.get("actor", "user:cli"))
+        res = await retract_point(gx, a["point_id"], actor=a.get("actor", "user:cli"))
     elif verb == "edit-point":
         # The per-point repair (5625b74e): re-apply the journaled FIELD SET to the standing
         # point; a point retracted later in the journal is a tolerated no-op.
         from .purenotes import edit_point
         f = a.get("fields") or {}
-        await edit_point(gx, a["point_id"], text=f.get("text"), lead=f.get("lead"),
-                         parent=f.get("parent_key"), heading=f.get("heading"),
-                         heading_index=f.get("heading_index"), refers_to=f.get("refers_to"),
-                         origins=f.get("origins"), judged=f.get("judged"), actor=a.get("actor", "user:cli"))
+        res = await edit_point(gx, a["point_id"], text=f.get("text"), lead=f.get("lead"),
+                               parent=f.get("parent_key"), heading=f.get("heading"),
+                               heading_index=f.get("heading_index"), refers_to=f.get("refers_to"),
+                               origins=f.get("origins"), judged=f.get("judged"), actor=a.get("actor", "user:cli"))
     elif verb == "rehome-points":
         # The re-home (96be1528 (P)): the Note's substance moves to the PointSet of its
         # (Source, unit) — replayed after the pre-re-home accepts it moves (an accept op that
         # carries `point_set` lands under the set directly); a no-op when nothing is left.
         from .purenotes import rehome_points
-        await rehome_points(gx, a["slug"], actor=a.get("actor", "user:cli"))
+        res = await rehome_points(gx, a["slug"], actor=a.get("actor", "user:cli"))
     elif verb == "place-point":
         # The deliverable's overlay on one point (96be1528 (3)/(7)): the PLACED edge re-landed
         # from the journaled fields; a point or section retracted later = a tolerated no-op.
         from .purenotes import place_point
-        await place_point(gx, a["slug"], a["key"], a.get("section_key", ""), after=a.get("after"),
-                          refs_shown=a.get("refs_shown"), actor=a.get("actor", "user:cli"))
+        res = await place_point(gx, a["slug"], a["key"], a.get("section_key", ""), after=a.get("after"),
+                                refs_shown=a.get("refs_shown"), actor=a.get("actor", "user:cli"))
     elif verb == "render-notes":
         # The body is a FUNCTION of the Points: replay re-derives the same Sections graph-only
         # (write_md=False — the staging file is emit's job), landing after the accepts in
@@ -381,195 +387,167 @@ async def _apply_op(
         # field renders none, as it did live).
         # The source FACTS (baa640e8: series, public title, dates) replay the same way — an op from
         # before the field renders none, as it did live.
-        await render_notes(gx, a["slug"], rendering=a.get("rendering", "both"),
-                           timestamps=a.get("timestamps", "always"),   # pre-e1fd4d64 ops rendered every span
-                           write_md=False, actor=a.get("actor", "agent:session"),
-                           references=list(a.get("references") or []),
-                           facts=dict(a.get("facts") or {}))
+        res = await render_notes(gx, a["slug"], rendering=a.get("rendering", "both"),
+                                 timestamps=a.get("timestamps", "always"),   # pre-e1fd4d64 ops rendered every span
+                                 write_md=False, actor=a.get("actor", "agent:session"),
+                                 references=list(a.get("references") or []),
+                                 facts=dict(a.get("facts") or {}))
     elif verb == "render-work-page":
         # The work page (ebb77107): the body is a function of the sibling's structure map (the
         # journaled OBSERVATION — replay never opens the sibling) and of the born chapter notes
         # on this graph, which landed earlier in the journal; graph-only, the .md is emit's job.
         from .purenotes import render_work_page
-        await render_work_page(gx, a["slug"], write_md=False, actor=a.get("actor", "agent:session"),
-                               observed=dict(a.get("observed") or {}))
+        res = await render_work_page(gx, a["slug"], write_md=False, actor=a.get("actor", "agent:session"),
+                                     observed=dict(a.get("observed") or {}))
     elif verb == "series":
         # A Series born on-graph (DEC 72d669c5 (2)): the op is the page's WHOLE record, so
         # replaying the append-ordered ops converges on the last one (upsert by key).
-        await mint_series(gx, a["key"], title=a.get("title", ""),
-                          description=a.get("description", ""), image=a.get("image", ""),
-                          date=a.get("date", ""), categories=a.get("categories") or [],
-                          actor=a.get("actor", "agent:session"))
+        res = await mint_series(gx, a["key"], title=a.get("title", ""),
+                                description=a.get("description", ""), image=a.get("image", ""),
+                                date=a.get("date", ""), categories=a.get("categories") or [],
+                                actor=a.get("actor", "agent:session"))
     elif verb == "series-members":
         # The whole ordered membership (DEC 72d669c5 (4)); a refused op (a member retired later
         # in the journal) writes nothing, exactly as it refused live.
-        await set_series_members(gx, a["key"], list(a.get("slugs") or []),
-                                 actor=a.get("actor", "agent:session"))
+        res = await set_series_members(gx, a["key"], list(a.get("slugs") or []),
+                                       actor=a.get("actor", "agent:session"))
     elif verb == "place-in-series":
         # One member spliced (insert / move / remove) against the chain the earlier ops built.
-        await place_in_series(gx, a["key"], a["slug"], after=a.get("after"),
-                              first=bool(a.get("first")), remove=bool(a.get("remove")),
-                              actor=a.get("actor", "agent:session"))
+        res = await place_in_series(gx, a["key"], a["slug"], after=a.get("after"),
+                                    first=bool(a.get("first")), remove=bool(a.get("remove")),
+                                    actor=a.get("actor", "agent:session"))
     elif verb == "entity":
         # A typed vocabulary Entity (design 8cbdc883): the whole record, so the append-ordered
         # ops converge on the last one per (kind, key).
         from .coverage import mint_entity
-        await mint_entity(gx, a["kind"], a["key"], name=a.get("name", ""),
-                          fields=dict(a.get("fields") or {}), actor=a.get("actor", "agent:session"))
+        res = await mint_entity(gx, a["kind"], a["key"], name=a.get("name", ""),
+                                fields=dict(a.get("fields") or {}), actor=a.get("actor", "agent:session"))
     elif verb == "verified-on":
         # One verification (design 8cbdc883 (7)): the op names the resolved deliverable id, so
         # replay re-lands the same edge; a retraction replays as the compensating delete.
         from .coverage import record_verification
-        await record_verification(gx, a["deliverable"], a["hardware"], os=a.get("os", ""),
-                                  date=a.get("date", ""), basis=a.get("basis", "stated"),
-                                  versions=dict(a.get("versions") or {}), note=a.get("note", ""),
-                                  retract=bool(a.get("retract")), actor=a.get("actor", "agent:session"))
+        res = await record_verification(gx, a["deliverable"], a["hardware"], os=a.get("os", ""),
+                                        date=a.get("date", ""), basis=a.get("basis", "stated"),
+                                        versions=dict(a.get("versions") or {}), note=a.get("note", ""),
+                                        retract=bool(a.get("retract")), actor=a.get("actor", "agent:session"))
     elif verb == "derived-from":
         # An archive deliverable's provenance (design leg 4a4ef27e (2)): the op names the
         # resolved deliverable id and the work / unit key; a retraction replays as the delete.
         from .library import record_provenance
-        await record_provenance(gx, a["deliverable"], a.get("source", ""), retract=bool(a.get("retract")),
-                                actor=a.get("actor", "agent:session"))
+        res = await record_provenance(gx, a["deliverable"], a.get("source", ""), retract=bool(a.get("retract")),
+                                      actor=a.get("actor", "agent:session"))
     elif verb == "work-member":
         # A metabolized source's place in its work (design leg 4a4ef27e (2)); a retraction
         # replays as the delete.
         from .library import record_work_member
-        await record_work_member(gx, a["reference"], a.get("target", ""), retract=bool(a.get("retract")),
-                                 actor=a.get("actor", "agent:session"))
+        res = await record_work_member(gx, a["reference"], a.get("target", ""), retract=bool(a.get("retract")),
+                                       actor=a.get("actor", "agent:session"))
     elif verb == "supports":
         # One support (amendment 98e99fe5 (2)): the op names the resolved deliverable id, so
         # replay re-lands the same edge; a retraction replays as the compensating delete.
         from .claims import record_support
-        await record_support(gx, a["deliverable"], a["claim"], kind=a.get("kind", ""),
-                             note=a.get("note", ""), retract=bool(a.get("retract")),
-                             actor=a.get("actor", "agent:session"))
+        res = await record_support(gx, a["deliverable"], a["claim"], kind=a.get("kind", ""),
+                                   note=a.get("note", ""), retract=bool(a.get("retract")),
+                                   actor=a.get("actor", "agent:session"))
     elif verb == "relate":
         # One path-model relation (design ae698640 (5)): the op names the resolved node ids, so
         # replay re-lands the same edge; a retraction replays as the compensating delete.
         from .paths import record_relation
-        await record_relation(gx, a["relation"], a["source"], a["target"], strength=a.get("strength", ""),
-                              note=a.get("note", ""), retract=bool(a.get("retract")),
-                              actor=a.get("actor", "agent:session"))
+        res = await record_relation(gx, a["relation"], a["source"], a["target"], strength=a.get("strength", ""),
+                                    note=a.get("note", ""), retract=bool(a.get("retract")),
+                                    actor=a.get("actor", "agent:session"))
     elif verb == "judge-related":
         # One judge run (design e09e262b): the judgments are observations the op carries whole,
         # so replay never calls the judge; the journaled content hashes bind the records the same.
         from .judging import apply_judgments
-        await apply_judgments(gx, a["run"], actor=a.get("actor", "agent:session"))
+        res = await apply_judgments(gx, a["run"], actor=a.get("actor", "agent:session"))
     elif verb == "judge-facets":
         # One facet run (design eefda2dd (3)): the Noul probabilities are observations the op
         # carries whole, so replay never calls the judge; the content hashes bind the records.
         from .facetjudge import apply_facet_run
-        await apply_facet_run(gx, a["run"], actor=a.get("actor", "agent:session"))
+        res = await apply_facet_run(gx, a["run"], actor=a.get("actor", "agent:session"))
     elif verb == "review-facets":
         # One facet review (design eefda2dd (5)): the confirmations and the review marks; the
         # journaled content hashes bind the facts the same.
         from .facetreview import apply_review
-        await apply_review(gx, a["run"], actor=a.get("actor", "agent:session"))
+        res = await apply_review(gx, a["run"], actor=a.get("actor", "agent:session"))
     elif verb == "judge-roles":
         # One role judge run (ruling 6a203252 (2)): every Choice distribution is an observation
         # the op carries whole, so replay never calls the judge.
         from .sectionroles import apply_role_run
-        await apply_role_run(gx, a["run"], actor=a.get("actor", "agent:session"))
+        res = await apply_role_run(gx, a["run"], actor=a.get("actor", "agent:session"))
     elif verb == "review-roles":
         # One role review (ruling 6a203252 (1)): the confirmed section_role facts and the review
         # marks; the journaled content hashes bind the facts the same.
         from .rolereview import apply_review as apply_role_review
-        await apply_role_review(gx, a["run"], actor=a.get("actor", "agent:session"))
+        res = await apply_role_review(gx, a["run"], actor=a.get("actor", "agent:session"))
     elif verb == "judge-concepts":
         # One concept judge run (ruling ad37f62a (2)): the judgments are observations the op
         # carries whole, so replay never calls the judge; the content hashes bind the records.
         from .conceptjudge import apply_concept_run
-        await apply_concept_run(gx, a["run"], actor=a.get("actor", "agent:session"))
+        res = await apply_concept_run(gx, a["run"], actor=a.get("actor", "agent:session"))
     elif verb == "review-concepts":
         # One concept relation review (ruling ad37f62a (2)): the retractions, the confirmed
         # relations through the relate write path, and the review marks.
         from .conceptreview import apply_relations
-        await apply_relations(gx, a["run"], actor=a.get("actor", "agent:session"))
+        res = await apply_relations(gx, a["run"], actor=a.get("actor", "agent:session"))
     elif verb == "harvest-discussions":
         # One comment-thread harvest (design 39c51c15 (1)): the threads are observations the op
         # carries whole, so replay never asks GitHub; the journaled content hashes bind the facts.
         from .comments import apply_harvest
-        await apply_harvest(gx, a["run"], actor=a.get("actor", "agent:session"))
+        res = await apply_harvest(gx, a["run"], actor=a.get("actor", "agent:session"))
     elif verb == "ingest-evidence":
         # One evidence snapshot ingested (design 7f315830): the measures are observations the op
         # carries whole, so replay never reads the evidence files and never asks a source.
         from .evidence import apply_evidence
-        await apply_evidence(gx, a["run"], actor=a.get("actor", "agent:session"))
+        res = await apply_evidence(gx, a["run"], actor=a.get("actor", "agent:session"))
     elif verb == "retire-source":
         # An archive source retired (design amendment e916a4b9 (1)): the ingest already restored
         # the node from the journaled commit, so replay re-lands the fact and the successor edge
         # without reading git again.
         from .archive import retire_source
-        await retire_source(gx, a["note"], reason=a.get("reason", ""), successor=a.get("successor"),
-                            commit=a["commit"], rel_path=a["path"], actor=a.get("actor", "agent:session"))
+        res = await retire_source(gx, a["note"], reason=a.get("reason", ""), successor=a.get("successor"),
+                                  commit=a["commit"], rel_path=a["path"], actor=a.get("actor", "agent:session"))
     elif verb == "relocate":
         # A removed page's repo copy (design 3d5ee659 (6)): the copy as the land check read it
         # rides the op, so replay re-mints the same Reference and edge without asking GitHub.
         from .relocate import apply_relocation
-        await apply_relocation(gx, a["note"], a["url"], observed_hash=a.get("observed_hash", ""),
-                               observed_at=a.get("observed_at"), title=a.get("title", ""),
-                               actor=a.get("actor", "agent:session"))
+        res = await apply_relocation(gx, a["note"], a["url"], observed_hash=a.get("observed_hash", ""),
+                                     observed_at=a.get("observed_at"), title=a.get("title", ""),
+                                     actor=a.get("actor", "agent:session"))
     elif verb == "transfer-path":
         # A page's active path moved to another holder (e916a4b9 (4)): the same cross-slot
         # supersession, re-landed in append order.
         from .archive import transfer_site_path
-        await transfer_site_path(gx, a["from"], a["to"], actor=a.get("actor", "agent:session"),
-                                 merge=bool(a.get("merge")))
+        res = await transfer_site_path(gx, a["from"], a["to"], actor=a.get("actor", "agent:session"),
+                                       merge=bool(a.get("merge")))
     else:
-        return ""
-    return verb
+        return "", None
+    return verb, res
 
 
-@timed("replay_journal")
-async def replay_journal(
+async def _apply_op(
     gx: GraphHandle,
-    path: Optional[str],  # Journal file path (JSONL); None = no writes ops (a source-only replay)
-    offset: int = 0,  # Skip the first N ops — the swap-rebuild DELTA lane (DEC 638782c9)
-    emit_root: Optional[str] = None,  # The notes graph's emit root (born posts' file locations derive from it)
-    notes: Optional[Dict[str, Any]] = None,  # The notes graph-sibling config: its source journal's groups replay as windows (fa61d93a)
-    source_offset: Optional[int] = None,     # None = the groups after each note's cutover (a full rebuild); N = every group after the N-th record (a delta)
+    op: Dict[str, Any],
+    emit_root: Optional[str] = None,  # The notes graph's emit root: a born post's file location derives from it
+) -> str:
+    """Apply one journaled op through its core verb; return the verb ('' = skipped)."""
+    return (await apply_write_op(gx, op, emit_root))[0]
+
+
+async def _replay_ops(
+    gx: GraphHandle,
+    path: Optional[str],          # The journal the ops were read from (None = no writes ops)
+    ops: List[Dict[str, Any]],    # Its ops after `offset`, in append order
+    offset: int,                  # The journal position of ops[0]
+    emit_root: Optional[str],     # The notes graph's emit root
+    notes: Optional[Dict[str, Any]],  # The notes graph-sibling config (its source groups replay as windows)
+    source_offset: Optional[int],     # The source groups' offset (None = after each note's cutover)
 ) -> Dict[str, int]:  # Per-verb replay counts
-    """Re-apply every journaled write through its core verb (idempotent).
-
-    TWO-PASS — STRUCTURE THEN CONTENT. Pass 1 replays the `new-note` GENESIS ops (M3) so all
-    journal-sourced Note + Section nodes exist; pass 2 replays everything else in append order.
-    This is REQUIRED post-cutover: the genesis ops are appended LAST (the flip is a late event)
-    but earlier curation `link`/`assert`/`alias`/`section` ops TARGET those notes/sections — a
-    single pass would replay them before the node exists, so `link` would drop the edge and
-    `assert` would mint a stray `term` entity. Minting the genesis nodes first lets every later
-    op land on the same deterministic id (so curation edges/assertions carry over automatically,
-    no re-authoring). Append order WITHIN pass 2 is preserved, so a `link` to a journaled
-    Decision still lands after that Decision's `decide`. Deterministic ids make re-application a
-    verified no-op; a pre-cutover `section` op for an as-yet-unbuilt section is still tolerated.
-
-    `add-section` is a pass-2 STRUCTURAL op (a section born on-graph AFTER its note's genesis).
-    It stays in append order — NOT hoisted to pass 1 like `new-note` — because an add-section is
-    always journaled AFTER the note it extends already carries a genesis op, so genesis→add
-    ordering holds without hoisting, and append order is exactly what lets an add compose with the
-    `section` STATE ops interleaved around it (boundary shift then final content, in causal order).
-    Its own idempotency (anchor-exists no-op) covers a note not yet journal-sourced whose backup
-    `.md` an ingest still read.
-
-    THE SITE-LINK STEP (design amendment 9ee4e346): the resolve runs once at the close of every
-    WINDOW that moved one of its inputs — a window is a run of consecutive ops sharing one
-    journaled ts, the ops one live invocation wrote under its one clock read — inside that
-    window, exactly as the live CLI runs it at an invocation's close; so an edge carries the
-    ts of the window that first made it hold, on rebuild as live. A hoisted genesis note is
-    left out of the step's sources until pass 2 reaches its journal position (its window
-    steps then). A whole-graph pass closes the replay as the CHECK: every rebuild path
-    (in-place, swap delta, heal) ends here, and anything it adds or removes is drift no
-    window justified — counted and printed loud. The counts carry the pass's tallies.
-
-    THE NOTES SOURCE JOURNAL'S WINDOWS (design amendment fa61d93a): with `notes`, each cut-over
-    archive note's groups after its cutover -- or, with `source_offset`, every group after it --
-    merge into the windows by ts and apply through the live step (`apply_notes_groups`), so an
-    archive edit steps the resolve at its own window, on rebuild as live."""
+    """The replay's two passes over ops already read -- `replay_journal` reads them, holds the
+    family's lock when the db is one a live writer may hold, and stamps the cursor after."""
     counts = {v: 0 for v in JOURNAL_VERBS}
     counts["skipped"] = 0
-    # offset = the swap-rebuild delta lane: ops[:offset] are already in the target
-    # projection; idempotent re-application makes a generous (over-inclusive) offset
-    # safe, so callers may pass a PRE-build count and let the overlap verify-collide.
-    ops = read_journal(path)[offset:] if path else []
     genesis = [op for op in ops if op.get("verb") == "new-note"]
     srecs, spans = _source_spans(notes, source_offset)
     counts["source_groups"] = 0
@@ -629,6 +607,82 @@ async def replay_journal(
         print(f"⚠ site links: the closing check changed {links['added']} added / "
               f"{links['removed']} removed edge(s) no window justified — drift, stamped at "
               "rebuild time (9ee4e346 (4))", file=sys.stderr)
+    return counts
+
+
+@timed("replay_journal")
+async def replay_journal(
+    gx: GraphHandle,
+    path: Optional[str],  # Journal file path (JSONL); None = no writes ops (a source-only replay)
+    offset: int = 0,  # Skip the first N ops — the swap-rebuild DELTA lane (DEC 638782c9)
+    emit_root: Optional[str] = None,  # The notes graph's emit root (born posts' file locations derive from it)
+    notes: Optional[Dict[str, Any]] = None,  # The notes graph-sibling config: its source journal's groups replay as windows (fa61d93a)
+    source_offset: Optional[int] = None,     # None = the groups after each note's cutover (a full rebuild); N = every group after the N-th record (a delta)
+) -> Dict[str, int]:  # Per-verb replay counts
+    """Re-apply every journaled write through its core verb (idempotent).
+
+    TWO-PASS — STRUCTURE THEN CONTENT. Pass 1 replays the `new-note` GENESIS ops (M3) so all
+    journal-sourced Note + Section nodes exist; pass 2 replays everything else in append order.
+    This is REQUIRED post-cutover: the genesis ops are appended LAST (the flip is a late event)
+    but earlier curation `link`/`assert`/`alias`/`section` ops TARGET those notes/sections — a
+    single pass would replay them before the node exists, so `link` would drop the edge and
+    `assert` would mint a stray `term` entity. Minting the genesis nodes first lets every later
+    op land on the same deterministic id (so curation edges/assertions carry over automatically,
+    no re-authoring). Append order WITHIN pass 2 is preserved, so a `link` to a journaled
+    Decision still lands after that Decision's `decide`. Deterministic ids make re-application a
+    verified no-op; a pre-cutover `section` op for an as-yet-unbuilt section is still tolerated.
+
+    `add-section` is a pass-2 STRUCTURAL op (a section born on-graph AFTER its note's genesis).
+    It stays in append order — NOT hoisted to pass 1 like `new-note` — because an add-section is
+    always journaled AFTER the note it extends already carries a genesis op, so genesis→add
+    ordering holds without hoisting, and append order is exactly what lets an add compose with the
+    `section` STATE ops interleaved around it (boundary shift then final content, in causal order).
+    Its own idempotency (anchor-exists no-op) covers a note not yet journal-sourced whose backup
+    `.md` an ingest still read.
+
+    THE SITE-LINK STEP (design amendment 9ee4e346): the resolve runs once at the close of every
+    WINDOW that moved one of its inputs — a window is a run of consecutive ops sharing one
+    journaled ts, the ops one live invocation wrote under its one clock read — inside that
+    window, exactly as the live CLI runs it at an invocation's close; so an edge carries the
+    ts of the window that first made it hold, on rebuild as live. A hoisted genesis note is
+    left out of the step's sources until pass 2 reaches its journal position (its window
+    steps then). A whole-graph pass closes the replay as the CHECK: every rebuild path
+    (in-place, swap delta, heal) ends here, and anything it adds or removes is drift no
+    window justified — counted and printed loud. The counts carry the pass's tallies.
+
+    THE NOTES SOURCE JOURNAL'S WINDOWS (design amendment fa61d93a): with `notes`, each cut-over
+    archive note's groups after its cutover -- or, with `source_offset`, every group after it --
+    merge into the windows by ts and apply through the live step (`apply_notes_groups`), so an
+    archive edit steps the resolve at its own window, on rebuild as live."""
+    if not path:
+        return await _replay_ops(gx, None, [], offset, emit_root, notes, source_offset)
+    # THE APPLIED CURSOR (design detail 65f4a6c9 (2c)): the family is read ONCE with each record's
+    # position, and the replay stamps the position of the last record it read -- every rebuild path
+    # (in place, swap, delta, heal) leaves the cursor current, and never past a record it did not
+    # apply. A db that already holds a cursor is one a live writer may hold: the replay takes the
+    # family's lock, so no writer interleaves with it; a fresh build holds none (writes never wait
+    # on a build) and stamps only what it read.
+    store = GraphCursorStore(gx.queue, gx.graph_id)
+    held = await store.read(family_name(path))
+    async with (family_lock(path) if held is not None else nullcontext()):
+        # offset = the swap-rebuild delta lane: ops[:offset] are already in the target
+        # projection; idempotent re-application makes a generous (over-inclusive) offset
+        # safe, so callers may pass a PRE-build count and let the overlap verify-collide.
+        tail = read_tail(path, ORIGIN)
+        if held is not None and held.ordinal:
+            # The cursor's TRUE place, counted off the family -- never its stored ordinal, which a
+            # writer still outside the write order (an append that does not advance it) leaves short
+            at = next((i + 1 for i, (_, pos) in enumerate(tail)
+                       if (pos.segment, pos.offset, pos.digest) == (held.segment, held.offset, held.digest)), None)
+            if at is None:
+                raise CursorMismatch(f"{family_name(path)}: no record ends where the db's cursor stands "
+                                     "-- the family was rewritten under it; rebuild to re-stamp it")
+            if at < offset:
+                raise RuntimeError(f"replay --offset {offset}: the db's cursor stands after record {at} "
+                                   f"-- the {offset - at} op(s) between would be skipped, never applied")
+        counts = await _replay_ops(gx, path, [record for record, _ in tail][offset:], offset,
+                                   emit_root, notes, source_offset)
+        await store.record(family_name(path), tail[-1][1] if tail else ORIGIN)
     return counts
 
 

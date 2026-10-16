@@ -240,6 +240,7 @@ async def assert_value(
     method: Optional[str] = None,          # Derivation method (oracle/programmatic)
     subject_content_hash: Optional[str] = None,  # The subject's content hash this claim binds to (design 40622922); None = compute live for content-bearing subjects (replay passes the journaled one)
     batch: Optional[FactBatch] = None,     # The batch this write lands in (finding da6cdab6): the slot state and the checks' context read from it, never the whole graph; None = read the graph
+    write: bool = True,                    # False = PLAN only (design detail 65f4a6c9 (1)): every refusal, then the op under "op" (None = changes nothing), nothing written
 ) -> Dict[str, Any]:  # The write result (incl. any conflict, warn-record-flag)
     """Write one value to a `(subject, predicate)` slot, recording any conflict.
 
@@ -310,6 +311,7 @@ async def assert_value(
     # re-stated as a fixture, a retired page reopened) — the ordering rule must not also
     # mark the new value born superseded by the very assertion it was told to replace.
     explicit_ids: List[str] = []
+    demoted_by: List[str] = []
     if supersede:
         m = _match_supersede_targets(supersede, slot_existing, predicate)
         if m["unmatched"] or m["ambiguous"]:
@@ -326,16 +328,10 @@ async def assert_value(
         # the very value it is now told to supersede (a flip back by one actor — point_role
         # meta -> content -> meta; identity is (slot, value, actor), so the node is the same).
         # Its demotion edge is lifted first: left standing, the two SUPERSEDES edges form a
-        # cycle and NEITHER value resolves active. Replay lands the same lift from the same op.
+        # cycle and NEITHER value resolves active. Replay lands the same lift from the same op. The
+        # lift waits below the last refusal: nothing is written before a refusal, live or planned.
         if any(F.nid(a) == assertion.id for a in slot_existing):
             demoted_by = [tid for tid in explicit_ids if (tid, assertion.id) in set(supers)]
-            if demoted_by:
-                await graph_task(gx.queue, gx.graph_id, "delete_edges",
-                                 edge_ids=[make_edge(tid, assertion.id, DevRelations.SUPERSEDES)["id"] for tid in demoted_by])
-                supers = [p for p in supers if not (p[0] in demoted_by and p[1] == assertion.id)]
-                if batch is not None:
-                    batch.dropped([(tid, assertion.id) for tid in demoted_by])
-                active_existing = F.active_assertions(slot_existing, supers)
 
     # Back-fill targets (ruling 96aff70e): the assertions that supersede THIS claim, resolved
     # on this slot exactly like `supersede` and refused the same way on any miss. A back-fill
@@ -362,6 +358,34 @@ async def assert_value(
         for tid in backfill_ids:
             edges.append(make_edge(tid, assertion.id, DevRelations.SUPERSEDES))
         born_superseded = bool(backfill_ids)
+
+    # THE PLAN (design detail 65f4a6c9 (1)): every refusal has passed, so the op is total. It names
+    # the subject by id (a free term by its text: replay mints the same term from it), the
+    # supersede / back-fill targets by the slot's assertion ids, and the bound content hash. A
+    # re-assertion of a value already standing active, naming nothing to supersede, changes
+    # nothing and plans no op (ruling 17daa86b).
+    if not write:
+        standing = (not supersede and not superseded_by
+                    and any(F.nid(a) == assertion.id for a in active_existing))
+        op = {"subject": subject if created is not None else subject_id, "predicate": predicate,
+              "value": value, "actor": actor, "evidence": evidence,
+              "supersede": explicit_ids or None,
+              "subject_content_hash": assertion.subject_content_hash}
+        if backfill_ids:
+            op["superseded_by"] = backfill_ids
+        return {"subject": subject, "subject_id": subject_id, "slot_id": slot.id,
+                "subject_content_hash": assertion.subject_content_hash, "predicate": predicate,
+                "value": value, "actor": actor, "assertion_id": assertion.id,
+                "created_subject": created is not None, "nodes_added": 0, "edges_added": 0,
+                "superseded": [], "born_superseded": False, "conflict": [], "soft_conflict": False,
+                "multi_active": [], "noop": standing, "op": None if standing else op}
+    if demoted_by:
+        await graph_task(gx.queue, gx.graph_id, "delete_edges",
+                         edge_ids=[make_edge(tid, assertion.id, DevRelations.SUPERSEDES)["id"] for tid in demoted_by])
+        supers = [p for p in supers if not (p[0] in demoted_by and p[1] == assertion.id)]
+        if batch is not None:
+            batch.dropped([(tid, assertion.id) for tid in demoted_by])
+        active_existing = F.active_assertions(slot_existing, supers)
 
     # Ordered predicate: newer auto-supersedes older active values (healthy evolution).
     if P.is_ordered(predicate) and not backfill_ids:

@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional
 from cjm_context_graph_layer.ops import extend_graph, graph_task
 from cjm_context_graph_primitives.journal import append_write, op_clock, op_now, read_journal
 from cjm_context_graph_primitives.timings import span
+from cjm_context_graph_primitives.writer import CursorMismatch, NoCursor
 
 from .authoring import add_symbol, author, emit_artifact, emit_post, read_node, read_slot
 from .code_edges import orphaned_edges
@@ -75,6 +76,7 @@ from .workbench import anchor_lead_view, portfolio_view, session_feed
 from .worklist import dangling_reference_sources, worklist
 from .write import (add_check, alias, assert_value, confirm_proposal, decide, link,
                     register_session, retract_session, unlink)
+from .writes import InvocationWrites
 
 DEFAULT_MEMORY = ("/home/innom-dt/.claude/projects/"
                   "-mnt-SN850X-8TB-EXT4-Projects-GitHub-cj-mills-cjm-substrate/memory")
@@ -145,14 +147,18 @@ READ_COMMANDS = frozenset({
     "filing", "list", "journal-window", "subgraph", "export", "export-session", "lens",
     "readme", "viz", "serve", "source-check", "portfolio", "lead", "feed",
     "notes-coverage", "notes-overlap", "notes-check", "notes-promotion",
-    "notes-staging-index", "series-order", "site-links", "coverage", "hardware", "claims",
+    "notes-staging-index", "series-order", "site-links", "journal-cursor", "coverage", "hardware", "claims",
     "library", "paths", "traffic", "inbound-links", "standing", "relocation-plan",
     "rebuild-diff", "round-trip", "section-roles", "concepts", "session-cost", "perf", "bench",
 })
 # A read verb whose named flag turns on a WRITE mode: with the flag given, the invocation
 # is a write (opened read-write, refused under --read-only) -- `notes-overlap --rows` lands
 # the judge's edits (the read-only open caught it; cg-read's old allowlist let it write).
-READ_WRITE_MODES = {"notes-overlap": "rows"}
+READ_WRITE_MODES = {"notes-overlap": "rows", "journal-cursor": "adopt"}
+# The write invocations that never open the writes journal's writer (design detail 65f4a6c9): a
+# rebuild verb builds the db FROM its journals (its replay stamps the cursor), and
+# `journal-cursor --adopt` stamps one; every other write invocation begins before its branch runs.
+JOURNAL_BUILD_VERBS = frozenset({"ingest", "ingest-notes", "replay", "m3-baseline", "journal-cursor"})
 
 
 def _reads_only(args) -> bool:
@@ -175,7 +181,7 @@ def _will_write(args) -> bool:
 
 async def _assert_journaled(
     gx: Any,
-    journal_path: Optional[str],  # The write journal (None = an unjournaled write)
+    writes: InvocationWrites,  # The invocation's writes-journal unit of work
     subject: str,
     predicate: str,
     value: str,
@@ -185,28 +191,26 @@ async def _assert_journaled(
     supersede: Optional[list] = None,      # Prior assertion ids OR values this claim supersedes
     superseded_by: Optional[list] = None,  # Assertion ids OR values that supersede this claim (back-fill)
 ) -> Dict[str, Any]:  # The assert_value result
-    """One assert and its journal op: the single write path `assert` and `assert-batch` share.
+    """One assert, plan -> append -> apply (design detail 65f4a6c9): the single write path
+    `assert`, `assert-batch` and the category paths share.
 
-    Never journals a REFUSED write (an ambiguous or typo'd subject, a supersede miss): replay
-    must not re-attempt it. The bound content hash rides the op (design 40622922) so replay
-    re-lands the SAME approval; `superseded_by` rides it only when set, so every other assert
-    op keeps its journaled shape."""
+    The PLAN (assert_value with write=False, against the healed db) resolves the evidence, the
+    subject and the supersede tokens to ids and binds the content hash (design 40622922), and
+    refuses before anything is journaled -- replay never re-attempts a refused write. A
+    re-assertion that changes nothing journals nothing (ruling 17daa86b). The op then applies
+    through the replay's own applier."""
+    await writes.begin()
     evidence, err, prose = await _resolve_evidence(gx, evidence)
     if err:
         return {"error": err}
     for p in prose:
         print(f"⚠ evidence {p[:60]!r} is not a node id — no EVIDENCED_BY edge lands "
               "(finding 0ccdca26)", file=sys.stderr)
-    res = await assert_value(gx, subject, predicate, value, actor=actor, evidence=evidence,
-                             supersede=supersede, superseded_by=superseded_by)
-    if journal_path and not res.get("error"):
-        op = {"subject": subject, "predicate": predicate, "value": value, "actor": actor,
-              "evidence": evidence, "supersede": supersede,
-              "subject_content_hash": res.get("subject_content_hash")}
-        if superseded_by:
-            op["superseded_by"] = superseded_by
-        append_write(journal_path, "assert", op)
-    return res
+    plan = await assert_value(gx, subject, predicate, value, actor=actor, evidence=evidence,
+                              supersede=supersede, superseded_by=superseded_by, write=False)
+    if plan.get("error") or plan["op"] is None:
+        return plan
+    return (await writes.write("assert", plan["op"])).result
 
 
 def _drafts_dir(
@@ -235,7 +239,7 @@ def _journal_entities(
 
 async def _category_paths_journaled(
     gx: Any,
-    journal_path: Optional[str],  # The write journal (None = unjournaled writes)
+    writes: InvocationWrites,     # The invocation's writes-journal unit of work
     actor: str,
     *,
     apply: bool,                  # Land the plan; else print it
@@ -247,6 +251,8 @@ async def _category_paths_journaled(
     from cjm_dev_graph_schema import predicates as P
     from .categorypages import plan_category_paths
     from .site import redirect_plan
+    if apply:
+        await writes.begin()  # the plan reads the db the family's lock and heal leave (65f4a6c9)
     res = await plan_category_paths(gx, (await redirect_plan(gx))["pages"])
     res["landed"] = 0
     for e in res["errors"]:
@@ -256,7 +262,7 @@ async def _category_paths_journaled(
         if not apply:
             print(f"- {r['entry']} -> {r['value']}" + (f" (renamed from {r['supersede'][0]})" if r.get("supersede") else ""))
             continue
-        got = await _assert_journaled(gx, journal_path, r["subject"], P.SITE_PATH, r["value"], actor=actor,
+        got = await _assert_journaled(gx, writes, r["subject"], P.SITE_PATH, r["value"], actor=actor,
                                       supersede=r.get("supersede"))
         if got.get("error"):
             print(f"error: {r['entry']}: {got['error']}", file=sys.stderr)
@@ -523,9 +529,15 @@ async def _dispatch(args) -> int:
     # growth covariates measured before the close, when the invocation is timed.
     journals = {"writes": args.journal_path, "source": args.source_journal_path,
                 "memory": (load_graph_config(args.graph_db_path) or {}).get("memory_journal_path")}
+    # The write order (design detail 65f4a6c9): a writing branch calls `writes.begin()` -- the
+    # writes journal's lock, then the heal -- before its plan reads the db; the lock is held until
+    # the invocation closes, its site-link step included (the window inside it closes first).
     async with invocation_graph(open_graph(args.graph_db_path, args.manifests_dir,
                                            readonly=_reads_only(args)), journals) as gx, \
+            InvocationWrites(gx, args.journal_path, getattr(args, "emit_root", None)) as writes, \
             site_link_window(gx, report=_report_site_links):
+        if not _reads_only(args) and args.command not in JOURNAL_BUILD_VERBS:
+            await writes.begin()  # the lock and the heal BEFORE any branch reads the db (65f4a6c9)
         if args.command == "ingest":
             note_aliases = await note_alias_map(gx)  # confirmed link aliases heal drifted refs
             # The code lane is a FOLD over the source journal (2cc81d3b): its inventory is the
@@ -858,7 +870,7 @@ async def _dispatch(args) -> int:
         elif args.command == "worklist":
             print(render("worklist", await worklist(gx, args.memory_dir), args.format))
         elif args.command == "assert":
-            res = await _assert_journaled(gx, args.journal_path, args.subject, args.predicate,
+            res = await _assert_journaled(gx, writes, args.subject, args.predicate,
                                           args.value, actor=args.actor, evidence=args.evidence,
                                           supersede=args.supersede,
                                           superseded_by=args.superseded_by)
@@ -890,7 +902,7 @@ async def _dispatch(args) -> int:
             # The site-link step runs once at the invocation's close (9ee4e346) — on a stop too,
             # since the lines before the refused one stand.
             for i, spec in specs:
-                res = await _assert_journaled(gx, args.journal_path, spec["subject"],
+                res = await _assert_journaled(gx, writes, spec["subject"],
                                               spec["predicate"], spec["value"],
                                               actor=spec.get("actor", args.actor),
                                               evidence=spec.get("evidence"),
@@ -1157,7 +1169,7 @@ async def _dispatch(args) -> int:
                              {"kind": args.kind, "key": args.key, "name": args.name,
                               "fields": fields, "actor": args.actor})
             if res.get("written"):   # a facet entry's URL lands with it (design a62f2499 (1))
-                paths = await _category_paths_journaled(gx, args.journal_path, args.actor, apply=True,
+                paths = await _category_paths_journaled(gx, writes, args.actor, apply=True,
                                                         only={f"{args.kind}:{args.key}"})
                 if paths["landed"]:
                     print(f"category path: {paths['landed']} assert op(s)")
@@ -1185,7 +1197,7 @@ async def _dispatch(args) -> int:
             _journal_entities(args.journal_path, res["landed"], args.actor)
             print(f"landed: {len(res['landed'])} entity op(s)")
             # the landed facet entries' URLs (design a62f2499 (1))
-            paths = await _category_paths_journaled(gx, args.journal_path, args.actor, apply=True,
+            paths = await _category_paths_journaled(gx, writes, args.actor, apply=True,
                                                     only={f"{r['kind']}:{r['key']}" for r in res["landed"]})
             if paths["landed"]:
                 print(f"category paths: {paths['landed']} assert op(s)")
@@ -1485,7 +1497,7 @@ async def _dispatch(args) -> int:
                 _journal_entities(args.journal_path, res["landed"], args.actor)
                 subjects = {f"{r['kind']}:{r['key']}" for r in res["landed"] if r["kind"] == "subject"}
                 if subjects:   # a landed subject's category URL lands with it (design a62f2499 (1))
-                    paths = await _category_paths_journaled(gx, args.journal_path, args.actor, apply=True,
+                    paths = await _category_paths_journaled(gx, writes, args.actor, apply=True,
                                                             only=subjects)
                     if paths["errors"]:
                         return 1
@@ -1601,7 +1613,7 @@ async def _dispatch(args) -> int:
             # Every category's URL (design a62f2499 (1)): a live facet entry without one takes
             # /categories/<slug>/, a renamed one its new slug (the old path superseded); each lands
             # as an ordinary journaled assert. Without --apply the plan is printed.
-            res = await _category_paths_journaled(gx, args.journal_path, args.actor, apply=args.apply)
+            res = await _category_paths_journaled(gx, writes, args.actor, apply=args.apply)
             print(f"category-paths: {len(res['assert'])} to assert · {res['held']} held"
                   + ("" if args.apply else " _(dry run -- pass --apply to land it)_")
                   + (f" · landed {res['landed']}" if args.apply else ""))
@@ -1711,6 +1723,27 @@ async def _dispatch(args) -> int:
             print(render("site-links", res, args.format))
             return 2 if (res["unresolved"] or res["ambiguous"] or res["anchors"]
                          or res["added"] or res["removed"]) else 0
+        elif args.command == "journal-cursor":
+            # The write order's cursor (design detail 65f4a6c9 (2c), (2d)): where the db's applied
+            # cursor stands on its writes journal and how many records lie past it -- a reader never
+            # heals (the family's next writer does); --adopt stamps the family's end once, on a db
+            # written before the cursor existed
+            if not args.journal_path:
+                print("error: journal-cursor needs --journal-path (cg-read / cg-write bake it)",
+                      file=sys.stderr)
+                return 1
+            from .writes import adopt_cursor, cursor_report
+            if args.adopt:
+                got = await adopt_cursor(gx, args.journal_path)
+                print(f"adopted: {got['family']}'s end is the db's cursor "
+                      f"(ordinal {got['cursor']['ordinal']})")
+            res = await cursor_report(gx, args.journal_path)
+            c = res["cursor"]
+            print(f"{res['family']}: no applied cursor -- adopt it once (journal-cursor --adopt) or "
+                  "rebuild (a replay stamps it)" if c is None else
+                  f"{res['family']}: cursor at ordinal {c['ordinal']} (segment {c['segment']}, "
+                  f"offset {c['offset']}) · {res['lag']} record(s) past it")
+            return 0 if c is not None and not res["lag"] else 2
         elif args.command == "lens":
             params: Dict[str, str] = {}
             for kv in (args.param or []):
@@ -2482,7 +2515,12 @@ async def _dispatch_clocked(args) -> int:
     live db equals its rebuild — for every verb, current and future, by construction.
     Replay / ingest open their own per-op windows inside it (op_clock nests)."""
     with op_clock():
-        return await _dispatch(args)
+        try:
+            return await _dispatch(args)
+        except (NoCursor, CursorMismatch) as e:  # the write order refused before anything was journaled (65f4a6c9)
+            print(f"error: {e} (journal-cursor reports the db's cursor; --adopt stamps it once on a "
+                  "db written before the cursor existed)", file=sys.stderr)
+            return 1
 
 
 def _report_code_fold(fold, args) -> None:
@@ -4400,6 +4438,13 @@ def build_parser() -> argparse.ArgumentParser:  # The CLI's parser, every verb
     sub.add_parser("site-links",
                    help="Report how every in-body site link resolves through site_path facts: "
                         "unresolved / ambiguous rows, and any edge drift (exit 2 when any)")
+
+    p_jc = sub.add_parser("journal-cursor",
+                          help="Report the db's applied cursor on its writes journal and the records "
+                               "past it (exit 2 when none or behind; design detail 65f4a6c9)")
+    p_jc.add_argument("--adopt", action="store_true",
+                      help="Stamp the journal's end as the cursor -- once, on a db written before "
+                           "the cursor existed (a write mode: refused under --read-only)")
 
     p_ls = sub.add_parser("list",
                           help="Enumerate a class: nodes by --label / assertions by --predicate / edges by --relation")

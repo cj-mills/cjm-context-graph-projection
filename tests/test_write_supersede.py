@@ -226,10 +226,12 @@ def test_backfill_journals_and_replays_to_the_same_history(tmp_path):
     jp = str(tmp_path / "writes.jsonl")
 
     async def live(gx):
+        from cjm_context_graph_projection.writes import InvocationWrites
         for v, by in (("/posts/x/", None), ("/Notes-on-X/", ["/posts/x/"]),
                       ("/X-2020/", ["/posts/x/"])):
-            res = await _assert_journaled(gx, jp, "fixture-page", "site_path", v,
-                                          actor="agent:test", superseded_by=by)
+            async with InvocationWrites(gx, jp) as writes:  # one invocation per assert, as the CLI runs it
+                res = await _assert_journaled(gx, writes, "fixture-page", "site_path", v,
+                                              actor="agent:test", superseded_by=by)
             assert not res.get("error")
 
     async def replayed(gx):

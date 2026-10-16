@@ -2,7 +2,9 @@
 
 import json
 
+import pytest
 from cjm_context_graph_primitives.journal import append_write, read_journal
+from cjm_context_graph_primitives.writer import ORIGIN, read_tail
 from cjm_context_graph_projection.journal import journal_window, touched_node_ids
 from cjm_context_graph_projection.render import render
 
@@ -28,6 +30,28 @@ def test_append_skips_exact_duplicate(tmp_path):
     assert append_write(p, "alias", args) is False   # identical -> not re-appended
     assert append_write(p, "alias", {**args, "actor": "b"}) is True  # different -> appended
     assert len(read_journal(p)) == 2
+
+
+@pytest.fixture
+def mem_cursors(monkeypatch):
+    """A graph stand-in for a replay with no store behind it: the db's applied cursors held in a
+    dict (design detail 65f4a6c9 (2c)). Yields (gx, cursors)."""
+    import types
+    import cjm_context_graph_projection.journal as journal_mod
+    cursors = {}
+
+    class MemCursors:
+        def __init__(self, queue, graph_id):
+            pass
+
+        async def read(self, family):
+            return cursors.get(family)
+
+        async def record(self, family, position):
+            cursors[family] = position
+
+    monkeypatch.setattr(journal_mod, "GraphCursorStore", MemCursors)
+    return types.SimpleNamespace(queue=None, graph_id="g"), cursors
 
 
 def test_journal_lines_are_valid_jsonl(tmp_path):
@@ -271,7 +295,7 @@ def test_unlink_full_id_triple_retracts_despite_missing_endpoints(monkeypatch):
     assert res2["written"] is False and "missing node" in res2["error"]
 
 
-def test_replay_offset_skips_applied_prefix(tmp_path, monkeypatch):
+def test_replay_offset_skips_applied_prefix(tmp_path, monkeypatch, mem_cursors):
     """`--offset` is the swap-rebuild delta lane (DEC 638782c9): ops[:offset] never
     re-dispatch; append order (and genesis hoisting) applies WITHIN the tail only."""
     import asyncio
@@ -288,10 +312,15 @@ def test_replay_offset_skips_applied_prefix(tmp_path, monkeypatch):
     async def no_links(gx):  # no graph behind the fake: the closing check has nothing to read
         return {"resolved": 0, "added": 0, "removed": 0, "unresolved": [], "ambiguous": [], "anchors": []}
 
+    gx, cursors = mem_cursors
     monkeypatch.setattr(journal_mod, "_apply_op", fake_apply)
     monkeypatch.setattr(journal_mod, "resolve_site_links", no_links)
-    rc = asyncio.run(journal_mod.replay_journal(None, p, offset=2))
+    rc = asyncio.run(journal_mod.replay_journal(gx, p, offset=2))
     assert applied == [2, 3] and rc["link"] == 2
+    assert cursors["writes.jsonl"].ordinal == 4  # stamped at the last record the replay read
+    cursors["writes.jsonl"] = read_tail(p, ORIGIN)[0][1]  # a db that applied only the first record
+    with pytest.raises(RuntimeError, match="would be skipped"):  # an offset past the cursor skips ops
+        asyncio.run(journal_mod.replay_journal(gx, p, offset=2))
 
 
 def test_node_journal_trace_first_last_sessions(tmp_path):
@@ -319,7 +348,7 @@ def test_node_journal_trace_first_last_sessions(tmp_path):
     assert node_journal_trace([str(p)], "ffff0000-1111-2222-3333-444444444444")["op_count"] == 0
 
 
-def test_procedure_verb_is_journaled_and_replays_through_mint(tmp_path, monkeypatch):
+def test_procedure_verb_is_journaled_and_replays_through_mint(tmp_path, monkeypatch, mem_cursors):
     """Journal-first for programmatic value-sources (finding b744b28e): the oracle's
     Procedure mint rides a `procedure` op, replay re-mints through `mint_procedure`,
     the touch feed resolves it to the deterministic per-method id, and a replayed
@@ -354,7 +383,7 @@ def test_procedure_verb_is_journaled_and_replays_through_mint(tmp_path, monkeypa
     monkeypatch.setattr(journal_mod, "mint_procedure", fake_mint)
     monkeypatch.setattr(journal_mod, "assert_value", fake_assert)
     monkeypatch.setattr(journal_mod, "resolve_site_links", no_links)
-    rc = asyncio.run(journal_mod.replay_journal(None, p))
+    rc = asyncio.run(journal_mod.replay_journal(mem_cursors[0], p))
     assert rc["procedure"] == 1 and rc["assert"] == 1 and rc["skipped"] == 0
     assert minted == [("version-oracle/v1", "version oracle", "programmatic", "asserted")]
     assert asserted == [("e1", "version", "0.0.2", "version-oracle/v1")]
