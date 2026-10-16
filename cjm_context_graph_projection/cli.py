@@ -66,15 +66,15 @@ from .series import mint_series, place_in_series, series_order, set_series_membe
 from .serve import serve_graphs
 from .sessioncost import session_cost
 from .site import site_build
-from .sitelinks import resolve_site_links, site_link_window
+from .sitelinks import resolve_site_links
 from .source_state import collect_appends, emit_source_artifact, flip_module, source_check
 from .structure import add_section
 from .viz import project_viz
 from .workbench import anchor_lead_view, portfolio_view, session_feed
 from .worklist import dangling_reference_sources, worklist
-from .write import (add_check, alias, assert_value, confirm_proposal, decide, link,
-                    register_session, retract_session, unlink)
-from .writes import InvocationWrites
+from .write import (add_check, alias, confirm_proposal, land_assert, land_decide, land_link,
+                    land_retract_session, land_session, link, resolve_evidence, unlink)
+from .writes import InvocationWrites, write_window
 
 DEFAULT_MEMORY = ("/home/innom-dt/.claude/projects/"
                   "-mnt-SN850X-8TB-EXT4-Projects-GitHub-cj-mills-cjm-substrate/memory")
@@ -182,29 +182,11 @@ async def _assert_journaled(
     subject: str,
     predicate: str,
     value: str,
-    *,
-    actor: str,
-    evidence: Optional[list] = None,       # Supporting node ids
-    supersede: Optional[list] = None,      # Prior assertion ids OR values this claim supersedes
-    superseded_by: Optional[list] = None,  # Assertion ids OR values that supersede this claim (back-fill)
+    **kw: Any,                 # land_assert's keywords (actor, evidence, supersede, superseded_by)
 ) -> Dict[str, Any]:  # The assert_value result
-    """One assert, plan -> append -> apply (design detail 65f4a6c9): the single write path
-    `assert`, `assert-batch` and the category paths share.
-
-    The PLAN (assert_value with write=False, against the healed db) resolves the evidence, the
-    subject and the supersede tokens to ids and binds the content hash (design 40622922), and
-    refuses before anything is journaled -- replay never re-attempts a refused write. A
-    re-assertion that changes nothing journals nothing (ruling 17daa86b). The op then applies
-    through the replay's own applier."""
-    await writes.begin()
-    evidence, err = await _plan_evidence(gx, evidence)
-    if err:
-        return {"error": err}
-    plan = await assert_value(gx, subject, predicate, value, actor=actor, evidence=evidence,
-                              supersede=supersede, superseded_by=superseded_by, write=False)
-    if plan.get("error") or plan["op"] is None:
-        return plan
-    return (await writes.write("assert", plan["op"])).result
+    """`land_assert` (the single write path every assert shares) with the CLI's warning for each
+    prose evidence value (finding 0ccdca26)."""
+    return await land_assert(gx, writes, subject, predicate, value, warn=_warn_prose, **kw)
 
 
 async def _land_run(
@@ -298,47 +280,23 @@ async def _resolve_capture(
     return None, f"--capture expects seed | deferred | riding:<item> (got {spec!r})"
 
 
-async def _resolve_evidence(
-    gx,        # The open graph handle
-    evidence,  # An assert's evidence values (a list; a bare string is ONE value)
-):  # -> (values | None, error | None, prose values) — the _resolve_capture shape
-    """Resolve an assert's evidence before its op is journaled (finding 0ccdca26): an
-    id-shaped value (a full id, or a unique prefix of >= 6 hex) becomes its full id, so the
-    op carries what the EVIDENCED_BY edge needs and live and replay land it alike; one that
-    resolves to nothing or to several refuses the write. A value that is not id-shaped is
-    PROSE: kept as given (no edge can land) and returned so the caller warns. A bare string is
-    one value, never a sequence of characters."""
-    from .projection import _ID_PREFIX_RE, ambiguity_error, resolve_node_ref
-    if evidence is None:
-        return None, None, []
-    out, prose = [], []
-    for v in ([evidence] if isinstance(evidence, str) else list(evidence)):
-        v = str(v).strip()
-        if not _ID_PREFIX_RE.match(v):
-            out.append(v)
-            prose.append(v)
-            continue
-        r = await resolve_node_ref(gx, v)
-        if "candidates" in r:
-            return None, ambiguity_error(v, r["candidates"]), []
-        node = r.get("node")
-        if node is None:
-            return None, f"--evidence: no node `{v}` — mint it first, then cite it", []
-        out.append(node.get("id") if isinstance(node, dict) else getattr(node, "id", v))
-    return out, None, prose
+def _warn_prose(
+    value: str,  # A prose evidence value
+) -> None:
+    print(f"⚠ evidence {value[:60]!r} is not a node id — no EVIDENCED_BY edge lands "
+          "(finding 0ccdca26)", file=sys.stderr)
 
 
 async def _plan_evidence(
     gx,        # The open graph handle
     evidence,  # A write's evidence values, as given
 ):  # -> (values | None, error | None)
-    """The evidence a write's PLAN journals (finding 0ccdca26): resolved by `_resolve_evidence`
+    """The evidence a write's PLAN journals (finding 0ccdca26): resolved by `resolve_evidence`
     (a prefix journaled as its full id, a miss refused), each prose value warned -- it lands no
     EVIDENCED_BY edge. One path for `assert` and `alias`."""
-    evidence, err, prose = await _resolve_evidence(gx, evidence)
+    evidence, err, prose = await resolve_evidence(gx, evidence)
     for p in prose:
-        print(f"⚠ evidence {p[:60]!r} is not a node id — no EVIDENCED_BY edge lands "
-              "(finding 0ccdca26)", file=sys.stderr)
+        _warn_prose(p)
     return evidence, err
 
 
@@ -544,8 +502,7 @@ async def _dispatch(args) -> int:
     # the invocation closes, its site-link step included (the window inside it closes first).
     async with invocation_graph(open_graph(args.graph_db_path, args.manifests_dir,
                                            readonly=_reads_only(args)), journals) as gx, \
-            InvocationWrites(gx, args.journal_path, _emit_root(args)) as writes, \
-            site_link_window(gx, report=_report_site_links):
+            write_window(gx, args.journal_path, _emit_root(args), report=_report_site_links) as writes:
         if not _reads_only(args) and args.command not in JOURNAL_BUILD_VERBS:
             await writes.begin()  # the lock and the heal BEFORE any branch reads the db (65f4a6c9)
         if args.command == "ingest":
@@ -990,11 +947,12 @@ async def _dispatch(args) -> int:
             # resolved to ids, a decision already standing no change) and written; each
             # follow-on planned against the db the previous op left -- an assert planned before
             # its decision applied would mint a term for the unknown id (resolve_subject)
-            res = await decide(gx, statement, actor=args.actor, supports=args.supports,
-                               supersedes=args.supersedes, session=args.session,
-                               title=args.title, write=False)
-            if res.get("op"):
-                res = (await writes.write("decide", res["op"])).result
+            facts = ([("task_state", args.state)] if args.state else []) + \
+                    ([("capture_state", capture["value"])] if capture else [])
+            res = await land_decide(gx, writes, statement, actor=args.actor, supports=args.supports,
+                                    supersedes=args.supersedes, session=args.session,
+                                    title=args.title, facts=facts,
+                                    rides=(capture or {}).get("rides"))
             # Mint-time near-duplicate surfacing (ff4e275e shape (a)): propose-only —
             # the mint always lands; the fresh decision carries no task_state yet so
             # it never matches itself. Replay bypasses this branch (rebuilds stay flat).
@@ -1008,21 +966,13 @@ async def _dispatch(args) -> int:
             # assert land in ONE invocation (explicit flag, not title-pattern magic).
             # --capture: the AUTHORED capture_state (a3d196c6 shape (a)) lands beside the
             # mint like --state does, and a riding capture REFERENCES the item it rides.
-            facts = ([("task_state", args.state)] if args.state else []) + \
-                    ([("capture_state", capture["value"])] if capture else [])
-            for predicate, value in facts:
-                st = await _assert_journaled(gx, writes, res["decision_id"], predicate, value,
-                                             actor=args.actor)
+            for st in res.get("facts") or []:
                 print(render("assert", st, args.format))
                 if st.get("error"):
                     return 1
-            if capture and capture.get("rides"):
-                lk = await link(gx, res["decision_id"], capture["rides"], "REFERENCES",
-                                actor=args.actor, write=False)
-                if lk.get("op"):
-                    lk = (await writes.write("link", lk["op"])).result
-                print(render("link", lk, args.format))
-                if lk.get("error"):
+            if res.get("link"):
+                print(render("link", res["link"], args.format))
+                if res["link"].get("error"):
                     return 1
         elif args.command == "uncaptured":
             from .source_state import journal_repos, uncaptured_modules
@@ -1740,32 +1690,20 @@ async def _dispatch(args) -> int:
                     started = None
             # THE PLAN (design detail 65f4a6c9): a re-register that leaves the spine node as it
             # stands journals nothing (ruling 17daa86b); the op applies through the replay's applier
-            res = await register_session(gx, args.key, started_at=started,
-                                         title=args.title, actor=args.actor, write=False)
-            if res.get("op"):
-                res = (await writes.write("session", res["op"])).result
+            res = await land_session(gx, writes, args.key, started_at=started,
+                                     title=args.title, actor=args.actor)
             print(render("session", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "retract-session":
-            # Emptiness guard CALLER-side (the verb + replay apply unconditionally):
-            # any journaled op attributed to the key besides its own registrations
-            # means the session is real history — refuse without --force.
-            paths = [p for p in (args.journal_path, args.source_journal_path) if p]
-            foreign = [
-                op for p in paths for op in read_journal(p)
-                if (op.get("session") or (op.get("args") or {}).get("session")) == args.key
-                and not (op.get("verb") == "session"
-                         and (op.get("args") or {}).get("key") == args.key)]
-            if foreign and not args.force:
-                print(f"error: session '{args.key}' has {len(foreign)} journaled op(s) "
-                      f"attributed to it — not an empty mint. Re-run with --force to "
-                      f"retract anyway.", file=sys.stderr)
+            # The emptiness guard rides the landing function (any journaled op attributed to the
+            # key besides its own registrations is real history -- refused without --force); no
+            # spine node standing journals nothing (ruling 17daa86b)
+            res = await land_retract_session(
+                gx, writes, args.key, force=args.force, actor=args.actor,
+                journal_paths=[p for p in (args.journal_path, args.source_journal_path) if p])
+            if res.get("foreign"):
+                print(f"error: {res['error']}. Re-run with --force to retract anyway.", file=sys.stderr)
                 return 1
-            # THE PLAN (design detail 65f4a6c9): no spine node standing journals nothing (ruling
-            # 17daa86b); the op applies through the replay's applier
-            res = await retract_session(gx, args.key, actor=args.actor, write=False)
-            if res.get("op"):
-                res = (await writes.write("retract-session", res["op"])).result
             print(render("retract-session", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "pull-transcript":
@@ -1776,17 +1714,15 @@ async def _dispatch(args) -> int:
             # cc_session_uuid fact only when it would change; then the chain re-link's
             # compensating `unlink` ops (finding e358fe97), each planned -> appended -> applied.
             # Nothing to land = nothing journaled, the watcher-cadence guarantee.
-            from .pull_transcript import pull_transcript
-            res = await pull_transcript(gx, args.key,
-                                        str(Path(args.transcript_dir).expanduser()),
-                                        require_signal=not args.any_boot,
-                                        actor=args.actor, write=False)
+            from .pull_transcript import land_pull, read_transcript
+            res = await land_pull(gx, writes, read_transcript(args.key,
+                                                              str(Path(args.transcript_dir).expanduser()),
+                                                              require_signal=not args.any_boot),
+                                  actor=args.actor)
             if res.get("error"):
                 print(f"error: {res['error']}", file=sys.stderr)
                 return 1
-            applied: Dict[str, Any] = {}
-            if res.get("op"):
-                applied = (await writes.write("pull-transcript", res["op"])).result or {}
+            applied = res["applied"]
             print(f"**pulled** `{args.key}` <- transcript `{res['cc_session_uuid']}`: "
                   f"{res['messages_new']} new / {res['messages_total']} total message(s) "
                   f"({applied.get('nodes_added', 0)} node(s), {applied.get('edges_added', 0)} edge(s) added)")
@@ -1795,8 +1731,7 @@ async def _dispatch(args) -> int:
                 print(f"  re-linked: {relinked} message(s) already on the graph missing their chain edge")
             if res.get("other_candidates"):
                 print(f"  other candidate transcript(s): {res['other_candidates']}")
-            for u in res["unlinks"]:
-                await writes.write("unlink", u)
+            for u in res["unlinked"]:
                 print(f"  re-linked: retracted stale NEXT "
                       f"{u['source_id'][:8]} -> {u['target_id'][:8]}")
             if res.get("noop"):
@@ -1807,7 +1742,7 @@ async def _dispatch(args) -> int:
             # scratchpad's journaled op; widened for the 47b83adb retro-sweep):
             # journal-first body + optional --set property updates (role/source
             # facet corrections), last-op-wins on replay.
-            from .pull_transcript import edit_message
+            from .pull_transcript import land_edit_message
             if (args.text is None) == (args.text_file is None):
                 print("error: exactly one of --text / --text-file is required",
                       file=sys.stderr)
@@ -1821,18 +1756,53 @@ async def _dispatch(args) -> int:
                     return 1
                 k, v = kv.split("=", 1)
                 props[k] = v
-            res = await edit_message(gx, args.source_uuid, text,
-                                     properties=props or None, actor=args.actor, write=False)
+            res = await land_edit_message(gx, writes, args.source_uuid, text,
+                                          properties=props or None, actor=args.actor)
             if res.get("error"):
                 print(f"error: {res['error']}", file=sys.stderr)
                 return 1
             if res.get("noop"):
                 print(f"**unchanged** Message `{res['message_id'][:8]}` (nothing journaled)")
                 return 0
-            res = (await writes.write("edit-message", res["op"])).result
             print(f"**edited** Message `{res['message_id'][:8]}` (source uuid "
                   f"`{args.source_uuid}`"
                   + (f"; set {', '.join(sorted(props))}" if props else "") + ")")
+            return 0
+        elif args.command == "mint-messages":
+            # The CLI dual of the scratchpad's composer mint (ruling d2d05e78 (3)): the payload as
+            # data -- {uuid, parent_uuid, prev_uuid, role, text, timestamp, source} per message --
+            # planned (every message standing with its chain edge = no change), appended, applied
+            from .pull_transcript import land_mint_messages
+            messages = json.loads(Path(args.messages_file).expanduser().read_text())
+            if not isinstance(messages, list) or not all(isinstance(m, dict) and m.get("uuid") for m in messages):
+                print("error: --messages-file holds a JSON list of message payloads, each with a uuid",
+                      file=sys.stderr)
+                return 1
+            res = await land_mint_messages(gx, writes, args.key, messages, actor=args.actor)
+            if res.get("error"):
+                print(f"error: {res['error']}", file=sys.stderr)
+                return 1
+            if res.get("noop"):
+                print(f"**unchanged** session `{args.key}`: every message stands (no change, nothing journaled)")
+                return 0
+            print(f"**minted** {res['minted']} message(s) onto `{args.key}` ({res['nodes_added']} node(s), "
+                  f"{res['edges_added']} edge(s) added)")
+            return 0
+        elif args.command == "derive-message":
+            # The CLI dual of the scratchpad's compose-send reconciliation (ruling d2d05e78 (3)):
+            # the sent message DERIVED_FROM each part, send order on the edges; a Message not on
+            # the graph refused, every edge standing no change
+            from .pull_transcript import land_derive_message
+            res = await land_derive_message(gx, writes, args.sent_uuid, args.part_uuids, actor=args.actor)
+            if res.get("error"):
+                print(f"error: {res['error']}", file=sys.stderr)
+                return 1
+            if res.get("noop"):
+                print(f"**unchanged** Message `{res['message_id'][:8]}`: every DERIVED_FROM stands "
+                      "(no change, nothing journaled)")
+                return 0
+            print(f"**derived** Message `{res['message_id'][:8]}` from {res['parts']} part(s) "
+                  f"({res['edges_added']} edge(s) added)")
             return 0
         elif args.command == "export-session":
             # The exporter lens (5ab24c57): read-only projection — no journal op.
@@ -1871,11 +1841,10 @@ async def _dispatch(args) -> int:
             # THE PLAN (design detail 65f4a6c9): endpoints resolved, the sibling observed, a link
             # that changes nothing caught (ruling 17daa86b); the op -- the observation riding it --
             # applies through the replay's applier, which never opens the sibling
-            res = await link(gx, args.source_id, args.target_id, args.relation, actor=args.actor,
-                             siblings=sibling_graphs(load_graph_config(args.graph_db_path)),
-                             manifests_dir=args.manifests_dir, write=False)
-            if res.get("op"):
-                res = (await writes.write("link", res["op"])).result
+            res = await land_link(gx, writes, args.source_id, args.target_id, args.relation,
+                                  actor=args.actor,
+                                  siblings=sibling_graphs(load_graph_config(args.graph_db_path)),
+                                  manifests_dir=args.manifests_dir)
             print(render("link", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "unlink":
@@ -4525,6 +4494,23 @@ def build_parser() -> argparse.ArgumentParser:  # The CLI's parser, every verb
     p_em.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                       help="Extra property update (repeatable), e.g. --set role=harness")
     p_em.add_argument("--actor", default=_DEFAULT_ACTOR)
+
+    p_mm = sub.add_parser("mint-messages",
+                          help="Mint message payloads onto a session spine (the CLI dual of the "
+                               "scratchpad's composer mint); every message already standing with "
+                               "its chain edge is no change")
+    p_mm.add_argument("key", help="The session key the messages belong to")
+    p_mm.add_argument("--messages-file", required=True,
+                      help="A JSON list of message payloads ({uuid, parent_uuid, prev_uuid, role, "
+                           "text, timestamp, source})")
+    p_mm.add_argument("--actor", default=_DEFAULT_ACTOR)
+
+    p_dm = sub.add_parser("derive-message",
+                          help="Land a compose-send: the sent Message DERIVED_FROM each part, send "
+                               "order on the edges (the CLI dual of the scratchpad's reconciliation)")
+    p_dm.add_argument("sent_uuid", help="The sent message's capture-source uuid")
+    p_dm.add_argument("part_uuids", nargs="+", help="The composition parts' uuids, in send order")
+    p_dm.add_argument("--actor", default=_DEFAULT_ACTOR)
 
     p_es = sub.add_parser("export-session",
                           help="Project a session's scratchpad message graph to portable "

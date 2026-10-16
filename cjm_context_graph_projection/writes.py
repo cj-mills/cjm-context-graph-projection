@@ -12,11 +12,16 @@ writers apply in journal order live, exactly as replay applies them.
 
 A record the heal applies (a crashed writer's tail) runs as its own window, at its own journaled
 ts, its site-link step at its close -- as replay runs it. An invocation with no writes journal (no
---journal-path: a scratch graph, a test) applies through the same applier and appends nothing."""
+--journal-path: a scratch graph, a test) applies through the same applier and appends nothing.
+
+`write_window` is the ONE unit of work every writer takes (ruling d2d05e78 (1)): the CLI's
+invocation and an app's write gesture alike -- the family's lock outermost, the live write window
+inside it, so the site-link step runs before the lock is released."""
 
 import sys
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, AsyncIterator, Callable, Dict, Optional
 
 from cjm_context_graph_layer.ops import GraphCursorStore, observe_writes
 from cjm_context_graph_primitives.writer import (family_name, journal_lag, JournalWriter,
@@ -24,7 +29,7 @@ from cjm_context_graph_primitives.writer import (family_name, journal_lag, Journ
 
 from .journal import apply_write_op
 from .runtime import GraphHandle
-from .sitelinks import step_site_links
+from .sitelinks import site_link_window, step_site_links
 
 
 @dataclass
@@ -108,6 +113,24 @@ class InvocationWrites:
             self._live = None
         self.written += 1
         return Written(result=result, journaled=True)
+
+
+@asynccontextmanager
+async def write_window(
+    gx: GraphHandle,
+    journal_path: Optional[str],      # The graph's writes journal (None = unjournaled: the applier alone)
+    emit_root: Optional[str] = None,  # The notes graph's emit root
+    report: Optional[Callable[[Dict[str, Any]], None]] = None,  # Called with the site-link step's result when it ran
+) -> AsyncIterator[InvocationWrites]:  # The unit's writes: `begin()` before the plan, `write()` per planned op
+    """THE UNIT OF WORK one write takes (ruling d2d05e78 (1)): the invocation's writes on the
+    family's journal, and inside them the live write window (design amendment 9ee4e346) whose
+    site-link step runs at its close -- before the lock is released. The CLI wraps every
+    invocation in one; an app's write gesture runs as ONE coroutine inside one (the lock's
+    reentrancy and the write observer are context-scoped, so separate submits would be separate
+    units)."""
+    async with InvocationWrites(gx, journal_path, emit_root) as writes:
+        async with site_link_window(gx, report=report):
+            yield writes
 
 
 async def cursor_report(

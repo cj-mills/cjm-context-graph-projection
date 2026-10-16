@@ -856,9 +856,14 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `build_pull_payload` _function_ — The journalable payload for an extraction sequence.
 - `derive_message` _function_ — The compose-send aggregation seam (DEC fc6a0cdc pt 5): the sent message
 - `edit_message` _function_ — In-place body edit of a Message — the journaled edit-op half of the
+- `land_derive_message` _function_ — Land a reconciled compose-send's DERIVED_FROM edges: planned (a missing Message refused),
+- `land_edit_message` _function_ — Edit a Message's body in place: planned, appended, applied; a body and properties already
+- `land_mint_messages` _function_ — Mint messages onto the spine (a composer's committed parts, DEC 93e3e881 pt 5): planned,
+- `land_pull` _function_ — THE PULL (ruling 24fa72c2 (5)): planned against the healed db, the op appended and applied
 - `mint_pulled_messages` _function_ — Land pulled messages on the spine — the code path live pull AND replay share.
+- `plan_messages` _function_ — THE MESSAGES' PLAN (rulings 24fa72c2 (5), d2d05e78 (3)), shared by the pull and
 - `plan_pull` _function_ — THE PULL'S PLAN (ruling 24fa72c2 (5)), read before anything lands: the op's messages are
-- `pull_transcript` _function_ — The live pull: derive the mapping, extract the active path, mint the delta.
+- `read_transcript` _function_ — The pull's READ: derive the mapping, extract the active path, build its payload -- file
 - `stale_next_edges` _function_ — The chain re-link plan (finding e358fe97) — pure, so the live pull and
 
 ### `cjm_context_graph_projection.purenotes`
@@ -1310,12 +1315,18 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `confirm_proposal` _function_ — RESOLVE a proposal for its confirmation (work item bb015d12 (b)): the deliverable, the ONE
 - `content_hash_of` _function_ — The content an approval binds to (design 40622922): a Note hashes as its lossless
 - `decide` _function_ — Record a Decision + its `SUPPORTED_BY` premise edges (reasoning substrate).
+- `land_assert` _function_ — One assert, plan -> append -> apply (design detail 65f4a6c9): the single write path every
+- `land_decide` _function_ — THE DECIDE CHAIN (ruling 547f4123 (1)): the decide op planned (supports / supersedes
+- `land_link` _function_ — Mint a deliberate edge: endpoints resolved, the sibling observed, a link that changes
+- `land_retract_session` _function_ — Retract an EMPTY-minted Session spine node. The emptiness guard lives here, caller-side of
+- `land_session` _function_ — Register / title a Session spine node: a re-register that leaves the node as it stands
 - `link` _function_ — Mint a deliberate edge between two EXISTING nodes (heterogeneous interlink).
 - `link_op` _function_ — A link's op: the RESOLVED ids (a prefix resolves against today's db; replay must land on
 - `mint_procedure` _function_ — Upsert a Procedure node by deterministic (method) id — the programmatic value-source
 - `mint_proposal` _function_ — Mint a PROPOSAL — an agent-drafted update for ONE section of a stale deliverable
 - `observe_foreign` _function_ — Open the sibling graph READ-ONLY, resolve the foreign node, and take the observation.
 - `register_session` _function_ — Register/update a timestamp-keyed Session node — the session SPINE (DEC 6124d8bf).
+- `resolve_evidence` _function_ — Resolve a write's evidence before its op is journaled (finding 0ccdca26): an id-shaped
 - `resolve_subject` _function_ — Resolve a subject to an entity id (rename-stable), minting a `term` entity
 - `retract_session` _function_ — RETRACT a Session spine node — the write dual of `register_session`, on
 - `unlink` _function_ — RETRACT a deliberate edge — the write dual of `link` (finding 2f1d9382).
@@ -1326,6 +1337,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `Written` _class_ — What one write did: the core verb's result, and whether its op was appended (False only
 - `adopt_cursor` _function_ — The one-time adoption of a db written before the cursor existed (65f4a6c9 (2c)): its
 - `cursor_report` _function_ — A READER's view of the write order (65f4a6c9 (2d)): where the db's cursor stands and how
+- `write_window` _function_ — THE UNIT OF WORK one write takes (ruling d2d05e78 (1)): the invocation's writes on the
 
 ## Dependencies
 

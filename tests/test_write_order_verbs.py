@@ -106,11 +106,20 @@ BORN = [(("new-note", "--slug", POST_SLUG, "--content", "---\ntitle: \"A chapter
 ACCEPTED = [(("notes-type", "pure-notes"), False)] + BORN + [
     (("notes-accept", "--slug", POST_SLUG, "--set", "npropset_proof", "--accept-all"), False)]
 NOCHANGE = "nochange"   # a step whose plan finds the graph already there: run once, journals nothing
+TRANSCRIPT_FILE = "transcripts/aaaa1111-2222-3333-4444-555566667777.jsonl"
 FILES = {"edit-message": {"transcripts/aaaa1111-2222-3333-4444-555566667777.jsonl": TRANSCRIPT},
          "pull-transcript": {"transcripts/aaaa1111-2222-3333-4444-555566667777.jsonl": TRANSCRIPT},
          "notes-render": PROPSET,
          "notes-retract": PROPSET, "notes-edit": PROPSET,
          "retire-source": {"site/posts/index.qmd": "---\ntitle: Posts\nlisting: default\n---\n"}}   # the website clone
+# mint-messages / derive-message (ruling d2d05e78 (3)): a composer's parts as payload data, the second
+# chained to the first; a send derived from both once the pull has landed the sent message
+PARTS = [{"uuid": f"c-{i}", "parent_uuid": None, "prev_uuid": f"c-{i - 1}" if i > 1 else None, "role": "user",
+          "text": f"part {i}", "timestamp": f"2026-01-01T00:00:0{i}.000Z", "source": "composer"} for i in (1, 2)]
+FILES.update({v: {TRANSCRIPT_FILE: TRANSCRIPT, "parts1.json": json.dumps(PARTS[:1]), "parts2.json": json.dumps(PARTS)}
+              for v in ("mint-messages", "derive-message")})
+MINT = [(("mint-messages", KEY, "--messages-file", "{run}/" + f), m) for f, m in
+        (("parts1.json", True), ("parts1.json", NOCHANGE), ("parts2.json", True), ("parts2.json", NOCHANGE))]
 RUN_VERBS = {"judge-related", "judge-facets", "judge-roles", "judge-concepts", "review-facets", "review-roles",
              "review-concepts"}
 NOTES = {"notes-retract", "notes-edit", "notes-rehome", "notes-render", "new-note-born", "cutover-born"} | RUN_VERBS   # on the notes lane's sibling + config
@@ -278,7 +287,6 @@ FILES["harvest-discussions"] = {"site/_quarto.yml": (
 # pull-transcript: a wider extraction yields a message BETWEEN the boot prompt and the reply (finding
 # e358fe97) -- the new one rides the op with the reply, whose NEXT edge from it is absent; the stale
 # boot -> reply edge is the planned unlink after it
-TRANSCRIPT_FILE = "transcripts/aaaa1111-2222-3333-4444-555566667777.jsonl"
 PULL = ("pull-transcript", KEY, "--transcript-dir", "{run}/transcripts")
 
 
@@ -604,6 +612,9 @@ SCENARIOS = {
                                         (_fake_gh, False),
                                         (("harvest-discussions", "--website-root", "{run}/site"), True),
                                         (("harvest-discussions", "--website-root", "{run}/site"), NOCHANGE)],
+    "mint-messages": MINT,
+    "derive-message": [(PULL, False)] + MINT[2:3] + [(("derive-message", "u-boot", "c-1", "c-2"), True),
+                                                     (("derive-message", "u-boot", "c-1", "c-2"), NOCHANGE)],
     "pull-transcript": [(PULL, True), (PULL, NOCHANGE), (_insert_mid, False), (PULL, ("pull-transcript", "unlink")),
                         (PULL, NOCHANGE)],
     "ingest-evidence": [(_traffic("2026-10-01", ["2026-09-01", "2026-10-01"],
@@ -844,3 +855,12 @@ def test_a_crashed_write_heals_to_the_uncrashed_run(tmp_path, scenario, k):
     crashed, crashed_counts = _run(tmp_path / "b", scenario, crash=k)
     assert all(counts), f"a step journaled nothing: {counts}"
     assert crashed_counts == counts and crashed == uncrashed
+
+
+def test_derive_message_refuses_a_message_not_on_the_graph(tmp_path):
+    # ruling d2d05e78 (3): an edge to nothing is refused in the plan -- nothing journaled, nothing landed
+    (tmp_path / "graph.config.json").write_text(json.dumps({"memory_journal_path": str(tmp_path / "memory.jsonl")}))
+    db, jp = str(tmp_path / "live.db"), str(tmp_path / "writes.jsonl")
+    r = _cli(db, jp, "derive-message", "u-none", "c-1")
+    assert r.returncode == 1 and "no Message node for source uuid(s) u-none, c-1" in r.stderr, r.stderr
+    assert _ops(jp) == []

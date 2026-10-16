@@ -10,7 +10,8 @@ the derived CC-session-UUID pairing asserted as a fact on the Session node.
 Journal shape (self-contained replay): the live verb journals one
 `pull-transcript` op carrying the NEW messages' full payload — never a bare
 invocation, because transcripts are prunable external files and the journal
-must reconstruct the graph alone. Each payload message carries its chain
+must reconstruct the graph alone (the op carries every message it lands: the
+new ones, and any already on the graph missing its chain edge). Each payload message carries its chain
 predecessor (`prev_uuid`), so an incremental op replays its NEXT edges without
 needing earlier messages in the same op. A pull that finds nothing new journals
 NOTHING (the watcher-cadence guarantee: quiet polls leave no trace)."""
@@ -24,7 +25,7 @@ from cjm_dev_graph_schema.nodes import MessageNode, SessionNode
 from cjm_dev_graph_schema.vocab import DevRelations
 
 from .runtime import GraphHandle
-from .write import assert_value, unlink
+from .write import assert_value
 
 # The capture-source facet stamped on pulled messages (one label, many sources —
 # editor-born parts stamp MESSAGE_SOURCE_COMPOSER).
@@ -136,12 +137,26 @@ async def mint_pulled_messages(
     messages: List[Dict[str, Any]],  # Payload: {uuid, parent_uuid, prev_uuid, role, text, timestamp}
     *,
     actor: str = "agent:session",
+    write: bool = True,        # False = PLAN only (ruling d2d05e78 (3)): the op under "op" (None = changes nothing), nothing written
 ) -> Dict[str, Any]:  # The write result
     """Land pulled messages on the spine — the code path live pull AND replay share.
 
     Idempotent by construction: Message ids derive from capture-record uuids and
-    edge ids from their endpoints, so re-minting converges to verified no-ops."""
+    edge ids from their endpoints, so re-minting converges to verified no-ops.
+
+    THE PLAN (write=False) is `mint-messages`' (a composer's parts; the pull plans its own op and
+    pairing fact in `plan_pull`, so a pairing uuid is refused here): the op carries the messages
+    `plan_messages` finds new or missing their chain edge -- None when every one stands."""
     sess = SessionNode(key=session_key)
+    if not write:
+        if cc_session_uuid:
+            return {"error": "a pairing fact is the pull's to plan (plan_pull), never mint-messages'",
+                    "written": False}
+        new, riding = await plan_messages(gx, session_key, messages)
+        return {"session_id": sess.id, "session_key": session_key, "new_messages": new,
+                "messages": riding, "written": False, "noop": not riding,
+                "op": ({"session_key": session_key, "messages": riding, "actor": actor}
+                       if riding else None)}
     nodes, edges = build_mint_batch(session_key, messages)
     res = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
     fact: Optional[Dict[str, Any]] = None
@@ -208,14 +223,33 @@ async def derive_message(
     part_uuids: List[str],    # Composition-part uuids, send order
     *,
     actor: str = "user:scratchpad",
+    write: bool = True,       # False = PLAN only (ruling d2d05e78 (3)): the refusal, then the op under "op" (None = changes nothing), nothing written
 ) -> Dict[str, Any]:  # The write result
     """The compose-send aggregation seam (DEC fc6a0cdc pt 5): the sent message
     DERIVED_FROM each composition part it was assembled from, order riding
     edge properties (the IN_SERIES pattern — no new relation). Deterministic
-    edge ids make re-derivation converge to no-ops."""
+    edge ids make re-derivation converge to no-ops.
+
+    THE PLAN (write=False): refuses a sent or part Message not on the graph (an edge to nothing --
+    the scratchpad derives only once the pull has landed the sent message), and is no change when
+    every DERIVED_FROM edge stands (extend_graph never updates a standing edge, so nothing else
+    could change)."""
     sent_id = MessageNode(source_uuid=sent_uuid, role="", text="").id
-    res = await extend_graph(gx.queue, gx.graph_id, [],
-                             build_derived_edges(sent_uuid, part_uuids))
+    edges = build_derived_edges(sent_uuid, part_uuids)
+    if not write:
+        ids = [sent_id] + [MessageNode(source_uuid=pu, role="", text="").id for pu in part_uuids]
+        res = await graph_task(gx.queue, gx.graph_id, "query_nodes", query=NodeQuery(ids=ids).to_dict())
+        present = {str(n.id) for n in (res.nodes or [])}
+        missing = [u for u, i in zip([sent_uuid] + list(part_uuids), ids) if i not in present]
+        if missing:
+            return {"error": f"no Message node for source uuid(s) {', '.join(missing)}", "written": False}
+        noop = all([await graph_task(gx.queue, gx.graph_id, "get_edge", edge_id=e["id"]) is not None
+                    for e in edges])
+        return {"message_id": sent_id, "sent_uuid": sent_uuid, "parts": len(part_uuids),
+                "written": False, "noop": noop,
+                "op": None if noop else {"sent_uuid": sent_uuid, "part_uuids": list(part_uuids),
+                                         "actor": actor}}
+    res = await extend_graph(gx.queue, gx.graph_id, [], edges)
     return {"message_id": sent_id, "sent_uuid": sent_uuid,
             "parts": len(part_uuids), "edges_added": res.edges_added,
             "written": True}
@@ -236,22 +270,17 @@ async def _inbound_next(
     return inbound
 
 
-async def plan_pull(
+async def plan_messages(
     gx: GraphHandle,
-    session_key: str,                # The session spine key to pull for
-    cc_session_uuid: str,            # The best-matching transcript's uuid
-    payload: List[Dict[str, Any]],   # build_pull_payload over the whole active path
-    *,
-    actor: str = "agent:session",
-) -> Dict[str, Any]:  # {new_messages, messages, cc_session_uuid_changes, op, unlinks, noop}
-    """THE PULL'S PLAN (ruling 24fa72c2 (5)), read before anything lands: the op's messages are
-    the NEW ones plus every message already on the graph whose expected inbound edge is absent
-    (a NEXT from its payload predecessor, or the Session's STARTS_WITH at a chain head) -- a
-    mid-chain insert's successor re-links on replay too, the applier unchanged; a cc_session_uuid
-    fact that would change is itself a write (an op with no message journals it); the op always
-    names the matched transcript -- provenance its readers take (the bench's ingest workload), and
-    a standing value re-asserts to the same Assertion, a verified no-op; the stale NEXT pairs (the
-    same before the mint as after it) are planned `unlink` ops after it. Nothing to land = no op."""
+    session_key: str,                # The session spine key
+    payload: List[Dict[str, Any]],   # Mint payload dicts, chronological
+    inbound: Optional[Dict[str, List[str]]] = None,  # The payload's inbound NEXT sources, when the caller read them (None = read here)
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:  # (the new messages, the messages an op must carry)
+    """THE MESSAGES' PLAN (rulings 24fa72c2 (5), d2d05e78 (3)), shared by the pull and
+    mint-messages: an op carries every NEW message plus every one already on the graph whose
+    expected inbound edge is absent (a NEXT from its payload predecessor, or the Session's
+    STARTS_WITH at a chain head) -- a mid-chain insert's successor re-links on replay too, the
+    applier unchanged."""
     sess = SessionNode(key=session_key)
     ids = [MessageNode(source_uuid=m["uuid"], role="", text="").id for m in payload]
     present = set()
@@ -259,7 +288,8 @@ async def plan_pull(
         res = await graph_task(gx.queue, gx.graph_id, "query_nodes",
                                query=NodeQuery(ids=ids[i:i + 500]).to_dict())
         present |= {str(n.id) for n in (res.nodes or [])}
-    inbound = await _inbound_next(gx, ids)
+    if inbound is None:
+        inbound = await _inbound_next(gx, ids)
     eres = await graph_task(gx.queue, gx.graph_id, "query_edges",
                             query=EdgeQuery(relation_type=SpineRelations.STARTS_WITH,
                                             source_ids=[sess.id], project=["id"]).to_dict())
@@ -274,6 +304,27 @@ async def plan_pull(
                 riding.append(m)
         elif mid not in heads:
             riding.append(m)
+    return new, riding
+
+
+async def plan_pull(
+    gx: GraphHandle,
+    session_key: str,                # The session spine key to pull for
+    cc_session_uuid: str,            # The best-matching transcript's uuid
+    payload: List[Dict[str, Any]],   # build_pull_payload over the whole active path
+    *,
+    actor: str = "agent:session",
+) -> Dict[str, Any]:  # {new_messages, messages, cc_session_uuid_changes, op, unlinks, noop}
+    """THE PULL'S PLAN (ruling 24fa72c2 (5)), read before anything lands: the op's messages are
+    `plan_messages`'; a cc_session_uuid fact that would change is itself a write (an op with no
+    message journals it); the op always names the matched transcript -- provenance its readers
+    take (the bench's ingest workload), and a standing value re-asserts to the same Assertion, a
+    verified no-op; the stale NEXT pairs (the same before the mint as after it) are planned
+    `unlink` ops after it. Nothing to land = no op."""
+    sess = SessionNode(key=session_key)
+    inbound = await _inbound_next(gx, [MessageNode(source_uuid=m["uuid"], role="", text="").id
+                                       for m in payload])
+    new, riding = await plan_messages(gx, session_key, payload, inbound)
     fact_changes = bool(cc_session_uuid)
     if fact_changes and await graph_task(gx.queue, gx.graph_id, "get_node", node_id=sess.id) is not None:
         fact = await assert_value(gx, sess.id, "cc_session_uuid", cc_session_uuid, actor=actor, write=False)
@@ -286,72 +337,107 @@ async def plan_pull(
             "op": op, "unlinks": unlinks, "noop": op is None and not unlinks}
 
 
-async def pull_transcript(
-    gx: GraphHandle,
+def read_transcript(
     session_key: str,          # The session spine key to pull for
     transcript_dir: str,       # The harness project transcript dir (*.jsonl)
     *,
     require_signal: bool = True,   # Only match boot prompts carrying the mint signal
-    actor: str = "agent:session",
-    write: bool = True,        # False = PLAN only (ruling 24fa72c2 (5)): plan_pull's op + unlinks, nothing written
-) -> Dict[str, Any]:  # The pull result (incl. the NEW-message payload for journaling)
-    """The live pull: derive the mapping, extract the active path, mint the delta.
-
-    Extraction is always FULL (idempotency is free — DEC fc6a0cdc point 3); the
-    watermark optimization can come later without touching correctness. The
-    result's `new_messages` payload is exactly what the CLI journals — messages
-    already on-graph re-mint as no-ops and stay OUT of the journal, so a
-    watcher-cadence pull with nothing new journals nothing.
-
-    write=False is the CLI's PLAN (plan_pull): the op it appends and applies through the
-    replay's applier, then each planned unlink. The write=True path is the scratchpad's
-    apply-then-append mirror, until its op moves with the Qt seats (L4)."""
+) -> Dict[str, Any]:  # {session_key, cc_session_uuid, transcript_path, payload, messages_total, other_candidates} | {error}
+    """The pull's READ: derive the mapping, extract the active path, build its payload -- file
+    work only, no graph read, so a writer runs it OUTSIDE the family's lock (ruling d2d05e78) and
+    takes the lock for the plan and its writes alone. Extraction is always FULL (idempotency is
+    free -- DEC fc6a0cdc point 3)."""
     try:
         from cjm_harness_transcripts.extract import extract_messages
         from cjm_harness_transcripts.mapping import find_transcripts_for_key
         from cjm_harness_transcripts.records import TranscriptDag
     except ModuleNotFoundError:
         return {"error": "cjm-harness-transcripts is not installed in this env — "
-                         "pip install -e it (the pull verb's extraction truth)",
-                "written": False}
+                         "pip install -e it (the pull verb's extraction truth)"}
     matches = find_transcripts_for_key(transcript_dir, session_key,
                                        require_signal=require_signal)
     if not matches:
         return {"error": f"no transcript in {transcript_dir} matches session "
-                         f"{session_key} (require_signal={require_signal})",
-                "written": False}
+                         f"{session_key} (require_signal={require_signal})"}
     best = matches[0]
     payload = build_pull_payload(extract_messages(TranscriptDag.load(best.path)))
-    found = {"session_key": session_key, "cc_session_uuid": best.cc_session_uuid,
-             "transcript_path": str(best.path), "messages_total": len(payload),
-             "other_candidates": [m.cc_session_uuid for m in matches[1:]]}
-    if not write:
-        plan = await plan_pull(gx, session_key, best.cc_session_uuid, payload, actor=actor)
-        return {**found, **plan, "messages_new": len(plan["new_messages"]), "written": False}
-    new_payload: List[Dict[str, Any]] = []
-    for m in payload:
-        existing = await graph_task(gx.queue, gx.graph_id, "get_node",
-                                    node_id=MessageNode(source_uuid=m["uuid"],
-                                                        role="", text="").id)
-        if existing is None:
-            new_payload.append(m)
-    res = await mint_pulled_messages(gx, session_key, best.cc_session_uuid,
-                                     payload, actor=actor)
-    # Chain re-link (finding e358fe97): pulls are ADDITIVE, so a message the
-    # extractor now yields MID-chain (a 2.1.246 thinking summary on a session
-    # pulled before the 6c3a0118 facet) leaves the stale prev->next NEXT edge
-    # beside the new pair. Read every payload message's inbound NEXT edges,
-    # retract the ones the payload's prev_uuid does not vouch for, and report
-    # them — the caller journals the compensating unlinks after the pull op.
-    # Runs even when nothing new minted: that is the repair pull.
-    inbound = await _inbound_next(gx, [MessageNode(source_uuid=m["uuid"], role="", text="").id for m in payload])
-    retracted: List[Dict[str, Any]] = []
-    for src, dst in stale_next_edges(payload, inbound):
-        ures = await unlink(gx, src, dst, SpineRelations.NEXT, actor=actor)
-        if ures.get("written"):
-            retracted.append({"source_id": src, "target_id": dst,
-                              "relation": SpineRelations.NEXT})
-    return {**res, "transcript_path": str(best.path),
-            "messages_total": len(payload), "messages_new": len(new_payload),
-            "new_messages": new_payload, "retracted_edges": retracted,
+    return {"session_key": session_key, "cc_session_uuid": best.cc_session_uuid,
+            "transcript_path": str(best.path), "payload": payload, "messages_total": len(payload),
             "other_candidates": [m.cc_session_uuid for m in matches[1:]]}
+
+
+async def land_pull(
+    gx: GraphHandle,
+    writes: Any,              # The unit of work (writes.InvocationWrites)
+    found: Dict[str, Any],    # read_transcript's result
+    *,
+    actor: str = "agent:session",
+) -> Dict[str, Any]:  # The plan, plus `applied` (the pull op's apply result) and `unlinked` (the unlinks written)
+    """THE PULL (ruling 24fa72c2 (5)): planned against the healed db, the op appended and applied
+    through the replay's applier, then each planned `unlink` the same way (the chain re-link,
+    finding e358fe97). Nothing to land = nothing journaled, the watcher-cadence guarantee."""
+    if found.get("error"):
+        return found
+    await writes.begin()
+    plan = await plan_pull(gx, found["session_key"], found["cc_session_uuid"], found["payload"],
+                           actor=actor)
+    out = {**{k: v for k, v in found.items() if k != "payload"}, **plan,
+           "messages_new": len(plan["new_messages"]), "applied": {}, "unlinked": []}
+    if plan["op"]:
+        out["applied"] = (await writes.write("pull-transcript", plan["op"])).result or {}
+    for u in plan["unlinks"]:
+        await writes.write("unlink", u)
+        out["unlinked"].append(u)
+    return out
+
+
+async def land_mint_messages(
+    gx: GraphHandle,
+    writes: Any,                     # The unit of work (writes.InvocationWrites)
+    session_key: str,                # The session spine key
+    messages: List[Dict[str, Any]],  # Mint payload dicts (a composer's parts)
+    *,
+    actor: str = "user:scratchpad",
+) -> Dict[str, Any]:  # The mint result (the plan's, when it changes nothing)
+    """Mint messages onto the spine (a composer's committed parts, DEC 93e3e881 pt 5): planned,
+    appended, applied; every message already standing with its chain edge is no change."""
+    await writes.begin()
+    res = await mint_pulled_messages(gx, session_key, "", messages, actor=actor, write=False)
+    if res.get("op"):
+        res = (await writes.write("mint-messages", res["op"])).result
+    return res
+
+
+async def land_edit_message(
+    gx: GraphHandle,
+    writes: Any,         # The unit of work (writes.InvocationWrites)
+    source_uuid: str,    # The message's capture-source uuid
+    text: str,           # The replacement body
+    *,
+    properties: Optional[Dict[str, Any]] = None,  # Extra property updates
+    actor: str = "user:scratchpad",
+) -> Dict[str, Any]:  # The edit result (the plan's, when it changes nothing)
+    """Edit a Message's body in place: planned, appended, applied; a body and properties already
+    standing are no change (ruling 17daa86b)."""
+    await writes.begin()
+    res = await edit_message(gx, source_uuid, text, properties=properties, actor=actor, write=False)
+    if res.get("op"):
+        res = (await writes.write("edit-message", res["op"])).result
+    return res
+
+
+async def land_derive_message(
+    gx: GraphHandle,
+    writes: Any,              # The unit of work (writes.InvocationWrites)
+    sent_uuid: str,           # The sent transcript message's capture uuid
+    part_uuids: List[str],    # Composition-part uuids, send order
+    *,
+    actor: str = "user:scratchpad",
+) -> Dict[str, Any]:  # The derive result (the plan's, when it changes nothing or refuses)
+    """Land a reconciled compose-send's DERIVED_FROM edges: planned (a missing Message refused),
+    appended, applied; every edge already standing is no change."""
+    await writes.begin()
+    res = await derive_message(gx, sent_uuid, part_uuids, actor=actor, write=False)
+    if res.get("op"):
+        res = (await writes.write("derive-message", res["op"])).result
+    return res

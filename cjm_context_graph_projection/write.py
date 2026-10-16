@@ -15,11 +15,12 @@ disagreement; untyped predicates report a SOFT signal (worklist, not a hard edge
 """
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from cjm_context_graph_layer.grammar import make_edge
 from cjm_context_graph_layer.identity import derive_node_id
 from cjm_context_graph_layer.ops import extend_graph, graph_task, PROVENANCE_TS
+from cjm_context_graph_primitives.journal import read_journal
 from cjm_context_graph_primitives.provenance import SourceRef
 from cjm_context_graph_primitives.timings import timed
 from cjm_dev_graph_schema import predicates as P
@@ -1100,6 +1101,177 @@ async def retract_session(
                                node_ids=[sess_id], cascade=True)
     return {"session_id": sess_id, "key": key, "deleted": int(deleted or 0),
             "written": True, "actor": actor}
+
+
+# ---- the landing functions (ruling d2d05e78 (2)) --------------------------------------------
+# One per verb, shared by the CLI and the apps' write gestures: each takes the unit of work
+# (`writes.write_window`), takes its lock and heal (`begin()`), plans every op against the db
+# the previous one left (ruling 547f4123 (1)) and writes it -- appended, then applied through
+# the replay's applier. A plan that changes nothing is returned as it stands (ruling 17daa86b).
+
+
+async def resolve_evidence(
+    gx: GraphHandle,
+    evidence: Any,  # A write's evidence values (a list; a bare string is ONE value)
+) -> Tuple[Optional[List[str]], Optional[str], List[str]]:  # (values | None, error | None, prose values)
+    """Resolve a write's evidence before its op is journaled (finding 0ccdca26): an id-shaped
+    value (a full id, or a unique prefix of >= 6 hex) becomes its full id, so the op carries what
+    the EVIDENCED_BY edge needs and live and replay land it alike; one that resolves to nothing or
+    to several refuses the write. A value that is not id-shaped is PROSE: kept as given (no edge
+    can land) and returned so the caller warns. A bare string is one value, never a sequence of
+    characters."""
+    if evidence is None:
+        return None, None, []
+    out: List[str] = []
+    prose: List[str] = []
+    for v in ([evidence] if isinstance(evidence, str) else list(evidence)):
+        v = str(v).strip()
+        if not _ID_PREFIX_SHAPED_RE.match(v):
+            out.append(v)
+            prose.append(v)
+            continue
+        r = await resolve_node_ref(gx, v)
+        if "candidates" in r:
+            return None, ambiguity_error(v, r["candidates"]), []
+        node = r.get("node")
+        if node is None:
+            return None, f"--evidence: no node `{v}` — mint it first, then cite it", []
+        out.append(node.get("id") if isinstance(node, dict) else getattr(node, "id", v))
+    return out, None, prose
+
+
+async def land_assert(
+    gx: GraphHandle,
+    writes: Any,                           # The unit of work (writes.InvocationWrites)
+    subject: str,
+    predicate: str,
+    value: str,
+    *,
+    actor: str = "agent:session",
+    evidence: Optional[List[str]] = None,       # Supporting node ids
+    supersede: Optional[List[str]] = None,      # Prior assertion ids OR values this claim supersedes
+    superseded_by: Optional[List[str]] = None,  # Assertion ids OR values that supersede this claim (back-fill)
+    warn: Optional[Callable[[str], None]] = None,  # Called with each prose evidence value (it lands no edge)
+) -> Dict[str, Any]:  # The assert_value result
+    """One assert, plan -> append -> apply (design detail 65f4a6c9): the single write path every
+    assert shares. The PLAN (against the healed db) resolves the evidence, the subject and the
+    supersede tokens to ids and binds the content hash (design 40622922), and refuses before
+    anything is journaled -- replay never re-attempts a refused write. A re-assertion that
+    changes nothing journals nothing (ruling 17daa86b)."""
+    await writes.begin()
+    evidence, err, prose = await resolve_evidence(gx, evidence)
+    if err:
+        return {"error": err}
+    for p in prose:
+        if warn is not None:
+            warn(p)
+    plan = await assert_value(gx, subject, predicate, value, actor=actor, evidence=evidence,
+                              supersede=supersede, superseded_by=superseded_by, write=False)
+    if plan.get("error") or plan["op"] is None:
+        return plan
+    return (await writes.write("assert", plan["op"])).result
+
+
+async def land_session(
+    gx: GraphHandle,
+    writes: Any,  # The unit of work (writes.InvocationWrites)
+    key: str,     # The session key
+    *,
+    started_at: Optional[float] = None,
+    title: Optional[str] = None,
+    actor: str = "agent:session",
+) -> Dict[str, Any]:  # The register_session result
+    """Register / title a Session spine node: a re-register that leaves the node as it stands
+    journals nothing (ruling 17daa86b)."""
+    await writes.begin()
+    res = await register_session(gx, key, started_at=started_at, title=title, actor=actor, write=False)
+    if res.get("op"):
+        res = (await writes.write("session", res["op"])).result
+    return res
+
+
+async def land_retract_session(
+    gx: GraphHandle,
+    writes: Any,                    # The unit of work (writes.InvocationWrites)
+    key: str,                       # The session key to retract
+    *,
+    journal_paths: Sequence[str] = (),  # The journals whose ops attribute history to a key (writes, source)
+    force: bool = False,            # Retract even when journaled ops are attributed to the key
+    actor: str = "agent:session",
+) -> Dict[str, Any]:  # The retract_session result, or {error, foreign, written: False}
+    """Retract an EMPTY-minted Session spine node. The emptiness guard lives here, caller-side of
+    the verb (replay applies the retraction unconditionally): any journaled op attributed to the
+    key besides its own registrations is real history -- refused unless `force`."""
+    await writes.begin()
+    foreign = [
+        op for p in journal_paths for op in read_journal(p)
+        if (op.get("session") or (op.get("args") or {}).get("session")) == key
+        and not (op.get("verb") == "session" and (op.get("args") or {}).get("key") == key)]
+    if foreign and not force:
+        return {"error": f"session '{key}' has {len(foreign)} journaled op(s) attributed to it "
+                         "— not an empty mint", "foreign": len(foreign), "written": False}
+    res = await retract_session(gx, key, actor=actor, write=False)
+    if res.get("op"):
+        res = (await writes.write("retract-session", res["op"])).result
+    return res
+
+
+async def land_link(
+    gx: GraphHandle,
+    writes: Any,       # The unit of work (writes.InvocationWrites)
+    source_id: str,
+    target_id: str,
+    relation: str,
+    *,
+    actor: str = "agent:session",
+    siblings: Optional[Dict[str, str]] = None,  # {graph key: db path} for a foreign target
+    manifests_dir: str = DEFAULT_MANIFESTS,
+) -> Dict[str, Any]:  # The link result
+    """Mint a deliberate edge: endpoints resolved, the sibling observed, a link that changes
+    nothing caught (ruling 17daa86b); the op -- the observation riding it -- applies through the
+    replay's applier, which never opens the sibling."""
+    await writes.begin()
+    res = await link(gx, source_id, target_id, relation, actor=actor, siblings=siblings,
+                     manifests_dir=manifests_dir, write=False)
+    if res.get("op"):
+        res = (await writes.write("link", res["op"])).result
+    return res
+
+
+async def land_decide(
+    gx: GraphHandle,
+    writes: Any,       # The unit of work (writes.InvocationWrites)
+    statement: str,
+    *,
+    actor: str = "agent:session",
+    supports: Optional[List[str]] = None,
+    supersedes: Optional[List[str]] = None,
+    session: Optional[str] = None,
+    title: Optional[str] = None,
+    facts: Sequence[Tuple[str, str]] = (),  # (predicate, value) asserted on the decision once it stands (task_state, capture_state)
+    rides: Optional[str] = None,            # A riding capture's item: the decision REFERENCES it
+) -> Dict[str, Any]:  # The decide result, plus `facts` (each assert's result) and `link` (the riding link's)
+    """THE DECIDE CHAIN (ruling 547f4123 (1)): the decide op planned (supports / supersedes
+    resolved to ids, a decision already standing no change) and written; each follow-on planned
+    against the db the previous op left -- an assert planned before its decision applied would
+    mint a term for the unknown id (resolve_subject). Stops at the first refusal, the ops already
+    landed standing (a retry completes the chain, every landed op no change)."""
+    await writes.begin()
+    res = await decide(gx, statement, actor=actor, supports=supports, supersedes=supersedes,
+                       session=session, title=title, write=False)
+    if res.get("op"):
+        res = (await writes.write("decide", res["op"])).result
+    if res.get("error"):
+        return res
+    res["facts"] = []
+    for predicate, value in facts:
+        st = await land_assert(gx, writes, res["decision_id"], predicate, value, actor=actor)
+        res["facts"].append(st)
+        if st.get("error"):
+            return res
+    if rides:
+        res["link"] = await land_link(gx, writes, res["decision_id"], rides, "REFERENCES", actor=actor)
+    return res
 
 
 async def mint_procedure(
