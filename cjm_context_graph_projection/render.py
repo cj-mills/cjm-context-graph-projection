@@ -422,6 +422,10 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
     if kind == "retire-source":
         if obj.get("error"):
             return f"⚠ {obj['error']}"
+        if obj.get("noop"):
+            return (f"**already retired** `{obj['slug']}` `{str(obj['note_id'])[:8]}`"
+                    + (f" · successor `{str(obj['successor_id'])[:8]}`" if obj.get("successor_id") else "")
+                    + " (nothing journaled)")
         return (f"**retired** `{obj['slug']}` `{str(obj['note_id'])[:8]}` · source {obj.get('path')} @ "
                 f"{str(obj.get('commit') or '')[:12]} · {obj.get('reason')}"
                 + (f" · successor `{str(obj['successor_id'])[:8]}`" if obj.get("successor_id") else ""))
@@ -2613,14 +2617,14 @@ def _render_notes_lane(kind: str, obj: Dict[str, Any]) -> str:
             lines.append("source " + _human("link", obj["source_link"]))
         return "\n".join(lines)
     if kind == "notes-retract":
-        state = "retracted (node + edges deleted)" if obj.get("deleted") else "already absent (no-op)"
+        state = "retracted (node + edges deleted)" if obj.get("deleted") else "no point to retract (nothing journaled)"
         return f"**retract-point** `{str(obj.get('point_id') or '')[:8]}` — {state}"
     if kind == "notes-edit":
         if obj.get("missing"):
-            return f"**edit-point** `{str(obj.get('point_id') or '')[:8]}` — no such point (no-op)"
+            return f"**edit-point** `{str(obj.get('point_id') or '')[:8]}` — no such point (nothing journaled)"
         changed = obj.get("changed") or {}
         if not changed:
-            return f"**edit-point** `{str(obj.get('point_id') or '')[:8]}` — nothing changed (no op journaled)"
+            return f"**edit-point** `{str(obj.get('point_id') or '')[:8]}` — nothing changed (nothing journaled)"
         lines = [f"**edit-point** `{str(obj.get('point_id') or '')[:8]}` — {', '.join(sorted(changed))} changed (journaled)"]
         for k, (old, new) in changed.items():
             lines.append(f"  {k}: {_short(str(old) or '∅', 70)} → {_short(str(new) or '∅', 70)}")
@@ -2644,7 +2648,7 @@ def _render_notes_lane(kind: str, obj: Dict[str, Any]) -> str:
     if kind == "notes-rehome":
         if not obj.get("written"):
             return (f"**rehome-points** `{obj.get('slug')}` — nothing to move ({obj.get('kept', 0)} deliverable-owned point(s) stay"
-                    + (f"; renders set `{str(obj.get('set_id'))[:8]}`" if obj.get("set_id") else "") + "; no op journaled)")
+                    + (f"; renders set `{str(obj.get('set_id'))[:8]}`" if obj.get("set_id") else "") + "; nothing journaled)")
         return (f"**rehome-points** `{obj.get('slug')}` — {obj.get('moved')} substance point(s) re-homed to set "
                 f"`{str(obj.get('set_id') or '')[:8]}` · {obj.get('kept', 0)} kept by the deliverable (journaled)\n"
                 "  next: `notes-render --slug <post>` — the body must not change")

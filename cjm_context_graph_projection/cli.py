@@ -1589,13 +1589,10 @@ async def _dispatch(args) -> int:
             # the node from git before replay once the file leaves the tree.
             from .archive import retire_source
             res = await retire_source(gx, args.note, reason=args.reason, successor=args.successor,
-                                      website_root=args.website_root, actor=args.actor)
+                                      website_root=args.website_root, actor=args.actor, write=False)
+            if res.get("op"):
+                res = (await writes.write("retire-source", res["op"])).result
             print(render("retire-source", res, args.format))
-            if args.journal_path and res.get("written"):
-                append_write(args.journal_path, "retire-source",
-                             {"note": res["note_id"], "slug": res["slug"], "path": res["path"],
-                              "commit": res["commit"], "reason": args.reason,
-                              "successor": res["successor_id"], "actor": args.actor})
             return 1 if res.get("error") else 0
         elif args.command == "transfer-path":
             # A page's active path moves to another holder (e916a4b9 (4)): the op carries the
@@ -3191,22 +3188,18 @@ async def _notes_lane_command(
         if not args.point:
             print("error: give a point id (or --slug <post> --all)", file=sys.stderr)
             return 1
-        res = await retract_point(gx, args.point, actor=args.actor)
+        res = await retract_point(gx, args.point, actor=args.actor, write=False)
+        if res.get("op"):
+            res = (await writes.write("retract-point", res["op"])).result
         print(render("notes-retract", res, args.format))
-        if res.get("error"):
-            return 1
-        if args.journal_path and res.get("deleted"):
-            append_write(args.journal_path, "retract-point", res["args"])
-        return 0
+        return 1 if res.get("error") else 0
     if cmd == "notes-rehome":
         from .purenotes import rehome_points
-        res = await rehome_points(gx, args.slug, actor=args.actor)
+        res = await rehome_points(gx, args.slug, actor=args.actor, write=False)
+        if res.get("op"):
+            res = (await writes.write("rehome-points", res["op"])).result
         print(render("notes-rehome", res, args.format))
-        if res.get("error"):
-            return 1
-        if args.journal_path and res.get("written"):
-            append_write(args.journal_path, "rehome-points", res["args"])
-        return 0
+        return 1 if res.get("error") else 0
     if cmd == "notes-coverage":
         res = await point_coverage(gx, args.slug, siblings=siblings, graph_key=args.sibling,
                                    skeleton=args.skeleton, manifests_dir=args.manifests_dir)
@@ -3248,13 +3241,11 @@ async def _notes_lane_command(
             return 1
         from .purenotes import edit_point
         res = await edit_point(gx, args.point, text=args.text, lead=args.lead,
-                               parent=("" if args.parent == "none" else args.parent), actor=args.actor)
+                               parent=("" if args.parent == "none" else args.parent), actor=args.actor, write=False)
+        if res.get("op"):
+            res = (await writes.write("edit-point", res["op"])).result
         print(render("notes-edit", res, args.format))
-        if res.get("error"):
-            return 1
-        if args.journal_path and res.get("written"):
-            append_write(args.journal_path, "edit-point", res["args"])
-        return 0
+        return 1 if res.get("error") else 0
     if cmd == "notes-rehead":
         from .purenotes import rehead_points
         pack = json.loads(Path(args.pack).expanduser().read_text())

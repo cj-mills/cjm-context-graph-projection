@@ -87,11 +87,18 @@ async def retire_source(
     commit: Optional[str] = None,         # REPLAY: the journaled commit (skips the git check)
     rel_path: Optional[str] = None,       # REPLAY: the journaled path under the website clone
     actor: str = "agent:session",
+    write: bool = True,                   # False = PLAN only (design detail 65f4a6c9 (1)): every refusal, then the op under "op", nothing written
 ) -> Dict[str, Any]:  # {note_id, slug, path, commit, reason, successor_id, written} | {error, written: False}
     """Retire an archive source (journaled `retire-source`). LIVE, the source must be committed
     as ingested: the clone's HEAD holds the file and its bytes hash to the node's content hash,
     so a rebuild restores exactly this node. The fact is `publish_state retired`; a successor
-    gets a SUPERSEDES edge onto the retired node."""
+    gets a SUPERSEDES edge onto the retired node.
+
+    THE PLAN (write=False): the note and the successor resolved to their ids, the fact's assert
+    planned (its refusal is the retirement's), the clone read, and the op -- or None when the
+    retirement already STANDS: the fact active as this actor asserts it and the successor's edge
+    landed (ruling 17daa86b; a crashed retirement's retry lands here, and so does one whose
+    source has since left the clone, so the standing test runs before the clone is read)."""
     from .purenotes import note_types
     from .write import assert_value
     from .projection import resolve_node_ref
@@ -106,6 +113,20 @@ async def retire_source(
     if (await note_types(gx)).get(nid, {}).get("origin") != P.ORIGIN_ARCHIVE:
         return {"error": f"`{slug}` is not an archive source — a born note retires by "
                          "`assert <note> publish_state retired`", "written": False}
+    successor_id = None
+    if successor:
+        sres = await resolve_node_ref(gx, successor)
+        if sres.get("node") is None:
+            return {"error": f"no successor node `{successor}`", "written": False}
+        successor_id = str(F.nid(sres["node"]))
+    if not write:
+        plan = await assert_value(gx, nid, P.PUBLISH_STATE, P.PUBLISH_RETIRED, actor=actor, write=False)
+        if plan.get("error"):
+            return {"error": plan["error"], "written": False}
+        if plan.get("op") is None and (not successor_id
+                                       or (successor_id, nid) in set(await F.load_supersedes(gx))):
+            return {"note_id": nid, "slug": slug, "reason": reason, "successor_id": successor_id,
+                    "written": False, "noop": True, "op": None}
     if commit is None:
         if not website_root:
             return {"error": "a live retirement needs the website clone (`website_root`)", "written": False}
@@ -123,12 +144,11 @@ async def retire_source(
             return {"error": f"{rel_path} at HEAD differs from the ingested node — commit the file as "
                              "ingested (or re-ingest) before retiring it, so a rebuild restores this node",
                     "written": False}
-    successor_id = None
-    if successor:
-        sres = await resolve_node_ref(gx, successor)
-        if sres.get("node") is None:
-            return {"error": f"no successor node `{successor}`", "written": False}
-        successor_id = str(F.nid(sres["node"]))
+    if not write:
+        return {"note_id": nid, "slug": slug, "path": rel_path, "commit": commit, "reason": reason,
+                "successor_id": successor_id, "written": False, "noop": False,
+                "op": {"note": nid, "slug": slug, "path": rel_path, "commit": commit, "reason": reason,
+                       "successor": successor_id, "actor": actor}}
     fact = await assert_value(gx, nid, P.PUBLISH_STATE, P.PUBLISH_RETIRED, actor=actor)
     if fact.get("error"):
         return {"error": fact["error"], "written": False}

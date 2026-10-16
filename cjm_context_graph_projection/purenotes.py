@@ -2553,22 +2553,32 @@ async def retract_point(
     point_ref: str,                 # The Point id (or unique prefix)
     *,
     actor: str = "user:cli",
+    write: bool = True,             # False = PLAN only (design detail 65f4a6c9 (1)): every refusal, then the op under "op", nothing written
 ) -> Dict[str, Any]:  # {point_id, owner_id, key, deleted, args, written} | {error}
     """Retract a point: delete the node (its edges cascade). The compensating op of accept —
     journaled, replayed in append order after the accept it undoes; a missing point is a
     tolerated no-op so a rebuild converges with the point absent. A set-owned point is the
-    SOURCE's (96be1528 (P)): retracting it reaches every deliverable rendering the set."""
+    SOURCE's (96be1528 (P)): retracting it reaches every deliverable rendering the set.
+
+    THE PLAN (write=False): the point resolved to its id and the op -- or None when no point
+    stands: a retraction of nothing is no change (ruling 17daa86b; a crashed retract's retry
+    lands here)."""
     from .projection import ambiguity_error, resolve_node_ref
     r = await resolve_node_ref(gx, point_ref)
     if "candidates" in r:
         return {"error": ambiguity_error(point_ref, r["candidates"]), "written": False}
     node = r.get("node")
     if node is None:
+        if not write:
+            return {"point_id": point_ref, "deleted": False, "written": False, "noop": True, "op": None}
         return {"point_id": point_ref, "deleted": False, "written": True,
                 "args": {"point_id": point_ref, "actor": actor}}
     if F.label(node) != DevNodeKinds.POINT:
         return {"error": f"`{point_ref}` is a {F.label(node)}, not a Point", "written": False}
     pid, owner_id, key = F.nid(node), str(F.prop(node, "owner_id") or ""), str(F.prop(node, "key") or "")
+    if not write:
+        return {"point_id": pid, "owner_id": owner_id, "key": key, "deleted": False, "written": False,
+                "noop": False, "op": {"point_id": pid, "slug": "", "key": key, "actor": actor}}
     await graph_task(gx.queue, gx.graph_id, "delete_nodes", node_ids=[pid], cascade=True)
     return {"point_id": pid, "owner_id": owner_id, "key": key, "deleted": True, "written": True,
             "args": {"point_id": pid, "slug": "", "key": key, "actor": actor}}
@@ -2617,6 +2627,7 @@ async def rehome_points(
     slug: str,                      # The deliverable Note's slug
     *,
     actor: str = "user:cli",
+    write: bool = True,             # False = PLAN only (design detail 65f4a6c9 (1)): every refusal, then the op under "op", nothing written
 ) -> Dict[str, Any]:  # {slug, note_id, set_id, moved, kept, args, written} | {error}
     """THE RE-HOME (ruling 96be1528 (P); the migration of a deliverable born before PointSets):
     every SUBSTANCE point the Note owns moves to the PointSet of its (Source, unit) — the set
@@ -2628,7 +2639,10 @@ async def rehome_points(
     and expansions re-targeted to the set. Journaled as `rehome-points` and replayed in
     append order after the accepts it moves, so a journal of pre-re-home accepts converges
     on the same graph as the live one; idempotent — a Note with nothing left to move is a
-    no-op that journals nothing."""
+    no-op that journals nothing.
+
+    THE PLAN (write=False): the refusals, the counts, and the op -- or None when nothing is left
+    to move (ruling 17daa86b; a crashed re-home's retry lands here)."""
     note_id = note_node_id(slug)
     note = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=note_id)
     if note is None:
@@ -2640,13 +2654,16 @@ async def rehome_points(
     if not moving:
         sets = await rendered_sets(gx, note_id)
         return {"slug": slug, "note_id": note_id, "set_id": sets[0] if sets else None, "moved": 0,
-                "kept": len(kept), "args": args, "written": False}
+                "kept": len(kept), "args": args, "written": False, "noop": True, "op": None}
     units = {(str((p.get("unit") or {}).get("graph") or ""), str((p.get("unit") or {}).get("source_id") or ""))
              for p in moving}
     if len(units) != 1 or not all(next(iter(units))):
         return {"error": f"the Note's points name {len(units)} source unit(s) — a Note renders ONE set per "
                          f"(Source, unit), and every point must carry its unit's graph + source_id",
                 "slug": slug, "written": False}
+    if not write:
+        return {"slug": slug, "note_id": note_id, "moved": len(moving), "kept": len(kept), "written": False,
+                "noop": False, "op": args}
     set_id = await ensure_point_set(gx, note_id, dict(moving[0].get("unit") or {}), actor=actor)
     moved_keys = {str(p.get("key")) for p in moving}
     nodes: List[Dict[str, Any]] = []
@@ -2694,6 +2711,7 @@ async def edit_point(
     origins: Optional[List[Dict[str, Any]]] = None,  # New provenance list (the judge's fold; None = keep)
     judged: Optional[List[Dict[str, Any]]] = None,   # New overlap judgements (the judge; None = keep)
     actor: str = "user:cli",
+    write: bool = True,                 # False = PLAN only (design detail 65f4a6c9 (1)): every refusal, then the op under "op", nothing written
 ) -> Dict[str, Any]:  # {point_id, owner_id, key, changed: {field: [old, new]}, args, written} | {error}
     """Edit an accepted point IN PLACE — the per-point repair the ch. 2 staging read demanded
     (ruling 5625b74e; the lane gap named in b542896b (b) and 5fdeb80c): text, lead, parent —
@@ -2707,14 +2725,18 @@ async def edit_point(
     target keeps its key, as at accept). The lead and arrow contracts of ingest hold on the
     edited text. Journaled as `edit-point` with the FIELD SET applied; replay re-applies it
     after the accept it edits (a missing point is a tolerated no-op — the accept may have
-    been retracted later in the journal). Unchanged fields land nothing."""
+    been retracted later in the journal). Unchanged fields land nothing.
+
+    THE PLAN (write=False): every contract checked, the parent resolved to its key, and the op
+    carrying the FIELD SET -- or None when no field would change or no point stands (ruling
+    17daa86b; a crashed edit's retry lands here)."""
     from .projection import ambiguity_error, resolve_node_ref
     r = await resolve_node_ref(gx, point_ref)
     if "candidates" in r:
         return {"error": ambiguity_error(point_ref, r["candidates"]), "written": False}
     node = r.get("node")
     if node is None:
-        return {"point_id": point_ref, "missing": True, "changed": {}, "written": False,
+        return {"point_id": point_ref, "missing": True, "changed": {}, "written": False, "op": None,
                 "args": {"point_id": point_ref, "fields": {}, "actor": actor}}
     if F.label(node) != DevNodeKinds.POINT:
         return {"error": f"`{point_ref}` is a {F.label(node)}, not a Point", "written": False}
@@ -2791,8 +2813,12 @@ async def edit_point(
         if new_parent_key != old_parent_key:
             fields["parent_key"] = new_parent_key
     if not fields:
-        return {"point_id": pid, "owner_id": owner_id, "key": key, "changed": {}, "written": False,
+        return {"point_id": pid, "owner_id": owner_id, "key": key, "changed": {}, "written": False, "op": None,
                 "args": {"point_id": pid, "key": key, "fields": {}, "actor": actor}}
+    if not write:
+        return {"point_id": pid, "owner_id": owner_id, "key": key, "written": False,
+                "changed": {k: [cur.get(k) if cur.get(k) is not None else "", v] for k, v in fields.items()},
+                "op": {"point_id": pid, "key": key, "fields": dict(fields), "actor": actor}}
     merged = {**{k: v for k, v in cur.items() if v is not None}, **fields, "key": key}
     pn = point_from_args(owner_id, merged, actor=str(cur.get("actor") or actor))
     props = pn.to_graph_node()["properties"]

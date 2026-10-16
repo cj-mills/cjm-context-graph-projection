@@ -8,8 +8,10 @@ Every verb planned -> appended -> applied is held to one proof, driven through t
 - each live db equals the replay of its own journal ELEMENT FOR ELEMENT (`rebuild-diff`, ruling
   f8b9c728), and the two journals hold the same ops in the same order -- a crashed step journals
   exactly ONE op, every step the same count in both runs, an A -> B -> A sequence kept whole.
-A verb joins the proof by adding its scenario to SCENARIOS; a scenario naming `tx:` gets the
-sibling graph a cross-graph link observes, and one keyed in FILES gets those files in its run."""
+A verb joins the proof by adding its scenario to SCENARIOS; a scenario naming `tx:` (or listed in
+NOTES) gets the sibling graph a cross-graph link observes, and one keyed in FILES gets those files in
+its run. A step whose first element is a function is a HARNESS action (a git commit, a journal written
+by an earlier release), run in both runs alike and never counted."""
 
 import asyncio
 import json
@@ -22,10 +24,11 @@ from pathlib import Path
 import psutil
 import pytest
 from cjm_context_graph_layer.ops import extend_graph
-from cjm_context_graph_primitives.journal import read_journal
+from cjm_context_graph_primitives.journal import append_record, read_journal
 from cjm_context_graph_primitives.writer import FAULT_EXIT, JOURNAL_FAULT_ENV
+from cjm_context_graph_projection.purenotes import NOTES_PROPSET_FORMAT, NOTES_PROPSET_VERSION
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
-from cjm_dev_graph_schema.identity import note_node_id
+from cjm_dev_graph_schema.identity import note_node_id, point_node_id, point_set_node_id
 from cjm_dev_graph_schema.nodes import DecisionNode, ReferenceNode
 
 # Drives the real CLI, which needs the graph-storage worker capability installed.
@@ -57,8 +60,64 @@ TRANSCRIPT = "".join(json.dumps(r) + "\n" for r in (
     {"type": "assistant", "isSidechain": False, "uuid": "u-reply", "parentUuid": "u-boot",
      "timestamp": (BOOT + timedelta(seconds=4)).isoformat().replace("+00:00", "Z"),
      "message": {"role": "assistant", "content": [{"type": "text", "text": "On it."}]}}))
-FILES = {"edit-message": {"transcripts/aaaa1111-2222-3333-4444-555566667777.jsonl": TRANSCRIPT}}
-JOURNALED_AS = {"notes-type": "deliverable-type"}   # a CLI verb whose op journals under another name
+# The sibling's Segments a point derives from, and a proposal set over them with FIXED proposal ids
+# (a drafted set mints uuid4 keys; a point's id is (owner, key), so both runs must accept the same keys)
+SEGMENTS = [{"id": f"seg-{i}", "label": "Segment", "properties": {"text": t, "index": i, "start_time": float(i),
+                                                                   "end_time": i + 1.0, "source_id": SOURCE}}
+            for i, t in enumerate(("Gatto quit teaching in 1991.", "Subjects taught in isolation.",
+                                   "Kids never build a coherent picture."))]
+UNIT = {"graph": "tx", "source_id": SOURCE, "title": "Chapter 1"}
+KEYS = [f"0000000{i}-1111-4222-8333-444455556666" for i in range(3)]
+PROPS = [{"proposal_id": k, "kind": "claim", "text": seg["properties"]["text"], "segment_ids": [seg["id"]],
+          "from_i": i, "to_i": i, "heading": "", "heading_index": 0, "start_time": float(i), "end_time": i + 1.0,
+          **({"lead": "Gatto"} if i == 0 else {})} for i, (k, seg) in enumerate(zip(KEYS, SEGMENTS))]
+PROPSET = {"purenotes/proposals/npropset_proof/manifest.json": json.dumps(
+               {"format": NOTES_PROPSET_FORMAT, "version": NOTES_PROPSET_VERSION, "proposal_set_id": "npropset_proof",
+                "created_at": 1.0, "type": "pure-notes", "model": {"kind": "test"}, "source": UNIT,
+                "files": {"proposals": "proposals.jsonl"}}),
+           "purenotes/proposals/npropset_proof/proposals.jsonl": "".join(json.dumps(p) + "\n" for p in PROPS)}
+PT = [point_node_id(point_set_node_id("tx", SOURCE, ""), k) for k in KEYS]   # each accepted point, set-owned
+POST_SLUG = "a-book/ch01"
+BORN = [(("new-note", "--slug", POST_SLUG, "--content", "---\ntitle: \"A chapter\"\ndate: 2026-09-07\n---\n\nNotes.\n"),
+         False)]
+ACCEPTED = [(("notes-type", "pure-notes"), False)] + BORN + [
+    (("notes-accept", "--slug", POST_SLUG, "--set", "npropset_proof", "--accept-all"), False)]
+FILES = {"edit-message": {"transcripts/aaaa1111-2222-3333-4444-555566667777.jsonl": TRANSCRIPT},
+         "notes-retract": PROPSET, "notes-edit": PROPSET,
+         "retire-source": {"site/posts/index.qmd": "---\ntitle: Posts\nlisting: default\n---\n"}}   # the website clone
+NOTES = {"notes-retract", "notes-edit", "notes-rehome"}   # scenarios on the notes lane's sibling + config
+JOURNALED_AS = {"notes-type": "deliverable-type", "notes-retract": "retract-point", "notes-rehome": "rehome-points",
+                "notes-edit": "edit-point"}   # a CLI verb whose op journals under another name
+
+
+def _legacy_accepts(
+    run: Path,  # This run's directory
+    jp: str,    # Its writes journal
+) -> None:
+    """Points accepted BEFORE the re-home (ruling 96be1528 (P)): accept-point ops carrying no
+    `point_set`, so they land under the Note -- the journal an earlier release wrote, never the
+    live CLI's (which names the set). Appended unapplied; the next invocation's heal lands them."""
+    for k, seg in zip(KEYS[:2], SEGMENTS):
+        obs = ReferenceNode.observe("tx", seg, observed_at=1.0).observation()
+        point = {"key": k, "kind": "claim", "text": seg["properties"]["text"], "segment_ids": [seg["id"]],
+                 "ordinal": 0, "unit": UNIT}
+        append_record(jp, {"verb": "accept-point", "args": {"slug": POST_SLUG, "point": point, "observations": [obs],
+                                                            "actor": "user:cli", "proposal_set_id": "npropset_proof"}})
+
+
+def _commit_site(
+    run: Path,  # This run's directory
+    jp: str,    # Its writes journal (unused: a commit journals nothing)
+) -> None:
+    """The website clone's history: everything under {run}/site committed at a FIXED time and author,
+    so both runs reach the same commit id (the retire-source op carries it)."""
+    env = {**os.environ, "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z", "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z",
+           "GIT_AUTHOR_NAME": "proof", "GIT_AUTHOR_EMAIL": "proof@example.invalid",
+           "GIT_COMMITTER_NAME": "proof", "GIT_COMMITTER_EMAIL": "proof@example.invalid"}
+    site = str(run / "site")
+    for cmd in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "the archive"]):
+        subprocess.run(["git", "-C", site, *cmd], check=True, env=env, capture_output=True)
+
 
 # Every scenario runs after the seed; a True step writes exactly ONE op and is the one crashed
 # between its append and its apply in run B (a False step may write several: an Entity's category
@@ -121,6 +180,26 @@ SCENARIOS = {
         (("edit-message", "u-boot", "--text", t), True) for t in ("T1", "T2", "T1")] + [
         (("edit-message", "u-boot", "--text", "T1", "--set", "flag=1"), True)],
     "notes-type": [(("notes-type", "a-type", "--title", t, "--kind", "notes"), True) for t in ("A", "B", "A")],
+    "retire-source": [(("new-note", "--path", "{run}/site/posts/arch.md", "--content", ARCH), False),
+                      (("notes-type", "archive-notes", "--title", "Archive", "--kind", "notes", "--origin", "archive"),
+                       False),
+                      (("assert", note_node_id("arch-note"), "deliverable_type", "archive-notes"), False),
+                      (_commit_site, False),
+                      (("retire-source", note_node_id("arch-note")[:8], "--reason", "gone",
+                        "--website-root", "{run}/site"), True),
+                      (("retire-source", note_node_id("arch-note"), "--reason", "gone", "--successor", OTHER_ID[:8],
+                        "--website-root", "{run}/site"), True)],
+    "notes-retract": ACCEPTED + [(("notes-retract", PT[2]), True),
+                                 (("notes-accept", "--slug", POST_SLUG, "--set", "npropset_proof", "--accept-all"),
+                                  False),
+                                 (("notes-retract", PT[2][:12]), True)],
+    "notes-edit": ACCEPTED + [(("notes-edit", PT[2], "--text", t), True)
+                              for t in ("Kids never see the whole.", SEGMENTS[2]["properties"]["text"],
+                                        "Kids never see the whole.")] + [
+        (("notes-edit", PT[2][:12], "--parent", PT[0][:12]), True), (("notes-edit", PT[2], "--lead", "Kids"), True),
+        (("notes-edit", PT[2], "--parent", "none"), True)],
+    "notes-rehome": [(("notes-type", "pure-notes"), False)] + BORN + [(_legacy_accepts, False),
+                                                                     (("notes-rehome", "--slug", POST_SLUG), True)],
     "transfer-path": [(("assert", ITEM_ID, "site_path", "/a/"), False),
                       (("transfer-path", ITEM_ID[:8], OTHER_ID[:8]), True),
                       (("transfer-path", OTHER_ID, ITEM_ID), True),
@@ -158,16 +237,20 @@ def _reap(pid: int) -> None:
 
 
 def _sibling(
-    run: Path,  # This run's directory
+    run: Path,           # This run's directory
+    notes: bool = False,  # The notes lane's config too: born posts emit under {run}/staging
 ) -> None:
-    """The sibling graph a cross-graph link observes -- one Source -- named in the run's config.
-    Replay reads the observation off the op, never the sibling."""
+    """The sibling graph a cross-graph link observes -- one Source and the Segments a point derives
+    from -- named in the run's config. Replay reads the observations off the op, never the sibling."""
     async def mint():
         async with open_graph(str(run / "sibling.db")) as sg:
             await extend_graph(sg.queue, sg.graph_id,
-                               [{"id": SOURCE, "label": "Source", "properties": {"title": "Chapter 1"}}], [])
+                               [{"id": SOURCE, "label": "Source", "properties": {"title": "Chapter 1"}}] + SEGMENTS, [])
     asyncio.run(mint())
-    (run / "graph.config.json").write_text(json.dumps({"sibling_graphs": {"tx": str(run / "sibling.db")}}))
+    config = {"sibling_graphs": {"tx": str(run / "sibling.db")}}
+    if notes:
+        config.update(notes_profile="quarto_post", emit_root=str(run / "staging"))
+    (run / "graph.config.json").write_text(json.dumps(config))
 
 
 def _ops(
@@ -185,13 +268,16 @@ def _run(
     (run / "no-memory").mkdir()
     db, jp = str(run / "live.db"), str(run / "writes.jsonl")
     steps = SEED + SCENARIOS[scenario]
-    if any(a.startswith("tx:") for args, _ in steps for a in args):
-        _sibling(run)
+    if scenario in NOTES or any(a.startswith("tx:") for args, _ in steps if not callable(args) for a in args):
+        _sibling(run, notes=scenario in NOTES)
     for rel, text in FILES.get(scenario, {}).items():
         (run / rel).parent.mkdir(parents=True, exist_ok=True)
         (run / rel).write_text(text)
     counts = []
     for args, crash_it in steps:
+        if callable(args):
+            args(run, jp)
+            continue
         args = [a.replace("{run}", str(run)) for a in args]
         before = len(_ops(jp))
         if crash and crash_it:
@@ -216,8 +302,9 @@ def _run(
     ops = []
     for o in read_journal(jp):
         args = json.loads(json.dumps(o["args"]).replace(str(run), "{run}"))
-        if isinstance(args.get("observation"), dict):   # an observation's time is its run's own clock
-            args["observation"]["observed_at"] = "{clock}"
+        for obs in ([args["observation"]] if isinstance(args.get("observation"), dict) else []) + list(
+                args.get("observations") or []):   # an observation's time is its run's own clock
+            obs["observed_at"] = "{clock}"
         ops.append((o["verb"], args))
     return ops, counts
 
