@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from cjm_context_graph_layer.ops import extend_graph, graph_task
-from cjm_context_graph_primitives.journal import append_write, op_clock, read_journal
+from cjm_context_graph_primitives.journal import op_clock, read_journal
 from cjm_context_graph_primitives.timings import span
 from cjm_context_graph_primitives.writer import CursorMismatch, NoCursor
 
@@ -36,8 +36,7 @@ from .explorer_page import EXPLORER_HTML
 from .factlayer import note_alias_map
 from .filing import filing, near_duplicates
 from .hybrid_page import HYBRID_HTML
-from .journal import (journal_sourced_note_paths, journal_window_view, M3_BASELINE_ACTOR,
-                      m3_baseline_import, replay_journal)
+from .journal import journal_sourced_note_paths, journal_window_view, replay_journal
 from .lens import apply_lens, set_lens
 from .linkaudit import link_audit
 from .listing import list_graph
@@ -55,7 +54,6 @@ from .readiness import readiness
 from .readme import project_readme
 from .reads import configure_reads, record_read
 from .rebuilddiff import parse_path_map, rebuild_diff, render_rebuild_diff
-from .reconcile import reconcile_memory
 from .refactor import refactor_candidates
 from .refactor_ops import move
 from .registers import register_drift
@@ -70,7 +68,7 @@ from .sessioncost import session_cost
 from .site import site_build
 from .sitelinks import resolve_site_links, site_link_window
 from .source_state import collect_appends, emit_source_artifact, flip_module, source_check
-from .structure import add_section, new_note
+from .structure import add_section
 from .viz import project_viz
 from .workbench import anchor_lead_view, portfolio_view, session_feed
 from .worklist import dangling_reference_sources, worklist
@@ -99,9 +97,8 @@ _DEFAULT_ACTOR = os.environ.get("CJM_ACTOR") or "agent:session"
 # BEFORE files). `_dispatch` REFUSES an unrouted verb at dispatch time — a mutating verb
 # is never 'available but dangerous', and verb N+1 lands here or the conformance test
 # fails the build. `readme`/`onboarding`/`viz` are PROJECTORS (their --write targets
-# generated surfaces, not journaled source); note-file writes (author on a Section,
-# add-section, new-note, reconcile-memory) ride the WRITES-journal domain until the
-# pillar-3 content-type unification.
+# generated surfaces, not journaled source); a note's writes (author on a Section, add-section,
+# new-note) ride its lane's SOURCE journal, its file an emit (ruling 48c4c34d).
 MUTATES_SOURCE: Dict[str, bool] = {
     "author": True, "add-symbol": True, "add-text": True, "emit": True,
     "flip-module": True, "flip-to-py": True, "emit-artifact": True,
@@ -158,7 +155,7 @@ READ_WRITE_MODES = {"notes-overlap": "rows", "journal-cursor": "adopt"}
 # The write invocations that never open the writes journal's writer (design detail 65f4a6c9): a
 # rebuild verb builds the db FROM its journals (its replay stamps the cursor), and
 # `journal-cursor --adopt` stamps one; every other write invocation begins before its branch runs.
-JOURNAL_BUILD_VERBS = frozenset({"ingest", "ingest-notes", "replay", "m3-baseline", "journal-cursor"})
+JOURNAL_BUILD_VERBS = frozenset({"ingest", "ingest-notes", "replay", "journal-cursor"})
 
 
 def _reads_only(args) -> bool:
@@ -547,7 +544,7 @@ async def _dispatch(args) -> int:
     # the invocation closes, its site-link step included (the window inside it closes first).
     async with invocation_graph(open_graph(args.graph_db_path, args.manifests_dir,
                                            readonly=_reads_only(args)), journals) as gx, \
-            InvocationWrites(gx, args.journal_path, getattr(args, "emit_root", None)) as writes, \
+            InvocationWrites(gx, args.journal_path, _emit_root(args)) as writes, \
             site_link_window(gx, report=_report_site_links):
         if not _reads_only(args) and args.command not in JOURNAL_BUILD_VERBS:
             await writes.begin()  # the lock and the heal BEFORE any branch reads the db (65f4a6c9)
@@ -576,14 +573,16 @@ async def _dispatch(args) -> int:
             # The memory lane (design c9b29de5 (4), (7)): with the config naming a memory journal, ingest
             # reads no memory file -- the journals are the notes' source -- and a stray .md in the dir
             # is reported for capture, never ingested; the lane's groups replay as windows below.
-            from .memorysource import memory_lane, stray_memory_files
-            lane = memory_lane(load_graph_config(args.graph_db_path) or {})
-            if lane:
+            from .memorysource import is_memory_lane, note_lane, stray_memory_files
+            from .notesource import journaled_lane
+            lane = note_lane(load_graph_config(args.graph_db_path) or {})
+            lane = lane if journaled_lane(lane) else {}
+            if is_memory_lane(lane):
                 for p in stray_memory_files(args.memory_dir, args.journal_path):
                     print(f"⚠ stray memory file, not ingested (capture it with new-note): {p}")
             dev_report: Dict[str, Any] = {}
             nodes, edges = build_dev_graph_elements(
-                None if lane else args.memory_dir, None if args.no_repo_map else args.repos_dir,
+                None if is_memory_lane(lane) else args.memory_dir, None if args.no_repo_map else args.repos_dir,
                 seed=not args.no_seed, note_aliases=note_aliases, code_fold=code_fold,
                 artifact_fold=artifact_fold, skip_memory_paths=skip_memory_paths, report=dev_report)
             res = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
@@ -636,28 +635,6 @@ async def _dispatch(args) -> int:
                 rc = await replay_journal(gx, args.journal_path, emit_root=args.emit_root, notes=notes)
                 print(f"replayed journal: {rc}")
             return 0
-        if args.command == "m3-baseline":
-            from .memorysource import memory_lane
-            if memory_lane(load_graph_config(args.graph_db_path) or {}):
-                print("error: m3-baseline is retired on the memory lane (design c9b29de5 (7)): a memory "
-                      "note is born with new-note into the memory journal", file=sys.stderr)
-                return 1
-            if not args.journal_path:
-                print("error: m3-baseline needs --journal-path (the genesis ops are journaled)",
-                      file=sys.stderr)
-                return 1
-            if not args.all and not args.slug:
-                print("error: m3-baseline needs --slug SLUG (repeatable) or --all", file=sys.stderr)
-                return 1
-            res = m3_baseline_import(args.memory_dir, args.journal_path,
-                                     slugs=args.slug, all_notes=args.all)
-            print(f"m3-baseline: imported {res['imported_count']} note(s) "
-                  f"(actor {M3_BASELINE_ACTOR}); skipped_existing={res['skipped_existing']} "
-                  f"unknown={res['unknown']} corpus={res['corpus_notes']}")
-            for it in res["imported"]:
-                print(f"  + {it['slug']} ({it['bytes']} bytes) <- {it['path']}")
-            print("NEXT -> rebuild (cg-rebuild): ingest now SKIPS these .md; replay reconstructs them.")
-            return 1 if res["unknown"] else 0
         if args.command == "replay":
             if not args.journal_path:
                 print("error: replay needs --journal-path", file=sys.stderr)
@@ -671,7 +648,12 @@ async def _dispatch(args) -> int:
                                            handlers=composed_replay_handlers(), offset=args.offset)
                 print(f"replayed journal: {rc}")
                 return 0
-            notes = None
+            # A full replay folds the graph's note lane too (ruling 48c4c34d (2)): its source groups are
+            # windows merged by ts -- a born note lives in the lane's source journal alone
+            from .memorysource import note_lane
+            from .notesource import journaled_lane
+            notes = note_lane(load_graph_config(args.graph_db_path) or {})
+            notes = notes if args.offset == 0 and journaled_lane(notes) else None
             if args.memory_offset is not None:
                 # The dev graph's memory lane (design c9b29de5 (4)): its groups after the offset replay
                 # as windows merged by ts into the writes windows, as the notes lane's do
@@ -1676,13 +1658,16 @@ async def _dispatch(args) -> int:
             res = await archive_command(gx, args, note_lane(load_graph_config(args.graph_db_path) or {}))
             print(render(args.command, res, args.format))
             return 1 if (res.get("error") or res.get("refused")) else 0
-        elif args.command == "cutover-memory":
-            # The memory notes onto the element source unit (design c9b29de5 (4)-(5)): each note read
-            # from the db, canonical, capture + cutover as ONE group in the memory journal
-            from .memorysource import cutover_memory, memory_lane
-            res = await cutover_memory(gx, memory_lane(load_graph_config(args.graph_db_path) or {}),
-                                       args.journal_path, list(args.slugs) or None, write=not args.no_write)
-            print(render("cutover-memory", res, args.format))
+        elif args.command in ("cutover-born", "cutover-memory"):
+            # The writes journal's genesis notes onto the element source unit (design c9b29de5 (4)-(5);
+            # ruling 48c4c34d (4)): the dev graph's memory notes or the notes graph's born drafts, each
+            # read from the db, canonical, capture + cutover as ONE group in the lane's source journal
+            from .bornnotes import cutover_born
+            from .memorysource import note_lane
+            await writes.begin()   # the capture reads the db the writes journal's history built: healed first
+            res = await cutover_born(gx, note_lane(load_graph_config(args.graph_db_path) or {}),
+                                     args.journal_path, list(args.slugs) or None, write=not args.no_write)
+            print(render("cutover-born", res, args.format))
             return 1 if (res.get("error") or res.get("refused")) else 0
         elif args.command == "series-members":
             # The whole ordered membership (DEC 72d669c5 (4)): each slug follows the one before.
@@ -1948,38 +1933,39 @@ async def _dispatch(args) -> int:
             print(render("propose", res, args.format))
             return 0
         elif args.command == "confirm-proposal":
-            # THE CHAIN (ruling 547f4123 (1)): the section STATE the draft applies (no change when it
-            # already stands), then the re-approval assert planned against the db it left -- so it
-            # binds the NEW content's hash -- each appended and applied through the replay's applier;
-            # the deliverable's .md refreshed after. A cut-over deliverable's source is its lane's
-            # journal, never this one: refused until C3 routes the leg there (ruling 547f4123 (2)).
-            res = await confirm_proposal(gx, args.proposal, actor=args.actor, write=False)
+            # THE CHAIN (ruling 547f4123 (1)): the draft lands through the deliverable's own write path
+            # -- a cut-over note's journal-first authoring in its lane's source journal (ruling 48c4c34d
+            # (6)), a file-sourced page's slot -- no change when it already stands; then the
+            # re-approval assert planned against the db it left, so it binds the NEW content's hash
+            from .bornnotes import genesis_refusal
+            from .memorysource import note_lane
+            from .notesource import archive_author
+            res = await confirm_proposal(gx, args.proposal)
+            lane = note_lane(load_graph_config(args.graph_db_path) or {})
             if not res.get("error"):
-                from .memorysource import note_lane
-                from .notesource import _cut_over_note
-                if (await _cut_over_note(gx, note_lane(load_graph_config(args.graph_db_path) or {}),
-                                         res["deliverable_id"]))[0] is not None:
-                    res = {**res, "error": "the deliverable is cut over -- its source is its lane's journal, so a "
-                                           "confirmation lands through journal-first authoring (eeda5977 L2c slice "
-                                           "C3, ruling 547f4123 (2)); nothing written"}
+                refused = await genesis_refusal(gx, lane, args.journal_path, res["deliverable_id"])
+                if refused:
+                    res = {**res, "error": refused}
             if res.get("error"):
                 print(render("confirm-proposal", res, args.format))
                 return 1
-            if res["section"]["op"]:
-                res["section"] = (await writes.write("section", res["section"]["op"])).result
+            await writes.begin()   # the plan reads the db the family's lock and heal leave (65f4a6c9)
+            section = await archive_author(gx, lane, res["section_id"], replace=res["raw"], actor=args.actor)
+            if section is None:   # a file-sourced page: its git history is the source, its file the write
+                section = await author(gx, res["section_id"], replace=res["raw"], actor=args.actor,
+                                       source_journal_path=args.source_journal_path, repos_dir=args.repos_dir)
+            res["section"] = section
+            if section.get("error"):
+                print(render("confirm-proposal", res, args.format))
+                return 1
+            res["approval"] = None
             if res["approval_value"]:
                 res["approval"] = await _assert_journaled(gx, writes, res["deliverable_id"], res["approval_predicate"],
                                                           res["approval_value"], actor=args.actor,
                                                           evidence=[res["proposal_id"]])
-            res["noop"] = res["section"].get("unchanged") and not (res["approval"] and not res["approval"].get("noop"))
+            res["noop"] = bool(section.get("unchanged")) and not (res["approval"] and not res["approval"].get("noop"))
             print(render("confirm-proposal", res, args.format))
-            if (res["approval"] or {}).get("error"):
-                return 1
-            # The graph is the source; refresh the deliverable's emitted .md (the backup).
-            em = await emit_artifact(gx, res["deliverable_id"], write=True)
-            if em.get("error"):
-                print(f"⚠ emit: {em['error']}", file=sys.stderr)
-            return 0
+            return 1 if (res["approval"] or {}).get("error") else 0
         elif str(args.command).startswith("notes-"):
             # The pure-notes lane (ruling a7262fe7, item fdafeed9): its own dispatcher.
             return await _notes_lane_command(args, gx, writes)
@@ -2017,21 +2003,21 @@ async def _dispatch(args) -> int:
             if arch is not None:
                 print(render("author-archive", arch, args.format))
                 return 1 if arch.get("error") else 0
+            from .bornnotes import genesis_refusal
+            refused = await genesis_refusal(gx, note_lane(load_graph_config(args.graph_db_path) or {}),
+                                            args.journal_path, args.node_id)
+            if refused:
+                print(f"error: {refused}", file=sys.stderr)
+                return 1
             res = await author(gx, args.node_id, replace=replace, edit=edit,
                                actor=args.actor, write=not args.no_write,
                                source_journal_path=args.source_journal_path,
                                repos_dir=args.repos_dir, imports=args.imports)
             print(render("author", res, args.format))
             _cli_import_smoke(res)
-            # M2b shadow: a memory-section author also journals its raw STATE (the .md stays the
-            # ingest source for now; the journal shadows + soaks). NON-cut-over code/notebook
-            # authoring stays un-journaled (Fork-1(a)); GRAPH-SOURCED modules/notebooks land in
-            # the SOURCE journal below. Skip no-op edits; append_write dedups identical states.
-            if (res.get("artifact") == "note" and args.journal_path
-                    and res.get("written") and not res.get("unchanged")):
-                append_write(args.journal_path, "section",
-                             {"slug": res.get("note_slug"), "anchor": res.get("anchor"),
-                              "raw": res.get("new_text"), "actor": args.actor})
+            # A file-sourced note's Section (a site page: its git history is the source) is written to
+            # its file alone -- the writes journal's section op retired for new writes (ruling 48c4c34d
+            # (5)); graph-sourced modules / notebooks land in the SOURCE journal through `author`
             return 1 if res.get("error") else 0
         elif args.command == "add-symbol":
             body = Path(args.body_file).read_text() if args.body_file else args.body
@@ -2084,18 +2070,6 @@ async def _dispatch(args) -> int:
             print(render("add-text", res, args.format))
             _cli_import_smoke(res)
             return 1 if res.get("error") else 0
-        elif args.command == "reconcile-memory":
-            from .memorysource import memory_lane
-            if memory_lane(load_graph_config(args.graph_db_path) or {}):
-                print("error: reconcile-memory is retired on the memory lane (design c9b29de5 (7)): a "
-                      "memory note has no file to reconcile -- the memory journal is its source",
-                      file=sys.stderr)
-                return 1
-            res = await reconcile_memory(gx, note_slug=args.note, absorb_anchors=args.absorb,
-                                         absorb_all=args.absorb_all, journal_path=args.journal_path,
-                                         backup_dir=args.backup_dir)
-            print(render("reconcile-memory", res, args.format))
-            return 1 if res.get("error") else 0
         elif args.command == "add-section":
             raw = Path(args.content_file).read_text() if args.content_file else args.content
             slug = args.slug
@@ -2127,94 +2101,58 @@ async def _dispatch(args) -> int:
             if args.parent:
                 print("error: --parent places an element of a cut-over archive note only", file=sys.stderr)
                 return 1
+            from .bornnotes import genesis_refusal
+            refused = await genesis_refusal(gx, note_lane(load_graph_config(args.graph_db_path) or {}),
+                                            args.journal_path, slug)
+            if refused:
+                print(f"error: {refused}", file=sys.stderr)
+                return 1
+            # A file-sourced note (a site page: its git history is the source) takes the section in its
+            # file alone -- the writes journal's add-section op retired for new writes (ruling 48c4c34d (5))
             res = await add_section(gx, slug, raw, after=args.after, write=not args.no_write)
             print(render("structure", res, args.format))
-            # M3 structural journaling: a live add-section is journal-sourced too — record the
-            # add-section op (slug/raw/after) so a rebuild re-splices the section on-graph (the
-            # `.md` is a generated backup, skipped by ingest for journal-sourced notes). Only on a
-            # REAL add (`added` non-empty): the anchor-exists no-op and every dry-run change
-            # nothing. append_write dedups an identical op on re-run.
-            if (args.journal_path and res.get("added") and not res.get("error")
-                    and not args.no_write):
-                append_write(args.journal_path, "add-section",
-                             {"slug": slug, "raw": res.get("section_raw"),
-                              "after": res.get("after"), "actor": args.actor})
             return 1 if res.get("error") else 0
         elif args.command == "new-note":
             content = Path(args.content_file).read_text() if args.content_file else args.content
-            # Born POST lane (a42c0f97): --slug names the permalink; the file lands as
-            # <emit_root>/<slug>/index.md (emit_root from the flag or the notes db's sibling
-            # config), identity = the slug relative to the emit root, harvest = the profile
-            # (flag, else the config's notes_profile). --path alone = the memory lane as before.
-            slug = corpus_root = None
-            path = args.path
-            from .memorysource import memory_lane, memory_new_note
-            mem_lane = {} if args.slug else memory_lane(load_graph_config(args.graph_db_path) or {})
-            if mem_lane:
-                # The memory lane (design c9b29de5 (6)): a memory note is born cut over in the memory
-                # journal -- one group, no file and no path (ruling fed38997)
-                if path:
-                    print("error: a memory note has no file (ruling fed38997) -- drop --path; its "
-                          "identity is its frontmatter name", file=sys.stderr)
-                    return 1
-                res = await memory_new_note(gx, mem_lane, content, write=not args.no_write)
-                print(render("new-note-memory", res, args.format))
-                return 1 if res.get("error") else 0
-            if args.slug:
-                if not args.emit_root:
-                    print("error: new-note --slug needs an emit root (--emit-root, or `emit_root` "
-                          "in the graph-sibling graph.config.json)", file=sys.stderr)
-                    return 1
-                slug = args.slug.strip("/")
-                corpus_root = str(Path(args.emit_root).resolve())
-                path = str(Path(corpus_root) / slug / "index.md")
-                if args.path and str(Path(args.path).resolve()) != path:
-                    print(f"error: --path {args.path} conflicts with --slug {slug} "
-                          f"(a born post lands at {path})", file=sys.stderr)
-                    return 1
-                if not args.no_write:
-                    Path(path).parent.mkdir(parents=True, exist_ok=True)
-            elif not path:
-                print("error: new-note needs --path (memory note) or --slug (born post)",
-                      file=sys.stderr)
+            # BORN CUT OVER (ruling 48c4c34d (3), over 547f4123 (2)): a note is born into its lane's
+            # source journal -- the dev graph's memory notes (no file, ruling fed38997) or the notes
+            # graph's born posts (--slug: identity pinned by the permalink, the file under the emit
+            # root an emit) -- never as a writes-journal genesis op (those keep replaying)
+            from .bornnotes import born_new_note
+            from .memorysource import note_lane
+            from .notesource import journaled_lane
+            lane = note_lane(load_graph_config(args.graph_db_path) or {})
+            if args.slug and args.emit_root:
+                lane = {**lane, "emit_root": str(Path(args.emit_root).resolve())}
+            if not journaled_lane(lane):
+                print("error: new-note births a note into its lane's source journal, and the graph-sibling "
+                      "config names none (memory_journal_path on the dev graph; source_journal_path + "
+                      "emit_root on the notes graph)", file=sys.stderr)
                 return 1
-            res = await new_note(gx, path, content, write=not args.no_write,
-                                 profile=args.profile, corpus_root=corpus_root, slug=slug)
-            print(render("structure", res, args.format))
-            # Born on-graph from BIRTH: journal a `new-note` genesis op (actor agent:session,
-            # NOT the m3-baseline provenance) capturing the exact written bytes — so the note is
-            # journal-sourced immediately (its `.md` is skipped on the next ingest, reconstructed
-            # by replay) with no post-hoc m3-baseline needed. Journal the on-disk bytes for
-            # byte-faithful round-trip; dedups on re-run via append_write. A born post's
-            # profile + slug ride the op so replay reproduces the same identity + harvest.
-            if args.journal_path and res.get("written") and not res.get("error"):
-                op = {"content": Path(path).read_text(), "actor": "agent:session"}
-                if args.profile:
-                    op["profile"] = args.profile
-                if slug:
-                    # A born post journals its SLUG, never a machine path: replay derives the
-                    # file location from the emit root (DEC 98293e72 (1))
-                    op["slug"] = slug
-                else:
-                    op["path"] = str(Path(path).resolve())
-                append_write(args.journal_path, "new-note", op)
-            # DRAFT AT BIRTH (user ruling 793f025e): a born POST is a public-facing
-            # deliverable, so it carries publish_state=draft from the SAME invocation that
-            # minted it — never a public-facing node without a publish state. Promotion is a
-            # human assertion (draft < reviewed < published, ordered so it auto-supersedes)
-            # and the website emit (`emit-post`) gates on `published`. The memory lane
-            # (--path) is private planning and carries no publish state.
-            if slug and res.get("written") and not res.get("error"):
-                st = await assert_value(gx, res["note_id"], "publish_state", "draft",
-                                        actor=_DEFAULT_ACTOR)
-                print(render("assert", st, args.format))
-                if args.journal_path and not st.get("error"):
-                    append_write(args.journal_path, "assert",
-                                 {"subject": res["note_id"], "predicate": "publish_state",
-                                  "value": "draft", "actor": _DEFAULT_ACTOR,
-                                  "evidence": None, "supersede": False,
-                                  "subject_content_hash": st.get("subject_content_hash")})
-            return 1 if res.get("error") else 0
+            if args.profile and args.profile != (lane.get("notes_profile") or "quarto_post"):
+                print(f"error: the lane's notes take its profile ({lane.get('notes_profile') or 'quarto_post'}), "
+                      f"not --profile {args.profile}", file=sys.stderr)
+                return 1
+            slug = args.slug.strip("/") if args.slug else None
+            await writes.begin()   # the plan reads the db the family's lock and heal leave (65f4a6c9)
+            res = await born_new_note(gx, lane, content, slug=slug, write=not args.no_write)
+            print(render("new-note-born", res, args.format))
+            if res.get("error"):
+                return 1
+            # DRAFT AT BIRTH (user ruling 793f025e): a born POST is a public-facing deliverable, so it
+            # carries publish_state=draft from the invocation that minted it, planned after the birth
+            # applied (ruling 547f4123 (1)) -- a retry whose birth was no change lands it unless a
+            # publish state already stands (a draft promoted since is never re-drafted). Promotion is a
+            # human assertion (draft < reviewed < published); the memory lane carries no publish state.
+            if slug and not args.no_write:
+                from .purenotes import note_publish_states
+                if not (res.get("unchanged") and (await note_publish_states(gx)).get(res["note_id"])):
+                    st = await _assert_journaled(gx, writes, res["note_id"], "publish_state", "draft",
+                                                 actor=_DEFAULT_ACTOR)
+                    print(render("assert", st, args.format))
+                    if st.get("error"):
+                        return 1
+            return 0
         elif args.command == "emit-post":
             # The outward leg of draft-at-birth (793f025e; item 6eba8815): refuses anything
             # but a single active publish_state=published, then writes the lossless graph
@@ -2580,6 +2518,13 @@ def _report_git_sources(report: Dict[str, Any], lane: str) -> None:
         print(f"⚠ {lane}: {p} is untracked — absent until committed", file=sys.stderr)
     for d in report.get("no_history") or []:
         print(f"⚠ {lane}: {d} has no git history — left out", file=sys.stderr)
+
+
+def _emit_root(args) -> Optional[str]:
+    """The emit root every applied op derives a born post's file location from (98293e72 (1)): the
+    verb's flag, else the graph-sibling config's -- so an op the heal applies under a verb with no
+    --emit-root lands placed exactly as `replay` lands it."""
+    return getattr(args, "emit_root", None) or (load_graph_config(args.graph_db_path) or {}).get("emit_root")
 
 
 def _apply_graph_config(args) -> None:
@@ -3265,7 +3210,22 @@ async def _notes_lane_command(
         res = await render_notes(gx, args.slug, rendering=args.rendering, timestamps=args.timestamps,
                                  actor=args.actor, siblings=siblings, manifests_dir=args.manifests_dir,
                                  write=False)
-        if res.get("op"):
+        from .memorysource import note_lane
+        from .notesource import _cut_over_note, archive_text
+        lane = note_lane(load_graph_config(args.graph_db_path) or {})
+        if res.get("op") and (await _cut_over_note(gx, lane, note_node_id(args.slug)))[0] is not None:
+            # A RENDERED BODY IS ELEMENT STATE (ruling f4cc62b9): a cut-over note's render lands
+            # journal-first in its lane's source journal, mapped by anchor; its inputs ride as
+            # provenance; the file is the emit after the apply; a body already held is no change
+            land = await archive_text(gx, lane, note_node_id(args.slug), res["text"],
+                                      {"op": "notes-render", **res["op"]})
+            if land.get("error"):
+                print(f"error: {land['error']}", file=sys.stderr)
+                return 1
+            res = {**res, "noop": not land.get("appended"), "written": bool(land.get("appended")),
+                   "records": len(land.get("records") or []), "notes_live": land.get("notes_live"),
+                   "path": land.get("file") or res.get("path")}
+        elif res.get("op"):
             res = {**(await writes.write("render-notes", res["op"])).result, "noop": False}
             if not args.no_write and res.get("path"):
                 Path(res["path"]).write_text(res["text"])
@@ -3580,16 +3540,6 @@ def build_parser() -> argparse.ArgumentParser:  # The CLI's parser, every verb
     p_rp.add_argument("--workflow", action="store_true",
                       help="Replay a WORKFLOW graph's journal through the layer's replay with every "
                            "installed core's registry (the scale harness's delta replay, 3bd8673d)")
-
-    p_m3 = sub.add_parser("m3-baseline",
-                          help="M3 genesis import: journal a per-note baseline `new-note` op "
-                               "(actor import:m3-baseline) so ingest stops reading its .md "
-                               "(the authority flip; needs --journal-path)")
-    p_m3.add_argument("--memory-dir", default=DEFAULT_MEMORY)
-    p_m3.add_argument("--slug", action="append", default=None,
-                      help="Note slug to import (repeatable); the thin-slice selector")
-    p_m3.add_argument("--all", action="store_true",
-                      help="Import the WHOLE corpus (slice->corpus widening; mechanical)")
 
     sub.add_parser("schema", help="Node labels, edge types, counts")
 
@@ -4336,11 +4286,13 @@ def build_parser() -> argparse.ArgumentParser:  # The CLI's parser, every verb
     p_rsec.add_argument("section_id", help="The Section (id or unique prefix)")
     p_rsec.add_argument("--no-write", action="store_true", help="Prove it; append nothing")
     p_rsec.add_argument("--actor", default=_DEFAULT_ACTOR)
-    p_cm = sub.add_parser("cutover-memory",
-                          help="THE MEMORY CUTOVER (design c9b29de5): each memory note read from the db, "
-                               "canonical (blank lines; an in-body H1 becomes the title), its capture + "
-                               "cutover appended to the memory journal as ONE group")
-    p_cm.add_argument("slugs", nargs="*", help="Memory note slugs (default: every one not yet cut over)")
+    p_cm = sub.add_parser("cutover-born", aliases=["cutover-memory"],
+                          help="THE GENESIS CUTOVER (design c9b29de5; ruling 48c4c34d (4)): each note the "
+                               "writes journal's genesis ops born -- the dev graph's memory notes, the notes "
+                               "graph's born drafts -- read from the db, canonical (blank lines; a memory note's "
+                               "in-body H1 becomes the title), its capture + cutover appended to the lane's "
+                               "source journal as ONE group")
+    p_cm.add_argument("slugs", nargs="*", help="Note slugs (default: every genesis note not yet cut over)")
     p_cm.add_argument("--no-write", action="store_true", help="List what the cutover changes; append nothing")
     p_rps = sub.add_parser("replay-source",
                            help="The rebuild swap's SOURCE-journal fold (finding 6c121287): fold the records after "
@@ -4686,17 +4638,14 @@ def build_parser() -> argparse.ArgumentParser:  # The CLI's parser, every verb
     p_asec.add_argument("--actor", default=_DEFAULT_ACTOR)
 
     p_nn = sub.add_parser("new-note",
-                          help="M2 gradient: create a new note, born on-graph — a memory note by "
-                               "--path, or a POST by --slug under the notes graph's emit root (a42c0f97)")
-    p_nn.add_argument("--path", default=None,
-                      help="Where to write the new .md (the legacy memory regime; a graph whose config names "
-                           "memory_journal_path births a memory note with no file and refuses --path)")
+                          help="A note born CUT OVER into its lane's source journal (ruling 48c4c34d): a memory "
+                               "note on the dev graph (no file), or a POST by --slug on the notes graph (its "
+                               "file under the emit root, an emit)")
     p_nn.add_argument("--slug", default=None,
                       help="The born post's permalink relative to the emit root: lands as "
                            "<emit_root>/<slug>/index.md, identity = the slug (the notes_corpus_elements convention)")
     p_nn.add_argument("--profile", default=None,
-                      help="Relationship-harvest profile for the born note (default: the sibling "
-                           "config's notes_profile, else auto-detect from the frontmatter)")
+                      help="The lane's harvest profile (a check: the lane's notes take its notes_profile)")
     p_nn.add_argument("--emit-root", default=None,
                       help="Where born posts land (default: the sibling config's emit_root)")
 
@@ -4726,16 +4675,6 @@ def build_parser() -> argparse.ArgumentParser:  # The CLI's parser, every verb
     p_nn.add_argument("--no-write", action="store_true", help="Dry run: parse + report, don't write/ingest")
 
     _add_notes_lane_parsers(sub)   # the pure-notes lane (a7262fe7): notes-type … notes-render
-
-    p_rc = sub.add_parser("reconcile-memory",
-                          help="M2b soak: report (dry-run) or --absorb out-of-band .md section drift")
-    p_rc.add_argument("--note", default=None, help="Restrict to one note (by slug); else the whole corpus")
-    p_rc.add_argument("--absorb", nargs="*", metavar="ANCHOR", default=None,
-                      help="Absorb these changed anchors into the journal (file-wins); needs --journal-path")
-    p_rc.add_argument("--absorb-all", action="store_true",
-                      help="Absorb ALL changed sections in scope (needs --journal-path)")
-    p_rc.add_argument("--backup-dir", default=None,
-                      help="Snapshot affected .md files here before absorbing (default: alongside the file)")
 
     p_em = sub.add_parser("emit",
                           help="Emit a container's canonical artifact FROM THE GRAPH (graph -> .py/.ipynb/.md)")

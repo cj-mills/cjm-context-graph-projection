@@ -174,20 +174,27 @@ def _content_ids(db):
 def test_journal_replay_after_an_edit_matches_archive_ingest_of_the_emitted_post(tmp_path):
     # The round-trip standard, now across an EDIT: born post -> CLI author adds a series link
     # -> the journal-only projection (what a rebuild replays) carries the same Note/Section/
-    # Topic/Series nodes AND relation edges as an archive ingest of the emitted tree.
+    # Topic/Series nodes AND relation edges as an archive ingest of the emitted tree. The post is
+    # born cut over (ruling 48c4c34d): its birth and the edit are notes source-journal records,
+    # the writes journal holds its draft state alone.
     emit = tmp_path / "emit"
+    emit.mkdir()
+    commit_all(emit)   # the archive is a git work tree from the start (19edbe97)
     journal = str(tmp_path / "notes.writes.jsonl")
+    source = tmp_path / "notes.source.jsonl"
     (tmp_path / "graph.config.json").write_text(json.dumps(
-        {"notes_profile": "quarto_post", "emit_root": str(emit), "notes_corpus": str(emit)}))
+        {"notes_profile": "quarto_post", "emit_root": str(emit), "notes_corpus": str(emit),
+         "source_journal_path": str(source)}))
     r = _run("--graph-db-path", str(tmp_path / "notes.db"), "--journal-path", journal,
              "new-note", "--slug", "born-post", "--content", POST)
     assert r.returncode == 0, r.stderr or r.stdout
     first = section_node_id(note_node_id("born-post"), "first")
     r = _run("--graph-db-path", str(tmp_path / "notes.db"), "--journal-path", journal,
-             "--source-journal-path", str(tmp_path / "notes.source.jsonl"),
              "author", first, "--replace", f"## First\n\nBody one. {LINKS}\n")
     assert r.returncode == 0, r.stderr or r.stdout
-    assert [o["verb"] for o in read_journal(journal)] == ["new-note", "assert", "section"]
+    assert [o["verb"] for o in read_journal(journal)] == ["assert"]
+    groups = {json.loads(line)["ts"] for line in source.read_text().splitlines()}
+    assert len(groups) == 2                                    # the birth, then the edit
     assert LINKS in (emit / "born-post" / "index.md").read_text()
 
     r2 = _run("--graph-db-path", str(tmp_path / "replay.db"), "--journal-path", journal, "replay")
@@ -206,18 +213,25 @@ def test_journal_replay_after_an_edit_matches_archive_ingest_of_the_emitted_post
 
 def test_a_live_insert_keeps_the_outline_relations_an_ingest_derives(tmp_path):
     # Order and nesting are relations (design 56c9c332 (3)): a section inserted mid-note re-points
-    # its preceding sibling's NEXT and re-parents the sub-section it now encloses -- live -- so the
-    # live graph carries exactly the PART_OF / NEXT edges an ingest of the emitted post derives.
+    # its preceding sibling's NEXT; a sub-section keeps its placement (its own fact) until it is
+    # re-placed under the new one -- live -- so the live graph carries exactly the PART_OF / NEXT
+    # edges an ingest of the emitted post derives. The post is born cut over (ruling 48c4c34d).
     emit = tmp_path / "emit"
+    emit.mkdir()
+    commit_all(emit)   # the archive is a git work tree from the start (19edbe97)
     journal = str(tmp_path / "notes.writes.jsonl")
     (tmp_path / "graph.config.json").write_text(json.dumps(
-        {"notes_profile": "quarto_post", "emit_root": str(emit), "notes_corpus": str(emit)}))
+        {"notes_profile": "quarto_post", "emit_root": str(emit), "notes_corpus": str(emit),
+         "source_journal_path": str(tmp_path / "notes.source.jsonl")}))
     live = str(tmp_path / "notes.db")
     post = POST + "\n### Sub\n\nSub body.\n\n## Last\n\nEnd.\n"
     r = _run("--graph-db-path", live, "--journal-path", journal, "new-note", "--slug", "born-post", "--content", post)
     assert r.returncode == 0, r.stderr or r.stdout
     r = _run("--graph-db-path", live, "--journal-path", journal, "add-section", "born-post",
              "--after", "first", "--content", "## Middle\n\nMid.\n")
+    assert r.returncode == 0, r.stderr or r.stdout
+    r = _run("--graph-db-path", live, "--journal-path", journal, "place",
+             section_node_id(note_node_id("born-post"), "sub"), "--parent", "middle", "--first")
     assert r.returncode == 0, r.stderr or r.stdout
     commit_all(emit)   # the archive is HEAD (19edbe97)
     r = _run("--graph-db-path", str(tmp_path / "ingest.db"), "ingest-notes")

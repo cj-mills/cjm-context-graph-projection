@@ -179,11 +179,15 @@ async def read_slot(
 async def _note_section_wires(
     gx: GraphHandle, note_id: str,
 ) -> List[Dict[str, Any]]:  # Section wire dicts for one Note (whole-note reconstruction)
-    """All of a Note's Section nodes, as wire dicts (carrying `raw`/`order`)."""
+    """A Note's LIVE Section nodes, as wire dicts (carrying `raw`/`order`). A retired Section stays
+    a node (RETIRE IS A FACT, a7617bd4) but is out of the composition and the outline, so no
+    reconstruction reads it -- its raw would re-enter the note's text (found building C3: a render
+    that dropped and then restored a heading read the retired element's text back)."""
     return [_as_wire(n, DevNodeKinds.SECTION)
             for n in await F.load_label_where(
                 gx, DevNodeKinds.SECTION,
-                [PropertyPredicate("note_id", "eq", note_id)])]
+                [PropertyPredicate("note_id", "eq", note_id)])
+            if not F.prop(n, "retired")]
 
 
 async def reharvest_note_relations(

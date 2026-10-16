@@ -1,9 +1,7 @@
-"""CLI dispatch smoke for `m3-baseline` — guards the import wiring the unit tests can't see.
-
-A pure-unit test imports `m3_baseline_import` from `journal` directly, so it stays green even
-if `cli` forgets to import the name into its own namespace (which broke the real `m3-baseline`
-run with a NameError at dispatch). This drives the actual CLI end-to-end in a subprocess, so the
-dispatch path's imports are exercised for real.
+"""CLI dispatch smoke -- drives the actual CLI end-to-end in a subprocess, so each dispatch path's
+imports and journaling are exercised for real (a pure-unit test stays green when `cli` forgets to
+import a name into its own namespace). The `m3-baseline` import it once guarded retired with
+ruling 48c4c34d (B): a note is born cut over into its lane's source journal.
 """
 
 import json
@@ -16,6 +14,7 @@ from pathlib import Path
 import pytest
 from cjm_context_graph_primitives.journal import read_journal
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS
+from cjm_context_graph_projection.source_state import read_source_journal
 
 from conftest import commit_all
 
@@ -32,45 +31,24 @@ def _run(*args):
                           capture_output=True, text=True)
 
 
-def test_m3_baseline_cli_dispatches_and_journals(tmp_path):
+def test_new_note_cli_births_a_memory_note_cut_over(tmp_path):
+    # Ruling 48c4c34d (3): a memory note BORN via `new-note` lands ONE group in the memory journal
+    # (note, its elements' state and placement, the cutover) -- no writes-journal genesis op, no file.
     mem = tmp_path / "memory"
     mem.mkdir()
-    (mem / "feedback_demo.md").write_text("---\nname: demo-note\ndescription: d\n---\n\nbody\n")
     db = str(tmp_path / "dev.db")
-    journal = str(tmp_path / "writes.jsonl")
-
-    r = _run("--graph-db-path", db, "--journal-path", journal,
-             "m3-baseline", "--memory-dir", str(mem), "--slug", "demo-note")
-    assert r.returncode == 0, f"m3-baseline dispatch failed: {r.stderr or r.stdout}"
-    ops = read_journal(journal)
-    assert [o["verb"] for o in ops] == ["new-note"]
-    assert ops[0]["args"]["actor"] == "import:m3-baseline"
-    assert ops[0]["args"]["content"] == (mem / "feedback_demo.md").read_text()
-
-
-def test_new_note_cli_journals_natively(tmp_path):
-    # A note BORN on-graph via `new-note` journals its OWN genesis op (actor agent:session,
-    # not m3-baseline) so it is journal-sourced from birth — no post-hoc m3-baseline needed.
-    mem = tmp_path / "memory"
-    mem.mkdir()
-    note = mem / "born_demo.md"
-    db = str(tmp_path / "dev.db")
-    journal = str(tmp_path / "writes.jsonl")
+    journal, mj = str(tmp_path / "writes.jsonl"), str(tmp_path / "memory.jsonl")
+    (tmp_path / "graph.config.json").write_text(json.dumps({"memory_dir": str(mem), "memory_journal_path": mj}))
     content = "---\nname: born-demo\ndescription: d\n---\n\nbody\n"
 
-    r = _run("--graph-db-path", db, "--journal-path", journal,
-             "new-note", "--path", str(note), "--content", content)
+    r = _run("--graph-db-path", db, "--journal-path", journal, "new-note", "--content", content)
     assert r.returncode == 0, f"new-note dispatch failed: {r.stderr or r.stdout}"
-    ops = read_journal(journal)
-    assert [o["verb"] for o in ops] == ["new-note"]
-    assert ops[0]["args"]["actor"] == "agent:session"      # born on-graph, NOT m3-baseline
-    assert ops[0]["args"]["content"] == note.read_text()    # exact written bytes captured
-
-
-def test_m3_baseline_cli_requires_journal(tmp_path):
-    db = str(tmp_path / "dev.db")
-    r = _run("--graph-db-path", db, "m3-baseline", "--slug", "x")
-    assert r.returncode != 0 and "journal" in (r.stderr + r.stdout).lower()
+    assert not Path(journal).exists() or read_journal(journal) == []   # the writes journal: nothing
+    recs = read_source_journal(mj)
+    assert [r["verb"] for r in recs] == ["note", "section", "place", "cutover"]
+    assert len({r["ts"] for r in recs}) == 1                           # one group, one step
+    assert recs[0]["args"]["path"] == "" and recs[0]["op"]["actor"] == "agent:session"
+    assert list(mem.iterdir()) == []                                   # no file (ruling fed38997)
 
 
 def test_decide_state_open_mints_and_asserts_in_one_invocation(tmp_path):
@@ -164,19 +142,22 @@ def test_new_note_born_post_round_trips_with_ingest_notes(tmp_path):
     # (replay-only projection == ingest-notes projection: the round-trip standard).
     import sqlite3
     emit = tmp_path / "emit"
-    journal = str(tmp_path / "notes.writes.jsonl")
+    journal, sj = str(tmp_path / "notes.writes.jsonl"), str(tmp_path / "notes.source.jsonl")
     (tmp_path / "graph.config.json").write_text(json.dumps(
-        {"notes_profile": "quarto_post", "emit_root": str(emit), "notes_corpus": str(emit)}))
+        {"notes_profile": "quarto_post", "emit_root": str(emit), "notes_corpus": str(emit),
+         "source_journal_path": sj}))
+    emit.mkdir()
+    commit_all(emit, "empty")   # the notes lane's archive is a committed work tree, like the website clone
     content = ("---\ntitle: \"Born post\"\ndate: 2026-09-03\ncategories: [notes, graph]\n---\n\n"
                "Lede paragraph.\n\n## First\n\nBody one.\n\n### Nested\n\nBody two.\n")
     r = _run("--graph-db-path", str(tmp_path / "notes.db"), "--journal-path", journal,
              "new-note", "--slug", "series/born-post", "--content", content)
     assert r.returncode == 0, f"new-note dispatch failed: {r.stderr or r.stdout}"
-    assert (emit / "series" / "born-post" / "index.md").read_text() == content
+    assert (emit / "series" / "born-post" / "index.md").read_text() == content   # the file: an emit
     ops = read_journal(journal)
-    assert [o["verb"] for o in ops] == ["new-note", "assert"]  # draft at birth (793f025e)
-    assert ops[0]["args"]["slug"] == "series/born-post"       # nested permalink pinned
-    assert ops[0]["args"]["profile"] == "quarto_post"          # harvest profile rides the op
+    assert [o["verb"] for o in ops] == ["assert"]              # draft at birth (793f025e); born cut over (48c4c34d)
+    note = read_source_journal(sj)[0]["args"]
+    assert note["slug"] == "series/born-post" and note["path"] == ""   # nested permalink pinned, no machine path
 
     def ids(db):
         # CONTENT ids only: the publish_state fact born beside the post (FactSlot +
@@ -193,10 +174,11 @@ def test_new_note_born_post_round_trips_with_ingest_notes(tmp_path):
         finally:
             con.close()
 
-    # Journal-only projection (what a rebuild replays) vs. archive ingest of the emitted tree
+    # Journal-only projection (what a rebuild replays: the notes source journal's born group a window)
+    # vs. archive ingest of the emitted tree (the born group never folds at ingest, 48c4c34d (2))
+    commit_all(emit)   # the archive is HEAD (19edbe97)
     r2 = _run("--graph-db-path", str(tmp_path / "replay.db"), "--journal-path", journal, "replay")
     assert r2.returncode == 0, r2.stderr or r2.stdout
-    commit_all(emit)   # the archive is HEAD (19edbe97)
     r3 = _run("--graph-db-path", str(tmp_path / "ingest.db"), "ingest-notes")   # corpus from config
     assert r3.returncode == 0, r3.stderr or r3.stdout
     replayed, ingested = ids(tmp_path / "replay.db"), ids(tmp_path / "ingest.db")
@@ -206,7 +188,8 @@ def test_new_note_born_post_round_trips_with_ingest_notes(tmp_path):
     r4 = _run("--graph-db-path", str(tmp_path / "notes.db"), "--journal-path", journal,
               "new-note", "--slug", "untitled", "--content", "---\ndate: 2026-09-03\n---\n\nx\n")
     assert r4.returncode != 0 and "title" in (r4.stdout + r4.stderr)
-    assert len(read_journal(journal)) == 2   # the refused post journaled nothing
+    assert len(read_journal(journal)) == 1 and len(read_source_journal(sj)) == len(  # the refused post journaled nothing
+        [r for r in read_source_journal(sj) if r["ts"] == read_source_journal(sj)[0]["ts"]])
 
 
 def test_born_post_is_draft_at_birth_and_emit_post_gates_on_published(tmp_path):
@@ -217,16 +200,17 @@ def test_born_post_is_draft_at_birth_and_emit_post_gates_on_published(tmp_path):
     emit, site = tmp_path / "staging" / "posts", tmp_path / "site"
     db, journal = str(tmp_path / "notes.db"), str(tmp_path / "notes.writes.jsonl")
     (tmp_path / "graph.config.json").write_text(json.dumps(
-        {"notes_profile": "quarto_post", "emit_root": str(emit), "website_root": str(site)}))
+        {"notes_profile": "quarto_post", "emit_root": str(emit), "website_root": str(site),
+         "source_journal_path": str(tmp_path / "notes.source.jsonl")}))
     content = ("---\ntitle: \"Gate\"\ndate: 2026-09-03\ncategories: [notes]\n---\n\n"
                "Lede.\n\n## Body\n\nText.\n")
     r = _run("--graph-db-path", db, "--journal-path", journal,
              "new-note", "--slug", "gate-post", "--content", content)
     assert r.returncode == 0, r.stderr or r.stdout
     ops = read_journal(journal)
-    assert [o["verb"] for o in ops] == ["new-note", "assert"]
-    assert ops[1]["args"]["predicate"] == "publish_state" and ops[1]["args"]["value"] == "draft"
-    note_id = ops[1]["args"]["subject"]
+    assert [o["verb"] for o in ops] == ["assert"]   # the birth: the notes source journal (48c4c34d)
+    assert ops[0]["args"]["predicate"] == "publish_state" and ops[0]["args"]["value"] == "draft"
+    note_id = ops[0]["args"]["subject"]
     landed = site / "posts" / "gate-post" / "index.md"
 
     def run_emit():
@@ -252,7 +236,7 @@ def test_born_post_is_draft_at_birth_and_emit_post_gates_on_published(tmp_path):
                and o["args"]["value"] == "published"]
     assert len(pub_ops) == 1 and pub_ops[0]["args"]["subject_content_hash"]
     r = _run("--graph-db-path", db, "--journal-path", journal, "add-section", "gate-post",
-             "--content", "## Later\n\nAdded after publication.\n")
+             "--content", "## Later\n\nAdded after publication.\n", "--after", "body")   # journal-first
     assert r.returncode == 0, r.stderr or r.stdout
     landed.unlink()
     r = run_emit()                                                # edited -> refused
@@ -310,15 +294,15 @@ def test_born_post_location_derives_from_emit_root_on_replay(tmp_path):
     # projects UNPLACED (same ids, no location) rather than onto the journaled tree.
     import sqlite3
     old, new = tmp_path / "old" / "posts", tmp_path / "site" / "drafts" / "posts"
-    journal = str(tmp_path / "notes.writes.jsonl")
+    journal, sj = str(tmp_path / "notes.writes.jsonl"), str(tmp_path / "notes.source.jsonl")
     cfg = tmp_path / "graph.config.json"
-    cfg.write_text(json.dumps({"notes_profile": "quarto_post", "emit_root": str(old)}))
+    cfg.write_text(json.dumps({"notes_profile": "quarto_post", "emit_root": str(old), "source_journal_path": sj}))
     content = "---\ntitle: \"Moved post\"\ndate: 2026-09-28\n---\n\nLede.\n\n## One\n\nBody.\n"
     r = _run("--graph-db-path", str(tmp_path / "notes.db"), "--journal-path", journal,
              "new-note", "--slug", "work/moved-post", "--content", content)
     assert r.returncode == 0, r.stderr or r.stdout
-    op = read_journal(journal)[0]["args"]
-    assert op["slug"] == "work/moved-post" and "path" not in op   # no machine path journaled
+    rec = read_source_journal(sj)[0]["args"]
+    assert rec["slug"] == "work/moved-post" and rec["path"] == ""   # no machine path journaled (48c4c34d (1))
 
     def note(db):
         con = sqlite3.connect(str(db))
@@ -333,16 +317,19 @@ def test_born_post_location_derives_from_emit_root_on_replay(tmp_path):
     nid, path, ids = note(tmp_path / "notes.db")
     assert path == str((old / "work" / "moved-post" / "index.md").resolve())
     # The tree moves: the config names the new root, the journal is untouched
-    cfg.write_text(json.dumps({"notes_profile": "quarto_post", "emit_root": str(new)}))
+    cfg.write_text(json.dumps({"notes_profile": "quarto_post", "emit_root": str(new), "source_journal_path": sj}))
     r2 = _run("--graph-db-path", str(tmp_path / "replay.db"), "--journal-path", journal, "replay")
     assert r2.returncode == 0, r2.stderr or r2.stdout
     nid2, path2, ids2 = note(tmp_path / "replay.db")
     assert nid2 == nid and ids2 == ids
     assert path2 == str((new / "work" / "moved-post" / "index.md").resolve())
-    # A legacy op (absolute path journaled beside the slug) derives the same way
+    # A legacy writes-journal genesis op (an earlier release's: absolute path journaled beside the
+    # slug) derives the same way
+    cfg.write_text(json.dumps({"notes_profile": "quarto_post", "emit_root": str(new)}))
     legacy = str(tmp_path / "legacy.writes.jsonl")
-    Path(legacy).write_text(json.dumps({"verb": "new-note", "args": dict(
-        op, path=str(old / "work" / "moved-post" / "index.md"))}) + "\n")
+    Path(legacy).write_text(json.dumps({"verb": "new-note", "args": {
+        "content": content, "slug": "work/moved-post", "profile": "quarto_post", "actor": "agent:session",
+        "path": str(old / "work" / "moved-post" / "index.md")}}) + "\n")
     r3 = _run("--graph-db-path", str(tmp_path / "legacy.db"), "--journal-path", legacy, "replay")
     assert r3.returncode == 0, r3.stderr or r3.stdout
     nid3, path3, ids3 = note(tmp_path / "legacy.db")
@@ -363,8 +350,10 @@ def test_read_verbs_open_read_only_and_the_flag_refuses_writes(tmp_path):
     mem.mkdir()
     db = str(tmp_path / "dev.db")
     journal = str(tmp_path / "writes.jsonl")
+    (tmp_path / "graph.config.json").write_text(json.dumps(
+        {"memory_dir": str(mem), "memory_journal_path": str(tmp_path / "memory.jsonl")}))
     r = _run("--graph-db-path", db, "--journal-path", journal, "new-note",
-             "--path", str(mem / "ro.md"), "--content", "---\nname: ro-demo\ndescription: d\n---\n\nbody\n")
+             "--content", "---\nname: ro-demo\ndescription: d\n---\n\nbody\n")
     assert r.returncode == 0, r.stderr or r.stdout
     observer = sqlite3.connect(db)
     before = observer.execute("PRAGMA data_version").fetchone()[0]

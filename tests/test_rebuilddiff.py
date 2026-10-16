@@ -37,23 +37,23 @@ _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 
 @needs_capability
 def test_live_writes_equal_their_rebuild(tmp_path):
-    # A batch of live writes across the common verbs — a born note, a multi-op invocation
-    # (decide --state open journals decide + assert), a batch (assert-batch), a supersede,
-    # an edge — then a replay of their journal into a fresh db: the live db and its rebuild
-    # must match on every property and both time columns.
+    # A batch of live writes across the common verbs — a born note (born cut over into the memory
+    # journal, ruling 48c4c34d), a multi-op invocation (decide --state open journals decide +
+    # assert), a batch (assert-batch), a supersede, an edge — then a replay of their journals into a
+    # fresh db: the live db and its rebuild must match on every property and both time columns.
     live, rebuilt = str(tmp_path / "live.db"), str(tmp_path / "rebuilt.db")
     journal = str(tmp_path / "writes.jsonl")
     base = ("--graph-db-path", live, "--journal-path", journal)
-    note = tmp_path / "memory" / "clock_demo.md"
-    note.parent.mkdir()
+    (tmp_path / "memory").mkdir()
+    (tmp_path / "graph.config.json").write_text(json.dumps(
+        {"memory_dir": str(tmp_path / "memory"), "memory_journal_path": str(tmp_path / "memory.jsonl")}))
 
     def ok(*args):
         r = _run(*base, *args)
         assert r.returncode == 0, f"{args[0]} failed: {r.stderr or r.stdout}"
         return r.stdout
 
-    ok("new-note", "--path", str(note), "--content",
-       "---\nname: clock-demo\ndescription: d\n---\n\nbody\n")
+    ok("new-note", "--content", "---\nname: clock-demo\ndescription: d\n---\n\nbody\n")
     item = _UUID.search(ok("decide", "WORK ITEM: one clock", "--title", "WORK ITEM: one clock",
                            "--state", "open")).group(0)
     design = _UUID.search(ok("decide", "DESIGN: the op clock", "--title",

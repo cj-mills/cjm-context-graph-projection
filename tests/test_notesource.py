@@ -228,9 +228,42 @@ def test_cutover_authoring_and_absorb_keep_live_equal_to_rebuild(tmp_path):
 
 
 @pytest.mark.skipif(not _HAVE_GRAPH, reason="needs the graph capability")
-def test_a_born_draft_edit_re_derives_the_whole_note(tmp_path):
-    # Finding 1d83a4d8: a section edit on a born draft re-derives level, anchor and the outline
-    # edges live, exactly as the replayed section op and the rebuild derive them.
+def test_a_commitless_note_replays_as_a_window_and_holds_no_git_path():
+    # Ruling 48c4c34d (2): a born post's capture group (no commit) is never folded at ingest
+    from cjm_context_graph_projection.notesource import cutover_freeze
+    fold, note = _fold(_A)
+    archive = [{"verb": v, "ts": 1.0, "args": a} for v, a in capture_records(note, "posts/a/index.md", "c0")]
+    archive.append({"verb": CUTOVER, "ts": 1.0, "args": {"note": note.id}})
+    born = note_from_text("/drafts/b/index.md", _A.replace('"A"', '"B"'), corpus_root="/drafts",
+                          profile="quarto_post", lossless=True, slug="b")
+    group = [{"verb": v, "ts": 2.0, "args": a} for v, a in capture_records(born, "", None, "b")]
+    group.append({"verb": CUTOVER, "ts": 2.0, "args": {"note": born.id}})
+    records = archive + group
+    assert group[0]["args"] == {"note": born.id, "path": "", "frontmatter": born.frontmatter_raw, "slug": "b"}
+    assert replay_spans(records) == [(len(archive), len(records))]       # the archive's capture folds at ingest
+    assert cutover_freeze(records) == {"posts/a/index.md": "c0"}         # the born post freezes no path
+    assert fold_records(records).notes[born.id].slug == "b"
+
+
+def test_the_render_owns_the_body_below_its_marker():
+    # Ruling f4cc62b9 rider (2): a hand write into a rendered body is refused; above the marker passes
+    from cjm_context_graph_projection.notesource import render_owned
+    from cjm_context_graph_projection.purenotes import BODY_MARKER
+    text = f"---\ntitle: \"R\"\n---\n\nAuthored.\n\n{BODY_MARKER}\n\nCard.\n\n## One\n\nRendered.\n"
+    fold, note = _fold(text, "r")
+    pre, one = section_node_id(note.id, "_preamble"), section_node_id(note.id, "one")
+    assert render_owned(fold, note.id, one, "## One\n\nEdited.") and render_owned(fold, note.id, None)
+    assert render_owned(fold, note.id, pre, f"Authored, edited.\n\n{BODY_MARKER}\n\nCard.") is None
+    assert render_owned(fold, note.id, pre, f"Authored.\n\n{BODY_MARKER}\n\nCard, edited.")
+    plain, pn = _fold(_A)
+    assert render_owned(plain, pn.id, section_node_id(pn.id, "one"), "## One\n\nx") is None
+
+
+def test_a_born_draft_is_born_cut_over_and_the_genesis_drafts_cut_over(tmp_path):
+    # Ruling 48c4c34d: on the notes graph (an archive + its drafts) a born post's source is the notes
+    # source journal, its file an emit; level is placement; a draft the writes journal's genesis op
+    # born is captured from the db -- live equal to the ingest-notes rebuild after each step
+    from cjm_context_graph_primitives.journal import append_record
     site = tmp_path / "site"
     (site / "posts").mkdir(parents=True)
     commit_all(site, "empty")
@@ -239,21 +272,55 @@ def test_a_born_draft_edit_re_derives_the_whole_note(tmp_path):
     config = {"notes_corpus": str(site / "posts"), "notes_profile": "quarto_post", "website_root": str(site),
               "emit_root": str(drafts), "journal_path": str(tmp_path / "w.jsonl"),
               "source_journal_path": str(tmp_path / "s.jsonl")}
-    for d in ("live", "rebuilt"):
-        (tmp_path / d).mkdir()
-        (tmp_path / d / "graph.config.json").write_text(json.dumps(config))
-    db, rb = str(tmp_path / "live/g.db"), str(tmp_path / "rebuilt/g.db")
+    (tmp_path / "live").mkdir()
+    (tmp_path / "live" / "graph.config.json").write_text(json.dumps(config))
+    db = str(tmp_path / "live/g.db")
+    n = [0]
 
-    def cli(*args, at=db):
+    def cli(*args, at=db, ok=True):
         r = _run("--graph-db-path", at, "--journal-path", config["journal_path"], *args)
-        assert r.returncode == 0, r.stdout + r.stderr
+        assert (r.returncode == 0) == ok, r.stdout + r.stderr
         return r
 
+    def same(step):
+        n[0] += 1
+        d = tmp_path / f"rebuilt{n[0]}"
+        d.mkdir()
+        (d / "graph.config.json").write_text(json.dumps(config))
+        cli("ingest-notes", at=str(d / "g.db"))
+        r = _run("--graph-db-path", db, "rebuild-diff", "--against", str(d / "g.db"))
+        assert r.returncode == 0, f"{step}: live != rebuild\n{r.stdout}"
+
+    # a draft an earlier release born by a genesis op and edited by a section op
+    old = "---\ntitle: \"O\"\n---\n\n## One\n\nx\n\n\n## Two\n\ny\n"
+    append_record(config["journal_path"], {"verb": "new-note", "args": {"content": old, "slug": "o", "profile": "quarto_post",
+                                                                        "actor": "agent:session"}})
+    append_record(config["journal_path"], {"verb": "section", "args": {"slug": "o", "anchor": "one",
+                                                                       "raw": "## One\n\nx, legacy.\n\n\n"}})
     cli("ingest-notes")
+    r = cli("author", section_node_id(note_node_id("o"), "two"), "--edit", "y", "z", ok=False)
+    assert "not cut over" in r.stderr, r.stderr                      # the retired regime refuses new writes
+    r = cli("cutover-born")
+    assert "1 note(s)" in r.stdout and "blank-lines 1" in r.stdout, r.stdout
+    assert (drafts / "o" / "index.md").read_text() == old.replace("x\n\n\n", "x, legacy.\n\n")
+    same("the genesis cutover")
+    assert "no change" in cli("cutover-born").stdout
+
     text = "---\ntitle: \"D\"\n---\n\n## One\n\nx\n\n## Two\n\ny\n"
+    w0 = len(Path(config["journal_path"]).read_text().splitlines())
     cli("new-note", "--slug", "d", "--content", text)
+    ops = [json.loads(line)["verb"] for line in Path(config["journal_path"]).read_text().splitlines()[w0:]]
+    assert ops == ["assert"]                                          # the writes journal: the draft state alone
+    assert (drafts / "d" / "index.md").read_text() == text            # the file: an emit
+    same("birth")
+    assert "no change" in cli("new-note", "--slug", "d", "--content", text).stdout
     two = section_node_id(note_node_id("d"), "two")
-    cli("author", two, "--edit", "## Two", "### Two")
-    cli("ingest-notes", at=rb)
-    r = _run("--graph-db-path", db, "rebuild-diff", "--against", rb)
-    assert r.returncode == 0, r.stdout
+    r = cli("author", two, "--edit", "## Two", "### Two", ok=False)
+    assert "level is placement" in r.stdout, r.stdout
+    cli("place", two, "--parent", "one", "--first")
+    assert "### Two" in (drafts / "d" / "index.md").read_text()
+    same("place")
+    cli("author", two, "--edit", "y", "y, cut over")
+    cli("add-section", "d", "--content", "## Three\n\nz", "--after", "one")
+    assert "y, cut over" in (drafts / "d" / "index.md").read_text()
+    same("journal-first authoring")

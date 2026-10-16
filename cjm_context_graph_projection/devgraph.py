@@ -345,6 +345,7 @@ class ArchiveSource:
         site_pages: Optional[List[str]] = None,   # The site's own pages, relative to site_root
         retired: Optional[List[Dict[str, Any]]] = None,  # The journal's retire records
         cutover: Optional[Dict[str, str]] = None,        # The cut-over paths -> their capture commit (notesource.cutover_freeze): frozen in the git fold, continued by the notes source fold
+        emit_root: Optional[str] = None,                 # The born posts' emit root (their files derive from it, 98293e72 (1))
     ):
         self.root = Path(corpus_root)
         top = git_toplevel(str(self.root))
@@ -359,6 +360,7 @@ class ArchiveSource:
         if site_root and str(Path(site_root).resolve()) != top:
             raise ValueError(f"the site root {site_root} is not the archive's work tree {top}")
         self.top, self.profile, self.note_aliases, self.site_root = top, profile, note_aliases, site_root
+        self.emit_root = emit_root
         rel = self.root.resolve().relative_to(top).as_posix()
         self.prefix = "" if rel == "." else rel + "/"
         self.by_retired = {r["path"]: r for r in retired}
@@ -387,6 +389,52 @@ class ArchiveSource:
                                   profile=self.profile, lossless=True)
         n, e = corpus_graph_elements([note], self.note_aliases)
         return note, n + e
+
+    def decompose_born(
+        self,
+        slug: str,    # A born post's pinned permalink, relative to the emit root
+        data: bytes,  # One version's bytes
+    ) -> Tuple[Any, List[Dict[str, Any]]]:  # (the Note, its element wires)
+        return born_decompose(self.emit_root, self.profile, self.note_aliases, slug, data)
+
+
+def born_decompose(
+    emit_root: Optional[str],                # The born posts' emit root (None: unplaced)
+    profile: str,                            # The lane's harvest profile
+    note_aliases: Optional[Dict[str, str]],  # Confirmed link aliases
+    slug: str,                               # A born post's pinned permalink, relative to the emit root
+    data: bytes,                             # One version's bytes
+) -> Tuple[Any, List[Dict[str, Any]]]:  # (the Note, its element wires)
+    """A born post (ruling 48c4c34d (1)): identity pinned by its slug, located under the emit root as
+    `new-note --slug` writes it -- unplaced (no path) with no emit root, as the writes replay projects it."""
+    from .structure import born_post_path
+    path = born_post_path(emit_root, slug) if emit_root else ""
+    note = note_from_text(path, data.decode("utf-8"), corpus_root=str(Path(path).parent),
+                          profile=profile, lossless=True, slug=slug)
+    n, e = corpus_graph_elements([note], note_aliases)
+    return note, n + e
+
+
+class BornSource:
+    """A notes lane that births posts but holds no archive (no `notes_corpus`): its every journaled
+    note is a born post (ruling 48c4c34d (1))."""
+
+    def __init__(
+        self,
+        emit_root: Optional[str],      # The born posts' emit root
+        profile: str = "quarto_post",  # The lane's harvest profile
+    ):
+        self.emit_root, self.profile, self.note_aliases = emit_root, profile, None
+
+    def decompose(self, path: str, data: bytes) -> Tuple[Any, List[Dict[str, Any]]]:
+        raise ValueError(f"{path}: a notes lane with no archive holds born posts only")
+
+    def decompose_born(
+        self,
+        slug: str,    # A born post's pinned permalink
+        data: bytes,  # One version's bytes
+    ) -> Tuple[Any, List[Dict[str, Any]]]:  # (the Note, its element wires)
+        return born_decompose(self.emit_root, self.profile, self.note_aliases, slug, data)
 
 
 ARCHIVE_SOURCE = "archive"  # The ingest record's kind for the notes lane's archive clone (DEC a9176261)

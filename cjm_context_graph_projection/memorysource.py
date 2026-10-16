@@ -7,10 +7,11 @@ config, DATA). A lane is config plus a source object: this module supplies the m
 
 NO FILE (ruling fed38997): a cut-over memory note is emitted nowhere and carries no path; the
 graph is how it is read. CAPTURE AND CUTOVER ARE ONE GROUP, READ FROM THE GRAPH: there is no
-outside file to shadow, so `cutover_memory` reads each note as the db holds it (its writes-journal
+outside file to shadow, so the cutover (`bornnotes.cutover_born`) read each note as the db held it (its writes-journal
 history: the genesis new-note op and its section / add-section ops) and appends its element
 records with the cutover record in one group. From then on the memory journal is the note's
-source and its writes-journal history stops growing.
+source and its writes-journal history stops growing; a new memory note is born cut over
+(`bornnotes.born_new_note`).
 
 THE CANONICALIZATION AT CAPTURE (c9b29de5 (5)): the blank lines between elements take the
 composed form, and an in-body H1 is the note's TITLE -- its text moves into the frontmatter as
@@ -20,17 +21,13 @@ before it merges in and retires, and its children step up to the top level."""
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from cjm_markdown_decompose_core.extract import note_from_text
 from cjm_markdown_decompose_core.ingest import corpus_graph_elements
 
-from .journal import _genesis_note_id, _note_slug, read_journal
-from .notesource import (_note_rows, _trial, append_group, apply_notes_live, capture_records,
-                         CUTOVER, derive_note, fold_records, held_text, NOTE, NotesFoldError, PLACE,
-                         RETIRE, SECTION)
-from .runtime import GraphHandle
-from .source_state import read_source_journal
+from .journal import read_journal
+from .notesource import NOTE, NotesFoldError, PLACE, RETIRE, SECTION
 
 MEMORY_LANE = "memory"       # The lane key a note-lane config carries (`lane`)
 MEMORY_PROFILE = "memory"    # The memory notes' harvest profile, fixed by the lane, never detected
@@ -77,21 +74,6 @@ def note_lane(
 
 def is_memory_lane(config: Dict[str, Any]) -> bool:  # A note-lane config naming the memory lane
     return config.get("lane") == MEMORY_LANE
-
-
-def memory_inventory(
-    journal_path: Optional[str],  # The dev graph's writes journal
-) -> Dict[str, str]:  # Note id -> slug, for every memory note a genesis new-note op mints
-    """The memory notes the writes journal holds: each `new-note` genesis op without a born
-    post's slug (a memory note is identified by its frontmatter name)."""
-    out: Dict[str, str] = {}
-    for op in read_journal(journal_path) if journal_path else []:
-        a = op.get("args") or {}
-        if op.get("verb") == "new-note" and not a.get("slug"):
-            nid = _genesis_note_id(op)
-            if nid:
-                out[nid] = _note_slug(a.get("path"), a.get("content"))
-    return out
 
 
 def stray_memory_files(
@@ -162,129 +144,3 @@ def title_records(
     out = ([out_note] + [(SECTION, a) for a in state.values()] + [(PLACE, a) for a in place.values()]
            + [(RETIRE, {"section": s}) for s in retire])
     return out, h
-
-
-def capture_memory_records(
-    note_id: str,              # The memory Note's id
-    text: str,                 # Its text as the db holds it (frontmatter + its live Sections' raw, in order)
-    live_ids: Set[str],        # Its live Section ids in the db
-    src: Optional[MemorySource] = None,
-) -> Tuple[List[Tuple[str, Dict[str, Any]]], Dict[str, Any]]:  # (the capture + cutover records, {change, title?, retired, composed})
-    """One note's capture + cutover records, canonical, proved: the db's text re-decomposes to the
-    db's elements, the records compose and re-decompose to the same elements, and the derived id
-    set is the live one less the retired. Raises NotesFoldError on any refusal."""
-    src = src or MemorySource()
-    note = src.decompose("", text.encode("utf-8"))[0]
-    if note.id != note_id:
-        raise NotesFoldError(f"{note_id}: its text decomposes as {note.id} (the frontmatter name moved)")
-    if {s.id for s in note.sections} != live_ids:
-        raise NotesFoldError(f"{note.slug}: the db's text re-decomposes to other elements than the db "
-                             "holds -- rebuild first")
-    recs = capture_records(note, "", "")
-    recs[0][1].pop("commit", None)
-    recs, h = title_records(note, recs)
-    recs.append((CUTOVER, {"note": note_id}))
-    trial = fold_records({"verb": v, "args": a} for v, a in recs)
-    derived, composed = derive_note(trial, note_id, src)
-    retired = {a["section"] for v, a in recs if v == RETIRE}
-    if {s.id for s in derived.sections} != live_ids - retired:
-        raise NotesFoldError(f"{note.slug}: the capture derives other ids than the db holds")
-    blank = lambda t: [line for line in t.split("\n") if line.strip()]
-    change = ("title" if h is not None else "none" if composed == text
-              else "blank-lines" if blank(composed) == blank(text) else "other")
-    if change == "other":
-        raise NotesFoldError(f"{note.slug}: the composition changes more than blank lines")
-    row: Dict[str, Any] = {"slug": note.slug, "note": note_id, "change": change, "retired": sorted(retired),
-                           "composed": composed}
-    if h is not None:
-        row["title"] = h.title
-    return recs, row
-
-
-async def cutover_memory(
-    gx: GraphHandle,
-    lane: Dict[str, Any],                # memory_lane(the dev graph config)
-    journal_path: Optional[str],         # The writes journal (the inventory's genesis ops)
-    slugs: Optional[List[str]] = None,   # The notes to cut over (default: every memory note not yet cut over)
-    *,
-    write: bool = True,
-) -> Dict[str, Any]:  # {notes: [{slug, note, change, title?, retired}], refused, records, appended, notes_live?}
-    """Capture + cut over the memory notes as ONE group, each read from the db as its writes-journal
-    history built it, canonical (c9b29de5 (4)-(5)); every refusal listed, nothing appended unless
-    every target is proved."""
-    jp = lane.get("source_journal_path")
-    if not jp:
-        return {"error": "the dev graph config names no memory_journal_path"}
-    fold = fold_records(read_source_journal(jp))
-    inv = memory_inventory(journal_path)
-    unknown = sorted(set(slugs or []) - set(inv.values()))
-    targets = sorted((nid for nid, s in inv.items() if nid not in fold.notes and (not slugs or s in slugs)),
-                     key=lambda nid: inv[nid])
-    src = MemorySource()
-    out: List[Tuple[str, Dict[str, Any]]] = []
-    rows: List[Dict[str, Any]] = []
-    refused = [{"path": s, "error": "no memory note of that slug"} for s in unknown]
-    for nid in targets:
-        nw, held, _ = await _note_rows(gx, nid)
-        if nw is None:
-            refused.append({"path": inv[nid], "error": "not in the db -- rebuild first"})
-            continue
-        text, live_ids = held_text(nw, held)
-        try:
-            recs, row = capture_memory_records(nid, text, live_ids, src)
-        except NotesFoldError as e:
-            refused.append({"path": inv[nid], "error": str(e)})
-            continue
-        row.pop("composed")
-        out += recs
-        rows.append(row)
-    res: Dict[str, Any] = {"notes": rows, "refused": refused, "records": len(out), "appended": [],
-                           "already": len([n for n in inv if n in fold.notes])}
-    if write and out and not refused:
-        res["appended"] = append_group(jp, out, op={"op": "cutover-memory"})
-        res["notes_live"] = await apply_notes_live(gx, lane, res["appended"])
-    res["written"] = bool(res["appended"])
-    return res
-
-
-# --- Born on the graph --------------------------------------------------------------------
-
-async def memory_new_note(
-    gx: GraphHandle,
-    lane: Dict[str, Any],          # memory_lane(the dev graph config)
-    content: str,                  # The whole note: frontmatter + body
-    *,
-    actor: str = "agent:session",
-    write: bool = True,
-) -> Dict[str, Any]:  # {note_id, slug, sections, canonical, records, appended, notes_live?} | {error}
-    """A memory note born cut over (c9b29de5 (6)): one group -- the note, its elements' state and
-    placement, the cutover -- with no file and no path. Its title is frontmatter (an in-body H1 is
-    refused); its id is its frontmatter name's."""
-    from cjm_context_graph_layer.ops import graph_task
-    jp = lane.get("source_journal_path")
-    if not jp:
-        return {"error": "the dev graph config names no memory_journal_path"}
-    if not content.endswith("\n"):
-        content += "\n"
-    src = MemorySource()
-    note = src.decompose("", content.encode("utf-8"))[0]
-    if any(s.level == 1 for s in note.sections):
-        return {"error": "an in-body H1 is the note's title -- put it in the frontmatter as `title:` "
-                         "(design c9b29de5 (5))", "slug": note.slug}
-    fold = fold_records(read_source_journal(jp))
-    if note.id in fold.notes or await graph_task(gx.queue, gx.graph_id, "get_node", node_id=note.id):
-        return {"error": f"note `{note.slug}` already exists (author / add-section edit it)", "slug": note.slug}
-    recs = capture_records(note, "", "")
-    recs[0][1].pop("commit", None)
-    recs.append((CUTOVER, {"note": note.id}))
-    try:
-        derived, composed = derive_note(_trial(fold, recs), note.id, src)
-    except NotesFoldError as e:
-        return {"error": str(e), "slug": note.slug}
-    res: Dict[str, Any] = {"note_id": note.id, "slug": note.slug, "sections": len(derived.sections),
-                           "canonical": composed == content, "records": recs, "appended": []}
-    if write:
-        res["appended"] = append_group(jp, recs, op={"op": "new-note", "actor": actor})
-        res["notes_live"] = await apply_notes_live(gx, lane, res["appended"])
-    res["written"] = bool(res["appended"])
-    return res

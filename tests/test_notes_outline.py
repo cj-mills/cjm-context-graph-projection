@@ -154,8 +154,9 @@ def test_cli_outline_pass_over_a_standing_draft_lands_journaled_ops_and_replays_
     sdb = str(sib_dir / "sib.db")
     _build_sibling(sdb)
     pdb, pj = str(pri_dir / "pri.db"), str(pri_dir / "writes.jsonl")
-    (pri_dir / "graph.config.json").write_text(json.dumps(
-        {"notes_profile": "quarto_post", "emit_root": str(pri_dir / "staging"), "sibling_graphs": {"tx": sdb}}))
+    (pri_dir / "graph.config.json").write_text(json.dumps(   # the draft is born cut over (ruling 48c4c34d)
+        {"notes_profile": "quarto_post", "emit_root": str(pri_dir / "staging"), "sibling_graphs": {"tx": sdb},
+         "source_journal_path": str(pri_dir / "source.jsonl")}))
     base = ("--graph-db-path", pdb, "--journal-path", pj, "--source-journal-path", str(pri_dir / "source.jsonl"))
     slug = "the-learning-game/ch01"
     assert _run(*base, "notes-type", "pure-notes").returncode == 0

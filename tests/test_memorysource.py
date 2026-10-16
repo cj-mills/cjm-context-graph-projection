@@ -10,9 +10,10 @@ import sys
 from pathlib import Path
 
 import pytest
+from cjm_context_graph_primitives.journal import append_record
+from cjm_context_graph_projection.bornnotes import capture_held_records as capture_memory_records
 from cjm_context_graph_projection.journal import _source_spans, touched_node_ids
-from cjm_context_graph_projection.memorysource import (capture_memory_records, memory_lane,
-                                                       MemorySource, note_lane)
+from cjm_context_graph_projection.memorysource import memory_lane, MemorySource, note_lane
 from cjm_context_graph_projection.notesource import fold_records, NotesFoldError
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS
 from cjm_dev_graph_schema.identity import note_node_id, section_node_id
@@ -140,14 +141,18 @@ def test_the_memory_notes_hand_over_to_the_memory_journal_live_equal_to_rebuild(
         finally:
             con.close()
 
-    # The legacy regime: born with a file and a genesis op, edited through section ops
+    # The legacy regime, as an earlier release journaled it (its writers retired, ruling 48c4c34d (5)):
+    # each note born by a genesis op with a file, then edited through an anchor-keyed section op
     configure()
-    ok(ingest(db))
     for slug, text in (("alpha", _ALPHA), ("beta", _BETA)):
-        ok(cli("new-note", "--path", str(mem / f"{slug}.md"), "--content", text))
+        (mem / f"{slug}.md").write_text(text)
+        append_record(str(writes), {"verb": "new-note", "args": {"path": str(mem / f"{slug}.md"), "content": text,
+                                                                 "actor": "agent:session"}})
+    append_record(str(writes), {"verb": "section", "args": {"slug": "alpha", "anchor": "one", "actor": "agent:session",
+                                                            "raw": "## One\n\nBody one, legacy. [[beta]]\n\n"}})
+    ok(ingest(db))
     a, b = note_node_id("alpha"), note_node_id("beta")
     one = section_node_id(a, "one")
-    ok(cli("author", one, "--edit", "Body one.", "Body one, legacy."))
     pre = same("legacy")
 
     # The lane on: the cutover, listed first, then one group
@@ -186,18 +191,22 @@ def test_the_memory_notes_hand_over_to_the_memory_journal_live_equal_to_rebuild(
     assert _lines(writes) == w0 and _lines(mj) > m0
     assert not (mem / "alpha.md").read_text().count("memory lane")   # no emit (ruling fed38997)
 
-    # Born on the memory lane: no file, no path; an in-body H1 refused
-    r = cli("new-note", "--path", str(mem / "gamma.md"), "--content", _FM.format("gamma") + "\n## G\n\ng\n")
-    assert r.returncode == 1 and "has no file" in r.stderr, r.stderr
+    # Born on the memory lane: no file, no path, no slug; an in-body H1 refused
+    r = cli("new-note", "--slug", "gamma", "--content", _FM.format("gamma") + "\n## G\n\ng\n")
+    assert r.returncode == 1 and "has no slug" in r.stdout, r.stdout
     r = cli("new-note", "--content", _FM.format("gamma") + "\n# G\n\ng\n")
     assert r.returncode == 1 and "title" in r.stdout, r.stdout
     ok(cli("new-note", "--content", _FM.format("gamma") + "\n## G\n\ng [[alpha]]\n"), "`gamma`")
     assert not (mem / "gamma.md").exists()
     same("new-note")
+    w2 = _lines(writes)
+    ok(cli("new-note", "--content", _FM.format("gamma") + "\n## G\n\ng [[alpha]]\n"), "no change")   # a retry
+    assert _lines(writes) == w2
 
-    # The legacy verbs retire on the lane; a stray file is reported, never ingested
-    r = cli("reconcile-memory")
-    assert r.returncode == 1 and "retired" in r.stderr, r.stderr
+    # The legacy verbs are gone (ruling 48c4c34d (B)); a stray file is reported, never ingested
+    for verb in ("reconcile-memory", "m3-baseline"):
+        r = cli(verb)
+        assert r.returncode == 2 and "invalid choice" in r.stderr, r.stderr
     (mem / "stray.md").write_text(_FM.format("stray") + "\nx\n")
     r = ingest(rebuild().replace("g.db", "g2.db"))
     assert r.returncode == 0 and "stray memory file" in r.stdout and "stray.md" in r.stdout, r.stdout

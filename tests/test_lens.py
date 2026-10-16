@@ -157,7 +157,8 @@ def test_list_predicate_value_filter_selects_register_subjects(tmp_path):
 
 @_GATED
 def test_set_lens_replays_from_journal(tmp_path):
-    from cjm_context_graph_projection.journal import append_write, replay_journal
+    from cjm_context_graph_primitives.journal import append_write
+    from cjm_context_graph_projection.journal import replay_journal
 
     db = str(tmp_path / "g.db")
     jp = str(tmp_path / "writes.jsonl")

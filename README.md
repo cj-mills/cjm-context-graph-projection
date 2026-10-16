@@ -13,6 +13,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - **`cjm_context_graph_projection.artifacts`** — Observed-source ARTIFACTS (design 9a7224a7, work item 4765b699): files the graph VERSIONS
 - **`cjm_context_graph_projection.authoring`** — The B write surface: AUTHOR a verbatim-text slot on-graph, emit the canonical artifact.
 - **`cjm_context_graph_projection.bench`** — THE SCALE HARNESS: synthetic tiers of a graph and its journals, the canonical verbs run at each.
+- **`cjm_context_graph_projection.bornnotes`** — Notes born on the graph, on either note lane (ruling 48c4c34d over ruling 547f4123 (2); design
 - **`cjm_context_graph_projection.categories`** — A post's CATEGORIES: the one reader every renderer calls (design ce17606b (1) under the category
 - **`cjm_context_graph_projection.categorypages`** — CATEGORY PAGES (design a62f2499 under the category model 0f7fcdcb (5), work item 779c7a79).
 - **`cjm_context_graph_projection.claims`** — The claims the site may make about the user's work, and the deliverables that back them
@@ -68,7 +69,6 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - **`cjm_context_graph_projection.readme`** — README-as-projection (v1, STRUCTURAL-ONLY): generate a repo's README FROM THE GRAPH.
 - **`cjm_context_graph_projection.reads`** — The content-access READS ledger: which nodes each read delivered into context.
 - **`cjm_context_graph_projection.rebuilddiff`** — A live graph against its own rebuild, property for property (design 8f6f2343, finding fbce0173).
-- **`cjm_context_graph_projection.reconcile`** — M2b shadow-phase RECONCILE — surface + (explicitly) absorb out-of-band `.md` edits.
 - **`cjm_context_graph_projection.refactor`** — Refactoring-candidate identification over the code graph (the IDENTIFY half of move).
 - **`cjm_context_graph_projection.refactor_ops`** — `move` — relocate a symbol between modules (the EXECUTE half of refactor-candidates).
 - **`cjm_context_graph_projection.registers`** — Register drift-check: each hub note's member-cache vs the active `role` assertions.
@@ -209,6 +209,14 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `tree_rss_kb` _function_ — The tree's resident set, read from /proc (statm + each task's children). An invocation's
 - `verb_parser` _function_ — One verb's subparser, read off the parser's subcommands.
 - `verb_specs` _function_ — The canonical verbs for a lane: the configured `verbs` replace the default list (the
+
+### `cjm_context_graph_projection.bornnotes`
+
+- `born_new_note` _function_ — A note born cut over (c9b29de5 (6); ruling 48c4c34d (3)): one group -- the note, its elements'
+- `capture_held_records` _function_ — One note's capture + cutover records, canonical, proved: the db's text re-decomposes to the
+- `cutover_born` _function_ — Capture + cut over the lane's writes-journal genesis notes as ONE group, each read from the db
+- `genesis_inventory` _function_ — The lane's notes the writes journal holds: on the memory lane each `new-note` op without a
+- `genesis_refusal` _function_ — The writes journal's note regime retired for new writes (ruling 48c4c34d (5)): a note its
 
 ### `cjm_context_graph_projection.categories`
 
@@ -384,6 +392,8 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 ### `cjm_context_graph_projection.devgraph`
 
 - `ArchiveSource` _class_ — The archive's kept paths and their decomposition — ONE definition for the ingest that
+- `BornSource` _class_ — A notes lane that births posts but holds no archive (no `notes_corpus`): its every journaled
+- `born_decompose` _function_ — A born post (ruling 48c4c34d (1)): identity pinned by its slug, located under the emit root as
 - `build_dev_graph_elements` _function_ — Assemble the full dev graph: memory notes (+ refs), the repo map (+ deps),
 - `memory_elements` _function_ — Decompose every memory markdown file (except MEMORY.md) into graph elements.
 - `notes_corpus_elements` _function_ — Decompose a git-held `<dir>/index.md` / `index.qmd` markdown corpus into graph elements.
@@ -546,7 +556,6 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `journal_touch_rows` _function_ — A journal's touch rows across its whole segment family (cold first,
 - `journal_window` _function_ — The journal-window projection: which nodes a window/session touched, when, how.
 - `journal_window_view` _function_ — The SESSION LENS read verb: `journal_window` + graph join (title/label per ref).
-- `m3_baseline_import` _function_ — One-time M3 GENESIS IMPORT: emit a per-note `new-note` baseline op into the journal.
 - `node_journal_trace` _function_ — One node's journal TRACE: created/updated + session keys + actors (axis D).
 - `replay_journal` _function_ — Re-apply every journaled write through its core verb (idempotent).
 - `touched_node_ids` _function_ — Best-effort node refs a journaled op touched — the session-lens feed (2f51ff5d).
@@ -631,12 +640,8 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 ### `cjm_context_graph_projection.memorysource`
 
 - `MemorySource` _class_ — The memory lane's decomposition: the memory profile, identity from the frontmatter name,
-- `capture_memory_records` _function_ — One note's capture + cutover records, canonical, proved: the db's text re-decomposes to the
-- `cutover_memory` _function_ — Capture + cut over the memory notes as ONE group, each read from the db as its writes-journal
 - `is_memory_lane` _function_
-- `memory_inventory` _function_ — The memory notes the writes journal holds: each `new-note` genesis op without a born
 - `memory_lane` _function_ — The note-lane config the notes lane's machinery reads: the memory journal as its source
-- `memory_new_note` _function_ — A memory note born cut over (c9b29de5 (6)): one group -- the note, its elements' state and
 - `note_lane` _function_ — One graph, one note lane: the notes graph's archive, else the dev graph's memory notes.
 - `stray_memory_files` _function_ — A memory note is born on the graph; a markdown file that appears in the harness memory dir
 - `title_records` _function_ — An in-body H1 is the note's title (c9b29de5 (5)): its text moves into the frontmatter as
@@ -674,7 +679,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `NotesFold` _class_ — The notes source journal folded to state: notes, elements, the addresses ever used.
 - `NotesFoldError` _class_ — A note whose journaled state does not compose and re-decompose to the same elements.
 - `absorb_archive` _function_ — Absorb an outside edit (a typo-fix pull request merged into the website repo): HEAD's blob
-- `absorb_records` _function_ — Map an outside version's elements to ids by their derived anchors (an unheaded element's
+- `absorb_records` _function_ — Map a new version's elements to ids by their derived anchors (an unheaded element's
 - `append_group` _function_ — Append one write's records under ONE ts (the op clock's), through the shared choke point.
 - `apply_notes_groups` _function_ — THE LIVE STEP at any journal position: records[start:end] applied to the db group by group,
 - `apply_notes_live` _function_ — THE LIVE STEP for the records a live verb just appended: `apply_notes_groups` over the
@@ -682,13 +687,15 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `archive_author` _function_ — `author` on a cut-over archive Section, journal-first (56b24fd5 (4)): title + body; a
 - `archive_command` _function_ — The archive cutover's verbs (work item 79703485; design amendment 56b24fd5): capture-archive,
 - `archive_source` _function_
+- `archive_text` _function_ — A RENDERED BODY IS ELEMENT STATE (ruling f4cc62b9): a verb that derives a cut-over note's whole
 - `birth_records` _function_ — A new headed element: its address at birth (the anchor its heading slugs to), a generation
 - `capture_archive` _function_ — Capture every kept post at `commit` into the notes source journal: one group, each post's
 - `capture_records` _function_
 - `cutover_archive` _function_ — Cut captured notes over: the journal's composition, the graph's (the round trip), HEAD's
-- `cutover_freeze` _function_ — The git fold's freeze for the cut-over paths: each stops at its note's capture commit.
+- `cutover_freeze` _function_ — The git fold's freeze for the cut-over paths: each stops at its note's capture commit. A
+- `decompose_rec` _function_ — A born post decomposes under its pinned slug (ruling 48c4c34d (1)); any other note under its path.
 - `derive_note` _function_ — Compose the note from its state, decompose the text as ingest would, and key every
-- `emit_note` _function_ — Write the note's composition to its path in the website tree (the emit). Commit + push main
+- `emit_note` _function_ — Write the note's composition to its file (the emit). An archive post's: commit + push main
 - `fold_records` _function_
 - `fold_source_records` _function_ — Continue the cut-over paths in the git fold's ElementFold: each journal step that touches a
 - `group_spans` _function_ — `groups` as index ranges: one write's records share a ts.
@@ -698,11 +705,13 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `journal_write` _function_ — The journal-first write path every authoring verb takes: build the records from the
 - `journaled_lane` _function_
 - `note_edit_records` _function_ — An edit of a Note's own state, its frontmatter (design c9b29de5 (6)); a changed identity is
+- `note_file` _function_ — An archive post's path in the website tree; a born post's file under the emit root (ruling
 - `note_source` _function_ — One grammar, two lanes (design c9b29de5 (2)): a lane is config DATA plus its source.
 - `note_wires` _function_
 - `notes_source_check` _function_ — Each journaled note's file against its journal: CLEAN (working tree == HEAD == journal),
 - `place_records` _function_ — A move, re-parent or reorder: the element's own placement, plus the two siblings whose
 - `read_notes_journal` _function_
+- `render_owned` _function_ — A rendered deliverable's body below its marker is the render's: a hand edit there is
 - `replay_source` _function_ — The rebuild swap's source-journal fold (finding 6c121287): records appended to the SOURCE
 - `replay_spans` _function_ — The groups a rebuild replays as windows instead of folding at ingest (design amendment
 - `retire_records` _function_ — An element leaves the note; its follower closes the gap. One with children refuses (move or
@@ -973,10 +982,6 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `parse_path_map` _function_ — Parse `--path-map OLD=NEW` flags; a pair without `=` is refused loudly.
 - `rebuild_diff` _function_ — Compare two graph dbs property for property — the live-versus-rebuild standing check.
 - `render_rebuild_diff` _function_ — Markdown by class and field (the drift map, the layer's), with this lane's Sources
-
-### `cjm_context_graph_projection.reconcile`
-
-- `reconcile_memory` _function_ — Report `.md`<->graph section drift across the corpus; optionally absorb hand-edits.
 
 ### `cjm_context_graph_projection.refactor`
 
@@ -1302,7 +1307,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `alias` _function_ — Confirm a drifted link slug as an alias OF a real note (the worklist payoff).
 - `assert_value` _function_ — Write one value to a `(subject, predicate)` slot, recording any conflict.
 - `author_section` _function_ — Apply a memory section's verbatim `raw` STATE to the graph — the born-on-graph leg
-- `confirm_proposal` _function_ — CONFIRM a proposal: apply its drafted section raw to the deliverable, then re-assert
+- `confirm_proposal` _function_ — RESOLVE a proposal for its confirmation (work item bb015d12 (b)): the deliverable, the ONE
 - `content_hash_of` _function_ — The content an approval binds to (design 40622922): a Note hashes as its lossless
 - `decide` _function_ — Record a Decision + its `SUPPORTED_BY` premise edges (reasoning substrate).
 - `link` _function_ — Mint a deliberate edge between two EXISTING nodes (heterogeneous interlink).

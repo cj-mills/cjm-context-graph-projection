@@ -146,13 +146,17 @@ def test_live_site_links_equal_their_rebuild_after_every_window(tmp_path):
     commit_all(corpus)
     emit.mkdir()
     journal = str(tmp_path / "writes.jsonl")
+    # every db here reads one config: the born posts are born cut over into its source journal (ruling 48c4c34d)
+    (tmp_path / "graph.config.json").write_text(json.dumps(
+        {"notes_corpus": str(corpus), "notes_profile": "quarto_post", "emit_root": str(emit),
+         "source_journal_path": str(tmp_path / "notes.source.jsonl")}))
     live = str(tmp_path / "live.db")
     base = ["--graph-db-path", live, "--journal-path", journal]
     checks = []
 
     def ok(*args):
         r = _cli(*base, *args)
-        assert r.returncode == 0, f"{args[0]} failed: {r.stderr or r.stdout}"
+        assert r.returncode == 0, f"{args[0]} failed: {r.stdout}{r.stderr}"
         return r
 
     def equals_its_rebuild(after):
@@ -196,7 +200,7 @@ def test_live_site_links_equal_their_rebuild_after_every_window(tmp_path):
     r = step("assert-batch", str(batch))
     assert "+3 -0" in r.stderr, r.stderr
     # a Section appears on the HOLDER: part-2's anchored link moves from the page to it
-    step("add-section", "s/part-1", "--content", "## Setup\n\nSteps.")
+    step("add-section", "s/part-1", "--content", "## Setup\n\nSteps.", "--after", "intro")
     # the path moves between holders: part-2's link follows it
     step("transfer-path", c, d)
     # a note born AFTER the facts it resolves through: its edge takes its own birth window, not

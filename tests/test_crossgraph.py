@@ -69,16 +69,18 @@ def test_cli_cross_graph_link_observes_frontier_follows_replay_needs_no_sibling(
     # deliverable). The primary's config names the sibling as DATA.
     sib_dir, pri_dir = tmp_path / "sib", tmp_path / "pri"
     sib_dir.mkdir(); pri_dir.mkdir()
-    (sib_dir / "graph.config.json").write_text(json.dumps({"emit_root": str(sib_dir / "staging")}))
+    # each graph's born notes are born cut over into its notes source journal (ruling 48c4c34d)
+    (sib_dir / "graph.config.json").write_text(json.dumps(
+        {"emit_root": str(sib_dir / "staging"), "source_journal_path": str(sib_dir / "notes.source.jsonl")}))
     sdb, sj = str(sib_dir / "sib.db"), str(sib_dir / "writes.jsonl")
     pdb, pj = str(pri_dir / "pri.db"), str(pri_dir / "writes.jsonl")
-    (pri_dir / "graph.config.json").write_text(json.dumps(
-        {"emit_root": str(pri_dir / "staging"), "sibling_graphs": {"tx": sdb}}))
+    lane = {"emit_root": str(pri_dir / "staging"), "source_journal_path": str(pri_dir / "notes.source.jsonl")}
+    (pri_dir / "graph.config.json").write_text(json.dumps({**lane, "sibling_graphs": {"tx": sdb}}))
     sbase = ("--graph-db-path", sdb, "--journal-path", sj, "--source-journal-path", str(sib_dir / "source.jsonl"))
     pbase = ("--graph-db-path", pdb, "--journal-path", pj, "--source-journal-path", str(pri_dir / "source.jsonl"))
     # sibling: a note whose SECTION is the foreign upstream node
     r = _run(*sbase, "new-note", "--slug", "stratum", "--content",
-             "---\nname: stratum\ndescription: s\n---\n\nIntro.\n\n## Span\n\nOne.\n")
+             "---\nname: stratum\ntitle: \"Stratum\"\ndescription: s\n---\n\nIntro.\n\n## Span\n\nOne.\n")
     assert r.returncode == 0, r.stderr or r.stdout
     r = _run("--graph-db-path", sdb, "--format", "agent", "locate", "stratum")
     sib_note = [m for m in json.loads(r.stdout)["matches"] if m.get("label") == "Note"][0]["id"]
@@ -138,10 +140,11 @@ def test_cli_cross_graph_link_observes_frontier_follows_replay_needs_no_sibling(
     assert r.returncode == 0, r.stderr or r.stdout
     r = _run(*pbase, "review-frontier")
     assert "stale 1" in r.stdout
-    # REPLAY onto a fresh db in a dir with NO config: the Reference rebuilds from the journaled
-    # observation (the sibling is never opened) and the frontier marks it unverifiable — never
-    # silently unchanged, never a crash.
+    # REPLAY onto a fresh db in a dir whose config names NO sibling (only the note lane its born
+    # post lives in): the Reference rebuilds from the journaled observation (the sibling is never
+    # opened) and the frontier marks it unverifiable — never silently unchanged, never a crash.
     rep_dir = tmp_path / "rep"; rep_dir.mkdir()
+    (rep_dir / "graph.config.json").write_text(json.dumps(lane))
     rdb = str(rep_dir / "rep.db")
     r = _run("--graph-db-path", rdb, "--journal-path", pj, "replay")
     assert r.returncode == 0, r.stderr or r.stdout
@@ -151,6 +154,6 @@ def test_cli_cross_graph_link_observes_frontier_follows_replay_needs_no_sibling(
     assert r.returncode == 0, r.stderr or r.stdout
     assert json.loads(r.stdout)["counts"]["unverifiable"] == 1 and json.loads(r.stdout)["counts"]["stale"] == 0
     # with the sibling named, the replayed graph agrees with the live one
-    (rep_dir / "graph.config.json").write_text(json.dumps({"sibling_graphs": {"tx": sdb}}))
+    (rep_dir / "graph.config.json").write_text(json.dumps({**lane, "sibling_graphs": {"tx": sdb}}))
     r = _run("--graph-db-path", rdb, "--journal-path", pj, "review-frontier")
     assert r.returncode == 0 and "stale 1" in r.stdout and "changed since observation" in r.stdout, r.stderr or r.stdout

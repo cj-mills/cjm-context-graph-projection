@@ -23,6 +23,8 @@ from cjm_context_graph_projection.propose import draft_code_block_update
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
 from cjm_dev_graph_schema.identity import code_module_node_id, note_node_id, section_node_id
 
+from conftest import commit_all
+
 OLD = "def f():\n    return 1\n"
 NEW = "def f():\n    return 2\n"
 RAW = "## Use\n\nCall it:\n\n```python\nimport os\n\ndef f():\n    return 1\n```\n\nAfter.\n"
@@ -57,8 +59,12 @@ def test_cli_propose_confirm_chain_and_replay(tmp_path):
     db, journal = str(tmp_path / "notes.db"), str(tmp_path / "writes.jsonl")
     src = str(tmp_path / "source.jsonl")
     emit = tmp_path / "staging"
+    emit.mkdir()
+    commit_all(emit)   # the archive is a git work tree (19edbe97)
+    notes_src = tmp_path / "notes.source.jsonl"   # the born post's source (ruling 48c4c34d); `src` is the code lane's
     (tmp_path / "graph.config.json").write_text(json.dumps(
-        {"notes_profile": "quarto_post", "emit_root": str(emit), "notes_corpus": str(emit)}))
+        {"notes_profile": "quarto_post", "emit_root": str(emit), "notes_corpus": str(emit),
+         "source_journal_path": str(notes_src)}))
     base = ("--graph-db-path", db, "--journal-path", journal, "--source-journal-path", src)
     # The referenced code: a CodeModule + CodeSymbol whose LIVE body is already the NEW one.
     module_id = code_module_node_id("r", "m.py")
@@ -95,7 +101,7 @@ def test_cli_propose_confirm_chain_and_replay(tmp_path):
     # Dry run mints nothing; the real run drafts exactly one proposal and journals it.
     r = _run(*base, "propose", "--no-write")
     assert r.returncode == 0 and "dry run" in r.stdout and "(dry)" in r.stdout, r.stderr or r.stdout
-    assert [o["verb"] for o in read_journal(journal)] == ["new-note", "assert", "link", "assert"]
+    assert [o["verb"] for o in read_journal(journal)] == ["assert", "link", "assert"]   # the birth: notes_src
     r = _run(*base, "propose")
     assert r.returncode == 0 and "proposed 1" in r.stdout and "confirm-proposal" in r.stdout, r.stderr or r.stdout
     ops = read_journal(journal)
@@ -120,11 +126,14 @@ def test_cli_propose_confirm_chain_and_replay(tmp_path):
     assert [o["verb"] for o in read_journal(journal)].count("propose") == 1
     # The approved content is untouched until confirmation.
     assert "return 1" in (emit / "tutorial" / "index.md").read_text()
-    # CONFIRM: the draft lands as a section op + the re-approval on the new hash; frontier clears.
+    # CONFIRM: the draft lands journal-first in the post's source journal (ruling 48c4c34d (6)) + the
+    # re-approval on the new hash; frontier clears.
     r = _run(*base, "confirm-proposal", proposal_id[:8], "--actor", "user:test")
     assert r.returncode == 0 and "**confirmed**" in r.stdout and "re-approved" in r.stdout, r.stderr or r.stdout
     verbs = [o["verb"] for o in read_journal(journal)]
-    assert verbs[-2:] == ["section", "assert"]
+    assert verbs[-2:] == ["propose", "assert"]
+    last = json.loads(notes_src.read_text().splitlines()[-1])
+    assert last["verb"] == "section" and last["args"]["section"] == use_id and last["op"]["op"] == "author"
     assert read_journal(journal)[-1]["args"]["evidence"] == [proposal_id]
     assert "return 2" in (emit / "tutorial" / "index.md").read_text()     # the .md refreshed
     r = _run(*base, "review-frontier")

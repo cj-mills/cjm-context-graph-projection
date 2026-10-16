@@ -91,7 +91,8 @@ def test_subgraph_expansion_cap_truncates_loudly(tmp_path):
 
 
 def test_journal_window_view_joins_via_bulk_read(tmp_path, monkeypatch):
-    from cjm_context_graph_projection.journal import append_write, journal_window_view
+    from cjm_context_graph_primitives.journal import append_write
+    from cjm_context_graph_projection.journal import journal_window_view
 
     db = str(tmp_path / "g.db")
     jp = str(tmp_path / "writes.jsonl")

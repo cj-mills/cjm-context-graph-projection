@@ -333,13 +333,15 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
     if kind == "confirm-proposal":
         if obj.get("error"):
             return f"⚠ {obj['error']}"
-        sec, ap = obj.get("section", {}), obj.get("approval", {})
+        sec, ap = obj.get("section") or {}, obj.get("approval") or {}
         state = "unchanged (already applied)" if sec.get("unchanged") else "applied"
         rel = sec.get("relations") or {}
         rel_note = (f"; relations +{len(rel.get('added', []))}/−{len(rel.get('removed', []))}"
                     if rel.get("added") or rel.get("removed") else "")
-        lines = [f"**confirmed** proposal `{str(obj.get('proposal_id') or '')[:8]}` → section `{sec.get('anchor')}` "
-                 f"of `{sec.get('slug')}` {state}{rel_note}"]
+        lines = [f"**confirmed** proposal `{str(obj.get('proposal_id') or '')[:8]}` → section `{obj.get('anchor')}` "
+                 f"of `{obj.get('slug')}` {state}{rel_note}"]
+        if sec.get("file"):
+            lines.append(f"- emitted `{sec['file']}`")
         if ap:
             lines.append(f"re-approved: `{obj.get('approval_predicate')}={obj.get('approval_value')}` on "
                          f"`{str(obj.get('deliverable_id') or '')[:8]}` (bound "
@@ -561,7 +563,7 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         return _render_round_trip(obj)
     if kind in ("capture-archive", "cutover-archive", "absorb-archive", "place", "retire-section",
                 "replay-source", "source-check-notes", "author-archive", "add-section-archive",
-                "cutover-memory", "new-note-memory"):
+                "cutover-born", "new-note-born"):
         return _render_archive_source(kind, obj)
     if kind == "series-order":
         if obj.get("error"):
@@ -1552,24 +1554,6 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
             for n in nb:
                 arrow = "→" if n["direction"] == "out" else "←"
                 lines.append(f"- {arrow} _{n['relation']}_ {_line(n['node'])[2:]}")
-        return "\n".join(lines)
-    if kind == "reconcile-memory":
-        if obj.get("error"):
-            return f"**error:** {obj['error']}"
-        if obj.get("clean"):
-            return "**reconcile-memory:** clean — no `.md`<->graph section drift"
-        lines = [f"**reconcile-memory** — {obj['notes_with_drift']} note(s) with drift, "
-                 f"{obj['absorbed_count']} section(s) absorbed"]
-        for d in obj.get("drift", []):
-            lines.append(f"- `{d['slug']}` — changed {[c['anchor'] for c in d['changed']]}"
-                         + (f" · added {d['added']}" if d['added'] else "")
-                         + (f" · removed {d['removed']}" if d['removed'] else ""))
-            for c in d["changed"]:
-                lines += [f"    · `{c['anchor']}` graph: {_short(c['graph'], 90)}",
-                          f"    · `{c['anchor']}`  file: {_short(c['file'], 90)}"]
-        for a in obj.get("absorbed", []):
-            lines.append(f"  ↳ absorbed `{a['anchor']}` of `{a['slug']}` "
-                         f"({a['prior_bytes']}→{a['new_bytes']} B; backup {a['backup']})")
         return "\n".join(lines)
     if kind == "structure":
         if obj.get("error"):
@@ -2790,10 +2774,10 @@ def _render_notes_lane(kind: str, obj: Dict[str, Any]) -> str:
                     f"{obj.get('chapters_born')} of {obj.get('chapters')} chapter(s) born ({obj.get('units')} unit(s)) · "
                     f"+{len(obj.get('added') or [])} ~{len(obj.get('updated') or [])} −{len(obj.get('removed_applied') or [])} section(s) · "
                     f"{status} → `{obj.get('path')}`")
+        delta = (f"{obj['records']} element record(s), journal-first (ruling f4cc62b9)" if "records" in obj else
+                 f"+{len(obj.get('added') or [])} ~{len(obj.get('updated') or [])} −{len(obj.get('removed_applied') or [])} section(s)")
         return (f"**{'already rendered' if obj.get('noop') else 'rendered'}** `{obj.get('slug')}` ({obj.get('rendering')}) "
-                f"from {obj.get('points')} point(s) — "
-                f"+{len(obj.get('added') or [])} ~{len(obj.get('updated') or [])} −{len(obj.get('removed_applied') or [])} section(s) · "
-                f"{status} → `{obj.get('path')}`")
+                f"from {obj.get('points')} point(s) — {delta} · {status} → `{obj.get('path')}`")
     return json.dumps(obj, indent=2, default=str)
 
 
@@ -2847,15 +2831,16 @@ def _render_archive_source(
                              + (f" -- {r['error']}" if r.get("error") else ""))
     elif kind == "replay-source":
         lines.append(f"## Source-journal fold -- {obj.get('records', 0)} record(s) after offset {obj.get('offset')}")
-    elif kind == "cutover-memory":
+    elif kind == "cutover-born":
         rows = obj.get("notes") or []
         by: Dict[str, int] = {}
         for r in rows:
             by[r["change"]] = by.get(r["change"], 0) + 1
-        lines.append(f"## Memory cutover -- {len(rows)} note(s) · {obj.get('records', 0)} record(s) · "
+        lines.append(f"## Genesis cutover -- {len(rows)} note(s) · {obj.get('records', 0)} record(s) · "
                      + " · ".join(f"{k} {v}" for k, v in sorted(by.items()))
                      + (f" · {obj['already']} already cut over" if obj.get("already") else "")
-                     + ("" if obj.get("written") else " · nothing appended"))
+                     + ("" if obj.get("written") else " · no change (every genesis note already cut over)"
+                        if not rows and not obj.get("refused") else " · nothing appended"))
         for r in rows:
             if r["change"] == "title":
                 lines.append(f"- `{r['slug']}`: title “{r['title']}” (the in-body H1); retired "
@@ -2863,17 +2848,24 @@ def _render_archive_source(
         blank = [r["slug"] for r in rows if r["change"] == "blank-lines"]
         if blank:
             lines.append(f"- blank lines normalized ({len(blank)}): " + ", ".join(f"`{s}`" for s in blank))
-    elif kind == "new-note-memory":
-        lines.append(f"## new-note (memory lane) -- `{obj.get('slug')}` · {obj.get('sections', 0)} element(s)"
+        for f in obj.get("files") or []:
+            lines.append(f"- emitted `{f}`")
+    elif kind == "new-note-born":
+        lines.append(f"## new-note ({'born post' if obj.get('born_post') else 'memory lane'}) -- `{obj.get('slug')}` · "
+                     f"{obj.get('sections', 0)} element(s)"
                      + ("" if obj.get("canonical") else " · canonicalized (blank lines)")
-                     + ("" if obj.get("written") else " · nothing appended")
+                     + (" · no change (the note stands)" if obj.get("unchanged")
+                        else "" if obj.get("written") else " · nothing appended")
                      + (f" · `{obj['note_id'][:8]}`" if obj.get("note_id") else ""))
+        if obj.get("file"):
+            lines.append(f"- emitted `{obj['file']}`")
     else:   # place | retire-section | author-archive | add-section-archive
         recs = obj.get("records") or []
         lines.append(f"## {kind} -- {len(recs)} record(s)" + (f" · `{obj['node_id'][:8]}`" if obj.get("node_id") else "")
                      + (" · unchanged" if obj.get("unchanged") else ""))
         if obj.get("file"):
-            lines.append(f"- emitted `{obj['file']}` (commit + push main; the public site deploys from gh-pages)")
+            lines.append(f"- emitted `{obj['file']}`" + ("" if obj.get("born_post") else
+                         " (commit + push main; the public site deploys from gh-pages)"))
     for r in obj.get("refused") or []:
         lines.append(f"- ⚠ refused `{r.get('path')}`: " + (r.get("error") or
                      f"line {r.get('line')}: {r.get('a')!r} vs {r.get('b')!r}"))

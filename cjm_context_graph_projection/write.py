@@ -932,55 +932,33 @@ async def mint_proposal(
 async def confirm_proposal(
     gx: GraphHandle,
     proposal: str,                 # The Proposal node (id, or a unique id prefix)
-    *,
-    actor: str = "user:cli",       # Who confirmed (the human — confirmation IS the re-approval)
-    write: bool = True,            # False = PLAN only (ruling 547f4123 (1)): the proposal resolved, the section leg planned; the CLI writes the chain
-) -> Dict[str, Any]:  # {proposal_id, deliverable_id, section, approval, section_op, written} or {error}
-    """CONFIRM a proposal: apply its drafted section raw to the deliverable, then re-assert
-    the stale approval on the NEW content (work item bb015d12 (b)).
+) -> Dict[str, Any]:  # {proposal_id, deliverable_id, key, section_id, slug, anchor, raw, approval_predicate, approval_value} or {error}
+    """RESOLVE a proposal for its confirmation (work item bb015d12 (b)): the deliverable, the ONE
+    Section its draft rewrites and the drafted raw, and the approval it re-asserts.
 
-    The propose/confirm shape the correction vertical uses, on deliverables: the agent
-    drafted beside the approved content, the human's confirmation is ONE act that (1)
-    lands the draft as a journaled `section` STATE (`author_section` — harvest-on-edit
-    keeps its links live) and (2) re-asserts the approval `publish_state` value the
-    proposal recorded, which by design 40622922 (2) binds to the new content hash and
-    SUPERSEDES the stale approval — the change the proposal answered is no longer
-    upstream of an older approval, so the frontier row clears by derivation. Idempotent:
-    a draft already applied re-lands as an unchanged section and a same-hash re-assert
-    is a no-op. Rejection is not here — it is the ordinary `review_verdict` ack of the
-    same key. The CLI journals the two ops (section + assert) exactly as `author` and
-    `assert` do, and refreshes the emitted `.md`."""
+    The propose/confirm shape the correction vertical uses, on deliverables: the agent drafted
+    beside the approved content, the human's confirmation is ONE act -- the CLI's chain (ruling
+    547f4123 (1)): (1) the draft lands through the deliverable's own write path -- a cut-over
+    note's journal-first authoring (ruling 48c4c34d (6)), a file-sourced page's slot -- no
+    change when it already stands, then (2) the approval `publish_state` value the proposal
+    recorded is re-asserted, planned against the db (1) left, so by design 40622922 (2) it binds
+    the new content hash and SUPERSEDES the stale approval and the frontier row clears by
+    derivation. Rejection is not here -- it is the ordinary `review_verdict` ack of the same key."""
     res = await resolve_node_ref(gx, proposal)
     if "candidates" in res:
-        return {"error": ambiguity_error(proposal, res["candidates"]), "proposal": proposal,
-                "written": False}
+        return {"error": ambiguity_error(proposal, res["candidates"]), "proposal": proposal}
     node = res.get("node")
     if node is None:
-        return {"error": f"no proposal `{proposal}`", "proposal": proposal, "written": False}
+        return {"error": f"no proposal `{proposal}`", "proposal": proposal}
     from .authoring import _label_of
     if _label_of(node) != PROPOSAL_LABEL:
-        return {"error": f"`{proposal}` is a {_label_of(node)}, not a Proposal",
-                "proposal": proposal, "written": False}
+        return {"error": f"`{proposal}` is a {_label_of(node)}, not a Proposal", "proposal": proposal}
     p = F.props(node)
-    pid, deliverable_id = F.nid(node), str(p.get("deliverable_id") or "")
-    slug, anchor, raw = str(p.get("slug") or ""), str(p.get("anchor") or ""), str(p.get("raw") or "")
-    section = await author_section(gx, slug, anchor, raw, actor=actor, write=write)
-    if section.get("error"):
-        return {"error": section["error"], "proposal_id": pid, "written": False}
-    pred = str(p.get("approval_predicate") or P.PUBLISH_STATE)
-    value = str(p.get("approval_value") or "")
-    approval: Dict[str, Any] = {}
-    if not write:   # the approval is planned after the section applied: it binds the NEW content's hash
-        return {"proposal_id": pid, "deliverable_id": deliverable_id, "key": p.get("key"),
-                "section": section, "approval": approval, "approval_predicate": pred,
-                "approval_value": value, "written": False}
-    if value:
-        approval = await assert_value(gx, deliverable_id, pred, value, actor=actor, evidence=[pid])
-    return {"proposal_id": pid, "deliverable_id": deliverable_id, "key": p.get("key"),
-            "section": section,
-            "section_op": {"slug": slug, "anchor": anchor, "raw": raw, "actor": actor},
-            "approval": approval, "approval_predicate": pred, "approval_value": value,
-            "written": True}
+    return {"proposal_id": F.nid(node), "deliverable_id": str(p.get("deliverable_id") or ""), "key": p.get("key"),
+            "section_id": str(p.get("section_id") or ""), "slug": str(p.get("slug") or ""),
+            "anchor": str(p.get("anchor") or ""), "raw": str(p.get("raw") or ""),
+            "approval_predicate": str(p.get("approval_predicate") or P.PUBLISH_STATE),
+            "approval_value": str(p.get("approval_value") or "")}
 
 
 async def register_session(

@@ -47,6 +47,38 @@ def _run(*args):
                           capture_output=True, text=True)
 
 
+def _source_groups(
+    path: Path,  # A note lane's source journal
+    op: str,     # The verb its groups' provenance names (`new-note`, `notes-render`, ...)
+) -> int:  # The groups that verb appended (a write's records share one ts)
+    """A born post's writes land in the notes source journal (ruling 48c4c34d), a render as element
+    state there (ruling f4cc62b9): counted by group, never by record."""
+    if not path.exists():
+        return 0
+    return len({r["ts"] for r in read_journal(str(path)) if (r.get("op") or {}).get("op") == op})
+
+
+def _render_provenance(
+    path: Path,  # A note lane's source journal
+) -> list:  # Each journal-first render's inputs (its group's provenance), in order
+    """What a render observed (references, facts) rides its group's `op` (ruling f4cc62b9)."""
+    seen, out = set(), []
+    for r in read_journal(str(path)):
+        op = r.get("op") or {}
+        if op.get("op") == "notes-render" and r["ts"] not in seen:
+            seen.add(r["ts"])
+            out.append(op)
+    return out
+
+
+def _lane_config(
+    pri_dir: Path,  # The run's private dir
+    **extra,        # Further config keys (sibling_graphs, website_root, ...)
+) -> dict:  # The notes graph's config: the lane's profile, emit root and source journal
+    return {"notes_profile": "quarto_post", "emit_root": str(pri_dir / "staging"),
+            "source_journal_path": str(pri_dir / "notes.source.jsonl"), **extra}
+
+
 # ---------------------------------------------------------------- pure pieces
 
 def test_choose_spine_auto_legacy_prefix_and_refusals():
@@ -928,9 +960,8 @@ def test_cli_pure_notes_lane_end_to_end_and_replay(tmp_path):
     _build_sibling(sdb)
     pdb, pj = str(pri_dir / "pri.db"), str(pri_dir / "writes.jsonl")
     lane = pri_dir / "purenotes"
-    (pri_dir / "graph.config.json").write_text(json.dumps(
-        {"notes_profile": "quarto_post", "emit_root": str(pri_dir / "staging"),
-         "sibling_graphs": {"tx": sdb}}))
+    nsj = pri_dir / "notes.source.jsonl"
+    (pri_dir / "graph.config.json").write_text(json.dumps(_lane_config(pri_dir, sibling_graphs={"tx": sdb})))
     base = ("--graph-db-path", pdb, "--journal-path", pj, "--source-journal-path", str(pri_dir / "source.jsonl"))
 
     # (1) the type profile as data, journaled; a re-mint is an upsert
@@ -1052,10 +1083,13 @@ def test_cli_pure_notes_lane_end_to_end_and_replay(tmp_path):
     r = _run("--graph-db-path", pdb, "read", note_id)
     assert r.stdout == staged                                     # the graph reconstruction IS the file
     live_text = r.stdout
-    assert len([o for o in read_journal(pj) if o["verb"] == "render-notes"]) == 1
-    # a re-render with nothing changed lands no new op (identical args dedup)
-    _run(*base, "notes-render", "--slug", "the-learning-game/ch01")
-    assert len([o for o in read_journal(pj) if o["verb"] == "render-notes"]) == 1
+    # the render is element state in the notes source journal (ruling f4cc62b9), never a writes op
+    assert not [o for o in read_journal(pj) if o["verb"] == "render-notes"]
+    assert _source_groups(nsj, "notes-render") == 1
+    # a re-render with nothing changed lands nothing (the body is already held)
+    r = _run(*base, "notes-render", "--slug", "the-learning-game/ch01")
+    assert "no change" in r.stdout, r.stdout
+    assert _source_groups(nsj, "notes-render") == 1
 
     # (7b) the per-point repair (ruling 5625b74e): text / parent edited IN PLACE — same node, same
     #      anchor; ingest's arrow + lead contracts hold on the edit; a parent change rewires
@@ -1125,9 +1159,11 @@ def test_cli_pure_notes_lane_end_to_end_and_replay(tmp_path):
     r = _run("--graph-db-path", pdb, "read", note_id)
     assert r.stdout == staged2
 
-    # (10) REPLAY onto a fresh db with NO config and NO sibling: type + points + references +
-    #      rendered sections all rebuild from the journal alone, byte-equal to the live note
+    # (10) REPLAY onto a fresh db with NO sibling: type + points + references + rendered sections
+    #      all rebuild from the journals alone (the writes journal + the lane's source journal, the
+    #      config naming the lane), byte-equal to the live note
     rep = tmp_path / "rep"; rep.mkdir()
+    (rep / "graph.config.json").write_text(json.dumps(_lane_config(pri_dir)))
     rdb = str(rep / "rep.db")
     r = _run("--graph-db-path", rdb, "--journal-path", pj, "replay")
     assert r.returncode == 0, r.stderr or r.stdout
@@ -1153,6 +1189,7 @@ def test_cli_pure_notes_lane_end_to_end_and_replay(tmp_path):
     staged3 = (pri_dir / "staging" / "the-learning-game" / "ch01" / "index.md").read_text()
     assert "## Lesson 1" not in staged3 and "Pure notes born on the graph." in staged3
     rep2 = tmp_path / "rep2"; rep2.mkdir()
+    (rep2 / "graph.config.json").write_text(json.dumps(_lane_config(pri_dir)))
     r = _run("--graph-db-path", str(rep2 / "rep.db"), "--journal-path", pj, "replay")
     assert r.returncode == 0, r.stderr or r.stdout
     r = _run("--graph-db-path", str(rep2 / "rep.db"), "read", note_id)
@@ -1179,8 +1216,7 @@ def test_cli_points_belong_to_the_source_rehome_and_replay_parity(tmp_path):
     sdb = str(sib_dir / "sib.db")
     _build_sibling(sdb)
     pdb, pj = str(pri_dir / "pri.db"), str(pri_dir / "writes.jsonl")
-    (pri_dir / "graph.config.json").write_text(json.dumps(
-        {"notes_profile": "quarto_post", "emit_root": str(pri_dir / "staging"), "sibling_graphs": {"tx": sdb}}))
+    (pri_dir / "graph.config.json").write_text(json.dumps(_lane_config(pri_dir, sibling_graphs={"tx": sdb})))
     base = ("--graph-db-path", pdb, "--journal-path", pj, "--source-journal-path", str(pri_dir / "source.jsonl"))
     slug = "the-learning-game/ch01"
     assert _run(*base, "notes-type", "pure-notes").returncode == 0
@@ -1263,11 +1299,13 @@ def test_cli_points_belong_to_the_source_rehome_and_replay_parity(tmp_path):
     r = _run(*lbase, "notes-rehome", "--slug", slug)
     assert r.returncode == 0 and "nothing to move" in r.stdout
     assert len([o for o in read_journal(str(legacy)) if o["verb"] == "rehome-points"]) == 1   # the no-op journals nothing
-    # the render is byte-identical (the body is a function of the substance, not the owner) and lands no new op
+    # the render is byte-identical (the body is a function of the substance, not the owner) and lands
+    # nothing: the body is element state the note lane's source journal already holds (ruling f4cc62b9)
     r = _run(*lbase, "notes-render", "--slug", slug)
-    assert r.returncode == 0, r.stderr or r.stdout
+    assert r.returncode == 0 and "no change" in r.stdout, r.stderr or r.stdout
     assert (pri_dir / "staging" / "the-learning-game" / "ch01" / "index.md").read_text() == staged
-    assert len([o for o in read_journal(str(legacy)) if o["verb"] == "render-notes"]) == 1
+    assert not [o for o in read_journal(str(legacy)) if o["verb"] == "render-notes"]
+    assert _source_groups(pri_dir / "notes.source.jsonl", "notes-render") == 1
     # (4) the migrated journal replays onto a fresh db to the same ids, edges and bytes — the oracle
     rdb = str(pri_dir / "rep.db")
     r = _run("--graph-db-path", rdb, "--journal-path", str(legacy), "replay")
@@ -1345,8 +1383,7 @@ def test_cli_block_merge_judge_accept_and_standing_detection_replay(tmp_path):
     _build_sibling(sdb)
     pdb, pj = str(pri_dir / "pri.db"), str(pri_dir / "writes.jsonl")
     lane = pri_dir / "purenotes"
-    (pri_dir / "graph.config.json").write_text(json.dumps(
-        {"notes_profile": "quarto_post", "emit_root": str(pri_dir / "staging"), "sibling_graphs": {"tx": sdb}}))
+    (pri_dir / "graph.config.json").write_text(json.dumps(_lane_config(pri_dir, sibling_graphs={"tx": sdb})))
     base = ("--graph-db-path", pdb, "--journal-path", pj, "--source-journal-path", str(pri_dir / "source.jsonl"))
     assert _run(*base, "notes-type", "pure-notes").returncode == 0
     r = _run(*base, "new-note", "--slug", "the-learning-game/ch01", "--content", "---\ntitle: \"Ch 1\"\ndate: 2026-09-22\n---\n\nBorn.\n")
@@ -1444,6 +1481,7 @@ def test_cli_block_merge_judge_accept_and_standing_detection_replay(tmp_path):
     r = _run(*base, "notes-overlap", "--slug", "the-learning-game/ch01")
     assert "CLEAN" in r.stdout and "_5 points" in r.stdout, r.stderr or r.stdout
     rep = tmp_path / "rep"; rep.mkdir()
+    (rep / "graph.config.json").write_text(json.dumps(_lane_config(pri_dir)))   # the born note's lane
     r = _run("--graph-db-path", str(rep / "rep.db"), "--journal-path", pj, "replay")
     assert r.returncode == 0, r.stderr or r.stdout
     r = _run("--graph-db-path", str(rep / "rep.db"), "notes-overlap", "--slug", "the-learning-game/ch01")
@@ -1490,9 +1528,8 @@ def test_cli_draft_lifecycle_staging_index_and_work_promotion_gate(tmp_path):
     asyncio.run(second_chapter())
     pdb, pj = str(pri_dir / "pri.db"), str(pri_dir / "writes.jsonl")
     staging, site = pri_dir / "staging", pri_dir / "site"
-    (pri_dir / "graph.config.json").write_text(json.dumps(
-        {"notes_profile": "quarto_post", "emit_root": str(staging / "posts"), "website_root": str(site),
-         "sibling_graphs": {"tx": sdb}}))
+    (pri_dir / "graph.config.json").write_text(json.dumps(_lane_config(
+        pri_dir, emit_root=str(staging / "posts"), website_root=str(site), sibling_graphs={"tx": sdb})))
     base = ("--graph-db-path", pdb, "--journal-path", pj, "--source-journal-path", str(pri_dir / "source.jsonl"))
     r = _run(*base, "notes-type", "pure-notes")
     assert r.returncode == 0, r.stderr or r.stdout
@@ -1564,8 +1601,10 @@ def test_cli_draft_lifecycle_staging_index_and_work_promotion_gate(tmp_path):
     assert r.returncode != 0 and "RETIRED" in (r.stdout + r.stderr)
     r = _run(*base, "notes-staging-index", "--write")
     assert [i["note_id"] for i in load("retired.yml")] == [ch1] and load("published.yml") == []
-    # (e) the lifecycle chain is journaled: a fresh db from the journal alone lists the same states
-    rep = str(tmp_path / "rep.db")
+    # (e) the lifecycle chain is journaled: a fresh db from the journals alone lists the same states
+    (tmp_path / "rep").mkdir()
+    (tmp_path / "rep" / "graph.config.json").write_text(json.dumps(_lane_config(pri_dir, emit_root=str(staging / "posts"))))
+    rep = str(tmp_path / "rep" / "rep.db")
     r = _run("--graph-db-path", rep, "--journal-path", pj, "replay")
     assert r.returncode == 0, r.stderr or r.stdout
     r = _run("--graph-db-path", rep, "notes-staging-index", "--project-root", str(tmp_path / "rep-staging"), "--write")
@@ -1600,8 +1639,8 @@ def test_cli_references_render_into_the_source_card_and_replay(tmp_path):
             await extend_graph(sg.queue, sg.graph_id, nodes, edges)
     asyncio.run(add_refs())
     pdb, pj = str(pri_dir / "pri.db"), str(pri_dir / "writes.jsonl")
-    (pri_dir / "graph.config.json").write_text(json.dumps(
-        {"notes_profile": "quarto_post", "emit_root": str(pri_dir / "staging"), "sibling_graphs": {"tx": sdb}}))
+    nsj = pri_dir / "notes.source.jsonl"
+    (pri_dir / "graph.config.json").write_text(json.dumps(_lane_config(pri_dir, sibling_graphs={"tx": sdb})))
     base = ("--graph-db-path", pdb, "--journal-path", pj, "--source-journal-path", str(pri_dir / "source.jsonl"))
     assert _run(*base, "notes-type", "pure-notes").returncode == 0
     post = "---\ntitle: \"ch01\"\ndate: 2026-09-09\ncategories: [book, notes]\n---\n\nPreamble.\n"
@@ -1625,10 +1664,13 @@ def test_cli_references_render_into_the_source_card_and_replay(tmp_path):
     staged = staged_path.read_text()
     assert ("Resources: [Dumbing Us Down (publisher page)](https://newsociety.com/dud) · "
             "[Notes on Dumbing Us Down](https://example.org/hand-notes)\n:::") in staged
-    ops = [o for o in read_journal(pj) if o["verb"] == "render-notes"]
-    assert len(ops) == 1 and [x["notes_slug"] for x in ops[0]["args"]["references"]] == ["", "dumbing-us-down/ch01-notes"]
-    # (2) the target is born -> the next render resolves the link to the born page (a NEW op: the
-    #     substance digest covers the resolution, so the re-render is never deduped away)
+    # the render is element state in the notes source journal (ruling f4cc62b9); the references it
+    # observed ride its group's provenance
+    assert not [o for o in read_journal(pj) if o["verb"] == "render-notes"]
+    ops = _render_provenance(nsj)
+    assert len(ops) == 1 and [x["notes_slug"] for x in ops[0]["references"]] == ["", "dumbing-us-down/ch01-notes"]
+    # (2) the target is born -> the next render resolves the link to the born page (a NEW group: the
+    #     resolved href changes the rendered text)
     r = _run(*base, "new-note", "--slug", "dumbing-us-down/ch01-notes",
              "--content", "---\ntitle: \"DUD ch01\"\ndate: 2026-09-09\n---\n\nBorn.\n")
     assert r.returncode == 0, r.stderr or r.stdout
@@ -1636,11 +1678,13 @@ def test_cli_references_render_into_the_source_card_and_replay(tmp_path):
     assert r.returncode == 0, r.stderr or r.stdout
     staged2 = staged_path.read_text()
     assert "[Notes on Dumbing Us Down](/posts/dumbing-us-down/ch01-notes/)" in staged2 and "hand-notes" not in staged2
-    assert len([o for o in read_journal(pj) if o["verb"] == "render-notes"]) == 2
+    assert _source_groups(nsj, "notes-render") == 2
     live = _run("--graph-db-path", pdb, "read", note_id).stdout
     assert live == staged2
-    # (3) replay onto a fresh db with NO sibling: the journaled references reproduce the live text
-    rep = str(tmp_path / "rep.db")
+    # (3) replay onto a fresh db with NO sibling: the journaled render reproduces the live text
+    (tmp_path / "rep").mkdir()
+    (tmp_path / "rep" / "graph.config.json").write_text(json.dumps(_lane_config(pri_dir)))
+    rep = str(tmp_path / "rep" / "rep.db")
     r = _run("--graph-db-path", rep, "--journal-path", pj, "replay")
     assert r.returncode == 0, r.stderr or r.stdout
     assert _run("--graph-db-path", rep, "read", note_id).stdout == staged2
@@ -1659,8 +1703,8 @@ def test_cli_lecture_page_reads_series_dates_and_style_live_and_replays(tmp_path
     sdb = str(sib_dir / "sib.db")
     _build_lecture_sibling(sdb)
     pdb, pj = str(pri_dir / "pri.db"), str(pri_dir / "writes.jsonl")
-    (pri_dir / "graph.config.json").write_text(json.dumps(
-        {"notes_profile": "quarto_post", "emit_root": str(pri_dir / "staging"), "sibling_graphs": {"tx": sdb}}))
+    nsj = pri_dir / "notes.source.jsonl"
+    (pri_dir / "graph.config.json").write_text(json.dumps(_lane_config(pri_dir, sibling_graphs={"tx": sdb})))
     base = ("--graph-db-path", pdb, "--journal-path", pj, "--source-journal-path", str(pri_dir / "source.jsonl"))
     policy = tmp_path / "lecture.policy.json"
     policy.write_text(json.dumps({"title": "Lecture notes (test)",
@@ -1709,13 +1753,16 @@ def test_cli_lecture_page_reads_series_dates_and_style_live_and_replays(tmp_path
             "\n\nResources: [Watch on YouTube](https://www.youtube.com/watch?v=abc)\n:::") in staged
     assert "## The core libraries\n\n- [§](#pt-" in staged and "){.src-ref}\n" in staged and "(00:00–00:04)" not in staged
     assert "[00:00](https://www.youtube.com/watch?v=abc&t=0s){.src-ref}" in staged
-    ops = [o for o in read_journal(pj) if o["verb"] == "render-notes"]
-    assert len(ops) == 1 and ops[0]["args"]["facts"] == {
+    assert not [o for o in read_journal(pj) if o["verb"] == "render-notes"]   # element state (ruling f4cc62b9)
+    ops = _render_provenance(nsj)
+    assert len(ops) == 1 and ops[0]["facts"] == {
         "series": ["GPU MODE"], "lecture_title": "Bonus Lecture: CUDA C++ llm.cpp", "public_url": "https://www.youtube.com/watch?v=abc",
         "published_at": "2024-04-27", "recorded_at": "2024-04-27", "recorded_at_precision": "around"}
     live = _run("--graph-db-path", pdb, "read", note_id).stdout
     assert live == staged
-    rep = str(tmp_path / "rep.db")
+    (tmp_path / "rep").mkdir()
+    (tmp_path / "rep" / "graph.config.json").write_text(json.dumps(_lane_config(pri_dir)))
+    rep = str(tmp_path / "rep" / "rep.db")
     r = _run("--graph-db-path", rep, "--journal-path", pj, "replay")
     assert r.returncode == 0, r.stderr or r.stdout
     assert _run("--graph-db-path", rep, "read", note_id).stdout == staged
@@ -1825,9 +1872,8 @@ def test_cli_work_page_binds_by_edge_renders_the_toc_gates_on_published_chapters
     asyncio.run(more_sibling())
     pdb, pj = str(pri_dir / "pri.db"), str(pri_dir / "writes.jsonl")
     staging, site = pri_dir / "staging", pri_dir / "site"
-    (pri_dir / "graph.config.json").write_text(json.dumps(
-        {"notes_profile": "quarto_post", "emit_root": str(staging / "posts"), "website_root": str(site),
-         "sibling_graphs": {"tx": sdb}}))
+    (pri_dir / "graph.config.json").write_text(json.dumps(_lane_config(
+        pri_dir, emit_root=str(staging / "posts"), website_root=str(site), sibling_graphs={"tx": sdb})))
     base = ("--graph-db-path", pdb, "--journal-path", pj, "--source-journal-path", str(pri_dir / "source.jsonl"))
     for key in ("pure-notes", "work-page"):
         r = _run(*base, "notes-type", key)
@@ -1854,12 +1900,20 @@ def test_cli_work_page_binds_by_edge_renders_the_toc_gates_on_published_chapters
         return note_id
 
     ch1 = born("the-learning-game/ch01", "Seven Dangerous", "Gatto quit teaching in 1991.", "Gatto's seven lessons diagnose school.")
-    # the work page: born draft and typed; a render before the edge is refused with the recipe
+    # the work page: a retired type, so it is the work page an earlier release born -- a writes-journal
+    # genesis op and its draft state, as that release journaled them (their writers retired, ruling
+    # 48c4c34d (5)); the next writer heals them in. A render before the edge is refused with the recipe
+    from cjm_context_graph_primitives.journal import append_record
+    from cjm_dev_graph_schema.identity import note_node_id
     post = ('---\ntitle: "x"\ndate: 2026-09-10\ncategories: [book, notes]\n'
             'aliases: [/posts/the-learning-game-book-notes/]\n---\n\nAuthored preamble.\n')
-    r = _run(*base, "new-note", "--slug", "the-learning-game", "--content", post)
+    wp = note_node_id("the-learning-game")
+    append_record(pj, {"verb": "new-note", "args": {"content": post, "slug": "the-learning-game", "profile": "quarto_post",
+                                                    "actor": "agent:session"}})
+    append_record(pj, {"verb": "assert", "args": {"subject": wp, "predicate": "publish_state", "value": "draft",
+                                                  "actor": "agent:session", "evidence": None, "supersede": False}})
+    r = _run("--graph-db-path", pdb, "--journal-path", pj, "replay")   # applied as that release applied them (the emit root its file derives from)
     assert r.returncode == 0, r.stderr or r.stdout
-    wp = [o for o in read_journal(pj) if o["verb"] == "assert"][-1]["args"]["subject"]
     r = _run(*base, "assert", wp, "deliverable_type", "work-page")
     assert r.returncode == 0, r.stderr or r.stdout
     r = _run(*base, "notes-render", "--slug", "the-learning-game")
@@ -1916,7 +1970,8 @@ def test_cli_work_page_binds_by_edge_renders_the_toc_gates_on_published_chapters
     # replay: a fresh db from the journal alone carries the same page — the render replays from
     # its journaled observation (the sibling is opened only by emit's gate, never by replay)
     rep = str(tmp_path / "rep.db")
-    (tmp_path / "graph.config.json").write_text(json.dumps({"website_root": str(tmp_path / "rep-site"), "sibling_graphs": {"tx": sdb}}))
+    (tmp_path / "graph.config.json").write_text(json.dumps(_lane_config(
+        pri_dir, emit_root=str(staging / "posts"), website_root=str(tmp_path / "rep-site"), sibling_graphs={"tx": sdb})))
     r = _run("--graph-db-path", rep, "--journal-path", pj, "replay")
     assert r.returncode == 0, r.stderr or r.stdout
     r = _run("--graph-db-path", rep, "emit-post", wp, "--website-root", str(tmp_path / "rep-site"))

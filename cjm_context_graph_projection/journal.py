@@ -26,19 +26,18 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from cjm_context_graph_layer.identity import derive_node_id
 from cjm_context_graph_layer.ops import GraphCursorStore, observe_writes, PROVENANCE_TS
-from cjm_context_graph_primitives.journal import (append_write, journal_segments, read_journal,
-                                                  read_segment)
+from cjm_context_graph_primitives.journal import journal_segments, read_journal, read_segment
 from cjm_context_graph_primitives.timings import record_replay, record_series, timed
 from cjm_context_graph_primitives.writer import (CursorMismatch, family_lock, family_name, ORIGIN,
                                                  read_tail)
 from cjm_dev_graph_schema.identity import (code_module_node_id, entity_node_id, note_node_id,
                                            section_node_id, series_node_id, session_node_id)
 from cjm_dev_graph_schema.nodes import DecisionNode
-from cjm_markdown_decompose_core.extract import note_from_file
 
 from .display import display_rule_node_id, set_display_rule
 from .lens import lens_node_id, set_lens
-from .notesource import apply_notes_groups, group_spans, read_notes_journal, replay_spans
+from .notesource import (apply_notes_groups, group_spans, journaled_lane, read_notes_journal,
+                         replay_spans)
 from .runtime import GraphHandle
 from .series import mint_series, place_in_series, set_series_members
 from .sitelinks import resolve_site_links, step_site_links
@@ -46,8 +45,8 @@ from .structure import add_section, born_post_path, reconstruct_note
 from .write import (add_check, alias, assert_value, author_section, decide, link, mint_procedure,
                     mint_proposal, register_session, retract_session, unlink)
 
-# The provenance actor stamped on the M3 one-time genesis import (a per-note `new-note` op
-# capturing the pre-cutover baseline). The lineage floor every later edit traces back to.
+# The provenance actor the M3 one-time genesis import stamped (a per-note `new-note` op capturing
+# the pre-cutover baseline; the import verb retired with ruling 48c4c34d (B), its ops replay).
 M3_BASELINE_ACTOR = "import:m3-baseline"
 
 # The write verbs the journal records + replays (keyed by the op `verb` field).
@@ -79,7 +78,8 @@ M3_BASELINE_ACTOR = "import:m3-baseline"
 # (ruling a7262fe7, item fdafeed9): the type profile upserts by slug (last op wins); an accept
 # carries the point AND its segment observations so replay never opens the sibling graph; a
 # retract is the compensating op; a render replays GRAPH-ONLY and re-derives the same Sections
-# from the same Points (the body is a function of the substance, never journaled as text).
+# from the same Points -- for a note not yet cut over: a cut-over note's render is element state
+# in its lane's source journal (ruling f4cc62b9, superseding b663d2f4 (f)'s replay = code x points).
 # `series` / `series-members` / `place-in-series` = Series born on-graph (DEC 72d669c5): the
 # page's whole record upserted by key (last op wins), the whole ordered membership, and a
 # one-member splice — replayed in append order, so the authored `after` chain converges.
@@ -115,55 +115,6 @@ JOURNAL_VERBS = ("decide", "alias", "assert", "link", "unlink", "section", "new-
                  "judge-roles", "review-roles", "judge-concepts", "review-concepts",
                  "harvest-discussions", "ingest-evidence",
                  "derived-from", "work-member", "relate", "relocate")
-
-
-def m3_baseline_import(
-    memory_dir: str,                  # Dir of memory markdown files
-    journal_path: str,                # The write journal to append genesis ops to
-    *,
-    slugs: Optional[List[str]] = None,  # Restrict to these note slugs (None + all_notes=False -> nothing)
-    all_notes: bool = False,            # Import the WHOLE corpus (the slice->corpus widening)
-) -> Dict[str, Any]:  # {imported: [{slug, path, bytes}], skipped_existing: [...], unknown: [...]}
-    """One-time M3 GENESIS IMPORT: emit a per-note `new-note` baseline op into the journal.
-
-    The authority flip's Fork 1 ([[memory-files-retirement-plan]]): for each selected note,
-    capture its EXACT current `.md` bytes as a `new-note` op stamped `import:m3-baseline` — the
-    lineage floor every later edit traces back to. After this, `ingest` stops reading that note's
-    `.md` (it's reconstructed by replay). Idempotent: `append_write` dedups an identical op, and
-    a note already carrying a baseline op is reported as `skipped_existing`, so re-running is safe
-    and the slice widens to the corpus mechanically (add slugs / `--all`)."""
-    mem = Path(memory_dir)
-    by_slug: Dict[str, Path] = {}
-    for p in sorted(mem.glob("*.md")):
-        if p.name == "MEMORY.md":
-            continue
-        by_slug[note_from_file(str(p), corpus_root=str(mem), lossless=True).slug] = p
-
-    if all_notes:
-        targets = sorted(by_slug)
-    else:
-        targets = list(slugs or [])
-    already = {str(Path(p).resolve()) for p in journal_sourced_note_paths(journal_path)}
-
-    imported: List[Dict[str, Any]] = []
-    skipped_existing: List[str] = []
-    unknown: List[str] = []
-    for slug in targets:
-        p = by_slug.get(slug)
-        if p is None:
-            unknown.append(slug)
-            continue
-        abspath = str(p.resolve())
-        if abspath in already:
-            skipped_existing.append(slug)
-            continue
-        content = p.read_text()
-        append_write(journal_path, "new-note",
-                     {"path": abspath, "content": content, "actor": M3_BASELINE_ACTOR})
-        imported.append({"slug": slug, "path": abspath, "bytes": len(content.encode("utf-8"))})
-    return {"imported": imported, "imported_count": len(imported),
-            "skipped_existing": skipped_existing, "unknown": unknown,
-            "corpus_notes": len(by_slug)}
 
 
 def journal_sourced_note_paths(
@@ -708,7 +659,7 @@ def _source_spans(
     """The notes source journal's groups a replay applies as windows (design amendment fa61d93a):
     a full rebuild replays the groups its ingest left out (`replay_spans`); a delta lane replays
     every group after its offset (over-inclusion is safe -- the live step is idempotent)."""
-    if not (notes and notes.get("source_journal_path") and (notes.get("notes_corpus") or notes.get("lane"))):
+    if not (notes and journaled_lane(notes)):
         return [], []
     records = read_notes_journal(notes)
     if source_offset is None:

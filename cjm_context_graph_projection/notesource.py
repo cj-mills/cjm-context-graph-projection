@@ -73,10 +73,11 @@ class NoteRec:
     """A journaled Note's state."""
 
     note: str                       # The Note id
-    path: str                       # Its file, relative to the website clone
+    path: str                       # Its file, relative to the website clone ("" for a memory note or a born post)
     frontmatter: str                # Its verbatim frontmatter
-    commit: Optional[str] = None    # The commit its capture read
+    commit: Optional[str] = None    # The commit its capture read (None: a note no git history holds)
     cut_over: bool = False          # The journal is its source
+    slug: Optional[str] = None      # A born post's pinned identity: its file derives from the emit root (98293e72 (1))
 
 
 @dataclass
@@ -113,11 +114,15 @@ class NotesFold:
             if n is None:
                 n = self.notes[a["note"]] = NoteRec(a["note"], a["path"], a["frontmatter"])
             else:
-                self.paths.pop(n.path, None)
+                if self.paths.get(n.path) == n.note:
+                    del self.paths[n.path]
                 n.path, n.frontmatter = a["path"], a["frontmatter"]
             if a.get("commit"):
                 n.commit = a["commit"]
-            self.paths[n.path] = n.note
+            if a.get("slug"):
+                n.slug = a["slug"]
+            if n.path:   # a memory note or a born post holds no path of the clone
+                self.paths[n.path] = n.note
             return {n.note}
         if verb == CUTOVER:
             self.notes[a["note"]].cut_over = True
@@ -251,7 +256,10 @@ def replay_spans(
     fa61d93a (1)): each group whose every touched note was cut over BEFORE it -- an edit, a
     placement, a birth, a retire, an absorb. A capture or a cutover folds at ingest: it changes
     no element by construction, so the ingest holds each note as the live db held it at its
-    cutover. A group touching a cut-over note and one not yet cut over is refused."""
+    cutover. A note no git history holds (no capture commit: a born post, a draft captured from
+    the graph) is never folded at ingest -- every group touching it is a window, as the memory
+    lane's are (c9b29de5 (4); ruling 48c4c34d (2)), so its capture lands after the writes history
+    it read. A group touching a cut-over note and one not yet cut over is refused."""
     fold = NotesFold()
     out: List[Tuple[int, int]] = []
     for begin, end in group_spans(records):
@@ -259,7 +267,8 @@ def replay_spans(
         touched: Set[str] = set()
         for rec in records[begin:end]:
             touched |= fold.apply(rec)
-        if touched and touched <= cut:
+        born = {nid for nid in touched if nid in fold.notes and not fold.notes[nid].commit}
+        if touched and touched <= cut | born:
             out.append((begin, end))
         elif touched & cut:
             raise NotesFoldError(f"source records {begin}..{end - 1} touch cut-over notes "
@@ -347,6 +356,17 @@ def _keyed(
                         next_id=ids.get(s.next_anchor) if s.next_anchor else None)
 
 
+def decompose_rec(
+    src: Any,      # The lane's source (ArchiveSource | MemorySource)
+    n: NoteRec,    # The journaled note
+    text: str,     # A version of its text
+) -> Any:  # The NoteNode the text decomposes to, under the note's identity
+    """A born post decomposes under its pinned slug (ruling 48c4c34d (1)); any other note under its path."""
+    if n.slug:
+        return src.decompose_born(n.slug, text.encode("utf-8"))[0]
+    return src.decompose(n.path, text.encode("utf-8"))[0]
+
+
 def derive_note(
     fold: NotesFold,
     note: str,     # A journaled Note id
@@ -358,7 +378,7 @@ def derive_note(
     n = fold.notes[note]
     text = fold.compose(note)
     walk = fold.outline(note)[0]
-    decomposed = src.decompose(n.path, text.encode("utf-8"))[0]
+    decomposed = decompose_rec(src, n, text)
     if decomposed.id != note:
         raise NotesFoldError(f"{n.path}: decomposes as {decomposed.id}, not the journaled {note}")
     secs = decomposed.sections
@@ -401,18 +421,21 @@ def note_wires(
 def cutover_freeze(
     records: Iterable[Dict[str, Any]],  # Notes source journal records
 ) -> Dict[str, str]:  # path -> the capture commit, for every path a cut-over note has held
-    """The git fold's freeze for the cut-over paths: each stops at its note's capture commit."""
+    """The git fold's freeze for the cut-over paths: each stops at its note's capture commit. A
+    note with no capture commit (a born post: ruling 48c4c34d (2)) holds no git path to freeze."""
     fold = NotesFold()
     held: Dict[str, Set[str]] = {}
     for rec in records:
         fold.apply(rec)
-        if rec.get("verb") == NOTE:
+        if rec.get("verb") == NOTE and rec["args"]["path"]:
             held.setdefault(rec["args"]["note"], set()).add(rec["args"]["path"])
     out: Dict[str, str] = {}
     for nid, n in fold.notes.items():
         if n.cut_over:
             if not n.commit:
-                raise NotesFoldError(f"{n.path}: cut over with no capture commit")
+                if held.get(nid):
+                    raise NotesFoldError(f"{n.path}: cut over with no capture commit")
+                continue
             for p in held.get(nid, ()):
                 out[p] = n.commit
     return out
@@ -469,7 +492,7 @@ def archive_source(
     return ArchiveSource(config["notes_corpus"], config.get("notes_profile") or "quarto_post",
                          site_root=config.get("website_root"), site_pages=config.get("site_pages"),
                          retired=retired_sources(config.get("journal_path")),
-                         cutover=cutover_freeze(records))
+                         cutover=cutover_freeze(records), emit_root=config.get("emit_root"))
 
 
 def note_source(
@@ -480,11 +503,15 @@ def note_source(
     if config.get("lane") == "memory":
         from .memorysource import MemorySource
         return MemorySource()
+    if not config.get("notes_corpus"):   # a notes lane that births posts but holds no archive
+        from .devgraph import BornSource
+        return BornSource(config.get("emit_root"), config.get("notes_profile") or "quarto_post")
     return archive_source(config, records)
 
 
 def journaled_lane(config: Dict[str, Any]) -> bool:  # The config names a note lane whose notes a source journal holds
-    return bool(config.get("source_journal_path") and (config.get("notes_corpus") or config.get("lane") == "memory"))
+    return bool(config.get("source_journal_path") and (config.get("notes_corpus") or config.get("lane") == "memory"
+                                                       or config.get("emit_root")))
 
 
 def held_text(
@@ -527,15 +554,20 @@ def _first_diff(a: str, b: str) -> Dict[str, Any]:  # The first differing line o
 # --- Capture and cutover ------------------------------------------------------------------
 
 def capture_records(
-    note: Any,     # The decomposed NoteNode (lossless, under the profile)
-    path: str,     # Its path relative to the website clone
-    commit: str,   # The commit it was read at
+    note: Any,                   # The decomposed NoteNode (lossless, under the profile)
+    path: str,                   # Its path relative to the website clone ("" for a note no clone holds)
+    commit: Optional[str],       # The commit it was read at (None: a note no git history holds)
+    slug: Optional[str] = None,  # A born post's pinned identity (ruling 48c4c34d (1))
 ) -> List[Tuple[str, Dict[str, Any]]]:  # The capture group's records: note, then each element's state, then placement
     secs = list(note.sections)
     after = {s.next_anchor: s.anchor for s in secs if s.next_anchor}
     by_anchor = {s.anchor: s.id for s in secs}
-    recs: List[Tuple[str, Dict[str, Any]]] = [
-        (NOTE, {"note": note.id, "path": path, "frontmatter": note.frontmatter_raw, "commit": commit})]
+    nrec: Dict[str, Any] = {"note": note.id, "path": path, "frontmatter": note.frontmatter_raw}
+    if commit:
+        nrec["commit"] = commit
+    if slug:
+        nrec["slug"] = slug
+    recs: List[Tuple[str, Dict[str, Any]]] = [(NOTE, nrec)]
     for s in secs:
         title, text = element_state(s)
         recs.append((SECTION, {"section": s.id, "title": title, "text": text, "block_role": s.block_role}))
@@ -644,12 +676,14 @@ def notes_source_check(
     """Each journaled note's file against its journal: CLEAN (working tree == HEAD == journal),
     UNCOMMITTED (the working tree is the journal's emit, HEAD not yet -- written, not drift),
     DRIFT (HEAD changed by another: absorb it), WORKTREE (an outside edit not yet committed:
-    commit it, then absorb), MISSING; a captured note not yet cut over is SHADOW."""
+    commit it, then absorb), MISSING; a captured note not yet cut over is SHADOW. A born post's
+    file is gitignored (ruling 48c4c34d (7)): CLEAN when it is the journal's emit, WORKTREE when
+    edited outside (the journal wins at the next emit), MISSING when absent."""
     records = read_notes_journal(config)
     fold = fold_records(records)
     top = config.get("website_root")
     head = head_commit(top) if top else None
-    blobs = blobs_at(top, head, [n.path for n in fold.notes.values()]) if head else {}
+    blobs = blobs_at(top, head, [n.path for n in fold.notes.values() if n.path]) if head else {}
     rows = []
     for n in sorted(fold.notes.values(), key=lambda n: n.path):
         if not n.cut_over:
@@ -659,6 +693,15 @@ def notes_source_check(
             composed = fold.compose(n.note)
         except NotesFoldError as e:
             rows.append({"note": n.note, "path": n.path, "state": "error", "error": str(e)})
+            continue
+        if n.slug:   # a born post (ruling 48c4c34d (7)): no git history holds it -- its emit alone is compared
+            f = note_file(config, n)
+            wt = f.read_bytes().decode("utf-8") if f is not None and f.exists() else None
+            state = "missing" if wt is None else "clean" if wt == composed else "worktree"
+            row = {"note": n.note, "path": str(f or n.slug), "state": state}
+            if state == "worktree":
+                row.update(_first_diff(composed, wt))
+            rows.append(row)
             continue
         tree = Path(top) / n.path
         wt = tree.read_bytes().decode("utf-8") if tree.exists() else None
@@ -687,16 +730,16 @@ def absorb_records(
     fold: NotesFold,
     note: str,     # A cut-over Note id
     src: Any,      # The ArchiveSource
-    text: str,     # The outside version (HEAD's blob)
-    commit: str,   # The commit it was read at
+    text: str,     # The new version (HEAD's blob, or a render's text)
+    commit: Optional[str],   # The commit it was read at (None: a text no git history holds -- a render)
 ) -> Tuple[List[Tuple[str, Dict[str, Any]]], Dict[str, Any]]:  # (the records, {changed, placed, born, retired, renamed?})
-    """Map an outside version's elements to ids by their derived anchors (an unheaded element's
+    """Map a new version's elements to ids by their derived anchors (an unheaded element's
     anchor is positional: `_preamble`, `_<role>-n`, `<region>~n`) -- never a rename guess: a
     heading the edit renamed is a retire plus a birth, listed for review."""
     n = fold.notes[note]
     current, _ = derive_note(fold, note, src)
     by_anchor = {s.anchor: s.id for s in current.sections}
-    outside = src.decompose(n.path, text.encode("utf-8"))[0]
+    outside = decompose_rec(src, n, text)
     secs = list(outside.sections)
     ids: Dict[str, str] = {}
     born: List[str] = []
@@ -711,7 +754,7 @@ def absorb_records(
     recs: List[Tuple[str, Dict[str, Any]]] = []
     if outside.frontmatter_raw != n.frontmatter:
         recs.append((NOTE, {"note": note, "path": n.path, "frontmatter": outside.frontmatter_raw,
-                            "commit": commit}))
+                            **({"commit": commit} if commit else {}), **({"slug": n.slug} if n.slug else {})}))
     changed, placed = [], []
     for s in secs:
         sid = ids[s.anchor]
@@ -903,16 +946,29 @@ async def _write_delta(
 
 # --- Journal-first authoring --------------------------------------------------------------
 
+def note_file(
+    config: Dict[str, Any],  # The note lane's config
+    n: NoteRec,              # A journaled note
+) -> Optional[Path]:  # Where its emit lands -- None for a note emitted nowhere
+    """An archive post's path in the website tree; a born post's file under the emit root (ruling
+    48c4c34d (1)); a memory note is emitted nowhere (ruling fed38997), nor a born post with no emit root."""
+    from .structure import born_post_path
+    if n.slug:
+        return Path(born_post_path(config["emit_root"], n.slug)) if config.get("emit_root") else None
+    return Path(config["website_root"]) / n.path if config.get("website_root") and n.path else None
+
+
 def emit_note(
     config: Dict[str, Any],  # The notes graph-sibling config
     fold: NotesFold,
     note: str,               # A cut-over Note id
-) -> str:  # The file written
-    """Write the note's composition to its path in the website tree (the emit). Commit + push main
-    as usual: main is the source of record, never the publish -- the public site deploys from
-    gh-pages."""
-    n = fold.notes[note]
-    p = Path(config["website_root"]) / n.path
+) -> Optional[str]:  # The file written (None: the note is emitted nowhere)
+    """Write the note's composition to its file (the emit). An archive post's: commit + push main
+    as usual -- main is the source of record, never the publish; the public site deploys from
+    gh-pages. A born post's file is gitignored: the journal is its only source."""
+    p = note_file(config, fold.notes[note])
+    if p is None:
+        return None
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_bytes(fold.compose(note).encode("utf-8"))
     return str(p)
@@ -1078,7 +1134,7 @@ def note_edit_records(
         return {"error": f"{note} is not a cut-over note"}
     if frontmatter == n.frontmatter:
         return []
-    return [(NOTE, {"note": note, "path": n.path, "frontmatter": frontmatter})]
+    return [(NOTE, {"note": note, "path": n.path, "frontmatter": frontmatter, **({"slug": n.slug} if n.slug else {})})]
 
 
 def birth_records(
@@ -1162,8 +1218,10 @@ async def _archive_write(
     if res.get("error") or not res.get("appended"):
         return res
     res["notes_live"] = await apply_notes_live(gx, config, res["appended"])
-    if config.get("website_root"):   # a memory note is emitted nowhere (ruling fed38997)
-        res["file"] = emit_note(config, fold, note)
+    f = emit_note(config, fold, note)   # a memory note is emitted nowhere (ruling fed38997)
+    if f:
+        res["file"] = f
+        res["born_post"] = bool(fold.notes[note].slug)   # a gitignored emit: nothing to commit
     return res
 
 
@@ -1237,7 +1295,8 @@ async def _note_author(
     if s is None:
         build = lambda f: note_edit_records(f, nid, n.frontmatter.replace(old, new, 1))
     else:
-        build = lambda f: section_edit_records(f, s.id, s.raw.replace(old, new, 1), s.level, profile)
+        raw = s.raw.replace(old, new, 1)
+        build = lambda f: _hand(f, nid, s.id, raw, lambda: section_edit_records(f, s.id, raw, s.level, profile))
     target = nid if s is None else s.id
     return {"node_id": target, **await _archive_write(gx, config, nid, build,
                                                       {"op": "author", "node_id": target, "actor": actor},
@@ -1272,8 +1331,9 @@ async def archive_author(
         return {"error": aerr, "node_id": sid}
     level = int(F.prop(node, "level") or 0)
     profile = config.get("notes_profile") or "quarto_post"
-    res = await _archive_write(gx, config, str(F.prop(node, "note_id")),
-                               lambda f: section_edit_records(f, sid, new_raw, level, profile),
+    nid = str(F.prop(node, "note_id"))
+    res = await _archive_write(gx, config, nid,
+                               lambda f: _hand(f, nid, sid, new_raw, lambda: section_edit_records(f, sid, new_raw, level, profile)),
                                {"op": "author", "node_id": sid, "actor": actor}, write)
     return {"node_id": sid, **res}
 
@@ -1306,8 +1366,57 @@ async def archive_add_section(
     if perr or aerr:
         return {"error": perr or aerr}
     profile = config.get("notes_profile") or "quarto_post"
-    return await _archive_write(gx, config, nid, lambda f: birth_records(f, nid, raw, pid, aid, profile),
+    return await _archive_write(gx, config, nid,
+                                lambda f: _hand(f, nid, None, None, lambda: birth_records(f, nid, raw, pid, aid, profile)),
                                 {"op": "add-section", "actor": actor}, write)
+
+
+async def archive_text(
+    gx: GraphHandle,
+    config: Dict[str, Any],   # The note lane's config
+    note: str,                # A cut-over Note id
+    text: str,                # Its whole new text (a render's)
+    op: Dict[str, Any],       # Provenance: the verb and its inputs (never replay input)
+    *,
+    write: bool = True,
+) -> Dict[str, Any]:  # The journal-first write's result (records [] + unchanged when the text is already held)
+    """A RENDERED BODY IS ELEMENT STATE (ruling f4cc62b9): a verb that derives a cut-over note's whole
+    text (notes-render) lands it journal-first, mapped by anchor as absorb maps an outside version --
+    an unchanged anchor keeps its id, a newly produced section is born, one no longer produced retires."""
+    src = note_source(config)
+    return await _archive_write(gx, config, note, lambda f: absorb_records(f, note, src, text, None)[0], op, write)
+
+
+def _hand(
+    fold: NotesFold,
+    note: str,
+    section: Optional[str],
+    raw: Optional[str],
+    build,   # () -> records | {"error"}: the hand write's records
+) -> Any:  # The records, or the render-owned refusal
+    why = render_owned(fold, note, section, raw)
+    return {"error": why} if why else build()
+
+
+def render_owned(
+    fold: NotesFold,
+    note: str,                  # A cut-over Note id
+    section: Optional[str],     # The element a write touches (None: the note's outline -- an add, a move)
+    raw: Optional[str] = None,  # The element's new heading-inclusive text (an edit)
+) -> Optional[str]:  # The refusal when the write lands in the region a render owns (ruling f4cc62b9 rider 2)
+    """A rendered deliverable's body below its marker is the render's: a hand edit there is
+    overwritten by the next render, so it is refused -- the points are the substance to edit."""
+    from .purenotes import BODY_MARKER
+    walk = fold.outline(note)[0]
+    if not walk or BODY_MARKER not in fold.elements[walk[0]].text:
+        return None
+    why = "the render owns this note's body below its marker (ruling f4cc62b9): edit the points, then notes-render"
+    if section is None or section != walk[0]:
+        return why
+    old = fold.elements[walk[0]].text
+    if raw is None or BODY_MARKER not in raw or raw.split(BODY_MARKER, 1)[1].strip() != old.split(BODY_MARKER, 1)[1].strip():
+        return why
+    return None
 
 
 async def archive_command(
@@ -1354,7 +1463,7 @@ async def archive_command(
         sid, nid = str(F.nid(node)), str(F.prop(node, "note_id"))
         if cmd == "retire-section":
             return {"node_id": sid, **await _archive_write(
-                gx, config, nid, lambda f: retire_records(f, sid),
+                gx, config, nid, lambda f: _hand(f, nid, None, None, lambda: retire_records(f, sid)),
                 {"op": "retire-section", "actor": args.actor}, write)}
         src = note_source(config)
         pid, perr = _element_ref(fold, src, nid, None if args.top else args.parent)
@@ -1364,7 +1473,7 @@ async def archive_command(
         if not args.top and args.parent is None:
             pid = fold.elements[sid].parent
         return {"node_id": sid, **await _archive_write(
-            gx, config, nid, lambda f: place_records(f, sid, pid, aid),
+            gx, config, nid, lambda f: _hand(f, nid, None, None, lambda: place_records(f, sid, pid, aid)),
             {"op": "place", "actor": args.actor}, write)}
     return {"error": f"no archive verb {cmd}"}
 

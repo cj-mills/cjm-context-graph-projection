@@ -122,30 +122,6 @@ def test_journal_sourced_note_paths_matches_any_actor(tmp_path):
     assert journal_sourced_note_paths(p) == [a, b]  # both flip ingest off their .md
 
 
-def test_m3_baseline_import_emits_baseline_and_is_idempotent(tmp_path):
-    from cjm_context_graph_projection.journal import (M3_BASELINE_ACTOR, journal_sourced_note_paths,
-                                                      m3_baseline_import, read_journal)
-    mem = tmp_path / "memory"
-    mem.mkdir()
-    note = mem / "feedback_demo.md"
-    note.write_text("---\nname: demo-note\ndescription: d\n---\n\nbody\n")
-    journal = str(tmp_path / "writes.jsonl")
-
-    r1 = m3_baseline_import(str(mem), journal, slugs=["demo-note"])
-    assert r1["imported_count"] == 1 and not r1["unknown"]
-    ops = read_journal(journal)
-    assert ops[0]["verb"] == "new-note"
-    assert ops[0]["args"]["actor"] == M3_BASELINE_ACTOR
-    assert ops[0]["args"]["content"] == note.read_text()  # EXACT baseline bytes captured
-    assert journal_sourced_note_paths(journal) == [str(note.resolve())]
-
-    # Re-running is a no-op (already has a baseline op); an unknown slug is reported, not raised.
-    r2 = m3_baseline_import(str(mem), journal, slugs=["demo-note", "ghost"])
-    assert r2["imported_count"] == 0 and r2["skipped_existing"] == ["demo-note"]
-    assert r2["unknown"] == ["ghost"]
-    assert len(read_journal(journal)) == 1  # journal unchanged
-
-
 def test_render_structure_human():
     nn = render("structure", {"slug": "n", "path": "/n.md", "sections": 3, "written": True}, "human")
     assert "created note" in nn and "n" in nn
@@ -154,18 +130,6 @@ def test_render_structure_human():
     assert "gamma" in add and "beta" in add
     err = render("structure", {"error": "no note `x`", "written": False}, "human")
     assert "no note" in err
-
-
-def test_render_reconcile_memory_human():
-    clean = render("reconcile-memory", {"clean": True, "notes_with_drift": 0,
-                                        "absorbed_count": 0, "drift": [], "absorbed": []}, "human")
-    assert "clean" in clean
-    drifty = render("reconcile-memory", {"clean": False, "notes_with_drift": 1, "absorbed_count": 1,
-        "drift": [{"slug": "n", "path": "/n.md", "added": [], "removed": [],
-                   "changed": [{"anchor": "beta", "graph": "old", "file": "new"}]}],
-        "absorbed": [{"slug": "n", "anchor": "beta", "backup": "/n.md.bak",
-                      "prior_bytes": 3, "new_bytes": 3}]}, "human")
-    assert "beta" in drifty and "absorbed" in drifty
 
 
 def test_append_write_stamps_session_from_env(tmp_path, monkeypatch):
@@ -257,7 +221,7 @@ def test_unlink_verb_is_journaled_and_replay_converges(tmp_path):
     """Retraction is a durable compensating op (finding 2f1d9382): the verb is
     journaled like link, and the orphan classifier's caller drops retracted
     triples so a retracted edge is never proposed for remap."""
-    from cjm_context_graph_projection.journal import JOURNAL_VERBS, append_write, read_journal
+    from cjm_context_graph_projection.journal import JOURNAL_VERBS
     assert "unlink" in JOURNAL_VERBS
     p = str(tmp_path / "writes.jsonl")
     args = {"source_id": "dec-1", "target_id": "sym-1", "relation": "SHAPES", "actor": "a"}
@@ -302,7 +266,7 @@ def test_replay_offset_skips_applied_prefix(tmp_path, monkeypatch, mem_cursors):
     import cjm_context_graph_projection.journal as journal_mod
     p = str(tmp_path / "writes.jsonl")
     for i in range(4):
-        journal_mod.append_write(p, "link", {"n": i})
+        append_write(p, "link", {"n": i})
     applied = []
 
     async def fake_apply(gx, op, emit_root=None):
@@ -360,8 +324,8 @@ def test_procedure_verb_is_journaled_and_replays_through_mint(tmp_path, monkeypa
     p = str(tmp_path / "writes.jsonl")
     proc_args = {"method": "version-oracle/v1", "name": "version oracle",
                  "actor": "programmatic", "root_kind": "asserted"}
-    assert journal_mod.append_write(p, "procedure", proc_args) is True
-    assert journal_mod.append_write(p, "assert", {
+    assert append_write(p, "procedure", proc_args) is True
+    assert append_write(p, "assert", {
         "subject": "e1", "predicate": "version", "value": "0.0.2",
         "actor": "procedure:version-oracle/v1", "evidence": ["p"], "supersede": None,
         "method": "version-oracle/v1"}) is True
@@ -452,9 +416,9 @@ def test_journal_window_verb_filters(tmp_path):
     aggregation, so a retraction sweep (unlink×30) can be filtered out of a session lens."""
     import cjm_context_graph_projection.journal as journal_mod
     p = str(tmp_path / "writes.jsonl")
-    journal_mod.append_write(p, "link", {"source_id": "a", "target_id": "b", "relation": "R"})
-    journal_mod.append_write(p, "unlink", {"source_id": "a", "target_id": "b", "relation": "R"})
-    journal_mod.append_write(p, "check", {"item_id": "a", "text": "t"})
+    append_write(p, "link", {"source_id": "a", "target_id": "b", "relation": "R"})
+    append_write(p, "unlink", {"source_id": "a", "target_id": "b", "relation": "R"})
+    append_write(p, "check", {"item_id": "a", "text": "t"})
     base = journal_mod.journal_window([p])
     assert base["entries"] == 3
     only = journal_mod.journal_window([p], verbs=["check"])

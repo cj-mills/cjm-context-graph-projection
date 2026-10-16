@@ -13,7 +13,11 @@ NOTES) gets the sibling graph a cross-graph link observes, and one keyed in FILE
 its run. A step whose first element is a function is a HARNESS action (a git commit, a journal written
 by an earlier release, a review document written), run in both runs alike and never counted; a step
 marked NOCHANGE is a write whose plan finds the graph already there -- it journals nothing (ruling
-24fa72c2). A step marked with a tuple of verbs writes those ops in that order: a scenario whose longest
+24fa72c2); a step marked LANE writes only its note lane's source journal (a note born cut over, a
+journal-first edit or render: ruling 48c4c34d, f4cc62b9) -- run once, never crashed, journaling no
+writes op, its records folded by the rebuild's replay. Each run's config names a note lane: the
+notes lane's source journal for a notes scenario (and any whose CONFIG names an emit root), the
+memory journal for every other. A step marked with a tuple of verbs writes those ops in that order: a scenario whose longest
 tuple has n ops runs n crashed variants, variant k killing each marked step at its k-th op
 (CJM_JOURNAL_FAULT=after_append@k; a shorter step dies at its last), and the retry heals that op while
 its plan writes the rest -- so a chain completes from every boundary (ruling 547f4123 (1)). A scenario in
@@ -62,10 +66,11 @@ LENS = json.dumps({"params": [{"name": "kind", "type": "string", "required": Tru
 ARCH = "---\nname: arch-note\ndescription: d\n---\n\nbody\n"
 SOURCE = "5f0c0a1e-0000-4000-8000-000000000001"   # the sibling graph's one Source
 REF_ID = ReferenceNode(graph="tx", foreign_id=SOURCE, foreign_label="Source", title="").id
-DELIVERABLE = [(("new-note", "--path", "{run}/memory/arch.md", "--content", ARCH), False)]
+LANE = "lane"           # a step writing only its note lane's source journal: run once, journals no writes op
+DELIVERABLE = [(("new-note", "--content", ARCH), LANE)]
 WORKS = [(("entity", "work", w, "--name", w, "--form", "book"), False) for w in ("a-book", "b-book")]
-POSTS = [(("new-note", "--path", f"{{run}}/memory/{s}.md", "--content",
-           f"---\nname: {s}\ndescription: d\n---\n\nbody\n"), False) for s in ("p1", "p2", "p3")]
+POSTS = [(("new-note", "--content", f"---\nname: {s}\ndescription: d\n---\n\nbody\n"), LANE)
+         for s in ("p1", "p2", "p3")]
 SERIES = [(("series", "a-series", "--title", "A"), False)]
 # A harness transcript booted just after KEY's mint (the key is LOCAL time, a record's stamp UTC)
 BOOT = (datetime.strptime(KEY, "%Y-%m-%d_%H-%M-%S").astimezone() + timedelta(seconds=5)).astimezone(timezone.utc)
@@ -94,6 +99,8 @@ PROPSET = {"purenotes/proposals/npropset_proof/manifest.json": json.dumps(
            "purenotes/proposals/npropset_proof/proposals.jsonl": "".join(json.dumps(p) + "\n" for p in PROPS)}
 PT = [point_node_id(point_set_node_id("tx", SOURCE, ""), k) for k in KEYS]   # each accepted point, set-owned
 POST_SLUG = "a-book/ch01"
+BORN_POST = "---\ntitle: \"A post\"\ndate: 2026-09-07\n---\n\nLede.\n\n## One\n\nBody one.\n"
+DRAFT = "---\ntitle: \"Old draft\"\ndate: 2026-01-01\n---\n\nLede.\n\n## One\n\nBody one.\n\n\n## Two\n\nBody two.\n"
 BORN = [(("new-note", "--slug", POST_SLUG, "--content", "---\ntitle: \"A chapter\"\ndate: 2026-09-07\n---\n\nNotes.\n"),
          False)]
 ACCEPTED = [(("notes-type", "pure-notes"), False)] + BORN + [
@@ -106,7 +113,7 @@ FILES = {"edit-message": {"transcripts/aaaa1111-2222-3333-4444-555566667777.json
          "retire-source": {"site/posts/index.qmd": "---\ntitle: Posts\nlisting: default\n---\n"}}   # the website clone
 RUN_VERBS = {"judge-related", "judge-facets", "judge-roles", "judge-concepts", "review-facets", "review-roles",
              "review-concepts"}
-NOTES = {"notes-retract", "notes-edit", "notes-rehome", "notes-render"} | RUN_VERBS   # on the notes lane's sibling + config
+NOTES = {"notes-retract", "notes-edit", "notes-rehome", "notes-render", "new-note-born", "cutover-born"} | RUN_VERBS   # on the notes lane's sibling + config
 JOURNALED_AS = {"notes-type": "deliverable-type", "notes-retract": "retract-point", "notes-rehome": "rehome-points",
                 "notes-edit": "edit-point", "notes-render": "render-notes"}   # a CLI verb whose op journals under another name
 
@@ -124,6 +131,27 @@ def _legacy_accepts(
                  "ordinal": 0, "unit": UNIT}
         append_record(jp, {"verb": "accept-point", "args": {"slug": POST_SLUG, "point": point, "observations": [obs],
                                                             "actor": "user:cli", "proposal_set_id": "npropset_proof"}})
+
+
+def _legacy_note(
+    content: str,                  # The note's whole text
+    rel: str = "",                 # Its file under the run (a legacy memory-regime note), or "" for a born post
+    slug: str = "",                # A born post's permalink
+    edits: tuple = (),             # (anchor, raw) section ops journaled after the genesis
+) -> object:  # A harness action journaling the note as an earlier release did -- unapplied; the next writer heals it
+    def journal(run: Path, jp: str) -> None:
+        args = {"content": content, "actor": "agent:session"}
+        if rel:
+            (run / rel).parent.mkdir(parents=True, exist_ok=True)
+            (run / rel).write_text(content)
+            args["path"] = str(run / rel)
+        if slug:
+            args.update(slug=slug, profile="quarto_post")
+        append_record(jp, {"verb": "new-note", "args": args})
+        for anchor, raw in edits:
+            append_record(jp, {"verb": "section", "args": {"slug": slug or rel, "anchor": anchor, "raw": raw,
+                                                           "actor": "agent:session"}})
+    return journal
 
 
 def _commit_site(
@@ -433,8 +461,10 @@ def _copy(
 
 
 CONFIG = {"ingest-evidence": {"evidence": {"root": "{run}/evidence", "host": HOST}},
-          "propose": {"notes_profile": "quarto_post", "emit_root": "{run}/staging"},
-          "confirm-proposal": {"notes_profile": "quarto_post", "emit_root": "{run}/staging"},
+          "propose": {"notes_profile": "quarto_post", "emit_root": "{run}/staging",
+                      "source_journal_path": "{run}/notes.source.jsonl"},
+          "confirm-proposal": {"notes_profile": "quarto_post", "emit_root": "{run}/staging",
+                               "source_journal_path": "{run}/notes.source.jsonl"},
           "relocate": {"relocation": {"retired_repo": "o/retired-posts", "raw_base": "{raw}{run}/served"}}}
 FILES.update({"entity-batch": {"batch.json": BATCH}, "library-survey": {"survey.tsv": SURVEY},
               "review-concepts-vocab": {"vocab.md": VOCAB_DOC}, "relocate": FILES["retire-source"]})
@@ -485,7 +515,7 @@ SCENARIOS = {
                        (("session", KEY, "--title", "T2"), False),
                        (("session", KEY, "--title", "T1"), True)],
     "retract-session": [(("session", KEY), False), (("retract-session", KEY), True)],
-    "alias": [(("new-note", "--path", "{run}/memory/canon.md", "--content", NOTE), False),
+    "alias": [(("new-note", "--content", NOTE), LANE),
               (("alias", "drifted-slug", "canon-note", "--memory-dir", "{run}/no-memory",
                 "--evidence", ITEM_ID[:8]), True)],
     "display-rule": [(("display-rule", "Assertion", "--title", "{predicate} @ {->ABOUT}"), True),
@@ -533,7 +563,7 @@ SCENARIOS = {
         (("edit-message", "u-boot", "--text", t), True) for t in ("T1", "T2", "T1")] + [
         (("edit-message", "u-boot", "--text", "T1", "--set", "flag=1"), True)],
     "notes-type": [(("notes-type", "a-type", "--title", t, "--kind", "notes"), True) for t in ("A", "B", "A")],
-    "retire-source": [(("new-note", "--path", "{run}/site/posts/arch.md", "--content", ARCH), False),
+    "retire-source": [(_legacy_note(ARCH, rel="site/posts/arch.md"), False),
                       (("notes-type", "archive-notes", "--title", "Archive", "--kind", "notes", "--origin", "archive"),
                        False),
                       (("assert", note_node_id("arch-note"), "deliverable_type", "archive-notes"), False),
@@ -585,12 +615,23 @@ SCENARIOS = {
                         (_traffic("2026-10-08", ["2026-10-01", "2026-10-08"], [_cf_row("2026-10-01", "/posts/a/", 12, 11)]),
                          False),
                         (("ingest-evidence",), True)],
-    "notes-render": ACCEPTED + [(("notes-render", "--slug", POST_SLUG), True),
+    # a born post's render is element state, journal-first in the notes source journal (ruling f4cc62b9)
+    "notes-render": ACCEPTED + [(("notes-render", "--slug", POST_SLUG), LANE),
                                 (("notes-render", "--slug", POST_SLUG), NOCHANGE),
-                                (("notes-render", "--slug", POST_SLUG, "--rendering", "outline"), True),
-                                (("notes-render", "--slug", POST_SLUG), True),
-                                (("notes-edit", PT[2], "--text", "Kids never see the whole."), False),
-                                (("notes-render", "--slug", POST_SLUG, "--no-write"), True)],
+                                (("notes-render", "--slug", POST_SLUG, "--rendering", "outline"), LANE),
+                                (("notes-render", "--slug", POST_SLUG), LANE),
+                                (("notes-edit", PT[2], "--text", "Kids never see the whole."), True),
+                                (("notes-render", "--slug", POST_SLUG), LANE)],
+    # C3 (ruling 48c4c34d): a post born cut over, its draft state planned after the birth applied
+    "new-note-born": [(("new-note", "--slug", "a-post", "--content", BORN_POST), ("assert",)),
+                      (("new-note", "--slug", "a-post", "--content", BORN_POST), NOCHANGE)],
+    # ... and a draft the writes journal's genesis op born, captured from the db, then authored journal-first
+    "cutover-born": [(_legacy_note(DRAFT, slug="old-draft", edits=(("one", "## One\n\nBody one, legacy.\n\n"),)), False),
+                     (("cutover-born",), LANE), (("cutover-born",), NOCHANGE),
+                     (("author", section_node_id(note_node_id("old-draft"), "one"), "--edit", "legacy", "cut over"),
+                      LANE),
+                     (("add-section", "old-draft", "--content", "## Three\n\nBody three.", "--after", "two"), LANE),
+                     (("assert", note_node_id("old-draft"), "publish_state", "reviewed"), True)],
     "propose": [(_code(OLD_F), False), (("new-note", "--slug", "tutorial", "--content", TUTORIAL), False),
                 (("link", section_node_id(note_node_id("tutorial"), "use"), "REFERENCES", SYM_ID), False),
                 (("assert", note_node_id("tutorial"), "publish_state", "published"), False),
@@ -621,7 +662,7 @@ SCENARIOS = {
                (("oracle", "--repos-dir", "{run}/repos"), NOCHANGE), (_version("0.0.3"), False),
                (("oracle", "--repos-dir", "{run}/repos"), ("assert",)), (_version("0.0.1"), False),
                (("oracle", "--repos-dir", "{run}/repos"), NOCHANGE)],
-    "relocate": [(("new-note", "--path", "{run}/site/posts/arch.md", "--content", ARCH), False),
+    "relocate": [(_legacy_note(ARCH, rel="site/posts/arch.md"), False),
                  (("notes-type", "archive-notes", "--title", "Archive", "--kind", "notes", "--origin", "archive"), False),
                  (("assert", note_node_id("arch-note"), "deliverable_type", "archive-notes"), False),
                  (("assert", note_node_id("arch-note"), P.CURRENCY, "removed"), False),
@@ -633,7 +674,7 @@ SCENARIOS = {
                          (("link", section_node_id(note_node_id("tutorial"), "use"), "REFERENCES", SYM_ID), False),
                          (("assert", note_node_id("tutorial"), "publish_state", "published"), False),
                          (_code(NEW_F, edited=True), False), (("propose",), False), (_proposal, False),
-                         (("confirm-proposal", "{proposal}"), ("section", "assert")),
+                         (("confirm-proposal", "{proposal}"), ("assert",)),   # the section: journal-first (48c4c34d (6))
                          (("confirm-proposal", "{proposal}"), NOCHANGE)],
     "notes-accept": [(("notes-type", "pure-notes"), False)] + BORN + [
         (("notes-accept", "--slug", POST_SLUG, "--set", "npropset_proof", "--accept-all"),
@@ -706,7 +747,10 @@ def _sibling(
     asyncio.run(mint())
     config = {"sibling_graphs": {"tx": str(run / "sibling.db")}}
     if notes:
-        config.update(notes_profile="quarto_post", emit_root=str(run / "staging"))
+        config.update(notes_profile="quarto_post", emit_root=str(run / "staging"),
+                      source_journal_path=str(run / "notes.source.jsonl"))
+    else:
+        config["memory_journal_path"] = str(run / "memory.jsonl")
     (run / "graph.config.json").write_text(json.dumps(config))
 
 
@@ -725,6 +769,8 @@ def _run(
     (run / "no-memory").mkdir()
     db, jp = str(run / "live.db"), str(run / "writes.jsonl")
     steps = SEED + SCENARIOS[scenario]
+    # every run names a note lane (ruling 48c4c34d): the memory journal, or the notes lane's source journal
+    (run / "graph.config.json").write_text(json.dumps({"memory_journal_path": str(run / "memory.jsonl")}))
     if scenario in NOTES or any(a.startswith("tx:") for args, _ in steps if not callable(args) for a in args):
         _sibling(run, notes=scenario in NOTES)
     if scenario in CONFIG:
@@ -742,6 +788,11 @@ def _run(
         args = [a.replace("{run}", str(run)).replace("{judge}", _judge_url()).replace("{proposal}", proposal)
                 for a in args]
         before = len(_ops(jp))
+        if crash_it == LANE:
+            r = _cli(db, jp, *args)
+            assert r.returncode == 0, f"{args}: {r.stderr or r.stdout}"
+            assert _ops(jp)[before:] == [], f"{args}: a source-journal step wrote the writes journal: {_ops(jp)[before:]}"
+            continue
         if crash_it == NOCHANGE:
             r = _cli(db, jp, *args)
             assert r.returncode == 0 and _ops(jp)[before:] == [], f"{args}: a no-change step wrote: {r.stdout}{r.stderr}"

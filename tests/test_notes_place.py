@@ -109,8 +109,9 @@ def test_cli_placement_pass_lands_facts_and_overlay_and_replays_to_the_same_byte
     sdb = str(sib_dir / "sib.db")
     _build_sibling(sdb)
     pdb, pj = str(pri_dir / "pri.db"), str(pri_dir / "writes.jsonl")
-    (pri_dir / "graph.config.json").write_text(json.dumps(
-        {"notes_profile": "quarto_post", "emit_root": str(pri_dir / "staging"), "sibling_graphs": {"tx": sdb}}))
+    (pri_dir / "graph.config.json").write_text(json.dumps(   # the draft is born cut over (ruling 48c4c34d)
+        {"notes_profile": "quarto_post", "emit_root": str(pri_dir / "staging"), "sibling_graphs": {"tx": sdb},
+         "source_journal_path": str(pri_dir / "source.jsonl")}))
     base = ("--graph-db-path", pdb, "--journal-path", pj, "--source-journal-path", str(pri_dir / "source.jsonl"))
     slug = "the-learning-game/ch01"
     policy = tmp_path / "policy.json"
