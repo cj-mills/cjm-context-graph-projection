@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Optional
 from cjm_context_graph_layer.ops import graph_task
 from cjm_dev_graph_schema import predicates as P
 
-from . import factlayer as F
+from . import factlayer as F, judgeengine as E
 from .conceptjudge import (concept_state, load_concept_judgments, load_concept_records,
                            load_confirmed_relations, POST_RELATIONS, relations_of, review_basis,
                            stale_pairs, STORE_FLOOR, THRESHOLD)
@@ -360,7 +360,7 @@ async def plan_relations(
     rs = await relation_state(gx, only=only, series=series)
     st = rs["st"]
     retract, confirm, mark = [], [], {}
-    counts = {"confirmed": 0, "rejected": 0, "kept": 0, "retracted": 0, "near_unchecked": 0}
+    counts = {"confirmed": 0, "rejected": 0, "kept": 0, "retracted": 0, "near_unchecked": 0, "applied": 0}
     for r in parsed["rows"]:
         s, k = r["source"], r["concept"]
         src, c = st["sources"].get(s), st["vocab"].get(k)
@@ -372,9 +372,6 @@ async def plan_relations(
             errors.append(f"{where}: the pair's basis moved since the document was written "
                           "(judge-concepts, then a fresh review document)")
             continue
-        if (s, k) in rs["reviewed"]:
-            errors.append(f"{where}: already reviewed on this basis -- write a fresh review document")
-            continue
         if r["word"] not in WORDS:
             errors.append(f"{where}: `{r['word']}` is no relation word ({', '.join(WORDS)})")
             continue
@@ -384,6 +381,19 @@ async def plan_relations(
                           f"never {rel}")
             continue
         standing = [x for x in rs["confirmed"].get((s, c["id"])) or []]
+        if (s, k) in rs["reviewed"]:
+            # Reviewed on this basis: a row whose outcome stands was landed by this document -- a
+            # crashed --apply's retry is no change (ruling 24fa72c2 (2)); any other is refused
+            held = {x["relation"]: x["strength"] or "required" for x in standing}
+            if r["section"] == "challenged":
+                landed = (rel in held) == r["checked"]
+            else:
+                landed = not r["checked"] or held.get(rel) == (strength or "required")
+            if landed:
+                counts["applied"] += 1
+                continue
+            errors.append(f"{where}: already reviewed on this basis -- write a fresh review document")
+            continue
         if r["section"] == "challenged":
             if rel not in {x["relation"] for x in standing}:
                 errors.append(f"{where}: a challenged row keeps or retracts its relation -- its word cannot change")
@@ -419,27 +429,44 @@ async def apply_relations(
     run: Dict[str, Any],   # {retract: [[source, REL, key]], confirm: [[source, REL, key, strength]], mark: [[source, concept id, basis]]}
     *,
     actor: str = "agent:session",
-) -> Dict[str, Any]:  # {retracted, related, marked}
+    write: bool = True,    # False = PLAN only (ruling 24fa72c2): every refusal, nothing written
+) -> Dict[str, Any]:  # {retracted, related, marked} (+ noop / error when planned)
     """Land one relation review: the retractions, the confirmations (record_relation, checked at
     write time like any relate), then the marks on every judged edge of each reviewed pair. Live
-    and replay share it."""
+    and replay share it. The PLAN (write=False) runs each relation's own plan -- a refusal returns
+    as `error` before anything lands -- and a review whose every relation and mark already stands
+    is `noop`. A retraction then a confirmation of one edge plans the retraction as a change, so
+    the confirmation's plan against the edge still standing never hides the run."""
     from .paths import record_relation
+    changes = 0
     for s, rel, k in run["retract"]:
-        res = await record_relation(gx, rel, s, f"{P.ENTITY_CONCEPT}:{k}", retract=True, actor=actor)
+        res = await record_relation(gx, rel, s, f"{P.ENTITY_CONCEPT}:{k}", retract=True, actor=actor, write=write)
         if res.get("error"):
+            if not write:
+                return {"error": f"retract {rel} {s} -> {k}: {res['error']}"}
             raise RuntimeError(f"retract {rel} {s} -> {k}: {res['error']}")
+        changes += write or res.get("op") is not None
     for s, rel, k, strength in run["confirm"]:
-        res = await record_relation(gx, rel, s, f"{P.ENTITY_CONCEPT}:{k}", strength=strength, actor=actor)
+        res = await record_relation(gx, rel, s, f"{P.ENTITY_CONCEPT}:{k}", strength=strength, actor=actor,
+                                    write=write)
         if res.get("error"):
+            if not write:
+                return {"error": f"{rel} {s} -> {k}: {res['error']}"}
             raise RuntimeError(f"{rel} {s} -> {k}: {res['error']}")
+        changes += write or res.get("op") is not None
     judged = await load_concept_judgments(gx)
     marked = 0
     for s, cid, basis in run["mark"]:
         for (a, b, _), e in judged.items():
             if (a, b) == (s, cid):
-                await graph_task(gx.queue, gx.graph_id, "update_edge", edge_id=e["_id"], properties={"reviewed": basis})
+                if write:
+                    await graph_task(gx.queue, gx.graph_id, "update_edge", edge_id=e["_id"], properties={"reviewed": basis})
+                changes += write or e.get("reviewed") != basis
                 marked += 1
-    return {"retracted": len(run["retract"]), "related": len(run["confirm"]), "marked": marked}
+    out = {"retracted": len(run["retract"]), "related": len(run["confirm"]), "marked": marked}
+    if not write:
+        out["noop"] = not changes
+    return out
 
 
 async def review_concepts(
@@ -452,6 +479,7 @@ async def review_concepts(
     only: Optional[List[str]] = None,
     series: Optional[List[str]] = None,
     actor: str = "agent:session",
+    write: bool = True,   # False = PLAN only (ruling 24fa72c2): a relation review's op under "op" (None = changes nothing), nothing written
 ) -> Dict[str, Any]:
     """The review verb: either review's document, or one landed (or refused) review."""
     if vocab:
@@ -470,6 +498,5 @@ async def review_concepts(
         return {**out, "error": f"{len(plan['errors'])} row(s) refused -- nothing written"}
     run = plan["run"]
     if dry_run or not (run["retract"] or run["confirm"] or run["mark"]):
-        return out
-    applied = await apply_relations(gx, run, actor=actor)
-    return {**out, "written": True, "run": run, "applied": applied}
+        return out if dry_run else {**out, "noop": True}   # an empty review lands nothing
+    return await E.land_run(gx, out, run, apply_relations, actor=actor, write=write)

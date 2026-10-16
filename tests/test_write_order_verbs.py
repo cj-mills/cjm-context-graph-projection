@@ -11,14 +11,18 @@ Every verb planned -> appended -> applied is held to one proof, driven through t
 A verb joins the proof by adding its scenario to SCENARIOS; a scenario naming `tx:` (or listed in
 NOTES) gets the sibling graph a cross-graph link observes, and one keyed in FILES gets those files in
 its run. A step whose first element is a function is a HARNESS action (a git commit, a journal written
-by an earlier release), run in both runs alike and never counted."""
+by an earlier release, a review document written), run in both runs alike and never counted; a step
+marked NOCHANGE is a write whose plan finds the graph already there -- it journals nothing (ruling
+24fa72c2). The run verbs ask a local JUDGE double ({judge}) and a fake `gh` on the run's PATH."""
 
 import asyncio
 import json
 import os
 import subprocess
 import sys
+import threading
 from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import psutil
@@ -28,6 +32,7 @@ from cjm_context_graph_primitives.journal import append_record, read_journal
 from cjm_context_graph_primitives.writer import FAULT_EXIT, JOURNAL_FAULT_ENV
 from cjm_context_graph_projection.purenotes import NOTES_PROPSET_FORMAT, NOTES_PROPSET_VERSION
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
+from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.identity import note_node_id, point_node_id, point_set_node_id
 from cjm_dev_graph_schema.nodes import DecisionNode, ReferenceNode
 
@@ -82,10 +87,13 @@ BORN = [(("new-note", "--slug", POST_SLUG, "--content", "---\ntitle: \"A chapter
          False)]
 ACCEPTED = [(("notes-type", "pure-notes"), False)] + BORN + [
     (("notes-accept", "--slug", POST_SLUG, "--set", "npropset_proof", "--accept-all"), False)]
+NOCHANGE = "nochange"   # a step whose plan finds the graph already there: run once, journals nothing
 FILES = {"edit-message": {"transcripts/aaaa1111-2222-3333-4444-555566667777.jsonl": TRANSCRIPT},
          "notes-retract": PROPSET, "notes-edit": PROPSET,
          "retire-source": {"site/posts/index.qmd": "---\ntitle: Posts\nlisting: default\n---\n"}}   # the website clone
-NOTES = {"notes-retract", "notes-edit", "notes-rehome"}   # scenarios on the notes lane's sibling + config
+RUN_VERBS = {"judge-related", "judge-facets", "judge-roles", "judge-concepts", "review-facets", "review-roles",
+             "review-concepts"}
+NOTES = {"notes-retract", "notes-edit", "notes-rehome"} | RUN_VERBS   # scenarios on the notes lane's sibling + config
 JOURNALED_AS = {"notes-type": "deliverable-type", "notes-retract": "retract-point", "notes-rehome": "rehome-points",
                 "notes-edit": "edit-point"}   # a CLI verb whose op journals under another name
 
@@ -118,6 +126,113 @@ def _commit_site(
     for cmd in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "the archive"]):
         subprocess.run(["git", "-C", site, *cmd], check=True, env=env, capture_output=True)
 
+
+def _judged(body: dict) -> dict:
+    """A deterministic judge for every family: related pairs score high; a Section's role follows
+    its heading; every other question is a yes (a Noul at 0.9, a Choice's first related option)."""
+    st, qs = body["state"], body.get("questions") or {}
+    if "post_a" in st:
+        answers = {"relatedness": {"type": "score", "score": 2.5, "confidence": 0.9,
+                                   "probabilities": {"0": 0.0, "1": 0.1, "2": 0.3, "3": 0.6}},
+                   "relation": {"type": "choice", "choice": "same_technique", "confidence": 0.8,
+                                "probabilities": {"same_technique": 0.9, "unrelated": 0.1}}}
+    else:
+        answers = {}
+        for k, q in qs.items():
+            if q["type"] == "noul":
+                answers[k] = {"type": "noul", "noul": 0.9}
+                continue
+            opts = sorted(q["criteria"])
+            h = str((st.get("section") or {}).get("heading", "")).lower()
+            top = ("intro" if "introduction" in h else "step") if "section" in st else \
+                next(o for o in opts if o not in ("unrelated", "none"))
+            probs = {o: 0.04 for o in opts}
+            probs[top] = round(1.0 - 0.04 * (len(opts) - 1), 2)
+            answers[k] = {"type": "choice", "choice": top, "probabilities": probs, "confidence": 0.9}
+    return {"model": "jev-test", "usage": {"input_tokens": 3}, "answers": answers}
+
+
+class _Judge(BaseHTTPRequestHandler):
+    def do_POST(self):
+        out = json.dumps(_judged(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(out)))
+        self.end_headers()
+        self.wfile.write(out)
+
+    def log_message(self, *a):
+        pass
+
+
+_JUDGE: list = []   # the module's one judge double, started on first use
+
+
+def _judge_url() -> str:
+    if not _JUDGE:
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _Judge)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        _JUDGE.append(f"http://127.0.0.1:{server.server_address[1]}/v1/systemone")
+    return _JUDGE[0]
+
+
+THREADS = [(1, "posts/a/", 9), (2, "posts/a/index", 3), (3, "posts/b/", 2)]   # a: a winner and an earlier thread
+GH = """import json, sys
+q = next(a[len("query="):] for a in sys.argv if a.startswith("query="))
+if "discussions" in q:
+    print(json.dumps({"data": {"repository": {"hasDiscussionsEnabled": False}}}))
+else:
+    print(json.dumps({"data": {"repository": {"issues": {"pageInfo": {"hasNextPage": False, "endCursor": None},
+        "nodes": [{"number": n, "title": t, "createdAt": f"2024-01-{n:02d}T00:00:00Z",
+                   "comments": {"totalCount": c, "nodes": []}} for n, t, c in %r]}}}}))
+""" % (THREADS,)
+
+
+def _fake_gh(
+    run: Path,  # This run's directory (its bin/ leads the CLI's PATH)
+    jp: str,    # Its writes journal (unused)
+) -> None:
+    """GitHub, as the harvest asks it through `gh api graphql`: fixed threads, no discussions."""
+    (run / "bin").mkdir(exist_ok=True)
+    gh = run / "bin" / "gh"
+    gh.write_text(f"#!{sys.executable}\n" + GH)
+    gh.chmod(0o755)
+
+
+def _document(
+    verb: str,  # A review verb
+) -> object:  # A harness action writing its review document to {run}/<verb>.md, unedited
+    def write(run: Path, jp: str) -> None:
+        r = _cli(str(run / "live.db"), jp, verb, "--out", str(run / f"{verb}.md"))
+        assert r.returncode == 0, r.stderr or r.stdout
+    return write
+
+
+# The run verbs' seed (notes lane): two public tutorials sharing their headings, a type mapping every role
+ROLES = ("intro", "step")
+TUTS = ("onnx-a", "onnx-b")
+TUTORIALS = [(("new-note", "--slug", t, "--content",
+               f"---\ntitle: \"{t}\"\ndescription: \"About {t}\"\ndate: 2024-01-01\n---\n\n## Introduction\n\n"
+               f"We export {t}.\n\n## Training the Model\n\nmodel.fit()\n"), False) for t in TUTS] + [
+    (("notes-type", "tut", "--title", "Tutorials", "--kind", "tutorial", "--origin", "archive",
+      "--policy-file", "{run}/policy.json"), False)] + [
+    (("assert", note_node_id(t), "deliverable_type", "tut"), False) for t in TUTS] + [
+    (("assert", note_node_id(t), "publish_state", "published"), False) for t in TUTS]   # born a draft: public once published
+POLICY = {"policy.json": json.dumps({"presentation_policy": {"section_roles": {k: "body" for k in ROLES}},
+                                     "information_policy": {"concept_relations": ["TEACHES", "ASSUMES"]}})}
+FACET_VOCAB = [(("entity", "tool", "onnx", "--name", "onnx", "--description", "ONNX", "--not-for", "a mention"), False),
+               (("entity", "task", "detection", "--name", "detection", "--description", "Detection",
+                 "--position", "1"), False)]
+ROLE_VOCAB = [(("entity", P.ENTITY_SECTION_ROLE, k, "--name", k, "--description", f"The {k}", "--not-for", "-",
+                "--position", str(i)), False) for i, k in enumerate(ROLES, 1)]
+CONCEPT_VOCAB = [(("entity", "task", "a-task", "--name", "T", "--position", "1"), False),
+                 (("entity", "concept", "nms", "--name", "NMS", "--description", "Dropping boxes", "--not-for", "IoU",
+                   "--area", "task:a-task"), False)]
+JUDGE = ("--url", "{judge}", "--workers", "2")
+FILES.update({v: POLICY for v in RUN_VERBS})
+FILES["harvest-discussions"] = {"site/_quarto.yml": (
+    "website:\n  title: The Site\npost-comments:\n  repo: o/r\n  repo-id: R_1\n  category: Comments\n"
+    "  category-id: C_1\n  base-paths: [old-project]\n")}
 
 # Every scenario runs after the seed; a True step writes exactly ONE op and is the one crashed
 # between its append and its apply in run B (a False step may write several: an Entity's category
@@ -200,6 +315,27 @@ SCENARIOS = {
         (("notes-edit", PT[2], "--parent", "none"), True)],
     "notes-rehome": [(("notes-type", "pure-notes"), False)] + BORN + [(_legacy_accepts, False),
                                                                      (("notes-rehome", "--slug", POST_SLUG), True)],
+    "judge-related": TUTORIALS + [(("judge-related", *JUDGE), True), (("judge-related", "--all", *JUDGE), NOCHANGE)],
+    "judge-facets": TUTORIALS + FACET_VOCAB + [(("judge-facets", *JUDGE), True),
+                                               (("judge-facets", "--all", *JUDGE), NOCHANGE)],
+    "judge-roles": TUTORIALS + ROLE_VOCAB + [(("judge-roles", *JUDGE), True), (("judge-roles", "--all", *JUDGE), NOCHANGE)],
+    "judge-concepts": TUTORIALS + CONCEPT_VOCAB + [(("judge-concepts", *JUDGE), True),
+                                                   (("judge-concepts", "--all", *JUDGE), NOCHANGE)],
+    "review-facets": TUTORIALS + FACET_VOCAB + [(("judge-facets", *JUDGE), False), (_document("review-facets"), False),
+                                                (("review-facets", "--apply", "{run}/review-facets.md"), True),
+                                                (("review-facets", "--apply", "{run}/review-facets.md"), NOCHANGE)],
+    "review-roles": TUTORIALS + ROLE_VOCAB + [(("judge-roles", *JUDGE), False), (_document("review-roles"), False),
+                                              (("review-roles", "--apply", "{run}/review-roles.md"), True),
+                                              (("review-roles", "--apply", "{run}/review-roles.md"), NOCHANGE)],
+    "review-concepts": TUTORIALS + CONCEPT_VOCAB + [(("judge-concepts", *JUDGE), False),
+                                                    (_document("review-concepts"), False),
+                                                    (("review-concepts", "--apply", "{run}/review-concepts.md"), True),
+                                                    (("review-concepts", "--apply", "{run}/review-concepts.md"), NOCHANGE)],
+    "harvest-discussions": POSTS[:2] + [(("assert", note_node_id("p1"), "site_path", "/posts/a/"), False),
+                                        (("assert", note_node_id("p2"), "site_path", "/posts/b/"), False),
+                                        (_fake_gh, False),
+                                        (("harvest-discussions", "--website-root", "{run}/site"), True),
+                                        (("harvest-discussions", "--website-root", "{run}/site"), NOCHANGE)],
     "transfer-path": [(("assert", ITEM_ID, "site_path", "/a/"), False),
                       (("transfer-path", ITEM_ID[:8], OTHER_ID[:8]), True),
                       (("transfer-path", OTHER_ID, ITEM_ID), True),
@@ -213,7 +349,10 @@ def _cli(
     *args: str,    # The verb and its arguments
     crash: bool = False,  # Arm the crash between append and apply
 ) -> subprocess.CompletedProcess:
-    env = {**os.environ, JOURNAL_FAULT_ENV: "after_append"} if crash else None
+    # Every call sees the run's harness: the judge's key and the run's bin/ (a fake gh) ahead of PATH
+    run = Path(db).parent
+    env = {**os.environ, "TYPESAFE_API_KEY": "test-key", "PATH": f"{run / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}",
+           **({JOURNAL_FAULT_ENV: "after_append"} if crash else {})}
     proc = subprocess.Popen([sys.executable, "-m", "cjm_context_graph_projection.cli",
                              "--graph-db-path", db, "--journal-path", journal, *args],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
@@ -278,8 +417,13 @@ def _run(
         if callable(args):
             args(run, jp)
             continue
-        args = [a.replace("{run}", str(run)) for a in args]
+        args = [a.replace("{run}", str(run)).replace("{judge}", _judge_url()) for a in args]
         before = len(_ops(jp))
+        if crash_it == NOCHANGE:
+            r = _cli(db, jp, *args)
+            assert r.returncode == 0 and _ops(jp)[before:] == [], f"{args}: a no-change step wrote: {r.stdout}{r.stderr}"
+            assert "no change" in r.stdout, f"{args}: {r.stdout}"
+            continue
         if crash and crash_it:
             r = _cli(db, jp, *args, crash=True)
             assert r.returncode == FAULT_EXIT, f"{args}: no crash ({r.returncode}): {r.stderr or r.stdout}"

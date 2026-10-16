@@ -359,29 +359,14 @@ async def assert_value(
             edges.append(make_edge(tid, assertion.id, DevRelations.SUPERSEDES))
         born_superseded = bool(backfill_ids)
 
-    # THE PLAN (design detail 65f4a6c9 (1)): every refusal has passed, so the op is total. It names
-    # the subject by id (a free term by its text: replay mints the same term from it), the
-    # supersede / back-fill targets by the slot's assertion ids, and the bound content hash. A
-    # re-assertion of a value already standing active, naming nothing to supersede, changes
-    # nothing and plans no op (ruling 17daa86b).
-    if not write:
-        standing = (not supersede and not superseded_by
-                    and any(F.nid(a) == assertion.id for a in active_existing))
-        op = {"subject": subject if created is not None else subject_id, "predicate": predicate,
-              "value": value, "actor": actor, "evidence": evidence,
-              "supersede": explicit_ids or None,
-              "subject_content_hash": assertion.subject_content_hash}
-        if backfill_ids:
-            op["superseded_by"] = backfill_ids
-        return {"subject": subject, "subject_id": subject_id, "slot_id": slot.id,
-                "subject_content_hash": assertion.subject_content_hash, "predicate": predicate,
-                "value": value, "actor": actor, "assertion_id": assertion.id,
-                "created_subject": created is not None, "nodes_added": 0, "edges_added": 0,
-                "superseded": [], "born_superseded": False, "conflict": [], "soft_conflict": False,
-                "multi_active": [], "noop": standing, "op": None if standing else op}
+    # Every refusal has passed. A re-assertion of a value already standing active, naming nothing
+    # to supersede, changes nothing (ruling 17daa86b).
+    standing = (not supersede and not superseded_by
+                and any(F.nid(a) == assertion.id for a in active_existing))
     if demoted_by:
-        await graph_task(gx.queue, gx.graph_id, "delete_edges",
-                         edge_ids=[make_edge(tid, assertion.id, DevRelations.SUPERSEDES)["id"] for tid in demoted_by])
+        if write:
+            await graph_task(gx.queue, gx.graph_id, "delete_edges",
+                             edge_ids=[make_edge(tid, assertion.id, DevRelations.SUPERSEDES)["id"] for tid in demoted_by])
         supers = [p for p in supers if not (p[0] in demoted_by and p[1] == assertion.id)]
         if batch is not None:
             batch.dropped([(tid, assertion.id) for tid in demoted_by])
@@ -420,6 +405,29 @@ async def assert_value(
         if tid != assertion.id and tid not in superseded_ids:
             edges.append(assertion.supersedes_edge(tid))
             superseded_ids.append(tid)
+
+    # THE PLAN (design detail 65f4a6c9 (1)): the op is total. It names the subject by id (a free
+    # term by its text: replay mints the same term from it), the supersede / back-fill targets by
+    # the slot's assertion ids, and the bound content hash. Planned inside a batch, the write
+    # lands in the batch's view, so a later plan in the same run reads the slot this one leaves
+    # (ruling 24fa72c2 (1)): a back-fill naming the winner its run just planned resolves.
+    if not write:
+        op = {"subject": subject if created is not None else subject_id, "predicate": predicate,
+              "value": value, "actor": actor, "evidence": evidence,
+              "supersede": explicit_ids or None,
+              "subject_content_hash": assertion.subject_content_hash}
+        if backfill_ids:
+            op["superseded_by"] = backfill_ids
+        if batch is not None and not standing:
+            batch.landed(nodes, edges)
+        return {"subject": subject, "subject_id": subject_id, "slot_id": slot.id,
+                "subject_content_hash": assertion.subject_content_hash, "predicate": predicate,
+                "value": value, "actor": actor, "assertion_id": assertion.id,
+                "created_subject": created is not None, "nodes_added": 0, "edges_added": 0,
+                "superseded": [] if standing else superseded_ids,
+                "born_superseded": born_superseded and not standing, "conflict": [],
+                "soft_conflict": False, "multi_active": [], "noop": standing,
+                "op": None if standing else op}
 
     res = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
 

@@ -210,6 +210,21 @@ async def _assert_journaled(
     return (await writes.write("assert", plan["op"])).result
 
 
+async def _land_run(
+    writes: InvocationWrites,  # The invocation's writes-journal unit of work
+    verb: str,                 # The journal verb
+    res: Dict[str, Any],       # The run verb's PLANNED result (write=False)
+) -> Dict[str, Any]:  # The result, with the applied run's report when its op was written
+    """A run verb's write (ruling 24fa72c2): its plan carries the op {run, actor} -- appended,
+    then applied through the replay's applier (design detail 65f4a6c9 (1)), so what it prints is
+    what its op applied. A refused or no-change plan writes nothing."""
+    if not res.get("op"):
+        return res
+    applied = dict((await writes.write(verb, res["op"])).result or {})
+    applied.pop("content_hashes", None)
+    return {**res, "written": True, "applied": applied}
+
+
 def _drafts_dir(
     args: Any,   # Parsed args with graph_db_path and website_root
 ) -> Optional[str]:  # The drafts tree relative to the site root, from the sibling config's emit_root; None = none named
@@ -1384,10 +1399,9 @@ async def _dispatch(args) -> int:
             from .judging import judge_related
             res = await judge_related(gx, all_posts=args.all, dry_run=args.dry_run,
                                       model=args.model or JUDGE_MODEL, url=args.url or JUDGE_URL,
-                                      workers=args.workers or JUDGE_WORKERS, actor=args.actor)
+                                      workers=args.workers or JUDGE_WORKERS, actor=args.actor, write=False)
+            res = await _land_run(writes, "judge-related", res)
             print(render("judge-related", res, args.format))
-            if args.journal_path and res.get("written"):
-                append_write(args.journal_path, "judge-related", {"run": res["run"], "actor": args.actor})
             return 1 if res.get("error") else 0
         elif args.command == "judge-facets":
             # The facet judge (design eefda2dd): asked here and only here; the op carries the whole
@@ -1402,24 +1416,22 @@ async def _dispatch(args) -> int:
                 return 0
             res = await judge_facets(gx, all_posts=args.all, dry_run=args.dry_run,
                                      model=args.model or JUDGE_MODEL, url=args.url or JUDGE_URL,
-                                     workers=args.workers or JUDGE_WORKERS, actor=args.actor)
+                                     workers=args.workers or JUDGE_WORKERS, actor=args.actor, write=False)
+            res = await _land_run(writes, "judge-facets", res)
             print(render("judge-facets", res, args.format))
-            if args.journal_path and res.get("written"):
-                append_write(args.journal_path, "judge-facets", {"run": res["run"], "actor": args.actor})
             return 1 if res.get("error") else 0
         elif args.command == "review-facets":
             # The facet review (design eefda2dd (5)): --out writes the review document; --apply lands
             # the edited document as ONE journaled batch (confirmations + review marks), or nothing.
             from .facetreview import review_facets
             text = Path(args.apply).read_text() if args.apply else None
-            res = await review_facets(gx, apply_text=text, dry_run=args.dry_run, actor=args.actor)
+            res = await _land_run(writes, "review-facets", await review_facets(
+                gx, apply_text=text, dry_run=args.dry_run, actor=args.actor, write=False))
             if text is None and args.out:
                 Path(args.out).parent.mkdir(parents=True, exist_ok=True)
                 Path(args.out).write_text(res["document"])
                 res["out"] = args.out
             print(render("review-facets", res, args.format))
-            if args.journal_path and res.get("written"):
-                append_write(args.journal_path, "review-facets", {"run": res["run"], "actor": args.actor})
             return 1 if res.get("error") else 0
         elif args.command == "judge-roles":
             # The role judge (ruling 6a203252 (2)): asked here and only here; the op carries the
@@ -1428,24 +1440,22 @@ async def _dispatch(args) -> int:
             from .sectionroles import judge_roles
             res = await judge_roles(gx, all_sections=args.all, dry_run=args.dry_run,
                                     model=args.model or JUDGE_MODEL, url=args.url or JUDGE_URL,
-                                    workers=args.workers or JUDGE_WORKERS, actor=args.actor)
+                                    workers=args.workers or JUDGE_WORKERS, actor=args.actor, write=False)
+            res = await _land_run(writes, "judge-roles", res)
             print(render("judge-roles", res, args.format))
-            if args.journal_path and res.get("written"):
-                append_write(args.journal_path, "judge-roles", {"run": res["run"], "actor": args.actor})
             return 1 if res.get("error") else 0
         elif args.command == "review-roles":
             # The role review (ruling 6a203252 (1)): --out writes the review document; --apply lands
             # the edited document as ONE journaled batch (section_role facts + review marks), or nothing.
             from .rolereview import review_roles
             text = Path(args.apply).read_text() if args.apply else None
-            res = await review_roles(gx, apply_text=text, dry_run=args.dry_run, actor=args.actor)
+            res = await _land_run(writes, "review-roles", await review_roles(
+                gx, apply_text=text, dry_run=args.dry_run, actor=args.actor, write=False))
             if text is None and args.out:
                 Path(args.out).parent.mkdir(parents=True, exist_ok=True)
                 Path(args.out).write_text(res["document"])
                 res["out"] = args.out
             print(render("review-roles", res, args.format))
-            if args.journal_path and res.get("written"):
-                append_write(args.journal_path, "review-roles", {"run": res["run"], "actor": args.actor})
             return 1 if res.get("error") else 0
         elif args.command == "judge-concepts":
             # The concept judge (ruling ad37f62a (2)): asked here and only here; the op carries the
@@ -1461,10 +1471,9 @@ async def _dispatch(args) -> int:
             res = await judge_concepts(gx, only=args.only, series=args.series, all_pairs=args.all,
                                        dry_run=args.dry_run, model=args.model or JUDGE_MODEL,
                                        url=args.url or JUDGE_URL, workers=args.workers or JUDGE_WORKERS,
-                                       actor=args.actor)
+                                       actor=args.actor, write=False)
+            res = await _land_run(writes, "judge-concepts", res)
             print(render("judge-concepts", res, args.format))
-            if args.journal_path and res.get("written"):
-                append_write(args.journal_path, "judge-concepts", {"run": res["run"], "actor": args.actor})
             return 1 if res.get("error") else 0
         elif args.command == "review-concepts":
             # The concept reviews (ruling ad37f62a (1), (2)): --vocab reads the draft pass's files
@@ -1486,7 +1495,9 @@ async def _dispatch(args) -> int:
                     d = json.loads(f.read_text())
                     drafts += d if isinstance(d, list) else [d]
             res = await review_concepts(gx, vocab=args.vocab, drafts=drafts, apply_text=text, dry_run=args.dry_run,
-                                        only=args.only, series=args.series, actor=args.actor)
+                                        only=args.only, series=args.series, actor=args.actor, write=False)
+            if not args.vocab:
+                res = await _land_run(writes, "review-concepts", res)
             if text is None and args.out:
                 Path(args.out).parent.mkdir(parents=True, exist_ok=True)
                 Path(args.out).write_text(res["document"])
@@ -1500,8 +1511,6 @@ async def _dispatch(args) -> int:
                                                             only=subjects)
                     if paths["errors"]:
                         return 1
-            elif args.journal_path and res.get("written"):
-                append_write(args.journal_path, "review-concepts", {"run": res["run"], "actor": args.actor})
             return 1 if res.get("error") else 0
         elif args.command == "concepts":
             # The concept vocabulary read (ruling ad37f62a (1)): each live concept with its subject
@@ -1540,11 +1549,9 @@ async def _dispatch(args) -> int:
                     print(f"error: --map takes N=<note id>, got {m!r}", file=sys.stderr)
                     return 1
                 maps[int(num)] = ref.strip()
-            res = await harvest_discussions(gx, args.website_root, maps=maps, dry_run=args.dry_run,
-                                            actor=args.actor)
+            res = await _land_run(writes, "harvest-discussions", await harvest_discussions(
+                gx, args.website_root, maps=maps, dry_run=args.dry_run, actor=args.actor, write=False))
             print(render("harvest-discussions", res, args.format))
-            if args.journal_path and res.get("written"):
-                append_write(args.journal_path, "harvest-discussions", {"run": res["run"], "actor": args.actor})
             return 1 if res.get("error") else 0
         elif args.command == "ingest-evidence":
             # The evidence (design 7f315830): an ingest reads the pulled files and its op carries

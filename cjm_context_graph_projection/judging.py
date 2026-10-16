@@ -208,15 +208,18 @@ async def apply_judgments(
     run: Dict[str, Any],   # {question, posts: {id: state hash}, judgments: [...], content_hashes?}
     *,
     actor: str = "agent:session",
-) -> Dict[str, Any]:  # {deleted, landed, recorded, content_hashes}
+    write: bool = True,    # False = PLAN only (ruling 24fa72c2): every refusal and the content hashes, nothing written
+) -> Dict[str, Any]:  # {deleted, landed, recorded, content_hashes} (+ noop / error when planned)
     """Land one judge run: every stored judgment touching a re-judged post is replaced by the
     run's, and each re-judged post's record moves to the state it was judged against. Live and
-    replay share it; replay passes the journaled content hashes so the records re-land the same."""
-    from .write import assert_value
+    replay share it; replay passes the journaled content hashes so the records re-land the same.
+    The PLAN (write=False) reads the same db, writes nothing, returns a record's refusal as
+    `error` and fixes the content hashes the op carries; a run restating the graph is `noop`."""
+    from .write import FactBatch, assert_value
     judged = set(run["posts"])
     standing = await load_judged(gx)
     drop = [p["_id"] for (a, b), p in standing.items() if a in judged or b in judged]
-    if drop:
+    if drop and write:
         await graph_task(gx.queue, gx.graph_id, "delete_edges", edge_ids=drop)
     # Sorted keys at every depth: the journal stores the run key-sorted, so live and replay must
     # land the same property text
@@ -224,9 +227,10 @@ async def apply_judgments(
     edges = [judged_related_edge(j["a"], j["b"], model=j["model"], question=run["question"],
                                  judgment={k: v for k, v in j.items() if k not in ("a", "b", "model")})
              for j in norm]
-    if edges:
+    if edges and write:
         await extend_graph(gx.queue, gx.graph_id, [], edges)
     records, given = await load_records(gx), dict(run.get("content_hashes") or {})
+    batch = None if write else await FactBatch.load(gx)
     hashes, recorded = {}, 0
     for n, h in sorted(run["posts"].items()):
         value, prior = f"{run['question']}:{h}", records.get(n)
@@ -234,12 +238,17 @@ async def apply_judgments(
             continue
         res = await assert_value(gx, n, P.RELATED_JUDGED, value, actor=actor,
                                  supersede=[prior] if prior else None,
-                                 subject_content_hash=given.get(n))
+                                 subject_content_hash=given.get(n), batch=batch, write=write)
         if res.get("error"):
+            if not write:
+                return {"error": f"related_judged on {n}: {res['error']}"}
             raise RuntimeError(f"related_judged on {n}: {res['error']}")
         hashes[n] = res.get("subject_content_hash")
         recorded += 1
-    return {"deleted": len(drop), "landed": len(edges), "recorded": recorded, "content_hashes": hashes}
+    out = {"deleted": len(drop), "landed": len(edges), "recorded": recorded, "content_hashes": hashes}
+    if not write:
+        out["noop"] = not recorded and E.restates(standing, drop, edges)
+    return out
 
 
 async def judge_related(
@@ -252,7 +261,8 @@ async def judge_related(
     url: str = E.JUDGE_URL,    # The judge endpoint (a local double in tests)
     workers: int = E.JUDGE_WORKERS,
     actor: str = "agent:session",
-) -> Dict[str, Any]:  # {stale, pairs, written, run?, applied?, input_tokens?, error?}
+    write: bool = True,   # False = PLAN only (ruling 24fa72c2): the run asked and planned, the op under "op" (None = changes nothing), nothing written
+) -> Dict[str, Any]:  # {stale, pairs, written, run?, op?, applied?, input_tokens?, error?}
     """The judge verb: find the stale posts, judge every pair touching them, land the run.
     All or nothing -- a run with any failed pair writes nothing and reports the failures."""
     views = await load_post_views(gx)
@@ -275,6 +285,4 @@ async def judge_related(
     run = {"question": q, "posts": {n: state_hash(views[n]) for n in stale},
            "judgments": sorted(kept, key=lambda j: (j["a"], j["b"])), "pairs": len(pairs),
            "models": sorted({j["model"] for j in res["judgments"]})}
-    applied = await apply_judgments(gx, run, actor=actor)
-    run["content_hashes"] = applied.pop("content_hashes")
-    return {**out, "written": True, "run": run, "applied": applied}
+    return await E.land_run(gx, out, run, apply_judgments, actor=actor, write=write)

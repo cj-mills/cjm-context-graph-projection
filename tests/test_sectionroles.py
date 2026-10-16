@@ -145,7 +145,8 @@ def test_judge_review_and_apply(tmp_path):
             doc1 = (await review_roles(gx))["document"]
             edited = _edit(doc1, "Training the Model", "setup")             # a pattern's role changed
             landed = await review_roles(gx, apply_text=edited)
-            refused = await review_roles(gx, apply_text=edited)               # every row moved on: refused whole
+            reapplied = await review_roles(gx, apply_text=edited)             # landed already: no change (24fa72c2 (2))
+            refused = await review_roles(gx, apply_text=_edit(edited, "Training the Model", "step"))   # an outcome that differs
             facts1 = await load_role_facts(gx)
             doc2 = (await review_roles(gx))["document"]
             first_step = doc2.index("- [x] `step`", doc2.index("## Overrides"))
@@ -160,9 +161,9 @@ def test_judge_review_and_apply(tmp_path):
             checks = [await assert_value(gx, notes_sec, P.SECTION_ROLE, "intro"),
                       await assert_value(gx, a_sec, P.SECTION_ROLE, "conclusion"),
                       await assert_value(gx, note_node_id("a-tutorial"), P.SECTION_ROLE, "intro")]
-            return (scope, secs, dry, first, judged1, again, failed, doc1, landed, refused, facts1, doc2,
+            return (scope, secs, dry, first, judged1, again, failed, doc1, landed, reapplied, refused, facts1, doc2,
                     landed2, facts2, read, doc3, checks)
-    (scope, secs, dry, first, judged1, again, failed, doc1, landed, refused, facts1, doc2, landed2, facts2,
+    (scope, secs, dry, first, judged1, again, failed, doc1, landed, reapplied, refused, facts1, doc2, landed2, facts2,
      read, doc3, checks) = asyncio.run(go())
     a, b = note_node_id("a-tutorial"), note_node_id("b-tutorial")
     assert set(scope) == {a, b}                                                 # the notes type maps no roles
@@ -177,8 +178,11 @@ def test_judge_review_and_apply(tmp_path):
     rows = parse_review(doc1)["rows"]
     assert [r["kind"] for r in rows].count("pattern") == 3 and [r["kind"] for r in rows].count("section") == 1
     assert not any(r["kind"] == "override" for r in rows) and "4 deeper section(s) wait" in doc1
-    assert not landed.get("error") and landed["counts"] == {"confirmed": 6, "no_role": 1, "kept_inherited": 0, "left": 0}
-    assert "nothing written" in refused["error"]
+    assert not landed.get("error") and landed["counts"] == {"confirmed": 6, "no_role": 1, "kept_inherited": 0, "left": 0,
+                                                             "applied": 0}
+    assert not reapplied.get("error") and not reapplied["written"] and reapplied["noop"]
+    assert reapplied["counts"]["applied"] == 7 and reapplied["counts"]["confirmed"] == 0
+    assert "nothing written" in refused["error"] and any("moved since" in e for e in refused["errors"])
     assert facts1[secs[a][2]["id"]] == "setup" and facts1[secs[b][0]["id"]] == "intro"
     assert secs[a][5]["id"] not in facts1                                         # none: reviewed, no fact
     # the second review: How the Optimizer Works overrides its inherited setup; Plot the Loss (step) too

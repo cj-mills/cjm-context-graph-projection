@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Optional
 from cjm_context_graph_layer.ops import graph_task
 from cjm_dev_graph_schema import predicates as P
 
-from . import factlayer as F
+from . import factlayer as F, judgeengine as E
 from .facetjudge import (applies, criteria_hash, entry_question, FACET_OF_KIND,
                          load_facet_judgments, load_facet_records, load_facet_views,
                          load_facet_vocab, review_basis, stale_pairs, STORE_FLOOR, THRESHOLD)
@@ -199,26 +199,39 @@ async def apply_review(
     run: Dict[str, Any],   # {confirm: [[post, predicate, key]], mark: [[post, Entity id, basis]], content_hashes?}
     *,
     actor: str = "agent:session",
-) -> Dict[str, Any]:  # {asserted, marked, content_hashes}
+    write: bool = True,    # False = PLAN only (ruling 24fa72c2): every refusal and the content hashes, nothing written
+) -> Dict[str, Any]:  # {asserted, marked, content_hashes} (+ noop / error when planned)
     """Land one review: assert each confirmation (checked at write time like any facet), then set
     each mark on its judged edge. Live and replay share it; replay passes the journaled content
-    hashes so the facts re-land the same."""
+    hashes so the facts re-land the same. The PLAN (write=False) writes nothing, returns a refusal
+    as `error` and fixes the content hashes; a review whose every fact and mark already stands is
+    `noop` -- a document landed once is no change the second time (ruling 24fa72c2 (2))."""
     from .write import FactBatch, assert_value
-    given, hashes = dict(run.get("content_hashes") or {}), {}
+    given, hashes, changes = dict(run.get("content_hashes") or {}), {}, 0
     batch = await FactBatch.load(gx)   # one read of the fact layer for the whole review (finding da6cdab6)
     for n, pred, key in run["confirm"]:
         res = await assert_value(gx, n, pred, key, actor=actor, subject_content_hash=given.get(f"{n}|{pred}|{key}"),
-                                 batch=batch)
+                                 batch=batch, write=write)
         if res.get("error"):
+            if not write:
+                return {"error": f"{pred} {key} on {n}: {res['error']}"}
             raise RuntimeError(f"{pred} {key} on {n}: {res['error']}")
         hashes[f"{n}|{pred}|{key}"] = res.get("subject_content_hash")
+        changes += write or res.get("op") is not None
     judged = await load_facet_judgments(gx)
     for n, eid, basis in run["mark"]:
         edge = judged.get((n, eid))
         if edge is None:
+            if not write:
+                return {"error": f"no judged edge {n} -> {eid} to mark"}
             raise RuntimeError(f"no judged edge {n} -> {eid} to mark")
-        await graph_task(gx.queue, gx.graph_id, "update_edge", edge_id=edge["_id"], properties={"reviewed": basis})
-    return {"asserted": len(run["confirm"]), "marked": len(run["mark"]), "content_hashes": hashes}
+        if write:
+            await graph_task(gx.queue, gx.graph_id, "update_edge", edge_id=edge["_id"], properties={"reviewed": basis})
+        changes += write or edge.get("reviewed") != basis
+    out = {"asserted": len(run["confirm"]), "marked": len(run["mark"]), "content_hashes": hashes}
+    if not write:
+        out["noop"] = not changes
+    return out
 
 
 async def review_facets(
@@ -227,7 +240,8 @@ async def review_facets(
     apply_text: Optional[str] = None,   # An edited review document to land; None = write a fresh one
     dry_run: bool = False,              # With apply_text: plan and check only
     actor: str = "agent:session",
-) -> Dict[str, Any]:  # {document, counts, stale} | {plan counts, errors, written, run?, applied?}
+    write: bool = True,                 # False = PLAN only (ruling 24fa72c2): the op under "op" (None = changes nothing), nothing written
+) -> Dict[str, Any]:  # {document, counts, stale} | {plan counts, errors, written, run?, op?, applied?}
     """The review verb: the document (counts and stale pairs alongside), or one landed review."""
     if apply_text is None:
         st = await review_state(gx)
@@ -240,11 +254,8 @@ async def review_facets(
     if plan["errors"]:
         return {**out, "error": f"{len(plan['errors'])} row(s) refused -- nothing written"}
     if dry_run or not (plan["run"]["confirm"] or plan["run"]["mark"]):
-        return out
-    run = plan["run"]
-    applied = await apply_review(gx, run, actor=actor)
-    run["content_hashes"] = applied.pop("content_hashes")
-    return {**out, "written": True, "run": run, "applied": applied}
+        return out if dry_run else {**out, "noop": True}   # an empty review lands nothing
+    return await E.land_run(gx, out, plan["run"], apply_review, actor=actor, write=write)
 
 
 async def facet_gate(

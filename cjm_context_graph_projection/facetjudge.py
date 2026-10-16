@@ -318,12 +318,15 @@ async def apply_facet_run(
     run: Dict[str, Any],   # {posts: {id: state hash}, asked: {id: [entries]}, criteria, judgments, content_hashes?}
     *,
     actor: str = "agent:session",
-) -> Dict[str, Any]:  # {deleted, landed, recorded, content_hashes}
+    write: bool = True,    # False = PLAN only (ruling 24fa72c2): every refusal and the content hashes, nothing written
+) -> Dict[str, Any]:  # {deleted, landed, recorded, content_hashes} (+ noop / error when planned)
     """Land one facet run: each asked pair's standing judgment is replaced by the run's (a post
     judged against a new state loses every standing judgment), and each judged post's record
     moves to the state and criteria it was judged against. Live and replay share it; replay
-    passes the journaled content hashes so the records re-land the same."""
-    from .write import assert_value
+    passes the journaled content hashes so the records re-land the same. The PLAN (write=False)
+    reads the same db, writes nothing, returns a record's refusal as `error` and fixes the
+    content hashes the op carries; a run restating the graph is `noop`."""
+    from .write import FactBatch, assert_value
     run = E.normalized(run)
     records, standing = await load_facet_records(gx), await load_facet_judgments(gx)
     ids = {e: entity_node_id(*e.split(":", 1)) for es in run["asked"].values() for e in es}
@@ -332,7 +335,7 @@ async def apply_facet_run(
         moved = (records.get(n) or {}).get("state") != h
         asked = {ids[e] for e in run["asked"].get(n, [])}
         drop += [j["_id"] for (a, b), j in standing.items() if a == n and (moved or b in asked)]
-    if drop:
+    if drop and write:
         await graph_task(gx.queue, gx.graph_id, "delete_edges", edge_ids=sorted(set(drop)))
     edges = []
     for j in run["judgments"]:
@@ -343,9 +346,10 @@ async def apply_facet_run(
         if mark and mark == review_basis(run["posts"][j["post"]], run["criteria"][j["entry"]]):
             edge["properties"]["reviewed"] = mark
         edges.append(edge)
-    if edges:
+    if edges and write:
         await extend_graph(gx.queue, gx.graph_id, [], edges)
     given, hashes, recorded = dict(run.get("content_hashes") or {}), {}, 0
+    batch = None if write else await FactBatch.load(gx)
     for n, h in sorted(run["posts"].items()):
         rec = records.get(n) or {}
         kept = dict(rec.get("criteria") or {}) if rec.get("state") == h else {}
@@ -355,12 +359,18 @@ async def apply_facet_run(
         if prior == value:
             continue
         res = await assert_value(gx, n, P.FACETS_JUDGED, value, actor=actor,
-                                 supersede=[prior] if prior else None, subject_content_hash=given.get(n))
+                                 supersede=[prior] if prior else None, subject_content_hash=given.get(n),
+                                 batch=batch, write=write)
         if res.get("error"):
+            if not write:
+                return {"error": f"facets_judged on {n}: {res['error']}"}
             raise RuntimeError(f"facets_judged on {n}: {res['error']}")
         hashes[n] = res.get("subject_content_hash")
         recorded += 1
-    return {"deleted": len(set(drop)), "landed": len(edges), "recorded": recorded, "content_hashes": hashes}
+    out = {"deleted": len(set(drop)), "landed": len(edges), "recorded": recorded, "content_hashes": hashes}
+    if not write:
+        out["noop"] = not recorded and E.restates(standing, drop, edges)
+    return out
 
 
 def run_facets(
@@ -403,7 +413,8 @@ async def judge_facets(
     url: str = E.JUDGE_URL,    # The judge endpoint (a local double in tests)
     workers: int = E.JUDGE_WORKERS,
     actor: str = "agent:session",
-) -> Dict[str, Any]:  # {posts, entries, requests, pairs, token_estimate, written, run?, applied?, input_tokens?, error?}
+    write: bool = True,   # False = PLAN only (ruling 24fa72c2): the run asked and planned, the op under "op" (None = changes nothing), nothing written
+) -> Dict[str, Any]:  # {posts, entries, requests, pairs, token_estimate, written, run?, op?, applied?, input_tokens?, error?}
     """The facet judge verb: find the stale pairs, ask one request per post, land the run.
     All or nothing -- a run with any failed request writes nothing and reports the failures."""
     views, vocab = await load_facet_views(gx), await load_facet_vocab(gx)
@@ -436,9 +447,7 @@ async def judge_facets(
            "criteria": {e: crit[e] for e in sorted({e for es in todo.values() for e in es})},
            "judgments": kept, "requests": len(todo),
            "models": sorted({r["model"] for r in res["judgments"]})}
-    applied = await apply_facet_run(gx, run, actor=actor)
-    run["content_hashes"] = applied.pop("content_hashes")
-    return {**out, "written": True, "run": run, "applied": applied}
+    return await E.land_run(gx, out, run, apply_facet_run, actor=actor, write=write)
 
 
 async def measure(

@@ -39,7 +39,7 @@ from cjm_context_graph_primitives.query import PropertyPredicate
 from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.vocab import DevNodeKinds
 
-from . import factlayer as F
+from . import factlayer as F, judgeengine as E
 from .runtime import GraphHandle
 
 CONFIG_KEY = "post-comments"                                  # The site-config key holding the widget's settings
@@ -358,32 +358,45 @@ async def apply_harvest(
     run: Dict[str, Any],   # {plan: {note: {winner, earlier}}, content_hashes?}
     *,
     actor: str = "agent:session",
-) -> Dict[str, Any]:  # {asserted, backfilled, content_hashes}
+    write: bool = True,    # False = PLAN only (ruling 24fa72c2): every refusal and the content hashes, nothing written
+) -> Dict[str, Any]:  # {asserted, backfilled, content_hashes} (+ noop / error when planned)
     """Land one harvest: each Note's winning thread stands (superseding a different active
     one), and every earlier thread not yet on the slot is back-filled superseded by it. Live
-    and replay share it; replay passes the journaled content hashes."""
-    from .write import assert_value
+    and replay share it; replay passes the journaled content hashes. The PLAN (write=False)
+    writes nothing and returns a refusal as `error`: it plans through one FactBatch, so a
+    back-fill reads the winner its own run planned (ruling 24fa72c2 (1))."""
+    from .write import FactBatch, assert_value
     given = dict(run.get("content_hashes") or {})
     hashes: Dict[str, Any] = {}
-    asserted = backfilled = 0
+    asserted = backfilled = changes = 0
+    batch = None if write else await FactBatch.load(gx)
     for c in _changes(run["plan"], await load_threads(gx)):
         n, winner = c["note"], str(run["plan"][c["note"]]["winner"])
         if c["assert"] is not None:
             res = await assert_value(gx, n, P.DISCUSSION, winner, actor=actor,
                                      supersede=[str(v) for v in c["supersede"]] or None,
-                                     subject_content_hash=given.get(n))
+                                     subject_content_hash=given.get(n), batch=batch, write=write)
             if res.get("error"):
+                if not write:
+                    return {"error": f"discussion on {n}: {res['error']}"}
                 raise RuntimeError(f"discussion on {n}: {res['error']}")
             hashes[n] = res.get("subject_content_hash")
             asserted += 1
+            changes += write or res.get("op") is not None
         for old in c["backfill"]:
             res = await assert_value(gx, n, P.DISCUSSION, str(old), actor=actor, superseded_by=[winner],
-                                     subject_content_hash=given.get(n))
+                                     subject_content_hash=given.get(n), batch=batch, write=write)
             if res.get("error"):
+                if not write:
+                    return {"error": f"discussion #{old} on {n}: {res['error']}"}
                 raise RuntimeError(f"discussion #{old} on {n}: {res['error']}")
             hashes[n] = res.get("subject_content_hash")
             backfilled += 1
-    return {"asserted": asserted, "backfilled": backfilled, "content_hashes": hashes}
+            changes += write or res.get("op") is not None
+    out = {"asserted": asserted, "backfilled": backfilled, "content_hashes": hashes}
+    if not write:
+        out["noop"] = not changes
+    return out
 
 
 async def harvest_discussions(
@@ -394,7 +407,8 @@ async def harvest_discussions(
     dry_run: bool = False,                   # Report the mapping and the changes; write nothing
     ask: Optional[Callable[[str, Dict[str, Any]], Dict[str, Any]]] = None,   # GitHub (default: gh)
     actor: str = "agent:session",
-) -> Dict[str, Any]:  # {threads, unmapped, ties, ambiguous, changes, written, run?, applied?, error?}
+    write: bool = True,   # False = PLAN only (ruling 24fa72c2): the op under "op" (None = changes nothing), nothing written
+) -> Dict[str, Any]:  # {threads, unmapped, ties, ambiguous, changes, written, run?, op?, applied?, error?}
     """The harvest verb: read every comment thread, map it to a Note, land the facts. All or
     nothing -- a tie, an ambiguous match or an unresolved map writes nothing."""
     cfg = load_comments_config(website_root, required=("repo",))
@@ -434,10 +448,8 @@ async def harvest_discussions(
                         "-- settle each with --map N=<note>; nothing written")
         return out
     if dry_run or not out["changes"]:
-        return out
+        return out if dry_run else {**out, "noop": True}   # every thread already stands (ruling 24fa72c2)
     run = {"repo": conf["repo"], "plan": planned["plan"], "maps": {str(k): v for k, v in sorted(resolved.items())},
            "threads": [{k: t[k] for k in ("number", "kind", "title", "comments", "created", "last_comment")}
                        for t in mapped]}
-    applied = await apply_harvest(gx, run, actor=actor)
-    run["content_hashes"] = applied.pop("content_hashes")
-    return {**out, "written": True, "run": run, "applied": applied}
+    return await E.land_run(gx, out, run, apply_harvest, actor=actor, write=write)

@@ -413,11 +413,14 @@ async def apply_concept_run(
     run: Dict[str, Any],   # {sources: {id: state hash}, asked: {id: [keys]}, criteria: {id: {key: hash}}, judgments, content_hashes?}
     *,
     actor: str = "agent:session",
-) -> Dict[str, Any]:  # {deleted, landed, recorded, content_hashes}
+    write: bool = True,    # False = PLAN only (ruling 24fa72c2): every refusal and the content hashes, nothing written
+) -> Dict[str, Any]:  # {deleted, landed, recorded, content_hashes} (+ noop / error when planned)
     """Land one run: each asked pair's standing judgments are replaced by the run's (a source
     judged against a new state loses every standing judgment), a review mark kept only where its
     basis is unchanged, and each judged source's record moves to the state and criteria it was
-    judged against. Live and replay share it; replay passes the journaled content hashes."""
+    judged against. Live and replay share it; replay passes the journaled content hashes. The PLAN
+    (write=False) reads the same db, writes nothing, returns a record's refusal as `error` and
+    fixes the content hashes the op carries; a run restating the graph is `noop`."""
     from .write import FactBatch, assert_value
     run = E.normalized(run)
     records, standing = await load_concept_records(gx), await load_concept_judgments(gx)
@@ -427,7 +430,7 @@ async def apply_concept_run(
         moved = (records.get(s) or {}).get("state") != h
         asked = {cid[k] for k in run["asked"].get(s, [])}
         drop += [j["_id"] for (a, b, _), j in standing.items() if a == s and (moved or b in asked)]
-    if drop:
+    if drop and write:
         await graph_task(gx.queue, gx.graph_id, "delete_edges", edge_ids=sorted(set(drop)))
     edges = []
     for j in run["judgments"]:
@@ -438,7 +441,7 @@ async def apply_concept_run(
         if mark and mark == review_basis(state, crit):
             edge["properties"]["reviewed"] = mark
         edges.append(edge)
-    if edges:
+    if edges and write:
         await extend_graph(gx.queue, gx.graph_id, [], edges)
     given, hashes, recorded = dict(run.get("content_hashes") or {}), {}, 0
     batch = await FactBatch.load(gx)
@@ -452,12 +455,17 @@ async def apply_concept_run(
             continue
         res = await assert_value(gx, s, P.CONCEPTS_JUDGED, value, actor=actor,
                                  supersede=[prior] if prior else None, subject_content_hash=given.get(s),
-                                 batch=batch)
+                                 batch=batch, write=write)
         if res.get("error"):
+            if not write:
+                return {"error": f"concepts_judged on {s}: {res['error']}"}
             raise RuntimeError(f"concepts_judged on {s}: {res['error']}")
         hashes[s] = res.get("subject_content_hash")
         recorded += 1
-    return {"deleted": len(set(drop)), "landed": len(edges), "recorded": recorded, "content_hashes": hashes}
+    out = {"deleted": len(set(drop)), "landed": len(edges), "recorded": recorded, "content_hashes": hashes}
+    if not write:
+        out["noop"] = not recorded and E.restates(standing, drop, edges)
+    return out
 
 
 async def concept_state(
@@ -491,7 +499,8 @@ async def judge_concepts(
     url: str = E.JUDGE_URL,
     workers: int = E.JUDGE_WORKERS,
     actor: str = "agent:session",
-) -> Dict[str, Any]:  # {sources, concepts, requests, pairs, token_estimate, stale, refusals, written, run?, applied?, error?}
+    write: bool = True,   # False = PLAN only (ruling 24fa72c2): the run asked and planned, the op under "op" (None = changes nothing), nothing written
+) -> Dict[str, Any]:  # {sources, concepts, requests, pairs, token_estimate, stale, refusals, written, run?, op?, applied?, error?}
     """The concept judge verb: find the stale pairs, ask, land the run. All or nothing -- a run with
     any failed request writes nothing and reports the failures."""
     st = await concept_state(gx, only=only, series=series)
@@ -536,9 +545,7 @@ async def judge_concepts(
            "criteria": {s: {k: st["criteria"][s][k] for k in ks} for s, ks in todo.items()},
            "judgments": kept, "requests": len(reqs),
            "models": sorted({r["model"] for r in res["judgments"]})}
-    applied = await apply_concept_run(gx, run, actor=actor)
-    run["content_hashes"] = applied.pop("content_hashes")
-    return {**out, "written": True, "run": run, "applied": applied}
+    return await E.land_run(gx, out, run, apply_concept_run, actor=actor, write=write)
 
 
 THRESHOLDS = (0.3, 0.4, 0.5, 0.6, 0.7, 0.8)

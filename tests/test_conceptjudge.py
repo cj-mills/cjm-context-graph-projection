@@ -177,14 +177,16 @@ def test_draft_confirm_judge_review_measure(tmp_path):
             lines[idx2] = lines[idx2].replace("- [x]", "- [ ]")                    # rejected
             edited = "\n".join(lines)
             landed = await review_concepts(gx, apply_text=edited)
-            refused = await review_concepts(gx, apply_text=edited)                  # every row moved on
+            reapplied = await review_concepts(gx, apply_text=edited)                # landed already: no change (24fa72c2 (2))
+            lines[idx2] = lines[idx2].replace("- [ ]", "- [x]")                    # the rejection now a confirmation
+            refused = await review_concepts(gx, apply_text="\n".join(lines))        # an outcome that differs
             confirmed = await load_confirmed_relations(gx)
             judged = await load_concept_judgments(gx)
             after = await review_concepts(gx)
             m = await measure(gx)
             return (scope, empty, vdoc, refused_subject, minted, dry, only, missing, failed, first, again, rdoc,
-                    landed, refused, confirmed, judged, after, m)
-    (scope, empty, vdoc, refused_subject, minted, dry, only, missing, failed, first, again, rdoc, landed, refused,
+                    landed, reapplied, refused, confirmed, judged, after, m)
+    (scope, empty, vdoc, refused_subject, minted, dry, only, missing, failed, first, again, rdoc, landed, reapplied, refused,
      confirmed, judged, after, m) = asyncio.run(go())
     a, b, unit = note_node_id("a-train"), note_node_id("b-export"), entity_node_id(P.ENTITY_UNIT, "gpu/lec-1")
     assert set(scope["sources"]) == {a, b, unit} and scope["sources"][unit]["post"] == note_node_id("c-notes")
@@ -208,7 +210,9 @@ def test_draft_confirm_judge_review_measure(tmp_path):
     rows = parse_relations(rdoc["document"])["rows"]
     assert sorted(r["word"] for r in rows) == ["assumes", "assumes", "covers", "teaches", "teaches"]
     assert not landed.get("error") and landed["counts"]["confirmed"] == 4 and landed["counts"]["rejected"] == 1
-    assert "nothing written" in refused["error"]
+    assert not reapplied.get("error") and not reapplied["written"] and reapplied["noop"]
+    assert reapplied["counts"]["applied"] == 5 and reapplied["counts"]["confirmed"] == 0
+    assert "nothing written" in refused["error"] and any("already reviewed" in e for e in refused["errors"])
     cid = lambda k: entity_node_id(P.ENTITY_CONCEPT, k)
     assert confirmed[(a, cid("nms"))][0]["relation"] == "TEACHES"
     assert confirmed[(b, cid("onnx"))][0] == {**confirmed[(b, cid("onnx"))][0], "relation": "ASSUMES",

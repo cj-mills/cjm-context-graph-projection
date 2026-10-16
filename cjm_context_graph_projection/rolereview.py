@@ -38,7 +38,7 @@ from .sectionroles import (CANDIDATE_LEVELS, distribution, effective_roles, load
 DISSENT_P = 0.5         # A Section whose own first role differs from its pattern's at or above it leaves the pattern
 OVERRIDE_MARGIN = 0.3   # A deeper Section is proposed an override when its first role outranks the inherited one by this
 KINDS = ("pattern", "section", "override")
-_ROW = re.compile(r"^\s*- \[([ xX])\] `([^`]*)` .*<!-- role (pattern|section|override) (\S+) (\S+) -->\s*$")
+_ROW = re.compile(r"^\s*- \[([ xX])\] `([^`]*)` .*<!-- role (pattern|section|override) (\S+) (\S+)(?: (\S+))? -->\s*$")
 
 
 def _top_role(dist: List[Tuple[str, float]]) -> Optional[str]:  # The first ROLE (never none) -- the edge a mark rides
@@ -47,8 +47,11 @@ def _top_role(dist: List[Tuple[str, float]]) -> Optional[str]:  # The first ROLE
 
 async def review_state(
     gx: GraphHandle,
-) -> Dict[str, Any]:  # {patterns, sections, overrides, waiting, stale, unjudged, vocab, titles}
-    """Every open row (module docstring), with the reads the plan reuses."""
+) -> Dict[str, Any]:  # {patterns, sections, overrides, waiting, stale, unjudged, vocab, titles, done, inherited}
+    """Every open row (module docstring), with the reads the plan reuses. `done` = each settled
+    Section's outcome (its confirmed role, or `none` when its judged edge is marked on its current
+    basis) and `inherited` = each deeper unconfirmed Section's inherited role: the plan reads a row
+    a crashed --apply already landed off them (ruling 24fa72c2 (2))."""
     from .site import stated
     scope = await role_scope(gx)
     secs = await scope_sections(gx, scope)
@@ -58,12 +61,15 @@ async def review_state(
     qhash = question_hash(role_question(vocab)) if roles else ""
     stale = set(stale_sections(views, qhash, judged, roles)) if roles else set(views)
     titles = {n: stated(scope[n]["node"], "title") for n in scope}
-    cands, overrides, waiting = [], [], 0
+    cands, overrides, waiting, done, inheriting = [], [], 0, {}, {}
     for n in sorted(scope, key=lambda n: (titles[n].lower(), n)):
         eff = effective_roles(secs[n], facts)
         for i, r in enumerate(secs[n]):
             s = r["id"]
-            if s in stale or s in facts:
+            if s in stale:
+                continue
+            if s in facts:
+                done[s] = facts[s]
                 continue
             dist = distribution(judged[s], roles)
             state = E.digest(views[s])
@@ -74,12 +80,17 @@ async def review_state(
                 basis = review_basis(state, qhash)
                 if mark != basis:
                     cands.append({**row, "basis": basis})
+                else:
+                    done[s] = NONE
                 continue
             inherited = eff[s][0]
             if inherited is None:
                 waiting += 1
                 continue
+            inheriting[s] = inherited
             basis = review_basis(state, qhash, inherited)
+            if mark == basis:
+                done[s] = NONE
             p = dict(dist)
             if mark != basis and dist[0][0] not in (inherited, NONE) and dist[0][1] - p.get(inherited, 0.0) >= OVERRIDE_MARGIN:
                 overrides.append({**row, "basis": basis, "inherited": inherited})
@@ -108,7 +119,7 @@ async def review_state(
     sections = [c for c in cands if c["section"] not in in_pattern]
     return {"patterns": sorted(patterns, key=lambda p: (-len(p["members"]), p["key"])), "sections": sections,
             "overrides": overrides, "waiting": waiting, "stale": len(stale), "unjudged": not roles,
-            "vocab": vocab, "titles": titles}
+            "vocab": vocab, "titles": titles, "done": done, "inherited": inheriting}
 
 
 def _alts(dist: List[Tuple[str, float]], n: int = 2) -> str:
@@ -141,7 +152,7 @@ def review_document(
             dissent = f" · {p['dissent']} dissenting, listed under their posts" if p["dissent"] else ""
             out.append(f"- [x] `{p['role']}` · **{p['heading']}** · {len(p['members'])} section(s) in "
                        f"{p['posts']} post(s) · mean {p['mean'][0][1]:.2f} · then {_alts(p['mean'])}{dissent} "
-                       f"<!-- role pattern {p['id']} {p['basis']} -->")
+                       f"<!-- role pattern {p['id']} {p['basis']} {','.join(m['section'] for m in p['members'])} -->")
         out.append("")
     if st["sections"]:
         out += [f"## Sections · {len(st['sections'])}", ""]
@@ -171,7 +182,7 @@ def review_document(
 
 def parse_review(
     text: str,  # An edited review document
-) -> Dict[str, Any]:  # {rows: [{checked, role, kind, id, basis}], errors}
+) -> Dict[str, Any]:  # {rows: [{checked, role, kind, id, basis, members}], errors}
     """The document's rows; a repeated row is an error (the file is refused whole)."""
     rows, errors, seen = [], [], set()
     for i, ln in enumerate(text.splitlines(), 1):
@@ -181,7 +192,8 @@ def parse_review(
                 errors.append(f"line {i}: a row the review cannot read: {ln.strip()[:120]}")
             continue
         row = {"checked": m.group(1) != " ", "role": m.group(2).strip(), "kind": m.group(3),
-               "id": m.group(4), "basis": m.group(5), "line": i}
+               "id": m.group(4), "basis": m.group(5), "line": i,
+               "members": m.group(6).split(",") if m.group(6) else []}   # a pattern's Sections (an older document names none)
         if (row["kind"], row["id"]) in seen:
             errors.append(f"line {i}: the {row['kind']} {row['id'][:8]} appears twice")
         seen.add((row["kind"], row["id"]))
@@ -202,7 +214,16 @@ async def plan_review(
     secs = {c["section"]: c for c in st["sections"]}
     ovs = {o["section"]: o for o in st["overrides"]}
     confirm, mark, touched = [], [], set()
-    counts = {"confirmed": 0, "no_role": 0, "kept_inherited": 0, "left": 0}
+    counts = {"confirmed": 0, "no_role": 0, "kept_inherited": 0, "left": 0, "applied": 0}
+
+    def landed(r):   # the row's outcome already stands: this document landed it (ruling 24fa72c2 (2))
+        done = st["done"]
+        if r["kind"] == "pattern":
+            return r["checked"] and bool(r["members"]) and all(done.get(m) == r["role"] for m in r["members"])
+        if r["kind"] == "section":
+            return r["checked"] and done.get(r["id"]) == r["role"]
+        keeps = not r["checked"] or r["role"] == st["inherited"].get(r["id"])
+        return done.get(r["id"]) == (NONE if keeps else r["role"])
 
     def land(c, role, where):
         if c["section"] in touched:
@@ -222,6 +243,9 @@ async def plan_review(
             continue
         if r["kind"] == "pattern":
             p = pats.get(r["id"])
+            if (p is None or p["basis"] != r["basis"]) and landed(r):
+                counts["applied"] += len(r["members"])
+                continue
             if p is None or p["basis"] != r["basis"]:
                 errors.append(f"{where}: the pattern moved since the document was written (a fresh review document)")
                 continue
@@ -233,6 +257,9 @@ async def plan_review(
             continue
         src = secs if r["kind"] == "section" else ovs
         c = src.get(r["id"])
+        if (c is None or c["basis"] != r["basis"]) and landed(r):
+            counts["applied"] += 1
+            continue
         if c is None or c["basis"] != r["basis"]:
             errors.append(f"{where}: the {r['kind']} {r['id'][:8]} moved since the document was written "
                           "(judge-roles, then a fresh review document)")
@@ -261,26 +288,40 @@ async def apply_review(
     run: Dict[str, Any],   # {confirm: [[section, role]], mark: [[section, the role its mark rides, basis]], content_hashes?}
     *,
     actor: str = "agent:session",
-) -> Dict[str, Any]:  # {asserted, marked, content_hashes}
+    write: bool = True,    # False = PLAN only (ruling 24fa72c2): every refusal and the content hashes, nothing written
+) -> Dict[str, Any]:  # {asserted, marked, content_hashes} (+ noop / error when planned)
     """Land one review: assert each role (checked at write time like any vocabulary fact), then
     set each mark on its judged edge. Live and replay share it; replay passes the journaled
-    content hashes so the facts re-land the same."""
+    content hashes so the facts re-land the same. The PLAN (write=False) writes nothing and
+    returns a refusal as `error` -- a role the post's type does not place is refused here, before
+    any fact lands -- and fixes the content hashes; a review whose every fact and mark already
+    stands is `noop`."""
     from .write import FactBatch, assert_value
-    given, hashes = dict(run.get("content_hashes") or {}), {}
+    given, hashes, changes = dict(run.get("content_hashes") or {}), {}, 0
     batch = await FactBatch.load(gx)   # one read of the fact layer for the whole review (finding da6cdab6)
     for s, role in run["confirm"]:
         res = await assert_value(gx, s, P.SECTION_ROLE, role, actor=actor, subject_content_hash=given.get(f"{s}|{role}"),
-                                 batch=batch)
+                                 batch=batch, write=write)
         if res.get("error"):
+            if not write:
+                return {"error": f"section_role {role} on {s}: {res['error']}"}
             raise RuntimeError(f"section_role {role} on {s}: {res['error']}")
         hashes[f"{s}|{role}"] = res.get("subject_content_hash")
+        changes += write or res.get("op") is not None
     judged = await load_role_judgments(gx)
     for s, role, basis in run["mark"]:
         edge = (judged.get(s) or {}).get(role)
         if edge is None:
+            if not write:
+                return {"error": f"no judged edge {s} -> {role} to mark"}
             raise RuntimeError(f"no judged edge {s} -> {role} to mark")
-        await graph_task(gx.queue, gx.graph_id, "update_edge", edge_id=edge["_id"], properties={"reviewed": basis})
-    return {"asserted": len(run["confirm"]), "marked": len(run["mark"]), "content_hashes": hashes}
+        if write:
+            await graph_task(gx.queue, gx.graph_id, "update_edge", edge_id=edge["_id"], properties={"reviewed": basis})
+        changes += write or edge.get("reviewed") != basis
+    out = {"asserted": len(run["confirm"]), "marked": len(run["mark"]), "content_hashes": hashes}
+    if not write:
+        out["noop"] = not changes
+    return out
 
 
 async def review_roles(
@@ -289,7 +330,8 @@ async def review_roles(
     apply_text: Optional[str] = None,   # An edited review document to land; None = write a fresh one
     dry_run: bool = False,              # With apply_text: plan and check only
     actor: str = "agent:session",
-) -> Dict[str, Any]:  # {document, counts} | {plan counts, errors, written, run?, applied?}
+    write: bool = True,                 # False = PLAN only (ruling 24fa72c2): the op under "op" (None = changes nothing), nothing written
+) -> Dict[str, Any]:  # {document, counts} | {plan counts, errors, written, run?, op?, applied?}
     """The review verb: the document (with its counts), or one landed review."""
     if apply_text is None:
         st = await review_state(gx)
@@ -302,8 +344,5 @@ async def review_roles(
     if plan["errors"]:
         return {**out, "error": f"{len(plan['errors'])} row(s) refused -- nothing written"}
     if dry_run or not (plan["run"]["confirm"] or plan["run"]["mark"]):
-        return out
-    run = plan["run"]
-    applied = await apply_review(gx, run, actor=actor)
-    run["content_hashes"] = applied.pop("content_hashes")
-    return {**out, "written": True, "run": run, "applied": applied}
+        return out if dry_run else {**out, "noop": True}   # an empty review lands nothing
+    return await E.land_run(gx, out, plan["run"], apply_review, actor=actor, write=write)

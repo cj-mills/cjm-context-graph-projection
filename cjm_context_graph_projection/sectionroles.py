@@ -265,13 +265,15 @@ async def apply_role_run(
     run: Dict[str, Any],   # {sections: {id: state hash}, criteria, judgments: [{section, model, p: {role: p}}]}
     *,
     actor: str = "agent:session",
-) -> Dict[str, Any]:  # {deleted, landed}
+    write: bool = True,    # False = PLAN only (ruling 24fa72c2): nothing written; a run restating the graph is `noop`
+) -> Dict[str, Any]:  # {deleted, landed} (+ noop when planned)
     """Land one run: each asked Section's standing judgments are replaced by the run's, a review
-    mark kept only where its basis is unchanged. Live and replay share it."""
+    mark kept only where its basis is unchanged. Live and replay share it. The PLAN (write=False)
+    writes nothing and never refuses -- a run is landed whole -- so it only tests for no change."""
     run = E.normalized(run)
     standing = await load_role_judgments(gx)
     drop = sorted(j["_id"] for s in run["sections"] for j in (standing.get(s) or {}).values())
-    if drop:
+    if drop and write:
         await graph_task(gx.queue, gx.graph_id, "delete_edges", edge_ids=drop)
     edges = []
     for j in run["judgments"]:
@@ -283,9 +285,14 @@ async def apply_role_run(
             if mark and mark.startswith(review_basis(state, run["criteria"])):
                 edge["properties"]["reviewed"] = mark
             edges.append(edge)
-    if edges:
+    if edges and write:
         await extend_graph(gx.queue, gx.graph_id, [], edges)
-    return {"deleted": len(drop), "landed": len(edges)}
+    out = {"deleted": len(drop), "landed": len(edges)}
+    if not write:
+        held = {(s, entity_node_id(P.ENTITY_SECTION_ROLE, k)): j
+                for s in run["sections"] for k, j in (standing.get(s) or {}).items()}
+        out["noop"] = E.restates(held, drop, edges)
+    return out
 
 
 def request_body(
@@ -329,7 +336,8 @@ async def judge_roles(
     url: str = E.JUDGE_URL,
     workers: int = E.JUDGE_WORKERS,
     actor: str = "agent:session",
-) -> Dict[str, Any]:  # {posts, sections, roles, requests, token_estimate, written, run?, applied?, input_tokens?, error?}
+    write: bool = True,   # False = PLAN only (ruling 24fa72c2): the run asked and planned, the op under "op" (None = changes nothing), nothing written
+) -> Dict[str, Any]:  # {posts, sections, roles, requests, token_estimate, written, run?, op?, applied?, input_tokens?, error?}
     """The role judge verb: find the stale Sections, ask one request each, land the run. All or
     nothing -- a run with any failed request writes nothing and reports the failures."""
     scope = await role_scope(gx)
@@ -356,8 +364,7 @@ async def judge_roles(
     run = {"sections": {s: E.digest(views[s]) for s in todo}, "criteria": qhash,
            "judgments": sorted(res["judgments"], key=lambda j: j["section"]),
            "models": sorted({j["model"] for j in res["judgments"]})}
-    out["applied"] = await apply_role_run(gx, run, actor=actor)
-    return {**out, "written": True, "run": run}
+    return await E.land_run(gx, out, run, apply_role_run, actor=actor, write=write)
 
 
 async def section_roles(

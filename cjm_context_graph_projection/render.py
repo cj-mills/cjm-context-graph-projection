@@ -1988,7 +1988,8 @@ def _render_role_review(obj: Dict[str, Any]) -> str:
         lines += [f"  - {e}" for e in (obj.get("errors") or [])[:20]]
     lines.append(f"**{'reviewed' if obj.get('written') else 'review plan'}** {obj.get('rows', 0)} row(s) · "
                  f"confirmed {c.get('confirmed', 0)} · no role {c.get('no_role', 0)} · kept inherited "
-                 f"{c.get('kept_inherited', 0)} · left {c.get('left', 0)}")
+                 f"{c.get('kept_inherited', 0)} · left {c.get('left', 0)}"
+                 + (f" · already applied {c['applied']}" if c.get("applied") else ""))
     if obj.get("written"):
         ap = obj.get("applied") or {}
         lines.append(f"  asserted {ap.get('asserted', 0)} · marked {ap.get('marked', 0)}")
@@ -2088,7 +2089,8 @@ def _render_concept_review(obj: Dict[str, Any]) -> str:
         return "\n".join(lines)
     lines.append(f"**{'reviewed' if obj.get('written') else 'review plan'}** {obj.get('rows', 0)} row(s) · "
                  f"confirmed {c.get('confirmed', 0)} · rejected {c.get('rejected', 0)} · kept {c.get('kept', 0)} · "
-                 f"retracted {c.get('retracted', 0)} · near misses left {c.get('near_unchecked', 0)}")
+                 f"retracted {c.get('retracted', 0)} · near misses left {c.get('near_unchecked', 0)}"
+                 + (f" · already applied {c['applied']}" if c.get("applied") else ""))
     if obj.get("written"):
         ap = obj.get("applied") or {}
         lines.append(f"  related {ap.get('related', 0)} · retracted {ap.get('retracted', 0)} · marked "
@@ -2256,6 +2258,11 @@ def _render_coverage(obj: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# The verbs whose op carries a computed run (ruling 24fa72c2)
+RUN_VERBS = ("judge-related", "judge-facets", "judge-roles", "judge-concepts", "review-facets", "review-roles",
+             "review-concepts", "harvest-discussions")
+
+
 def render(
     kind: str,         # Command kind: schema | state | relevant | show
     obj: Dict[str, Any],  # The projection result
@@ -2269,6 +2276,9 @@ def render(
     if fmt == "agent":
         return json.dumps(obj, indent=2, default=str)
     out = _human(kind, obj)
+    # A run verb's plan that changes nothing (ruling 24fa72c2): one uniform line -- nothing journaled
+    if isinstance(obj, dict) and obj.get("noop") and kind in RUN_VERBS and not obj.get("error"):
+        out += "\n  no change: the graph already holds this run (nothing journaled)"
     # Only a journaled_emit RECEIPT (it carries `journal_first`) gets the line — a read
     # verb's journal TRACE (`show`'s axis-D metadata) is a different dict under the same
     # key and used to print 'PREVIEW — would journal' on every show (da9ea508 (3)).

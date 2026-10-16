@@ -554,11 +554,13 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 
 - `digest` _function_ — The hash staleness is keyed by: key-sorted JSON, so equal content hashes equal.
 - `http_ask` _function_ — The HTTP judge: one POST per request, retried with backoff on overload and network faults.
+- `land_run` _function_ — The run verbs' shared tail (ruling 24fa72c2, design detail 65f4a6c9 (1)): the run's apply
 - `normalized` _function_ — The journal writes ops `sort_keys`, so replay rebuilds every dict key-sorted: live and
 - `post_sections` _function_ — Every Note's sections in order (HAS_SECTION), for a family's judged state to read from
 - `public_posts` _function_ — The posts a judge may be shown (the audience rule e1fd4d64: only public posts are sent).
 - `read_key` _function_ — The key from KEY_ENV, else KEY_FILE -- never printed, never journaled.
 - `resolve_ask` _function_ — The judge a run asks: the one given, else HTTP with the key -- or the reason there is none.
+- `restates` _function_ — A family apply's PLAN no-change test (ruling 24fa72c2 (3)): a run that drops exactly the
 - `run_requests` _function_ — Ask every request on a worker pool; every answer is kept (the family applies its floor).
 
 ### `cjm_context_graph_projection.judging`
@@ -1051,7 +1053,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `plan_review` _function_ — Check every row against the graph (its basis current, its role live) and plan the batch.
 - `review_document` _function_ — The review document: the patterns, then each post's Sections, then the overrides.
 - `review_roles` _function_ — The review verb: the document (with its counts), or one landed review.
-- `review_state` _function_ — Every open row (module docstring), with the reads the plan reuses.
+- `review_state` _function_ — Every open row (module docstring), with the reads the plan reuses. `done` = each settled
 
 ### `cjm_context_graph_projection.runtime`
 

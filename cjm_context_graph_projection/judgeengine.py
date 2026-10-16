@@ -51,6 +51,49 @@ def normalized(
     return json.loads(json.dumps(x, sort_keys=True))
 
 
+def restates(
+    standing: Dict[Tuple[str, ...], Dict[str, Any]],  # {(source, target, ...): a stored judgment's properties + _id}
+    drop: List[str],                                  # The edge ids the run deletes
+    edges: List[Dict[str, Any]],                      # The judged edges it lands
+) -> bool:  # Deleting and re-landing would leave the graph as it stands
+    """A family apply's PLAN no-change test (ruling 24fa72c2 (3)): a run that drops exactly the
+    edges it re-lands, each between the same ends with the same properties, restates the graph --
+    a re-judge whose answers did not move journals nothing."""
+    held = {j["_id"]: {"source_id": key[0], "target_id": key[1], "properties": {k: v for k, v in j.items() if k != "_id"}}
+            for key, j in standing.items()}
+    return (set(drop) == {e["id"] for e in edges}
+            and all(F.edge_holds(held.get(e["id"]), e) for e in edges))
+
+
+async def land_run(
+    gx: GraphHandle,
+    out: Dict[str, Any],   # The verb's report so far
+    run: Dict[str, Any],   # The computed run (the op carries it whole)
+    apply: Callable,       # The family's apply: (gx, run, *, actor, write) -> its result
+    *,
+    actor: str = "agent:session",
+    write: bool = True,    # False = PLAN only: the op under "op", nothing written
+) -> Dict[str, Any]:  # out + {written, run, op, applied?, noop?, error?}
+    """The run verbs' shared tail (ruling 24fa72c2, design detail 65f4a6c9 (1)): the run's apply
+    PLANNED against the db first -- a refusal returns before anything is written, a run changing
+    nothing is no change (op None), else the run gains the content hashes its records bind and the
+    op is {run, actor}. With write the op is applied here (a caller with no writes journal);
+    the CLI plans and lets InvocationWrites append, then apply."""
+    plan = await apply(gx, run, actor=actor, write=False)
+    if plan.get("error"):
+        return {**out, "error": plan["error"], "written": False, "op": None}
+    if "content_hashes" in plan:
+        run["content_hashes"] = plan["content_hashes"]
+    if plan.get("noop"):
+        return {**out, "run": run, "noop": True, "written": False, "op": None}
+    op = {"run": run, "actor": actor}
+    if not write:
+        return {**out, "run": run, "op": op, "written": False}
+    applied = await apply(gx, run, actor=actor)
+    applied.pop("content_hashes", None)
+    return {**out, "written": True, "run": run, "op": op, "applied": applied}
+
+
 def read_key() -> Optional[str]:  # The judge's API key, or None
     """The key from KEY_ENV, else KEY_FILE -- never printed, never journaled."""
     k = os.environ.get(KEY_ENV, "").strip()
