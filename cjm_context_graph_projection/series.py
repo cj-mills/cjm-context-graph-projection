@@ -47,26 +47,26 @@ async def mint_series(
     date: str = "",                          # The page's own date (verbatim; "" = none)
     categories: Optional[List[str]] = None,  # The page's own categories -> TAGGED edges (None = none)
     actor: str = "agent:session",
+    write: bool = True,                      # False = PLAN only (design detail 65f4a6c9 (1)): every refusal, then the op under "op" (None = changes nothing), nothing written
 ) -> Dict[str, Any]:  # {series_id, key, updated, tagged, written} | {error}
     """Mint or update a Series from its page's record (journaled `series`; upsert by key).
 
     The op carries the WHOLE record, so a re-mint replaces every field (a field left empty
     clears) and the Series' TAGGED edges become exactly its categories — replay of the
     append-ordered ops converges on the last one. The id is key-derived, so a Series the
-    harvester once minted keeps its id when it is born here."""
+    harvester once minted keeps its id when it is born here.
+
+    THE PLAN (write=False): the op -- or None when the Series already carries the record and
+    exactly its categories' TAGGED edges (ruling 17daa86b)."""
     if not key or not isinstance(key, str):
         return {"error": "a series needs a key", "written": False}
     node = SeriesNode(key=key, title=title, description=description, image=image,
                       date=date).to_graph_node()
     sid = node["id"]
     existing = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=sid)
-    if existing is not None:
-        props = dict(node["properties"])
-        for k in PAGE_FIELDS:
-            props.setdefault(k, "")
-        await graph_task(gx.queue, gx.graph_id, "update_node", node_id=sid, properties=props)
-    else:
-        await extend_graph(gx.queue, gx.graph_id, [node], [])
+    props = dict(node["properties"])
+    for k in PAGE_FIELDS:
+        props.setdefault(k, "")
     keys = []
     for c in categories or []:
         k = slugify(str(c))
@@ -75,10 +75,24 @@ async def mint_series(
     want = {topic_node_id(k): k for k in keys}
     standing = await _edges(gx, EdgeQuery(source_ids=[sid], relation_type=DevRelations.TAGGED))
     stale = [str(e["id"]) for e in standing if str(e["target_id"]) not in want]
-    if stale:
-        await graph_task(gx.queue, gx.graph_id, "delete_edges", edge_ids=stale)
     have = {str(e["target_id"]) for e in standing}
     new = {tid: k for tid, k in want.items() if tid not in have}
+    if not write:
+        # a Series first minted by extend stores no empty page field: absent reads as ""
+        shown = None if existing is None else {"properties": {**dict.fromkeys(PAGE_FIELDS, ""),
+                                                              **F.props(existing)}}
+        noop = F.holds(shown, props) and not stale and not new
+        return {"series_id": sid, "key": key, "updated": existing is not None,
+                "tagged": sorted(want.values()), "written": False, "noop": noop,
+                "op": None if noop else {"key": key, "title": title, "description": description,
+                                         "image": image, "date": date,
+                                         "categories": list(categories or []), "actor": actor}}
+    if existing is not None:
+        await graph_task(gx.queue, gx.graph_id, "update_node", node_id=sid, properties=props)
+    else:
+        await extend_graph(gx.queue, gx.graph_id, [node], [])
+    if stale:
+        await graph_task(gx.queue, gx.graph_id, "delete_edges", edge_ids=stale)
     if new:  # a Topic already on the graph re-extends as a verified no-op
         await extend_graph(gx.queue, gx.graph_id,
                            [TopicNode(key=k).to_graph_node() for k in new.values()],

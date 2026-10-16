@@ -200,12 +200,9 @@ async def _assert_journaled(
     re-assertion that changes nothing journals nothing (ruling 17daa86b). The op then applies
     through the replay's own applier."""
     await writes.begin()
-    evidence, err, prose = await _resolve_evidence(gx, evidence)
+    evidence, err = await _plan_evidence(gx, evidence)
     if err:
         return {"error": err}
-    for p in prose:
-        print(f"⚠ evidence {p[:60]!r} is not a node id — no EVIDENCED_BY edge lands "
-              "(finding 0ccdca26)", file=sys.stderr)
     plan = await assert_value(gx, subject, predicate, value, actor=actor, evidence=evidence,
                               supersede=supersede, superseded_by=superseded_by, write=False)
     if plan.get("error") or plan["op"] is None:
@@ -330,6 +327,20 @@ async def _resolve_evidence(
             return None, f"--evidence: no node `{v}` — mint it first, then cite it", []
         out.append(node.get("id") if isinstance(node, dict) else getattr(node, "id", v))
     return out, None, prose
+
+
+async def _plan_evidence(
+    gx,        # The open graph handle
+    evidence,  # A write's evidence values, as given
+):  # -> (values | None, error | None)
+    """The evidence a write's PLAN journals (finding 0ccdca26): resolved by `_resolve_evidence`
+    (a prefix journaled as its full id, a miss refused), each prose value warned -- it lands no
+    EVIDENCED_BY edge. One path for `assert` and `alias`."""
+    evidence, err, prose = await _resolve_evidence(gx, evidence)
+    for p in prose:
+        print(f"⚠ evidence {p[:60]!r} is not a node id — no EVIDENCED_BY edge lands "
+              "(finding 0ccdca26)", file=sys.stderr)
+    return evidence, err
 
 
 async def _resolve_module_ref(
@@ -925,15 +936,22 @@ async def _dispatch(args) -> int:
             return 2 if flagged else 0
         elif args.command == "alias":
             actor = f"agent:session:{args.session}" if args.session else args.actor
-            evidence = (args.evidence
-                        or (dangling_reference_sources(args.memory_dir, args.drifted)
-                            if args.memory_dir else None))
-            res = await alias(gx, args.drifted, args.canonical, actor=actor, evidence=evidence)
+            # THE PLAN (design detail 65f4a6c9): given evidence resolved as `assert` resolves it
+            # (the discovered note ids are full ids already), the canonical note found, an alias
+            # already standing caught (ruling 17daa86b); the op then applies through the replay's applier
+            evidence = None
+            if args.evidence:
+                evidence, err = await _plan_evidence(gx, args.evidence)
+                if err:
+                    print(render("alias", {"error": err}, args.format))
+                    return 1
+            elif args.memory_dir:
+                evidence = dangling_reference_sources(args.memory_dir, args.drifted) or None
+            res = await alias(gx, args.drifted, args.canonical, actor=actor, evidence=evidence,
+                              write=False)
+            if res.get("op"):
+                res = (await writes.write("alias", res["op"])).result
             print(render("alias", res, args.format))
-            if args.journal_path and not res.get("error"):
-                append_write(args.journal_path, "alias",
-                             {"drifted": args.drifted, "canonical": args.canonical,
-                              "actor": actor, "evidence": evidence})
             return 1 if res.get("error") else 0
         elif args.command == "decide":
             # decide safety (build 1b109ddc): shell-proof statement input + debris
@@ -1069,15 +1087,14 @@ async def _dispatch(args) -> int:
                 print("_capture: `capture-artifact <repo_key> <path> --kind <kind>`_")
             return 1
         elif args.command == "display-rule":
+            # Presentation vocabulary is journal-sourced like every born-on-graph write: the last
+            # display-rule op per kind wins on replay (deterministic-id upsert). THE PLAN (design
+            # detail 65f4a6c9): a rule already reading so journals nothing (ruling 17daa86b)
             res = await set_display_rule(gx, args.for_label, args.title, args.gloss,
-                                         actor=args.actor)
+                                         actor=args.actor, write=False)
+            if res.get("op"):
+                res = (await writes.write("display-rule", res["op"])).result
             print(render("display-rule", res, args.format))
-            # Presentation vocabulary is journal-sourced like every born-on-graph write:
-            # the last display-rule op per kind wins on replay (deterministic-id upsert).
-            if args.journal_path and res.get("written"):
-                append_write(args.journal_path, "display-rule",
-                             {"for_label": args.for_label, "title_template": args.title,
-                              "gloss_template": args.gloss, "actor": args.actor})
             return 1 if res.get("error") else 0
         elif args.command == "set-lens":
             if args.spec_file:
@@ -1092,30 +1109,27 @@ async def _dispatch(args) -> int:
             except json.JSONDecodeError as e:
                 print(f"error: spec is not valid JSON: {e}", file=sys.stderr)
                 return 1
+            # Lens vocabulary is journal-sourced like display-rule: the last set-lens op per slug
+            # wins on replay (deterministic-id upsert). THE PLAN (design detail 65f4a6c9): a lens
+            # already reading so journals nothing (ruling 17daa86b)
             res = await set_lens(gx, args.slug, spec, title=args.title,
-                                 description=args.description, actor=args.actor, date=args.date)
+                                 description=args.description, actor=args.actor, date=args.date,
+                                 write=False)
+            if res.get("op"):
+                res = (await writes.write("set-lens", res["op"])).result
             print(render("set-lens", res, args.format))
-            # Lens vocabulary is journal-sourced like display-rule: the last
-            # set-lens op per slug wins on replay (deterministic-id upsert).
-            if args.journal_path and res.get("written"):
-                op = {"slug": args.slug, "spec": spec, "title": args.title,
-                      "description": args.description, "actor": args.actor}
-                if args.date is not None:   # only then, so every other op keeps its shape
-                    op["date"] = args.date
-                append_write(args.journal_path, "set-lens", op)
             return 1 if res.get("error") else 0
         elif args.command == "series":
             # A Series born on-graph (DEC 72d669c5 (2)): the op carries the page's WHOLE record,
-            # so the last `series` op per key wins on replay (deterministic-id upsert).
-            op = {"key": args.key, "title": args.title or "", "description": args.description or "",
-                  "image": args.image or "", "date": args.date or "",
-                  "categories": list(args.category or []), "actor": args.actor}
-            res = await mint_series(gx, args.key, title=op["title"], description=op["description"],
-                                    image=op["image"], date=op["date"], categories=op["categories"],
-                                    actor=args.actor)
+            # so the last `series` op per key wins on replay (deterministic-id upsert). THE PLAN
+            # (design detail 65f4a6c9): a Series already carrying the record journals nothing
+            res = await mint_series(gx, args.key, title=args.title or "",
+                                    description=args.description or "", image=args.image or "",
+                                    date=args.date or "", categories=list(args.category or []),
+                                    actor=args.actor, write=False)
+            if res.get("op"):
+                res = (await writes.write("series", res["op"])).result
             print(render("series", res, args.format))
-            if args.journal_path and res.get("written"):
-                append_write(args.journal_path, "series", op)
             return 1 if res.get("error") else 0
         elif args.command == "entity":
             # A typed vocabulary Entity (design 8cbdc883 (1)): the op is the WHOLE record, so
@@ -1764,13 +1778,13 @@ async def _dispatch(args) -> int:
                     started = datetime.strptime(args.key, "%Y-%m-%d_%H-%M-%S").timestamp()
                 except ValueError:
                     started = None
+            # THE PLAN (design detail 65f4a6c9): a re-register that leaves the spine node as it
+            # stands journals nothing (ruling 17daa86b); the op applies through the replay's applier
             res = await register_session(gx, args.key, started_at=started,
-                                         title=args.title, actor=args.actor)
+                                         title=args.title, actor=args.actor, write=False)
+            if res.get("op"):
+                res = (await writes.write("session", res["op"])).result
             print(render("session", res, args.format))
-            if args.journal_path and res.get("written"):
-                append_write(args.journal_path, "session",
-                             {"key": args.key, "started_at": started, "title": args.title,
-                              "actor": args.actor})
             return 1 if res.get("error") else 0
         elif args.command == "retract-session":
             # Emptiness guard CALLER-side (the verb + replay apply unconditionally):
@@ -1787,11 +1801,12 @@ async def _dispatch(args) -> int:
                       f"attributed to it — not an empty mint. Re-run with --force to "
                       f"retract anyway.", file=sys.stderr)
                 return 1
-            res = await retract_session(gx, args.key, actor=args.actor)
+            # THE PLAN (design detail 65f4a6c9): no spine node standing journals nothing (ruling
+            # 17daa86b); the op applies through the replay's applier
+            res = await retract_session(gx, args.key, actor=args.actor, write=False)
+            if res.get("op"):
+                res = (await writes.write("retract-session", res["op"])).result
             print(render("retract-session", res, args.format))
-            if args.journal_path and res.get("written"):
-                append_write(args.journal_path, "retract-session",
-                             {"key": args.key, "actor": args.actor})
             return 1 if res.get("error") else 0
         elif args.command == "pull-transcript":
             # Scratchpad-v2 pull (fc6a0cdc): mint the active path's user-facing
@@ -1898,12 +1913,15 @@ async def _dispatch(args) -> int:
         elif args.command == "link":
             # A `<graph key>:<id>` target routes into the sibling graph named by this
             # graph's config (0154f5e4) — observed read-only, landed as a Reference.
+            # THE PLAN (design detail 65f4a6c9): endpoints resolved, the sibling observed, a link
+            # that changes nothing caught (ruling 17daa86b); the op -- the observation riding it --
+            # applies through the replay's applier, which never opens the sibling
             res = await link(gx, args.source_id, args.target_id, args.relation, actor=args.actor,
                              siblings=sibling_graphs(load_graph_config(args.graph_db_path)),
-                             manifests_dir=args.manifests_dir)
+                             manifests_dir=args.manifests_dir, write=False)
+            if res.get("op"):
+                res = (await writes.write("link", res["op"])).result
             print(render("link", res, args.format))
-            if args.journal_path and res.get("written") and not res.get("noop"):
-                append_write(args.journal_path, "link", _link_op(res, args.relation, args.actor))
             return 1 if res.get("error") else 0
         elif args.command == "unlink":
             if args.journal_path and not args.force:
@@ -1925,13 +1943,14 @@ async def _dispatch(args) -> int:
                           f"this looks like an ingest-derived (structural) edge; "
                           f"pass --force to retract it anyway (nothing deleted)")
                     return 1
+            # THE PLAN (design detail 65f4a6c9): endpoints resolved, an edge already absent
+            # between standing endpoints caught (ruling 17daa86b); the op applies through the
+            # replay's applier
             res = await unlink(gx, args.source_id, args.target_id, args.relation,
-                               actor=args.actor)
+                               actor=args.actor, write=False)
+            if res.get("op"):
+                res = (await writes.write("unlink", res["op"])).result
             print(render("unlink", res, args.format))
-            if args.journal_path and res.get("written"):
-                append_write(args.journal_path, "unlink",
-                             {"source_id": res["source_id"], "target_id": res["target_id"],
-                              "relation": res["relation"], "actor": args.actor})
             return 1 if res.get("error") else 0
         elif args.command == "propose":
             # Triage proposals (bb015d12): the frontier's verification substrate (writes +
@@ -1987,16 +2006,15 @@ async def _dispatch(args) -> int:
             return 0
         elif str(args.command).startswith("notes-"):
             # The pure-notes lane (ruling a7262fe7, item fdafeed9): its own dispatcher.
-            return await _notes_lane_command(args, gx)
+            return await _notes_lane_command(args, gx, writes)
         elif args.command == "check":
-            res = await add_check(gx, args.item, args.text, actor=args.actor)
+            # THE PLAN (design detail 65f4a6c9): the op journals the RESOLVED item id (a prefix
+            # resolves against TODAY's db; replay must land on the same node regardless of future
+            # prefix collisions), a check already standing journals nothing (ruling 17daa86b)
+            res = await add_check(gx, args.item, args.text, actor=args.actor, write=False)
+            if res.get("op"):
+                res = (await writes.write("check", res["op"])).result
             print(render("check", res, args.format))
-            # Journal the RESOLVED item id (a prefix resolves against TODAY's db;
-            # replay must land on the same node regardless of future prefix collisions).
-            if args.journal_path and res.get("written"):
-                append_write(args.journal_path, "check",
-                             {"item_id": res["item_id"], "text": args.text,
-                              "actor": args.actor})
             return 1 if res.get("error") else 0
         elif args.command == "author":
             replace, edit = None, None
@@ -2617,23 +2635,6 @@ def _apply_graph_config(args) -> None:
                 setattr(args, attr, cfg[key])
 
 
-def _link_op(
-    res: Dict[str, Any],  # link's result
-    relation: str,
-    actor: str,
-) -> Dict[str, Any]:  # The journaled `link` op's args
-    """A link's op: the RESOLVED ids (a prefix resolves against today's db; replay must land on
-    the same nodes), audit-only endpoint labels (the orphaned-edge detector's remap input), and a
-    cross-graph link's observation plus a source's facts (722a8232) -- replay never opens the sibling."""
-    op = {"source_id": res["source_id"], "target_id": res["target_id"], "relation": relation,
-          "actor": actor, "source_label": res.get("source_label"), "target_label": res.get("target_label")}
-    if res.get("observation"):
-        op["observation"] = res["observation"]
-    if res.get("source_facts"):
-        op["source_facts"] = res["source_facts"]
-    return op
-
-
 def _notes_lane_root(args: argparse.Namespace) -> Path:
     """Where the lane's packs + proposal sets live: `--out-dir`, else `<journal dir>/purenotes`
     (the PRIVATE repo beside the notes journal — inference output is provenance, never public)."""
@@ -2662,7 +2663,11 @@ def _read_rows_file(path: Path) -> list:
     return rows
 
 
-async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
+async def _notes_lane_command(
+    args: argparse.Namespace,
+    gx,
+    writes: InvocationWrites,  # The invocation's writes-journal unit of work (design detail 65f4a6c9)
+) -> int:
     """The pure-notes lane's verbs (a7262fe7): type profile, pack, ingest, accept, retract,
     coverage, overlap, check, render. Writes journal exactly what replay needs."""
     from cjm_dev_graph_schema.identity import note_node_id
@@ -3126,12 +3131,13 @@ async def _notes_lane_command(args: argparse.Namespace, gx) -> int:
                       file=sys.stderr)
                 return 1
             source_link = await link(gx, note_id, f"{key}:{source['source_id']}", "DERIVED_FROM",
-                                     actor=args.actor, siblings=siblings, manifests_dir=args.manifests_dir)
+                                     actor=args.actor, siblings=siblings, manifests_dir=args.manifests_dir,
+                                     write=False)
             if source_link.get("error"):
                 print(f"error: the source link (nothing accepted): {source_link['error']}", file=sys.stderr)
                 return 1
-            if args.journal_path and source_link.get("written") and not source_link.get("noop"):
-                append_write(args.journal_path, "link", _link_op(source_link, "DERIVED_FROM", args.actor))
+            if source_link.get("op"):  # planned, then applied through the replay's applier (65f4a6c9)
+                source_link = (await writes.write("link", source_link["op"])).result
         type_fact = None
         tkey = await note_deliverable_type(gx, note_id)
         if tkey is None:

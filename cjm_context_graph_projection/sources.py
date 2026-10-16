@@ -129,10 +129,13 @@ async def apply_source_facts(
     facts: Dict[str, Any],     # observed_facts' result (the op carries it)
     *,
     actor: str = "agent:session",
+    write: bool = True,        # False = PLAN only (design detail 65f4a6c9 (1)): the predicates that WOULD assert, nothing written
 ) -> Dict[str, Any]:  # {asserted: [predicate], held: [{predicate, value, held_by}]}
     """Land an observation's facts on its Reference -- live and replay alike. An unchanged value
     is a no-op; a changed one supersedes the OBSERVED value it replaces; an authored value holds.
-    A source observed with no links clears an earlier links value and never mints an empty one."""
+    A source observed with no links clears an earlier links value and never mints an empty one.
+    With write=False the same walk reports what it would assert: a link's plan reads it to tell
+    a re-link that changes nothing (ruling 17daa86b)."""
     from .write import assert_value
     asserted: List[str] = []
     held: List[Dict[str, Any]] = []
@@ -149,6 +152,9 @@ async def apply_source_facts(
         if authored:
             held.append({"predicate": predicate, "value": value,
                          "held_by": str(F.prop(authored[0], "value") or "")})
+            continue
+        if not write:
+            asserted.append(predicate)
             continue
         res = await assert_value(gx, reference_id, predicate, value, actor=actor, method=OBSERVED,
                                  supersede=[F.nid(a) for a in active] or None)

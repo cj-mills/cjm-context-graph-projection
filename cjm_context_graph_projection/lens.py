@@ -149,6 +149,7 @@ async def set_lens(
     description: Optional[str] = None,  # One orientation line for the shelf
     actor: str = "agent:session",       # Who authored the view
     date: Optional[str] = None,         # The page's own date when the lens is a site page (verbatim; design e240183f (4))
+    write: bool = True,                 # False = PLAN only (design detail 65f4a6c9 (1)): every refusal, then the op under "op" (None = changes nothing), nothing written
 ) -> Dict[str, Any]:  # The write result (incl. error on a malformed spec)
     """Author/update a graph-carried Lens (journaled upsert-by-slug).
 
@@ -156,7 +157,8 @@ async def set_lens(
     re-author UPDATES the node (update_node — never trips the re-extend
     content-hash guard) and the journal's last `set-lens` op per slug wins on
     replay. CONSUMERS BIND THE SLUG, never the title (the session-picker lesson,
-    d377f5e6)."""
+    d377f5e6). THE PLAN (write=False): the op -- the spec as given, replay validates it
+    again -- or None when the lens already reads so (ruling 17daa86b)."""
     if not slug or not isinstance(slug, str):
         return {"error": "a lens needs a slug", "written": False}
     normalized, err = validate_lens_spec(spec)
@@ -173,6 +175,13 @@ async def set_lens(
         props["date"] = date
 
     existing = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=node_id)
+    if not write:
+        noop = F.holds(existing, props)
+        op = {"slug": slug, "spec": spec, "title": title, "description": description, "actor": actor}
+        if date is not None:  # only then, so every other op keeps its shape
+            op["date"] = date
+        return {"lens_id": node_id, "slug": slug, "updated": existing is not None, "written": False,
+                "noop": noop, "op": None if noop else op}
     if existing is not None:
         await graph_task(gx.queue, gx.graph_id, "update_node", node_id=node_id, properties=props)
         return {"lens_id": node_id, "slug": slug, "updated": True, "written": True}

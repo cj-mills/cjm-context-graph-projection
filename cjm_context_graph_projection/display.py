@@ -322,13 +322,15 @@ async def set_display_rule(
     gloss_template: Optional[str] = None,  # The `gloss` template (one orientation line)
     *,
     actor: str = "agent:session",          # Who authored the vocabulary
+    write: bool = True,                    # False = PLAN only (design detail 65f4a6c9 (1)): every refusal, then the op under "op" (None = changes nothing), nothing written
 ) -> Dict[str, Any]:  # The write result (incl. error on a malformed template)
     """Author/update the graph-carried DisplayRule for a kind (presentation vocabulary).
 
     Validates both templates against the frozen grammar BEFORE writing (a bad rule
     never lands). Deterministic id = one rule per kind: a re-author UPDATES the
     existing node (update_node — a changed template must not trip the re-extend
-    content-hash guard), so the journal's last `display-rule` op wins on replay."""
+    content-hash guard), so the journal's last `display-rule` op wins on replay.
+    THE PLAN (write=False): the op, or None when the rule already reads so (ruling 17daa86b)."""
     if not (title_template or gloss_template):
         return {"error": "a display rule needs --title and/or --gloss", "for_label": for_label,
                 "written": False}
@@ -347,6 +349,12 @@ async def set_display_rule(
         props["gloss_template"] = gloss_template
 
     existing = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=node_id)
+    if not write:
+        noop = F.holds(existing, props)
+        return {"rule_id": node_id, "for_label": for_label, "updated": existing is not None,
+                "written": False, "title_template": title_template, "gloss_template": gloss_template,
+                "noop": noop, "op": None if noop else {"for_label": for_label, "title_template": title_template,
+                                                        "gloss_template": gloss_template, "actor": actor}}
     if existing is not None:
         await graph_task(gx.queue, gx.graph_id, "update_node", node_id=node_id, properties=props)
         return {"rule_id": node_id, "for_label": for_label, "updated": True, "written": True,

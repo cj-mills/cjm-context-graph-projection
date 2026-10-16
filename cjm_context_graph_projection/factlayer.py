@@ -52,6 +52,19 @@ def prop(node: Any, key: str, default: Any = None) -> Any:
     return props(node).get(key, default)
 
 
+def holds(
+    node: Any,                   # A node (typed GraphNode or wire dict), or None when absent
+    properties: Dict[str, Any],  # The properties an upsert's update_node would merge in
+) -> bool:  # The node stands and already carries every one of them
+    """Whether an upsert would change nothing -- the PLAN's no-change test (ruling 17daa86b).
+    update_node merges and restamps the node's time, so a write that changes no property is
+    still a write: caught here, it is neither applied nor journaled."""
+    if node is None:
+        return False
+    cur = props(node)
+    return all(k in cur and cur[k] == v for k, v in properties.items())
+
+
 async def load_label(
     gx: GraphHandle,
     label: str,  # Node label to load

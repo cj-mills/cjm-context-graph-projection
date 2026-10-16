@@ -467,6 +467,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `alias_index` _function_ — Build the entity alias index + an id->entity lookup (rename-stable subjects).
 - `count_label` _function_ — Count nodes of a label (optionally predicate-filtered) — `NodeQuery(count=True)`.
 - `group_by_slot` _function_ — Group assertion nodes by their `slot_id` property.
+- `holds` _function_ — Whether an upsert would change nothing -- the PLAN's no-change test (ruling 17daa86b).
 - `label` _function_ — A node's label / kind (typed GraphNode or wire dict) — the sibling of `nid`/`props`.
 - `load_assertions` _function_ — All Assertion nodes.
 - `load_contradicts` _function_ — All CONTRADICTS pairs already recorded (for write idempotency / reporting).
@@ -1298,6 +1299,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `content_hash_of` _function_ — The content an approval binds to (design 40622922): a Note hashes as its lossless
 - `decide` _function_ — Record a Decision + its `SUPPORTED_BY` premise edges (reasoning substrate).
 - `link` _function_ — Mint a deliberate edge between two EXISTING nodes (heterogeneous interlink).
+- `link_op` _function_ — A link's op: the RESOLVED ids (a prefix resolves against today's db; replay must land on
 - `mint_procedure` _function_ — Upsert a Procedure node by deterministic (method) id — the programmatic value-source
 - `mint_proposal` _function_ — Mint a PROPOSAL — an agent-drafted update for ONE section of a stale deliverable
 - `observe_foreign` _function_ — Open the sibling graph READ-ONLY, resolve the foreign node, and take the observation.

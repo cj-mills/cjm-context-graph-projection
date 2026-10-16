@@ -117,13 +117,15 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
     if kind == "set-lens":
         if obj.get("error"):
             return f"⚠ {obj['error']}"
-        verb = "updated" if obj.get("updated") else "authored"
+        verb = ("unchanged (nothing journaled)" if obj.get("noop")
+                else "updated" if obj.get("updated") else "authored")
         return (f"**lens {verb}:** `{obj.get('slug')}`\n`{obj.get('lens_id')}`\n"
                 f"_apply it: `lens {obj.get('slug')}`_")
     if kind == "session":
         if obj.get("error"):
             return f"⚠ {obj['error']}"
-        verb = "updated" if obj.get("updated") else "registered"
+        verb = ("unchanged (nothing journaled)" if obj.get("noop")
+                else "updated" if obj.get("updated") else "registered")
         lines = [f"**session {verb}:** `{obj.get('key')}`", f"`{obj.get('session_id')}`"]
         if obj.get("started_at") is not None:
             lines.append(f"started {_fmt_ts(obj['started_at'])}")
@@ -241,7 +243,8 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
     if kind == "alias":
         if obj.get("error"):
             return f"⚠ {obj['error']}"
-        lines = [f"**aliased** `[[{obj.get('drifted')}]]` → **{obj.get('canonical')}** "
+        head = "already aliased (nothing journaled)" if obj.get("noop") else "aliased"
+        lines = [f"**{head}** `[[{obj.get('drifted')}]]` → **{obj.get('canonical')}** "
                  f"(actor {obj.get('actor')})",
                  f"`assertion {obj.get('assertion_id')}`"]
         ev = obj.get("evidence") or []
@@ -266,7 +269,8 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
     if kind == "link":
         if obj.get("error"):
             return f"⚠ {obj['error']}"
-        out = (f"**linked** `{obj.get('source_id')}` —_{obj.get('relation')}_→ "
+        head = "already linked (nothing journaled)" if obj.get("noop") else "linked"
+        out = (f"**{head}** `{obj.get('source_id')}` —_{obj.get('relation')}_→ "
                f"`{obj.get('target_id')}` (actor {obj.get('actor')})\n"
                f"`edge {obj.get('edge_id')}`")
         obs = obj.get("observation")
@@ -290,9 +294,11 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
         if obj.get("error"):
             return f"⚠ {obj['error']}"
         outcome = "retracted" if obj.get("deleted") else "already absent (no-op)"
+        tail = ("nothing journaled" if obj.get("noop")
+                else "retraction journaled; replay converges without it")
         return (f"**unlinked** `{obj.get('source_id')}` —_{obj.get('relation')}_→ "
                 f"`{obj.get('target_id')}` — edge {outcome}\n"
-                f"`edge {obj.get('edge_id')}` (retraction journaled; replay converges without it)")
+                f"`edge {obj.get('edge_id')}` ({tail})")
     if kind == "propose":
         # Triage proposals (bb015d12): what was drafted, what was skipped and why.
         c = obj.get("counts", {})
@@ -340,7 +346,8 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
     if kind == "check":
         if obj.get("error"):
             return f"⚠ {obj['error']}"
-        return (f"**check attached** to **{_short(obj.get('item_label', ''), 80)}** "
+        head = "check already attached (nothing journaled)" if obj.get("noop") else "check attached"
+        return (f"**{head}** to **{_short(obj.get('item_label', ''), 80)}** "
                 f"`{obj.get('item_id')}`\n"
                 f"_{obj.get('text')}_\n"
                 f"`check {obj.get('check_id')}` (task_state=open; close with "
@@ -686,7 +693,8 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
     if kind == "display-rule":
         if obj.get("error"):
             return f"⚠ {obj['error']}"
-        verb = "updated" if obj.get("updated") else "authored"
+        verb = ("unchanged (nothing journaled)" if obj.get("noop")
+                else "updated" if obj.get("updated") else "authored")
         lines = [f"**display-rule {verb}** for kind `{obj.get('for_label')}`",
                  f"`rule {obj.get('rule_id')}`"]
         if obj.get("title_template") is not None:

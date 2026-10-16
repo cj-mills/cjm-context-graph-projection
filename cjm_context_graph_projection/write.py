@@ -480,6 +480,7 @@ async def alias(
     *,
     actor: str = "agent:session",       # Who confirmed the equivalence
     evidence: Optional[List[str]] = None,  # Source-note ids that carried the broken link (auto-discovered upstream)
+    write: bool = True,                 # False = PLAN only (design detail 65f4a6c9 (1)): every refusal, then the op under "op" (None = changes nothing), nothing written
 ) -> Dict[str, Any]:  # The write result (incl. error when the canonical note is absent)
     """Confirm a drifted link slug as an alias OF a real note (the worklist payoff).
 
@@ -488,17 +489,29 @@ async def alias(
     conflict. Ingest then resolves the drifted reference through it (the dangling
     edge heals) and the worklist drops it. The canonical note MUST exist (we never
     mint a phantom for a confirmed target); evidence is the notes the broken link
-    appeared in (provenance of the rot). Idempotent on (note, alias, actor)."""
+    appeared in (provenance of the rot). Idempotent on (note, alias, actor).
+
+    THE PLAN (write=False): the canonical note found and the `aka` claim planned
+    (assert_value's plan) -- the op, or None when this actor's alias already stands (ruling
+    17daa86b). The evidence arrives resolved: the CLI resolves it as `assert` does."""
     canonical_id = note_node_id(canonical_slug)
     target = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=canonical_id)
     if target is None:
         return {"error": f"no note `{canonical_slug}` to alias to", "drifted": drifted_slug,
                 "canonical": canonical_slug, "written": False}
     res = await assert_value(gx, canonical_id, "aka", drifted_slug,
-                             actor=actor, evidence=evidence)
-    return {"drifted": drifted_slug, "canonical": canonical_slug, "canonical_id": canonical_id,
-            "actor": actor, "evidence": evidence or [], "assertion_id": res["assertion_id"],
-            "nodes_added": res["nodes_added"], "edges_added": res["edges_added"], "written": True}
+                             actor=actor, evidence=evidence, write=write)
+    if res.get("error"):
+        return {"error": res["error"], "drifted": drifted_slug, "canonical": canonical_slug,
+                "written": False}
+    out = {"drifted": drifted_slug, "canonical": canonical_slug, "canonical_id": canonical_id,
+           "actor": actor, "evidence": evidence or [], "assertion_id": res["assertion_id"],
+           "nodes_added": res["nodes_added"], "edges_added": res["edges_added"], "written": write}
+    if not write:
+        noop = res["op"] is None
+        out.update(noop=noop, op=None if noop else {"drifted": drifted_slug, "canonical": canonical_slug,
+                                                    "actor": actor, "evidence": evidence})
+    return out
 
 
 async def decide(
@@ -586,6 +599,7 @@ async def link(
     observation: Optional[Dict[str, Any]] = None,     # REPLAY: the journaled observation — the Reference is rebuilt from it, no sibling opened
     source_facts: Optional[Dict[str, Any]] = None,    # REPLAY: the journaled facts a Source / Collection stated at observation (722a8232)
     manifests_dir: str = DEFAULT_MANIFESTS,           # For opening the sibling read-only
+    write: bool = True,                               # False = PLAN only (design detail 65f4a6c9 (1)): every refusal, then the op under "op" (None = changes nothing), nothing written
 ) -> Dict[str, Any]:  # The write result (incl. error when an endpoint is missing/ambiguous)
     """Mint a deliberate edge between two EXISTING nodes (heterogeneous interlink).
 
@@ -609,7 +623,11 @@ async def link(
     written, never needed for a rebuild). Re-linking an existing Reference RE-OBSERVES:
     a moved hash updates the node in place (the journal carries the new observation).
     A Source or a Collection's locator and citation land with it as observed facts on the
-    Reference (`sources.apply_source_facts`); the op carries them as `source_facts`."""
+    Reference (`sources.apply_source_facts`); the op carries them as `source_facts`.
+
+    THE PLAN (write=False): the endpoints resolved and the foreign node observed, every refusal
+    passed, and the op `link_op` journals -- or None when the link changes nothing (the edge
+    standing, the Reference minted at the same hash, no fact to assert: ruling 17daa86b)."""
     src_res = await resolve_node_ref(gx, source_id)
     if "candidates" in src_res:
         return {"error": ambiguity_error(source_id, src_res["candidates"]), "source_id": source_id,
@@ -640,19 +658,15 @@ async def link(
             facts = obs.get("facts") or {}
 
     nodes: List[Dict[str, Any]] = []
-    reobserved = False
+    reobserve = False
     if reference is not None:
         target_id = reference.id
         wire = reference.to_graph_node()
         existing = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=target_id)
         if existing is None:
             nodes.append(wire)
-        elif F.prop(existing, "observed_hash") != reference.observed_hash:
-            # Re-observation: the foreign node moved since the last look — refresh the
-            # stand-in in place (extend_graph verifies, never updates, a present node).
-            await graph_task(gx.queue, gx.graph_id, "update_node", node_id=target_id,
-                             properties=wire["properties"])
-            reobserved = True
+        else:
+            reobserve = F.prop(existing, "observed_hash") != reference.observed_hash
         tgt: Any = wire
     else:
         tgt_res = await resolve_node_ref(gx, target_id)
@@ -666,26 +680,55 @@ async def link(
         target_id = F.nid(tgt)  # the RESOLVED endpoint id
 
     edge = make_edge(source_id, target_id, relation, properties={"actor": actor})
-    res = await extend_graph(gx.queue, gx.graph_id, nodes, [edge])
     out = {"source_id": source_id, "target_id": target_id, "relation": relation,
-           "actor": actor, "edge_id": edge["id"], "edges_added": res.edges_added,
-           "source_label": _label(src), "target_label": _label(tgt),
-           "written": True}
+           "actor": actor, "edge_id": edge["id"], "source_label": _label(src),
+           "target_label": _label(tgt)}
     if reference is not None:
         out["observation"] = reference.observation()
+        if facts:
+            out["source_facts"] = facts
+    if not write:
+        from .sources import apply_source_facts
+        standing = await graph_task(gx.queue, gx.graph_id, "get_edge", edge_id=edge["id"]) is not None
+        would = (await apply_source_facts(gx, target_id, facts, actor=actor, write=False)
+                 if reference is not None and facts else {"asserted": [], "held": []})
+        noop = standing and not (nodes or reobserve or would["asserted"])
+        return {**out, "edges_added": 0, "written": False, "noop": noop,
+                "op": None if noop else link_op(out)}
+    if reobserve:
+        # Re-observation: the foreign node moved since the last look — refresh the
+        # stand-in in place (extend_graph verifies, never updates, a present node).
+        await graph_task(gx.queue, gx.graph_id, "update_node", node_id=target_id,
+                         properties=wire["properties"])
+    res = await extend_graph(gx.queue, gx.graph_id, nodes, [edge])
+    out.update(edges_added=res.edges_added, written=True)
+    if reference is not None:
         out["reference_added"] = res.nodes_added
-        out["reobserved"] = reobserved
+        out["reobserved"] = reobserve
         applied: Dict[str, Any] = {"asserted": [], "held": []}
         if facts:
             from .sources import apply_source_facts
             applied = await apply_source_facts(gx, target_id, facts, actor=actor)
-            out["source_facts"] = facts
             out["facts_asserted"] = applied["asserted"]
             out["facts_held"] = applied["held"]
-        # An unchanged re-link is a verified no-op: nothing to journal (a fresh observed_at
-        # alone would defeat append_write's dedup and pile identical observations up).
-        out["noop"] = not (res.nodes_added or res.edges_added or reobserved or applied["asserted"])
+        out["noop"] = not (res.nodes_added or res.edges_added or reobserve or applied["asserted"])
     return out
+
+
+def link_op(
+    res: Dict[str, Any],  # link's result or plan
+) -> Dict[str, Any]:  # The journaled `link` op's args
+    """A link's op: the RESOLVED ids (a prefix resolves against today's db; replay must land on
+    the same nodes), audit-only endpoint labels (the orphaned-edge detector's remap input), and a
+    cross-graph link's observation plus a source's facts (722a8232) -- replay never opens the sibling."""
+    op = {"source_id": res["source_id"], "target_id": res["target_id"], "relation": res["relation"],
+          "actor": res["actor"], "source_label": res.get("source_label"),
+          "target_label": res.get("target_label")}
+    if res.get("observation"):
+        op["observation"] = res["observation"]
+    if res.get("source_facts"):
+        op["source_facts"] = res["source_facts"]
+    return op
 
 
 async def add_check(
@@ -694,6 +737,7 @@ async def add_check(
     text: str,        # The check statement
     *,
     actor: str = "agent:session",  # Who attached it
+    write: bool = True,            # False = PLAN only (design detail 65f4a6c9 (1)): every refusal, then the op under "op" (None = changes nothing), nothing written
 ) -> Dict[str, Any]:  # The write result (incl. error when the item is missing/ambiguous)
     """Attach a definition-of-done check to a work item (DoD-as-graph-objects).
 
@@ -705,7 +749,10 @@ async def add_check(
     Deterministic (item, text) identity makes re-attaching (and journal replay) a
     verified no-op; a replayed `open` after a later `done` lands born-superseded
     (ordered-predicate supersession), so a rebuild converges on the true state.
-    The item MUST exist — a check is never left dangling (like `link`)."""
+    The item MUST exist — a check is never left dangling (like `link`).
+
+    THE PLAN (write=False): the item resolved to its id, and the op -- or None when this
+    actor's check already stands with its `open` assertion (ruling 17daa86b)."""
     res = await resolve_node_ref(gx, item)
     if "candidates" in res:
         return {"error": ambiguity_error(item, res["candidates"]), "item": item,
@@ -719,11 +766,20 @@ async def add_check(
     item_label = str(props.get("display_title") or props.get("title")
                      or props.get("name") or props.get("statement") or item_id)
     check = CheckNode(item_id=item_id, text=text, actor=actor)
+    out = {"check_id": check.id, "item_id": item_id, "item_label": item_label,
+           "text": text, "actor": actor}
+    if not write:
+        noop = False
+        if await graph_task(gx.queue, gx.graph_id, "get_node", node_id=check.id) is not None:
+            state = await assert_value(gx, check.id, P.TASK_STATE, P.TASK_OPEN, actor=actor, write=False)
+            noop = await graph_task(gx.queue, gx.graph_id, "get_node",
+                                    node_id=state["assertion_id"]) is not None
+            out["assertion_id"] = state["assertion_id"]
+        return {**out, "written": False, "noop": noop,
+                "op": None if noop else {"item_id": item_id, "text": text, "actor": actor}}
     await extend_graph(gx.queue, gx.graph_id, [check.to_graph_node()], [check.checks_edge()])
     state = await assert_value(gx, check.id, P.TASK_STATE, P.TASK_OPEN, actor=actor)
-    return {"check_id": check.id, "item_id": item_id, "item_label": item_label,
-            "text": text, "actor": actor,
-            "assertion_id": state.get("assertion_id"), "written": True}
+    return {**out, "assertion_id": state.get("assertion_id"), "written": True}
 
 
 async def author_section(
@@ -885,6 +941,7 @@ async def register_session(
     started_at: Optional[float] = None,  # Unix start time (the window anchor; end is DERIVED, never stored)
     title: Optional[str] = None,         # Human-friendly name — asserted at session END, like decision titles
     actor: str = "agent:session",
+    write: bool = True,                  # False = PLAN only (design detail 65f4a6c9 (1)): the op under "op" (None = changes nothing), nothing written
 ) -> Dict[str, Any]:  # The write result
     """Register/update a timestamp-keyed Session node — the session SPINE (DEC 6124d8bf).
 
@@ -893,7 +950,10 @@ async def register_session(
     re-register with --title. Existing properties are MERGED — a later title write must
     not clobber `started_at`. The window's END is derived at read time (next session's
     start / last write), never stored: a stored end would drift from the journal it
-    summarizes. Pre-spine NAMED Sessions stay as phases (PHASE_OF), not competitors."""
+    summarizes. Pre-spine NAMED Sessions stay as phases (PHASE_OF), not competitors.
+
+    THE PLAN (write=False): the op -- or None when the merge would leave the standing node's
+    properties as they are (a boot re-register of a minted key: ruling 17daa86b)."""
     sess = SessionNode(key=key, title=title or "")
     node = sess.to_graph_node()
     props = node["properties"]
@@ -903,11 +963,17 @@ async def register_session(
     if title:
         props["display_title"] = title
     existing = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=sess.id)
+    cur = ((existing.get("properties") if isinstance(existing, dict)
+            else getattr(existing, "properties", None)) or {}) if existing is not None else {}
+    merged = {**cur, **props}
+    if not write:
+        noop = F.holds(existing, props)
+        return {"session_id": sess.id, "key": key, "updated": existing is not None,
+                "written": False, "started_at": merged.get("started_at"),
+                "title": merged.get("display_title") or None, "noop": noop,
+                "op": None if noop else {"key": key, "started_at": started_at, "title": title,
+                                         "actor": actor}}
     if existing is not None:
-        cur = (existing.get("properties") if isinstance(existing, dict)
-               else getattr(existing, "properties", None)) or {}
-        merged = dict(cur)
-        merged.update(props)
         await graph_task(gx.queue, gx.graph_id, "update_node", node_id=sess.id,
                          properties=merged)
         return {"session_id": sess.id, "key": key, "updated": True, "written": True,
@@ -924,6 +990,7 @@ async def unlink(
     relation: str,     # The edge relation to retract
     *,
     actor: str = "agent:session",  # Who retracted it (journal provenance; the edge itself is gone)
+    write: bool = True,            # False = PLAN only (design detail 65f4a6c9 (1)): every refusal, then the op under "op" (None = changes nothing), nothing written
 ) -> Dict[str, Any]:  # The write result (incl. error when an endpoint is missing/ambiguous)
     """RETRACT a deliberate edge — the write dual of `link` (finding 2f1d9382).
 
@@ -938,7 +1005,11 @@ async def unlink(
     FULL-id triple retracts anyway (finding 78cff95f): the db edge is already
     gone (cascade), but the JOURNALED link op would poison the orphan audit
     forever and resurrect the edge if the endpoint id ever re-resolved, so the
-    compensating op must stay recordable."""
+    compensating op must stay recordable.
+
+    THE PLAN (write=False): the endpoints resolved, and the op -- or None when the edge is
+    already absent between two standing endpoints (ruling 17daa86b). An orphaned triple
+    always plans its op: the compensating op is the point (78cff95f)."""
     src_res = await resolve_node_ref(gx, source_id)
     tgt_res = await resolve_node_ref(gx, target_id)
     for ref, res in ((source_id, src_res), (target_id, tgt_res)):
@@ -955,10 +1026,16 @@ async def unlink(
     source_id = F.nid(src) if src is not None else source_id
     target_id = F.nid(tgt) if tgt is not None else target_id
     edge_id = make_edge(source_id, target_id, relation)["id"]
+    out = {"source_id": source_id, "target_id": target_id, "relation": relation,
+           "actor": actor, "edge_id": edge_id}
+    if not write:
+        standing = await graph_task(gx.queue, gx.graph_id, "get_edge", edge_id=edge_id) is not None
+        noop = not standing and not missing
+        return {**out, "deleted": 0, "written": False, "noop": noop,
+                "op": None if noop else {"source_id": source_id, "target_id": target_id,
+                                         "relation": relation, "actor": actor}}
     deleted = await graph_task(gx.queue, gx.graph_id, "delete_edges", edge_ids=[edge_id])
-    return {"source_id": source_id, "target_id": target_id, "relation": relation,
-            "actor": actor, "edge_id": edge_id, "deleted": int(deleted or 0),
-            "written": True}
+    return {**out, "deleted": int(deleted or 0), "written": True}
 
 
 async def retract_session(
@@ -966,6 +1043,7 @@ async def retract_session(
     key: str,           # The session key whose spine node should be removed
     *,
     actor: str = "agent:session",  # Who retracted it (journal provenance; the node itself is gone)
+    write: bool = True,            # False = PLAN only (design detail 65f4a6c9 (1)): the op under "op" (None = changes nothing), nothing written
 ) -> Dict[str, Any]:  # The write result
     """RETRACT a Session spine node — the write dual of `register_session`, on
     `unlink`'s compensating-op pattern (finding 2f1d9382): the journal is
@@ -977,9 +1055,17 @@ async def retract_session(
     the journaled retraction unconditionally, and a missing node is a tolerated
     no-op (`deleted: 0`, deterministic id) — that is what keeps replay
     idempotent. `cascade=True` mirrors node deletion semantics elsewhere; an
-    actually-empty session has no edges for it to reach."""
+    actually-empty session has no edges for it to reach.
+
+    THE PLAN (write=False): the op -- or None when no spine node stands for the key (ruling
+    17daa86b)."""
     sess_id = SessionNode(key=key).id
     existing = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=sess_id)
+    if not write:
+        noop = existing is None
+        return {"session_id": sess_id, "key": key, "deleted": 0, "written": False,
+                "actor": actor, "noop": noop,
+                "op": None if noop else {"key": key, "actor": actor}}
     if existing is None:
         return {"session_id": sess_id, "key": key, "deleted": 0, "written": True,
                 "actor": actor}
