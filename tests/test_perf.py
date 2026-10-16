@@ -12,9 +12,10 @@ from pathlib import Path
 
 import pytest
 from cjm_context_graph_primitives.journal import append_op, read_journal
-from cjm_context_graph_projection.perf import (fit, guards, io_row, load_report, net_written,
-                                               perf_report, render_perf, self_times, series_trend,
-                                               target_standing, tier_curves, tier_regressions)
+from cjm_context_graph_projection.perf import (fit, guards, io_row, knee, load_report, net_written,
+                                               parse_roles, perf_report, render_perf, self_times,
+                                               series_trend, target_standing, tier_curves,
+                                               tier_regressions)
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS
 
 
@@ -229,7 +230,7 @@ def test_target_standing_reads_shape_absolute_and_membership():
     """Design detail 2f5033bf (3): each seat against its class -- a flat read passes, a linear
     by-id read fails, a cost linear in a linear answer passes per answer, a seat in no class is
     NO TARGET, a picker that timed out fails at x32 although it never ran there, and a class
-    carrying only load targets claims no seat (its load rows are unmeasured with no load run)."""
+    whose members are loads claims no seat (its load rows are unmeasured with no load run)."""
     tiers = (1, 2, 4, 8, 16, 32)
     events = (_tier_runs("dev", "read", {k: 0.01 for k in tiers})
               + _tier_runs("dev", "show", {k: 0.05 * k for k in tiers})
@@ -243,9 +244,9 @@ def test_target_standing_reads_shape_absolute_and_membership():
         {"key": "class-2", "targets": {"perf_b_max": "0.2", "perf_per_answer": "true"}, "members": ["locate"]},
         {"key": "class-3", "targets": {"perf_b_max": "1.1", "perf_x32_s": "1", "perf_gates": "true"},
          "members": ["picker"]},
-        {"key": "class-7", "targets": {"perf_load_p99_ratio": "2", "perf_gates": "true"},
-         "members": ["read", "show"]}]
-    st = target_standing(tier_curves(events), [], classes)
+        {"key": "class-7i", "targets": {"perf_load_p99_ratio": "2", "perf_gates": "true"},
+         "members": ["load-L1"]}]
+    st = target_standing(tier_curves(events), [], classes, load_defs={"load-L1": {"tier": 32, "lane": "dev"}})
     by = {s["seat"]: s for s in st["seats"]}
     assert by["read"]["class"] == "class-1" and by["read"]["status"] == "pass" and by["read"]["gate"]
     assert by["show"]["status"] == "fail" and not by["show"]["gate"]
@@ -356,3 +357,73 @@ def test_tier_regressions_and_the_load_read():
     assert (show["n"], show["p50_s"], show["p99_s"], show["verb_p99_s"]) == (2, 1.0, 3.0, 1.5)
     assert r["written"] == 3000 and r["peak_rss_kb"] == 2048 and r["integrity"] == {"ok": True}
     assert r["writes_per_s"] == 0.25 and r["ops_per_s"] == 0.75
+
+
+def test_the_named_loads_read_7i_7b_7v_and_a_composed_load_never_gates():
+    """Design detail 2c4bad75 (5): a named load's latest full run at its tier -- 7i the interactive
+    clients' p99 on class (1)-(2) verbs over the solo pass's, 7b its own write floor, no failure,
+    no integrity break and the summed RSS's growth over the scale sweep with the knee, 7v the held
+    reader's p99; the largest op and the roles are reported; a composed load is a projection
+    whose gate never counts toward promotion."""
+    assert parse_roles("main=1 ingest=1, sub=4") == {"main": 1, "ingest": 1, "sub": 4}
+    with pytest.raises(ValueError):
+        parse_roles("main=one")
+
+    def run(load_id, perf_load, clients, calls, t0, solo=None, scale=1.0, composed=False, aborted=None):
+        base = {"lane": "dev", "tier": 32, "load": load_id, "clients": clients, "perf_load": perf_load,
+                "scale": scale, "composed": composed, **({"solo": solo} if solo else {})}
+        evs = []
+        for i, (client, role, inter, verb, wall, appended) in enumerate(calls):
+            a = {**base, "client": client, "role": role, "interactive": inter}
+            rid = f"{load_id}-{i}"
+            evs.append({"verb": verb, "kind": "bench", "run_id": rid, "ts": t0 + i + wall,
+                        "wall_s": wall, "outcome": 0, "attrs": a})
+            evs.append({"verb": verb, "kind": "cli", "run_id": rid, "ts": t0 + i + wall, "wall_s": wall,
+                        "outcome": 0, "attrs": {**a, "read_only": not appended},
+                        "appended": {"w.jsonl": {"ops": 1, "bytes": appended}} if appended else {}})
+        evs.append({"verb": "bench-load", "kind": "bench", "ts": t0 + 100, "wall_s": 10.0,
+                    "peak_rss_kb": 1000, "integrity": {"ok": True}, "attrs": base, "aborted": aborted,
+                    "visibility": {"n": 2, "p50_s": 0.01, "p99_s": 0.05, "max_s": 0.05, "unseen": 0}})
+        return evs
+    l1 = [(0, "main", True, "show", 0.4, 0), (0, "main", True, "show", 0.6, 0),
+          (1, "sub", True, "show", 0.5, 0), (2, "ingest", False, "pull-transcript", 2.0, 5000)]
+    events = (run("a", "load-L1", 3, l1, 0.0)
+              + run("s", "load-L1", 1, [(0, "main", True, "show", 0.4, 0)], 200.0, solo="main")
+              + run("b", "load-L1", 6, l1 * 2, 300.0, scale=2.0)
+              + run("c", "load-L1", 12, l1 * 4, 500.0, scale=4.0)
+              + run("p", "load-S4", 16, l1, 700.0, composed=True)
+              + run("g", "load-L1", 24, l1, 900.0, scale=8.0, aborted="the clients' summed RSS passed the ceiling"))
+    loads = load_report(events)
+    full = next(r for r in loads if r["perf_load"] == "load-L1" and r["scale"] == 1.0 and not r["solo"])
+    assert full["largest_op"]["verb"] == "pull-transcript" and full["largest_op"]["bytes"] == 5000
+    assert [x["role"] for x in full["roles"]] == ["ingest", "main", "sub"]
+    assert [v["verb"] for v in full["interactive"]] == ["show"] and full["visibility"]["p99_s"] == 0.05
+    classes = [{"key": "class-1", "position": 1, "targets": {"perf_b_max": "0.2"}, "members": ["show"]},
+               {"key": "class-7i", "position": 7, "targets": {"perf_load_p99_ratio": "2"}, "members": ["load-L1"]},
+               {"key": "class-7b", "position": 7, "targets": {"perf_load_rss_b_max": "0.2"},
+                "members": ["load-L1", "load-S4"]},
+               {"key": "class-7v", "position": 7, "targets": {"perf_load_visibility_p99_s": "1"},
+                "members": ["load-L1"]}]
+    defs = {"load-L1": {"tier": 32, "lane": "dev", "writes_min": 0.1},
+            "load-S4": {"tier": 32, "lane": "dev", "writes_min": None}}
+    st = target_standing([], loads, classes, load_defs=defs)
+    rows = {(r["class"], r["load"]): r for r in st["loads"]}
+    seven_i = rows[("class-7i", "load-L1")]
+    assert seven_i["status"] == "pass" and seven_i["checks"][0]["value"] == pytest.approx(0.6 / 0.4)
+    assert [c["target"] for c in seven_i["checks"]] == ["interactive p99 ratio"]  # the load's floor is 7b's
+    seven_b = rows[("class-7b", "load-L1")]
+    assert {c["target"] for c in seven_b["checks"]} == {"load writes/s", "load RSS b", "failures",
+                                                         "integrity breaks"}
+    # the aborted run is the guard's reading: never in the knee or the RSS growth
+    assert seven_b["status"] == "pass" and seven_b["knee"]["clients"] in (3, 6, 12) and seven_b["guard_at"] == 24
+    assert knee([{"clients": 1, "ops_per_s": 1.0}, {"clients": 2, "ops_per_s": 1.9},
+                 {"clients": 4, "ops_per_s": 2.0}]) == {"clients": 2, "ops_per_s": 1.9, "beyond": False}
+    assert knee([{"clients": 1, "ops_per_s": 1.0}, {"clients": 2, "ops_per_s": 2.0}])["beyond"]
+    assert knee([{"clients": 1, "ops_per_s": 1.0}]) is None
+    assert rows[("class-7v", "load-L1")]["status"] == "pass"
+    s4 = rows[("class-7b", "load-S4")]
+    assert s4["composed"] and s4["status"].startswith("projection") and s4["gate"] is None
+    assert all(s["seat"] != "show" or s["class"] == "class-1" for s in st["seats"])
+    assert "load-S4 x32" in render_perf({"ledger": "g.timings.jsonl", "events": 0, "verbs": [], "rebuilds": [],
+                                          "load": loads, "standing": st, "regressions": [], "fits": [],
+                                          "guards": [], "unmeasured": []})

@@ -78,7 +78,10 @@ ENTITY_FIELDS: Dict[str, Dict[str, type]] = {
     P.ENTITY_SECTION_ROLE: {"description": str, "not_for": str, "position": int, "retired": bool},
     # The performance target classes (ruling dba17ca8, design detail 2f5033bf (3)): the targets
     # themselves are facts on the class (P.PERF_TARGETS, P.PERF_MEMBER), never record fields
-    P.ENTITY_PERF_CLASS: {"description": str, "position": int},
+    P.ENTITY_PERF_CLASS: {"description": str, "position": int, "retired": bool},
+    # The planning loads (ruling 110c662f (5), design detail 2c4bad75 (1)): a load's intent is
+    # facts on it (P.PERF_LOAD_FACTS, P.PERF_LOAD_WITH, its own write floor), never record fields
+    P.ENTITY_PERF_LOAD: {"description": str, "position": int, "retired": bool},
 }
 _REQUIRED = {P.ENTITY_TASK: ("position",), P.ENTITY_STAGE: ("position",),
              P.ENTITY_HARDWARE: ("device_class",), P.ENTITY_CLAIM: ("statement", "position"),
@@ -88,7 +91,8 @@ _REQUIRED = {P.ENTITY_TASK: ("position",), P.ENTITY_STAGE: ("position",),
              P.ENTITY_ARTIFACT_KIND: ("description",), P.ENTITY_ARTIFACT: ("artifact_kind",),
              P.ENTITY_ENVIRONMENT: ("description",), P.ENTITY_CONCEPT: ("description", "not_for", "area"),
              P.ENTITY_SECTION_ROLE: ("description", "not_for", "position"),
-             P.ENTITY_PERF_CLASS: ("description", "position")}
+             P.ENTITY_PERF_CLASS: ("description", "position"),
+             P.ENTITY_PERF_LOAD: ("description", "position")}
 _ALLOWED = {(P.ENTITY_HARDWARE, "device_class"): P.DEVICE_CLASSES,   # closed slates on a field
             (P.ENTITY_WORK, "form"): P.WORK_FORMS}
 TUTORIAL_KIND = "tutorial"   # the navigation kind (predicates.DELIVERABLE_KINDS) the matrix reads

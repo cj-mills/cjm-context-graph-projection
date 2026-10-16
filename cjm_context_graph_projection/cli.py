@@ -44,8 +44,8 @@ from .module_ops import (add_module, delete_module, flip_notebook_to_py, new_mod
                          rename_module)
 from .onboarding import project_onboarding
 from .oracle import run_version_oracle
-from .perf import (begin_invocation, invocation_graph, invocation_parsed, load_targets, perf_report,
-                   render_perf, run_invocation)
+from .perf import (begin_invocation, invocation_graph, invocation_parsed, load_definitions,
+                   load_targets, perf_report, render_perf, run_invocation)
 from .projection import (explore, full_graph_view, get_schema, grep, locate, relevant, show, state,
                          subgraph_view)
 from .propose import propose_updates
@@ -421,16 +421,22 @@ async def _dispatch(args) -> int:
             print("error: perf reads the timings ledger -- pass --timings-path (cg-read bakes it)",
                   file=sys.stderr)
             return 1
-        targets = None
-        if args.check:  # 2f5033bf (3): the target classes are facts on the graph
+        targets, loads = None, None
+        if args.check:  # 2f5033bf (3): the target classes are facts on the graph, and the loads (2c4bad75)
             async with open_graph(args.graph_db_path, args.manifests_dir, readonly=True) as gx:
                 targets = await load_targets(gx)
+                try:
+                    loads = await load_definitions(gx)
+                except ValueError as e:
+                    print(f"error: {e}", file=sys.stderr)
+                    return 1
         res = perf_report(args.timings_path, verb=args.verb, runs=args.runs,
-                          since=_parse_ts(args.since), targets=targets)
+                          since=_parse_ts(args.since), targets=targets, load_defs=loads)
         print(render_perf(res, args.format))
         # the ratchet's gate: a regression (the targets' standing is reported, never an exit); the
-        # instrument's own read never gates itself -- its --check opens the graph a plain read does not
-        if args.check and ([r for r in res["regressions"] if r["verb"] != "perf"]
+        # instrument never gates itself -- perf's --check opens the graph a plain read does not, and a
+        # bench invocation's wall is the whole measured run (its readings are the tier events)
+        if args.check and ([r for r in res["regressions"] if r["verb"] not in ("perf", "bench")]
                            or res["tier_regressions"]):
             return 1
         return 0
@@ -439,7 +445,7 @@ async def _dispatch(args) -> int:
         # every measured run is its own CLI invocation against one -- no graph opens here
         from .bench import BenchRefusal, bench_config, render_bench, resolve_lane
         from .bench import build as bench_build, run as bench_run, status as bench_status
-        from .bench import extract_workload, load as bench_load
+        from .bench import extract_ingest_workload, extract_workload, load as bench_load
         try:
             settings = bench_config(args.graph_db_path)
             journals = {"writes": args.journal_path, "source": args.source_journal_path,
@@ -448,7 +454,7 @@ async def _dispatch(args) -> int:
                                 settings=settings)
             if args.action == "build":
                 res = bench_build(lane, settings, tiers=args.tier, resnapshot=args.resnapshot,
-                                  ledger=args.timings_path)
+                                  ledger=args.timings_path, fresh=args.fresh)
             elif args.action == "run":
                 if not args.timings_path:
                     raise BenchRefusal("bench run records into the timings ledger -- pass "
@@ -458,14 +464,22 @@ async def _dispatch(args) -> int:
             elif args.action == "workload":
                 if not args.session:
                     raise BenchRefusal("bench workload replays a recorded session -- pass --session")
-                res = extract_workload(lane, settings, args.session, actor=args.from_actor,
-                                       name=args.name)
+                extract = extract_ingest_workload if args.ingest else extract_workload  # 2c4bad75 (3)
+                res = extract(lane, settings, args.session, actor=args.from_actor, name=args.name)
             elif args.action == "load":
                 if not args.timings_path:
                     raise BenchRefusal("bench load records into the timings ledger -- pass "
                                        "--timings-path (cg-read bakes it)")
+                plan = None
+                if args.load:  # a NAMED load (ruling 110c662f): its definition is facts on the graph
+                    async with open_graph(args.graph_db_path, args.manifests_dir, readonly=True) as gx:
+                        try:
+                            plan = {"key": args.load, "defs": await load_definitions(gx)}
+                        except ValueError as e:
+                            raise BenchRefusal(str(e)) from None
                 res = bench_load(lane, settings, args.timings_path, tiers=args.tier,
-                                 clients=args.clients, workloads=args.workload, steps=args.steps)
+                                 clients=args.clients, workloads=args.workload, steps=args.steps,
+                                 plan=plan, scales=args.scale)
             else:
                 res = bench_status(lane, settings)
         except BenchRefusal as e:
@@ -3812,6 +3826,9 @@ def build_parser() -> argparse.ArgumentParser:  # The CLI's parser, every verb
     p_bench.add_argument("--repeat", type=int, default=1, help="run: runs per verb per tier")
     p_bench.add_argument("--resnapshot", action="store_true",
                          help="build: take a fresh snapshot (every copy and tier rebuilds)")
+    p_bench.add_argument("--fresh", action="store_true",
+                         help="build: reassemble the tiers asked for from the snapshot even when current "
+                              "(a tier keeps what measured writes and loads landed in it)")
     p_bench.add_argument("--session", default=None,
                          help="workload: the recorded session to replay (its key)")
     p_bench.add_argument("--from-actor", default=None,
@@ -3824,6 +3841,15 @@ def build_parser() -> argparse.ArgumentParser:  # The CLI's parser, every verb
                          help="load: a workload name (repeatable; default: the settings' set, else all)")
     p_bench.add_argument("--steps", type=int, default=None,
                          help="load: steps per client, at most (default: the load settings')")
+    p_bench.add_argument("--load", default=None,
+                         help="load: a NAMED load -- a perf_load key on the graph (ruling 110c662f); its "
+                              "roster, tier, sharing and pace are its facts, its roles' sources the bench "
+                              "config's load.roles; a solo pass first, then the roster")
+    p_bench.add_argument("--scale", type=float, action="append", default=None,
+                         help="load --load: a role-count multiplier (repeatable: 7b's sweep; default 1)")
+    p_bench.add_argument("--ingest", action="store_true",
+                         help="workload: the session's transcript pulls, replayed through the real pull "
+                              "against a growing copy of the recorded transcript (design detail 2c4bad75)")
 
     p_pf = sub.add_parser("portfolio",
                           help="Workbench front door: every role-asserted anchor + lock lead "
@@ -3899,11 +3925,11 @@ def build_parser() -> argparse.ArgumentParser:  # The CLI's parser, every verb
     p_ent = sub.add_parser("entity",
                            help="Mint/update a typed Entity (task | stage | hardware | claim | work | unit | "
                                 "output_class | tool | subject | model | artifact_kind | artifact | environment | "
-                                "concept | section_role | perf_class) from its WHOLE record (journaled upsert by "
+                                "concept | section_role | perf_class | perf_load) from its WHOLE record (journaled upsert by "
                                 "kind + key; a field or flag left off clears; designs 8cbdc883 / 4a4ef27e / 3c5cff97)")
     p_ent.add_argument("kind", help="The Entity sub-kind (task | stage | hardware | claim | work | unit | output_class "
                                     "| tool | subject | model | artifact_kind | artifact | environment | concept | section_role "
-                                    "| perf_class)")
+                                    "| perf_class | perf_load)")
     p_ent.add_argument("key", help="The durable key the teaches_* facts name (never renamed; --name is the display)")
     p_ent.add_argument("--name", required=True, help="The display name")
     p_ent.add_argument("--description", default="", help="One line on what the entry covers")

@@ -180,16 +180,19 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 ### `cjm_context_graph_projection.bench`
 
 - `BenchRefusal` _class_ — A harness precondition failed (no bench directory, a path outside it, a missing lane).
+- `VisibilityProbe` _class_ — 7v's reader (ruling 110c662f (2), design detail 2c4bad75 (4)): ONE read-only connection to
 - `assemble_tier` _function_ — Build tier xK: a fresh db holding the snapshot's rows plus copies 1 .. k-1 (plain row
 - `bench_config` _function_ — The harness's settings as DATA; `bench_dir` has no default (a path on one machine is
 - `build` _function_ — Snapshot (once), stage the copies the tiers need (missing or from another snapshot, in
+- `compose_steps` _function_ — A COMPOSED role's steps (ruling 110c662f (6), design detail 2c4bad75 (2)): RECORDED op
 - `env_python` _function_ — The interpreter of the env an app runs in (design detail 4389a579: a gesture driver runs
+- `extract_ingest_workload` _function_ — A recorded session's transcript INGEST as a workload (design detail 2c4bad75 (3)): its
 - `extract_workload` _function_ — A recorded session as a WORKLOAD (design detail 2f5033bf (2)): its reads-ledger requests
 - `family_ops` _function_ — Ops in a tier's family as it stands: the cold segments counted at assembly (immutable),
 - `inside` _function_ — The path guard (design detail 3bd8673d (3)): every write resolves inside the bench.
 - `invert_request` _function_ — A recorded request back to its argv by the verb's OWN parser (design detail 2f5033bf (2)):
 - `lane_dir` _function_ — The lane's directory under the bench directory, refused if the lane's own graph or
-- `load` _function_ — THE CONCURRENT REPLAY MODE (design detail 2f5033bf (2)): at each tier and client count, N
+- `load` _function_ — THE CONCURRENT REPLAY MODE (design detail 2f5033bf (2)): at each tier, clients replay
 - `load_settings` _function_ — The concurrent replay mode's settings as DATA: the bench config's `load` object.
 - `measure` _function_ — Run one invocation under the limits: its peak RSS is the process tree's (the graph
 - `memory_ceiling_kb` _function_ — The machine guard (design detail 2f5033bf (2)): a load must never push the machine into
@@ -197,6 +200,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `rekeyer` _function_ — The copy's id map, applied to any value: a string has every UUID token replaced by
 - `render_bench` _function_ — Render a bench result: tables for a person, the result as JSON for an agent.
 - `resolve_lane` _function_ — A lane: the graph a tier copies and the journal families beside it. The invoking graph
+- `roster` _function_ — A named load's CLIENTS (ruling 110c662f (1), design detail 2c4bad75 (1) / (2)): its role
 - `run` _function_ — Run the canonical verbs against each tier: real CLI invocations with the tier's db,
 - `snapshot` _function_ — Copy 0: the live db through SQLite's backup API (a consistent snapshot under a live
 - `stage_copy` _function_ — Re-key copy `copy` of the snapshot once: its rows (nodes, edges -- no indexes, the
@@ -748,11 +752,14 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `invocation_parsed` _function_ — Name the run, record the parse, and keep it armed only when a ledger will take it.
 - `io_row` _function_ — An event's disk figures (design detail 2f5033bf (1)): net bytes written and bytes read
 - `journal_footprint` _function_ — A journal family's size as stored: segments and bytes on disk (a cold segment counts
+- `knee` _function_ — 7b's KNEE (ruling 110c662f (2), design detail 2c4bad75 (5)): the client count after which
+- `load_definitions` _function_ — The planning loads (ruling 110c662f (5), design detail 2c4bad75 (1)): every perf_load
 - `load_report` _function_ — The concurrent replay mode's read (design detail 2f5033bf (2)): per load run -- its lane,
-- `load_targets` _function_ — The target classes (design detail 2f5033bf (3)): every perf_class Entity and its ACTIVE
+- `load_targets` _function_ — The target classes (design detail 2f5033bf (3)): every perf_class Entity not retired and its
 - `logical_bytes` _function_ — The denominator of a run's write amplification (ruling 9af0e42e (1) / (3)): the journal
 - `measure_covariates` _function_ — The growth covariates every event carries: the store half (nodes, edges and bytes of the
 - `net_written` _function_ — Bytes a run wrote to the disk (design detail 2f5033bf (1)): write_bytes less
+- `parse_roles` _function_ — A load's role counts (design detail 2c4bad75 (1)): role=count pairs, space- or
 - `perf_report` _function_ — The ledger read: per verb the latest / median / p90 END-TO-END seconds (launch + import
 - `poll_rows` _function_ — A poll's cost per tick (design detail 4389a579): its rolling windows' ticks, the mean work
 - `render_perf` _function_ — Render the perf read: tables for a person, the result as JSON for an agent.

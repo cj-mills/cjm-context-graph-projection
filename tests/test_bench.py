@@ -15,10 +15,12 @@ from pathlib import Path
 
 import pytest
 from cjm_context_graph_primitives.journal import journal_segments, read_journal, write_segment
-from cjm_context_graph_projection.bench import (_client_argv, _integrity, _normalized, bench_config,
-                                                BenchRefusal, build, DROP_KEYS, extract_workload,
-                                                inside, invert_request, lane_dir, load, measure,
-                                                rekeyer, run, status, tree_rss_kb, UUID_RE)
+from cjm_context_graph_projection.bench import (_client_argv, _ingest_key, _integrity, _normalized,
+                                                bench_config, BenchRefusal, build, compose_steps,
+                                                DROP_KEYS, extract_ingest_workload,
+                                                extract_workload, inside, invert_request, lane_dir,
+                                                load, measure, rekeyer, roster, run, status,
+                                                tree_rss_kb, UUID_RE, VisibilityProbe)
 from cjm_context_graph_projection.perf import (growth, PAGE_BYTES, perf_report, render_perf,
                                                tier_curves)
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS
@@ -162,6 +164,9 @@ def test_a_tier_is_k_self_consistent_copies_and_its_journals(tmp_path):
     # a second build reuses every tier of the same snapshot; status reads them current
     again = build(lane, {"bench_dir": str(bench), "tiers": [2, 4], "workers": 1})
     assert all(t["reused"] for t in again["tiers"]) and not again["copies"]
+    # a fresh build reassembles the tiers asked for from the same snapshot, copies untouched
+    fresh = build(lane, {"bench_dir": str(bench), "tiers": [2], "workers": 1}, tiers=[2], fresh=True)
+    assert [(t["k"], t["reused"]) for t in fresh["tiers"]] == [(1, False), (2, False)] and not fresh["copies"]
     st = status(lane, {"bench_dir": str(bench)})
     assert [t["k"] for t in st["tiers"]] == [1, 2, 4] and all(t["current"] for t in st["tiers"])
 
@@ -398,6 +403,72 @@ def test_load_integrity_finds_torn_lines_lost_and_duplicated_ops(tmp_path):
     assert not bad["ok"] and (bad["bad_lines"], bad["duplicated"], bad["in_db"]) == (1, 1, 1)
 
 
+def test_a_named_load_s_roster_composition_and_composed_roles(tmp_path):
+    """Design detail 2c4bad75 (1) / (2): a load's roster is its role counts per group, then every
+    load it runs beside; recorded roles deal their workloads round robin, a composed role draws
+    recorded op shapes by a seeded generator (never one naming an id its trace minted, never a
+    pull); the scale multiplies the counts; composed is derived; a role with no source refuses."""
+    root = tmp_path / "lane"
+    (root / "workloads").mkdir(parents=True)
+    minted = "44444444-4444-5444-8444-444444444444"
+    main = {"name": "m", "steps": [
+        {"kind": "write", "verb": "decide", "request": {"statement": "s"}, "mints": minted},
+        {"kind": "write", "verb": "link", "request": {"source_id": minted, "target_id": A}},
+        {"kind": "write", "verb": "assert", "request": {"subject": A, "predicate": "p", "value": "v"}},
+        {"kind": "read", "verb": "show", "request": {"ref": A}}]}
+    pull = {"name": "i", "kind": "ingest", "transcript": "/t/x.jsonl", "session_key": "2026-10-01_10-00-00",
+            "steps": [{"kind": "write", "verb": "pull-transcript", "upto": 3}]}
+    for w in (main, pull):
+        (root / "workloads" / f"{w['name']}.json").write_text(json.dumps(w))
+    steps = compose_steps([main, pull], ["link", "assert", "decide"], 6, "seed")
+    assert len(steps) == 6 and steps == compose_steps([main, pull], ["link", "assert", "decide"], 6, "seed")
+    assert {s["verb"] for s in steps} <= {"assert", "decide"} and all(s["composed"] for s in steps)
+    with pytest.raises(BenchRefusal):
+        compose_steps([pull], None, 2, "seed")
+    defs = {"load-L": {"roles": {"main": 1, "ingest": 1, "sub": 2}, "groups": 2, "interactive": ["main", "sub"],
+                       "sharing": "shared", "pace": 0.0, "with": []},
+            "load-P": {"roles": {"proposer": 3}, "groups": 1, "interactive": [], "sharing": "partitioned",
+                       "pace": 0.0, "with": ["load-L"]}}
+    ls = {"roles": {"main": {"workloads": ["m"]}, "ingest": {"workloads": ["i"]}, "sub": {"workloads": ["m"]},
+                    "proposer": {"compose": {"from": ["m"], "verbs": ["assert"], "burst": 2, "idle_s": 0.5}}}}
+    ros = roster({"key": "load-P", "defs": defs}, ls, root, cap=3)
+    assert ros["loads"] == ["load-P", "load-L"] and ros["composed"]
+    roles = [(c["of_load"], c["role"], c["group"]) for c in ros["clients"]]
+    assert roles[:3] == [("load-P", "proposer", 0)] * 3 and len(roles) == 3 + 2 * (1 + 1 + 2)
+    by = {(c["of_load"], c["role"]): c for c in ros["clients"]}
+    assert by[("load-P", "proposer")]["burst"] == (2, 0.5) and by[("load-P", "proposer")]["sharing"] == "partitioned"
+    assert by[("load-L", "ingest")]["ingest"] == {"transcript": "/t/x.jsonl", "session_key": "2026-10-01_10-00-00"}
+    assert by[("load-L", "sub")]["interactive"] and not by[("load-L", "ingest")]["interactive"]
+    assert not roster({"key": "load-L", "defs": defs}, ls, root, cap=3)["composed"]
+    assert len(roster({"key": "load-L", "defs": defs}, ls, root, cap=3, scale=2.0)["clients"]) == 2 * (2 + 2 + 4)
+    with pytest.raises(BenchRefusal):
+        roster({"key": "load-L", "defs": defs}, {"roles": {"main": {"workloads": ["m"]}}}, root, cap=3)
+    assert _ingest_key("2026-10-01_10-00-00", 0) == "2026-10-01_09-59-59"
+
+
+def test_the_held_reader_sees_an_id_land():
+    """Design detail 2c4bad75 (4): the probe holds one read-only connection and records when an
+    id it was told to watch first appears; one that never lands stays unseen."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        db = Path(d) / "g.db"
+        con = sqlite3.connect(db)
+        con.execute("CREATE TABLE nodes (id TEXT PRIMARY KEY)")
+        con.commit()
+        probe = VisibilityProbe(str(db), 0.005)
+        probe.start()
+        probe.watch("a")
+        probe.watch("never")
+        time.sleep(0.05)
+        t = time.time()
+        con.execute("INSERT INTO nodes VALUES ('a')")
+        con.commit()
+        time.sleep(0.05)
+        probe.stop()
+        con.close()
+        assert "a" in probe.seen and probe.seen["a"] >= t and "never" not in probe.seen
+
+
 @needs_capability
 def test_a_recorded_session_replays_as_a_concurrent_load(tmp_path):
     """Design detail 2f5033bf (2), end to end: a session recorded through the CLI becomes a
@@ -428,6 +499,74 @@ def test_a_recorded_session_replays_as_a_concurrent_load(tmp_path):
     assert sorted((r["tier"], r["clients"]) for r in rep["load"]) == [(1, 2), (2, 2)]
     assert not rep["tiers"] or all(v["verb"] != "decide" for t in rep["tiers"] for v in t["verbs"])
     assert "### Load — g" in render_perf(rep)
+
+
+@needs_capability
+def test_a_named_load_runs_its_solo_pass_then_its_roster_with_an_ingest_client(tmp_path):
+    """Ruling 110c662f, design detail 2c4bad75, end to end: a session recorded through the CLI --
+    decides, a read, and two transcript pulls -- becomes a main workload and an INGEST workload
+    (each pull mapped to its transcript line); a named load of a main, an ingest client and a
+    composed sub runs its solo passes (the interactive roles alone), then the roster: the ingest
+    client registers its own spine and pulls its re-keyed copy of the transcript through the real
+    verb, the held reader times each decide, the integrity holds, and perf reads the run by load."""
+    src = tmp_path / "live"
+    src.mkdir()
+    db, journal = str(src / "g.db"), str(src / "g.writes.jsonl")
+    ledger = str(tmp_path / "g.timings.jsonl")
+    key = "2026-10-01_10-00-00"
+    base = [sys.executable, "-m", "cjm_context_graph_projection.cli", "--graph-db-path", db,
+            "--journal-path", journal]
+    env = {**os.environ, "CJM_SESSION": key}
+    tdir = tmp_path / "transcripts"
+    tdir.mkdir()
+    cc = "aaaa1111-2222-3333-4444-555566667777"
+
+    def rec(kind, u, parent, ts, content):
+        return json.dumps({"type": kind, "isSidechain": False, "uuid": u, "parentUuid": parent,
+                           "timestamp": ts, "sessionId": cc, "message": {"role": kind, "content": content}})
+    ids = [f"bbbb{n:04d}-2222-3333-4444-555566667777" for n in range(4)]
+    lines = [rec("user", ids[0], None, "2026-10-02T10:00:00.000Z", "New session minted in-scratchpad. go"),
+             rec("assistant", ids[1], ids[0], "2026-10-02T10:00:05.000Z", [{"type": "text", "text": "on it"}]),
+             rec("user", ids[2], ids[1], "2026-10-02T10:01:00.000Z", "and the widgets?"),
+             rec("assistant", ids[3], ids[2], "2026-10-02T10:01:05.000Z", [{"type": "text", "text": "they render"}])]
+    transcript = tdir / f"{cc}.jsonl"
+    for cmd in (["session", key], ["decide", "the widgets render lazily"],
+                ["decide", "the widgets cache their layout"]):
+        assert subprocess.run([*base, *cmd], capture_output=True, env=env).returncode == 0
+    for upto in (2, 4):
+        transcript.write_text("\n".join(lines[:upto]) + "\n")
+        r = subprocess.run([*base, "pull-transcript", key, "--transcript-dir", str(tdir), "--any-boot"],
+                           capture_output=True, env=env, text=True)
+        assert r.returncode == 0, r.stdout + r.stderr
+    (src / "g.reads.jsonl").write_text(json.dumps(
+        {"verb": "locate", "request": {"term": "widgets"}, "session": key, "ts": time.time()}) + "\n")
+    settings = {"bench_dir": str(tmp_path / "bench"), "tiers": [2], "workers": 1, "memory_limit_gb": 16,
+                "timeout_s": 300, "replay_tail": 10,
+                "load": {"transcript_dir": str(tdir), "roles": {
+                    "main": {"workloads": ["main"]}, "ingest": {"workloads": ["pulls"]},
+                    "sub": {"compose": {"from": ["main"], "verbs": ["locate", "decide"]}}}}}
+    lane = _lane(db, journal)
+    build(lane, settings, tiers=[2], ledger=ledger)
+    extract_workload(lane, settings, key, name="main")
+    w = extract_ingest_workload(lane, settings, key, name="pulls")
+    assert [s["upto"] for s in w["steps"]] == [2, 4] and w["session_key"] == key
+    defs = {"load-T": {"key": "load-T", "roles": {"main": 1, "ingest": 1, "sub": 1}, "groups": 1,
+                       "interactive": ["main", "sub"], "lane": "g", "tier": 1, "sharing": "shared",
+                       "pace": 0.0, "with": [], "writes_min": None}}
+    res = load(lane, settings, ledger, plan={"key": "load-T", "defs": defs}, steps=4)
+    solo, full = res["loads"][:2], res["loads"][2]
+    assert sorted(r["solo"] for r in solo) == ["main", "sub"] and all(r["clients"] == 1 for r in solo)
+    assert full["composed"] and full["clients"] == 3 and full["failed"] == 0, full
+    assert full["integrity"]["ok"] and full["visibility"]["n"] >= 1 and full["visibility"]["unseen"] == 0
+    tier_db = tmp_path / "bench" / "g" / "x1" / "g.db"
+    spine = _rows(tier_db, "SELECT COUNT(*) FROM nodes WHERE label = 'Session' AND properties LIKE "
+                           "'%2026-10-01_09-59-58%'")  # the ingest client (number 1) got its own spine
+    assert spine == [(1,)]
+    rep = perf_report(ledger)
+    named = [r for r in rep["load"] if r["perf_load"] == "load-T" and not r["solo"]]
+    assert len(named) == 1 and {x["role"] for x in named[0]["roles"]} == {"main", "ingest", "sub"}
+    assert any(v["verb"] == "pull-transcript" for v in named[0]["verbs"])
+    assert len(read_journal(journal)) == 5  # the live journal untouched
 
 
 # The gesture leg's fixture driver (design detail 4389a579): a session that measures one gesture

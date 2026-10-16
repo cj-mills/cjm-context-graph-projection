@@ -24,6 +24,7 @@ this machine.
 
 import argparse
 import json
+import math
 import os
 import re
 import resource
@@ -88,6 +89,9 @@ LOAD_DEFAULTS: Dict[str, Any] = {
               "link", "assert", "decide", "check"],  # The verbs a workload keeps
     "workloads": [],        # The workload set (names in the lane's workloads directory); [] = all
     "memory_ceiling_gb": None,  # The clients' summed RSS that aborts a run (None = 70% of this machine's RAM)
+    "roles": {},            # Each named load's role -> its source: {workloads: [...]} or {compose: {from, verbs, burst, idle_s}} (2c4bad75 (2))
+    "transcript_dir": None,  # Where an ingest workload's recorded transcripts live (2c4bad75 (3))
+    "probe_interval_s": 0.01,  # The held reader's poll (7v, 2c4bad75 (4))
 }
 DROP_KEYS = frozenset({"actor", "session"})  # A write op's envelope: each client stamps its own actor, no session
 MARK_DESTS = ("statement", "text")           # Free text a client marks, so dedup never drops it
@@ -474,9 +478,12 @@ def build(
     tiers: Optional[List[int]] = None,  # Tiers to build (default: the configured list + x1)
     resnapshot: bool = False,      # Take a fresh snapshot (every copy and tier is rebuilt)
     ledger: Optional[str] = None,  # The timings ledger: one `bench-build` event per stage
+    fresh: bool = False,           # Reassemble the tiers asked for even when current (drop what runs wrote)
 ) -> Dict[str, Any]:  # {lane, base, copies, tiers}
     """Snapshot (once), stage the copies the tiers need (missing or from another snapshot, in
-    parallel), then assemble each tier not already built from this snapshot."""
+    parallel), then assemble each tier not already built from this snapshot -- or, `fresh`,
+    every tier asked for: a tier accumulates what measured writes and loads land in it, and a
+    fresh one holds the snapshot's size again."""
     root = lane_dir(settings, lane)
     inside(root, settings["bench_dir"])
     wanted = sorted({1, *(tiers or settings["tiers"])})
@@ -504,7 +511,7 @@ def build(
                        {"peak_rss_kb": m["peak_rss_kb"]})
     for k in wanted:
         tm = _read_json(root / f"x{k}" / MANIFEST)
-        if tm and tm.get("base_id") == base["base_id"] and not resnapshot:
+        if tm and tm.get("base_id") == base["base_id"] and not (resnapshot or fresh):
             out["tiers"].append({**_tier_row(tm), "reused": True})
             continue
         tm = assemble_tier(root, k, lane)
@@ -700,7 +707,9 @@ def run(
         # before it) and then warm, the repeats at once; perf reads the warm reading
         for spec in specs:
             for cache in ["cold"] + ["warm"] * max(1, repeat):
-                values["stamp"] = time.strftime("%Y-%m-%dT%H:%M:%S") + f" x{k}"
+                # unique per run: a cold and a warm decide in one second must never share a
+                # statement, or the warm one measures a dedup no-op
+                values["stamp"] = time.strftime("%Y-%m-%dT%H:%M:%S") + f" x{k} {cache} {uuid.uuid4().hex[:8]}"
                 if "writes" in fams:
                     values["tail_offset"] = max(0, family_ops(fams["writes"])
                                                 - int(settings["replay_tail"]))
@@ -946,6 +955,84 @@ def extract_workload(
     return out
 
 
+def extract_ingest_workload(
+    lane: Dict[str, Any],       # `resolve_lane`'s result
+    settings: Dict[str, Any],   # `bench_config`'s result
+    session: str,               # The recorded session whose transcript pulls to replay
+    actor: Optional[str] = None,  # Only this actor's pulls (default: every pull of the session)
+    name: Optional[str] = None,   # The workload's name (default: <session>--ingest)
+) -> Dict[str, Any]:  # The workload, written to <lane>/workloads/<name>.json
+    """A recorded session's transcript INGEST as a workload (design detail 2c4bad75 (3)): its
+    pull-transcript ops in ts order, each mapped to the line of the recorded transcript holding
+    the op's last message -- a client replays the real pull against its own copy of that
+    transcript grown to that line, never a re-applied op. The transcript is the one the pulls
+    name (their cc_session_uuid; the most pulled when several), found in the load settings'
+    `transcript_dir`; a pulled message the transcript no longer holds is counted, never guessed."""
+    root = lane_dir(settings, lane)
+    base = _read_json(root / "base" / MANIFEST)
+    if not base:
+        raise BenchRefusal(f"no snapshot in {root} -- `bench build` first")
+    tdir = load_settings(settings).get("transcript_dir")
+    if not tdir:
+        raise BenchRefusal("an ingest workload reads the recorded transcripts -- set "
+                           "`bench.load.transcript_dir` in the graph-sibling config")
+    if not lane["journals"].get("writes"):
+        raise BenchRefusal(f"lane {lane['name']} has no writes journal to read the pulls from")
+    ops = sorted((e for e in read_journal(lane["journals"]["writes"])
+                  if e.get("session") == session and e.get("verb") == "pull-transcript"
+                  and (actor is None or (e.get("args") or {}).get("actor") == actor)),
+                 key=lambda e: e.get("ts") or 0)
+    if not ops:
+        raise BenchRefusal(f"no pull-transcript op in session {session}"
+                           + (f" by {actor}" if actor else ""))
+    pulls: Dict[str, int] = {}
+    for e in ops:
+        cc = str((e.get("args") or {}).get("cc_session_uuid") or "")
+        pulls[cc] = pulls.get(cc, 0) + 1
+    cc = max(pulls, key=lambda c: pulls[c])
+    path = Path(tdir) / f"{cc}.jsonl"
+    if not cc or not path.exists():
+        raise BenchRefusal(f"the transcript {path} the pulls name is not there")
+    line_of: Dict[str, int] = {}
+    with open(path, errors="replace") as fh:
+        for n, line in enumerate(fh):
+            try:
+                u = json.loads(line).get("uuid")
+            except (ValueError, AttributeError):
+                continue
+            if u:
+                line_of[u] = n
+    steps, skipped, prev, upto = [], {}, None, 0
+    for e in ops:
+        a = e.get("args") or {}
+        if str(a.get("cc_session_uuid") or "") != cc:
+            skipped["pull-transcript (another transcript)"] = skipped.get("pull-transcript (another transcript)", 0) + 1
+            continue
+        msgs = a.get("messages") or []
+        # a derived message (a thinking summary, a tool parameter: `<record uuid>#...`) sits on
+        # its record's line
+        lines = [line_of[u] for u in (str(m.get("uuid") or "").split("#")[0] for m in msgs) if u in line_of]
+        if len(lines) < len(msgs):
+            skipped["messages the transcript no longer holds"] = (
+                skipped.get("messages the transcript no longer holds", 0) + len(msgs) - len(lines))
+        if not lines:
+            continue
+        ts = e.get("ts") or 0
+        upto = max(upto, max(lines) + 1)
+        steps.append({"kind": "write", "verb": "pull-transcript", "upto": upto, "messages": len(msgs),
+                      "gap_s": round(ts - prev, 3) if prev is not None else 0.0})
+        prev = ts
+    name = name or re.sub(r"[^A-Za-z0-9_.-]+", "_", f"{session}--ingest")
+    out = {"name": name, "lane": lane["name"], "base_id": base["base_id"], "kind": "ingest",
+           "source": {"session": session, "actor": actor},
+           "session_key": str((ops[0].get("args") or {}).get("session_key") or session),
+           "transcript": str(path), "steps": steps, "reads": 0, "writes": len(steps),
+           "skipped": skipped, "dropped": {}, "made_at": time.time()}
+    (root / "workloads").mkdir(exist_ok=True)
+    _write_json(inside(root / "workloads" / f"{name}.json", root.parent), out)
+    return out
+
+
 def _client_argv(
     parser,                  # The CLI's parser
     step: Dict[str, Any],    # One workload step
@@ -975,6 +1062,112 @@ def _client_argv(
         minted[rekey(step["mints"])] = mints
     return {"argv": invert_request(parser, step["verb"], req, frozenset(step.get("drop") or ()))["argv"],
             "mints": mints}
+
+
+def _names_any(
+    value: Any,  # A request value (a string, a list, a dict)
+    ids: set,    # Ids
+) -> bool:  # Whether it names any of them
+    if isinstance(value, dict):
+        return any(_names_any(v, ids) for v in value.values())
+    if isinstance(value, list):
+        return any(_names_any(v, ids) for v in value)
+    return isinstance(value, str) and any(m.group(0) in ids for m in UUID_RE.finditer(value))
+
+
+def compose_steps(
+    pool: List[Dict[str, Any]],    # The recorded workloads a composed role draws from
+    verbs: Optional[List[str]],    # The verbs it draws (None = every verb the pool holds)
+    count: int,                    # Steps to draw
+    seed: str,                     # The client's seed (its load, role, group and number)
+) -> List[Dict[str, Any]]:  # The client's steps: recorded op shapes on a composed schedule
+    """A COMPOSED role's steps (ruling 110c662f (6), design detail 2c4bad75 (2)): RECORDED op
+    shapes from the pool's workloads -- those of the given verbs, never one naming an id its
+    trace minted (only that trace's client could follow it), never an ingest pull (it follows
+    its own transcript) -- drawn by a seeded generator, so a client's schedule is reproducible.
+    Never a synthetic op; each step is marked composed (its writes take a per-step marker)."""
+    import random
+    shapes: List[Dict[str, Any]] = []
+    for w in pool:
+        if w.get("kind") == "ingest":
+            continue
+        minted = {s["mints"] for s in w["steps"] if s.get("mints")}
+        shapes += [{**s, "gap_s": 0.0, "composed": True} for s in w["steps"]
+                   if (not verbs or s["verb"] in verbs) and not _names_any(s["request"], minted)]
+    if not shapes:
+        raise BenchRefusal(f"a composed role draws nothing: no step of {[w['name'] for w in pool]} "
+                           f"has the verbs {verbs}")
+    rng = random.Random(seed)
+    return [dict(rng.choice(shapes)) for _ in range(count)]
+
+
+def roster(
+    plan: Dict[str, Any],      # {key, defs}: the load to run and every load on the graph (perf.load_definitions)
+    ls: Dict[str, Any],        # `load_settings`'s result (its `roles`: each role's source)
+    root: Path,                # The lane's bench directory (its workloads)
+    cap: int,                  # Steps per client, at most
+    scale: float = 1.0,        # The role counts' multiplier (7b's sweep)
+) -> Dict[str, Any]:  # {clients: [...], composed, loads}
+    """A named load's CLIENTS (ruling 110c662f (1), design detail 2c4bad75 (1) / (2)): its role
+    counts per group, then every load it runs beside (perf_load_with, depth first, each once),
+    the counts multiplied by `scale` (at least one where a role is named). Each role's source is
+    the bench config's `load.roles` -- a recorded role's workloads dealt round robin across its
+    clients (an ingest workload replays its transcript), a composed role's steps drawn from its
+    pool. A role with no source refuses, never guessed. `composed` is derived: any role of the
+    roster composed."""
+    defs, roles = plan["defs"], ls.get("roles") or {}
+    order: List[str] = []
+
+    def walk(key: str) -> None:
+        if key in order:
+            return
+        if key not in defs:
+            raise BenchRefusal(f"no perf_load {key!r} on the graph (the loads: {', '.join(sorted(defs)) or 'none'})")
+        order.append(key)
+        for other in defs[key].get("with") or []:
+            walk(other)
+    walk(plan["key"])
+    cache: Dict[str, Dict[str, Any]] = {}
+
+    def workload(name: str) -> Dict[str, Any]:
+        if name not in cache:
+            w = _read_json(root / "workloads" / f"{name}.json")
+            if not w:
+                raise BenchRefusal(f"no workload {name!r} in {root / 'workloads'} -- `bench workload` first")
+            cache[name] = w
+        return cache[name]
+    clients: List[Dict[str, Any]] = []
+    composed = False
+    for key in order:
+        d = defs[key]
+        for g in range(int(d.get("groups") or 1)):
+            for role, n in d["roles"].items():
+                src = roles.get(role)
+                if not src:
+                    raise BenchRefusal(f"load {key}: role {role!r} has no source -- name its workloads "
+                                       "(or its composition) in the bench config's load.roles")
+                count = max(1, math.ceil(n * scale)) if n else 0
+                for j in range(count):
+                    c = {"i": len(clients), "of_load": key, "role": role, "group": g,
+                         "interactive": role in (d.get("interactive") or []),
+                         "sharing": d.get("sharing") or "shared", "pace": float(d.get("pace") or 0.0)}
+                    if src.get("compose"):
+                        composed = True
+                        spec = src["compose"]
+                        c["steps"] = compose_steps([workload(x) for x in spec.get("from") or []],
+                                                   spec.get("verbs"), cap, f"{key}:{role}:{g}:{j}")
+                        if spec.get("burst"):
+                            c["burst"] = (int(spec["burst"]), float(spec.get("idle_s") or 0.0))
+                    else:
+                        names = src.get("workloads") or []
+                        if not names:
+                            raise BenchRefusal(f"role {role!r} names no workloads in the bench config's load.roles")
+                        w = workload(names[(g * count + j) % len(names)])
+                        c["workload"], c["steps"] = w["name"], w["steps"][:cap]
+                        if w.get("kind") == "ingest":
+                            c["ingest"] = {"transcript": w["transcript"], "session_key": w["session_key"]}
+                    clients.append(c)
+    return {"clients": clients, "composed": composed, "loads": order}
 
 
 def _integrity(
@@ -1025,6 +1218,111 @@ def _integrity(
             "in_journal": len(marked), "in_db": in_db, "duplicated": dup}
 
 
+def _decide_ts(
+    tm: Dict[str, Any],  # The tier's manifest
+    load_id: str,        # The load run
+) -> Dict[str, float]:  # decision id -> the unix ts its decide op was journaled at
+    """When each of the load's marked decides reached the journal (design detail 2c4bad75 (4)):
+    the op line's own ts, the start of 7v's reading."""
+    from cjm_dev_graph_schema.nodes import DecisionNode
+    fam = tm["journals"].get("writes")
+    if not fam:
+        return {}
+    known = {c["name"] for c in fam["cold"]}
+    tag = f"[bench load {load_id} "
+    out: Dict[str, float] = {}
+    for seg in journal_segments(fam["live"]):
+        if Path(seg).name in known:
+            continue
+        for line in read_segment(seg).splitlines():
+            if tag not in line:
+                continue
+            try:
+                op = json.loads(line)
+            except ValueError:
+                continue
+            if op.get("verb") == "decide":
+                st = str((op.get("args") or {}).get("statement") or "")
+                out[DecisionNode(statement=st).id] = float(op.get("ts") or 0)
+    return out
+
+
+class VisibilityProbe:
+    """7v's reader (ruling 110c662f (2), design detail 2c4bad75 (4)): ONE read-only connection to
+    the tier's db held for the whole run -- a standing reader's shape (an app holds the graph
+    open and polls) -- polling every `interval` seconds for the ids clients are about to mint,
+    recording when each is first seen. A connection that cannot open yet (a WAL file not there)
+    is retried on the next tick; one last poll runs at stop."""
+
+    def __init__(
+        self,
+        db: str,          # The tier's db
+        interval: float,  # Seconds between polls
+    ):
+        self.db, self.interval = db, interval
+        self.pending: Dict[str, bool] = {}
+        self.seen: Dict[str, float] = {}  # id -> unix time first seen
+        self.lock = threading.Lock()
+        self.done = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+
+    def watch(self, node_id: str) -> None:  # An id a client is about to mint
+        with self.lock:
+            if node_id not in self.seen:
+                self.pending[node_id] = True
+
+    def _poll(self, con: sqlite3.Connection) -> None:
+        with self.lock:
+            ids = list(self.pending)
+        found = []
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            found += [r[0] for r in con.execute(
+                f"SELECT id FROM nodes WHERE id IN ({','.join('?' * len(chunk))})", chunk)]
+        now = time.time()
+        with self.lock:
+            for i in found:
+                self.seen.setdefault(i, now)
+                self.pending.pop(i, None)
+
+    def _run(self) -> None:
+        con = None
+        while True:
+            last = self.done.is_set()
+            try:
+                if con is None:
+                    con = sqlite3.connect(f"file:{self.db}?mode=ro", uri=True)
+                self._poll(con)
+            except sqlite3.Error:
+                if con is not None:
+                    con.close()
+                con = None
+            if last:
+                break
+            self.done.wait(self.interval)
+        if con is not None:
+            con.close()
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.done.set()
+        self.thread.join()
+
+
+def _ingest_key(
+    key: str,     # The recorded session key (YYYY-MM-DD_HH-MM-SS)
+    client: int,  # The ingest client's number
+) -> str:  # The client's own session key
+    """An ingest client's own spine (design detail 2c4bad75 (3)): the recorded key shifted back by
+    the client's number plus one second, so its transcript (booted after the recorded key) still
+    matches it and its pulls land on a spine of their own."""
+    from datetime import datetime, timedelta
+    t = datetime.strptime(key, "%Y-%m-%d_%H-%M-%S") - timedelta(seconds=client + 1)
+    return t.strftime("%Y-%m-%d_%H-%M-%S")
+
+
 def memory_ceiling_kb(
     ls: Dict[str, Any],  # `load_settings`'s result
 ) -> int:  # The clients' summed RSS (KB) that aborts a load run
@@ -1065,134 +1363,237 @@ def _kill_descendants() -> None:
             pass
 
 
+def _call(
+    ctx: Dict[str, Any],       # The run's context (`load`'s: lane, settings, ledger, tm, tier, k, root, limit)
+    argv: List[str],           # The verb's argv
+    read_only: bool,           # A read (--read-only)
+    env: Dict[str, str],       # The client's environment additions
+    attrs: Dict[str, Any],     # The call's identifying context (the load, the client, its role)
+) -> Dict[str, Any]:  # `measure`'s result
+    """One client call: a real CLI invocation against the tier under the harness's limits, its
+    own timing event in the ledger and the harness's beside it (design detail 2f5033bf (2))."""
+    tm, lane = ctx["tm"], ctx["lane"]
+    run_id = str(uuid.uuid4())
+    env = {**os.environ, "CJM_RUN_ID": run_id, "CJM_BENCH_TIER": str(ctx["k"]),
+           "CJM_BENCH_LANE": lane["name"], "CJM_T0": repr(time.time()), **env}
+    cmd = [sys.executable, "-m", "cjm_context_graph_projection.cli", "--graph-db-path", tm["db"],
+           "--manifests-dir", lane["manifests_dir"], "--timings-path", ctx["ledger"]]
+    for fam, flag in (("writes", "--journal-path"), ("source", "--source-journal-path")):
+        if fam in tm["journals"]:
+            cmd += [flag, tm["journals"][fam]["live"]]
+    if read_only:
+        cmd.append("--read-only")
+    out = inside(ctx["tier"] / "runs" / f"{run_id}.out", ctx["root"].parent)
+    res = measure(cmd + argv, env, ctx["limit"], float(ctx["settings"]["timeout_s"]), out)
+    if res["outcome"] == 0:
+        out.unlink()
+    _event(ctx["ledger"], argv[0], res["wall_s"], lane, ctx["k"],
+           {"peak_rss_kb": res["peak_rss_kb"], "out_bytes": res["out_bytes"],
+            "read_bytes": res["read_bytes"], "write_bytes": res["write_bytes"]},
+           attrs=attrs, run_id=run_id, outcome=res["outcome"], cli_verb=argv[0])
+    return res
+
+
+def _drive(
+    clients: List[Dict[str, Any]],  # The run's clients: {i, steps, rekey} and, named, {of_load, role, group, interactive, pace, burst, ingest}
+    ctx: Dict[str, Any],            # The run's context (`load`'s)
+    attrs: Dict[str, Any],          # The run's own identity (its perf_load, scale, solo role, composed label)
+) -> Dict[str, Any]:  # The run's summary row
+    """ONE load run (design detail 2f5033bf (2), 2c4bad75): every client concurrently, each
+    replaying its steps as real CLI invocations -- ids re-keyed into its copy, then any its trace
+    minted swapped for its own; free text marked (a composed step per step); an ingest client
+    registers its own session, then grows its copy of the recorded transcript to each step's
+    line and runs the real pull. Throughout: the clients' summed RSS against the machine guard
+    (every client killed past it, the abort itself a reading) and the held reader polling for
+    each decide about to land (7v). Then the integrity check and the visibility readings; one
+    `bench-load` event carries the summary."""
+    from .perf import _quantile
+    load_id, n = str(uuid.uuid4()), len(clients)
+    decided: Dict[int, List[str]] = {}
+    rows: List[Dict[str, Any]] = []
+    lock = threading.Lock()
+    stop, aborted = threading.Event(), [None]
+    probe = VisibilityProbe(ctx["tm"]["db"], ctx["probe_s"])
+    run_attrs = {"load": load_id, "clients": n, **attrs}
+
+    def record(c: Dict[str, Any], verb: str, res: Dict[str, Any]) -> None:
+        with lock:
+            rows.append({"client": c["i"], "verb": verb, "outcome": res["outcome"], "wall_s": res["wall_s"]})
+
+    def client(c: Dict[str, Any]) -> None:
+        i, minted = c["i"], {}
+        mine = {**run_attrs, "client": i,
+                **{k: c[k] for k in ("of_load", "role", "group", "interactive") if c.get(k) is not None}}
+        env = {"CJM_BENCH_LOAD": load_id, "CJM_BENCH_CLIENTS": str(n), "CJM_BENCH_CLIENT": str(i),
+               "CJM_ACTOR": f"bench:load:{i}"}
+        ing, upto = c.get("ingest"), 0
+        if ing:  # 2c4bad75 (3): its own spine, its own re-keyed copy of the recorded transcript
+            folder = inside(ctx["tier"] / "runs" / f"ingest-{load_id}-{i}", ctx["root"].parent)
+            folder.mkdir(parents=True, exist_ok=True)
+            rk = rekeyer(f"ingest:{load_id}:{i}")
+            src = Path(ing["transcript"]).read_text(errors="replace").splitlines(keepends=True)
+            dest = folder / f"{rk(Path(ing['transcript']).stem)}.jsonl"
+            key = _ingest_key(ing["session_key"], i)
+            record(c, "session", _call(ctx, ["session", key], False, env, mine))
+        burst, pace = c.get("burst"), c.get("pace", ctx["pace"])
+        for j, step in enumerate(c["steps"]):
+            if stop.is_set():
+                break
+            if burst and j and j % burst[0] == 0:
+                time.sleep(burst[1])
+            elif pace and step.get("gap_s"):
+                time.sleep(min(step["gap_s"] * pace, 60.0))
+            mints = None
+            if ing:
+                with open(dest, "a") as fh:
+                    fh.writelines(rk(line) for line in src[upto:step["upto"]])
+                upto = max(upto, step["upto"])
+                argv, read_only = ["pull-transcript", key, "--transcript-dir", str(folder), "--any-boot"], False
+            else:
+                marker = f"[bench load {load_id} client {i}" + (f" step {j}]" if step.get("composed") else "]")
+                made = _client_argv(ctx["parser"], step, c["rekey"], minted, marker)
+                if made["argv"] is None:
+                    continue
+                argv, read_only, mints = made["argv"], step["kind"] == "read", made["mints"]
+                if mints:
+                    probe.watch(mints)
+            res = _call(ctx, argv, read_only, env, mine)
+            if res["outcome"] == 0 and mints:
+                with lock:
+                    decided.setdefault(i, []).append(mints)
+            record(c, argv[0], res)
+
+    peak, done = [0], threading.Event()
+
+    def sample() -> None:  # the clients' summed RSS: every live descendant of the harness
+        me = os.getpid()
+        page_kb = os.sysconf("SC_PAGE_SIZE") // 1024
+        while not done.is_set():
+            try:
+                own = int(Path(f"/proc/{me}/statm").read_text().split()[1]) * page_kb
+            except (OSError, ValueError):
+                own = 0
+            peak[0] = max(peak[0], tree_rss_kb(me) - own)
+            if peak[0] > ctx["ceiling"] and not stop.is_set():
+                aborted[0] = (f"the clients' summed RSS {peak[0] / 1024 ** 2:.1f} GB passed the "
+                              f"{ctx['ceiling'] / 1024 ** 2:.1f} GB ceiling")
+                stop.set()
+            if stop.is_set():
+                _kill_descendants()
+            done.wait(0.05)
+    from concurrent.futures import ThreadPoolExecutor
+    sampler = threading.Thread(target=sample, daemon=True)
+    t0 = time.perf_counter()
+    sampler.start()
+    probe.start()
+    with ThreadPoolExecutor(max_workers=max(1, n)) as pool:
+        for f in [pool.submit(client, c) for c in clients]:
+            f.result()
+    done.set()
+    sampler.join()
+    probe.stop()
+    wall = time.perf_counter() - t0
+    check = _integrity(ctx["tm"], load_id, decided)
+    journaled = _decide_ts(ctx["tm"], load_id)
+    lat = sorted(probe.seen[x] - journaled[x] for x in probe.seen if x in journaled)
+    landed = [x for ids in decided.values() for x in ids]
+    vis = {"n": len(lat), "unseen": sum(1 for x in landed if x not in probe.seen),
+           "p50_s": _quantile(lat, 0.5), "p99_s": _quantile(lat, 0.99),
+           "min_s": lat[0] if lat else None, "max_s": lat[-1] if lat else None,
+           "interval_s": ctx["probe_s"]} if landed else None
+    extra = {"peak_rss_kb": peak[0] or None, "integrity": check, "steps": len(rows),
+             "workloads": sorted({c["workload"] for c in clients if c.get("workload")}),
+             "roles": sorted({c["role"] for c in clients if c.get("role")}),
+             "aborted": aborted[0], "visibility": vis}
+    _event(ctx["ledger"], "bench-load", wall, ctx["lane"], ctx["k"], extra, attrs=run_attrs)
+    return {"tier": ctx["k"], "clients": n, "load": load_id, "wall_s": wall, "steps": len(rows),
+            "failed": sum(1 for r in rows if r["outcome"] != 0), "peak_rss_kb": peak[0] or None,
+            "integrity": check, "aborted": aborted[0], "visibility": vis, **attrs}
+
+
 def load(
     lane: Dict[str, Any],       # `resolve_lane`'s result
     settings: Dict[str, Any],   # `bench_config`'s result
     ledger: str,                # The timings ledger every event lands in
-    tiers: Optional[List[int]] = None,    # Tiers (default: the load settings', those built)
-    clients: Optional[List[int]] = None,  # Client counts (default: the load settings')
-    workloads: Optional[List[str]] = None,  # Workload names (default: the settings' set, else all)
+    tiers: Optional[List[int]] = None,    # Tiers (default: a named load's own, else the load settings', those built)
+    clients: Optional[List[int]] = None,  # Client counts, unnamed (default: the load settings')
+    workloads: Optional[List[str]] = None,  # Workload names, unnamed (default: the settings' set, else all)
     steps: Optional[int] = None,          # Steps per client, at most (default: the settings')
+    plan: Optional[Dict[str, Any]] = None,  # {key, defs}: a NAMED load and every load on the graph
+    scales: Optional[List[float]] = None,   # A named load's role-count multipliers (default: 1)
 ) -> Dict[str, Any]:  # {lane, loads: [...]}
-    """THE CONCURRENT REPLAY MODE (design detail 2f5033bf (2)): at each tier and client count, N
-    clients each replay a workload (round robin over the set) as real CLI invocations under the
-    harness's limits -- every call a tier-tagged event carrying the load id, the client count and
-    the client (each its own actor, ids re-keyed into copy i mod k so clients act as distinct
-    projects; at x1 all share copy 0, the hot spot) -- the clients' summed RSS sampled throughout,
-    then the integrity check; one `bench-load` event per run carries the summary. Writes land in
-    the tier, as the canonical writes do. THE MACHINE GUARD: when the clients' summed RSS passes
-    the memory ceiling the run aborts (every client killed, no further step) and the event says
-    so -- itself a reading: the per-process shape cannot hold that many clients at that tier."""
-    from concurrent.futures import ThreadPoolExecutor
-    import threading
+    """THE CONCURRENT REPLAY MODE (design detail 2f5033bf (2)): at each tier, clients replay
+    recorded workloads concurrently as real CLI invocations under the harness's limits -- every
+    call a tier-tagged event carrying the run's load id, the client count and the client -- the
+    clients' summed RSS sampled throughout, then the integrity check; one `bench-load` event per
+    run carries the summary. Writes land in the tier, as the canonical writes do. THE MACHINE
+    GUARD: when the clients' summed RSS passes the memory ceiling the run aborts (every client
+    killed, no further step) and the event says so -- itself a reading.
+
+    UNNAMED (`clients`): N anonymous clients round robin over the workloads, ids re-keyed into
+    copy i mod k (distinct projects; at x1 all share copy 0, the hot spot).
+
+    NAMED (`plan`; ruling 110c662f, design detail 2c4bad75): the clients are the load's ROSTER
+    (`roster`: its role counts per group and every load it runs beside, each role fed by the
+    bench config's load.roles), ids re-keyed into copy 0 when the client's load is shared, copy i
+    mod k when partitioned; at the load's own tier (else `tiers`). A SOLO pass first runs one
+    client of each interactive role alone (7i's baseline), then the roster at each scale of
+    `scales` (7b's sweep); every run's held reader times each decide's visibility (7v)."""
     from .cli import build_parser
     root = lane_dir(settings, lane)
     ls = load_settings(settings)
-    names = workloads or ls["workloads"] or sorted(p.stem for p in (root / "workloads").glob("*.json"))
-    loaded = [w for w in (_read_json(root / "workloads" / f"{n}.json") for n in names) if w]
-    if not loaded:
-        raise BenchRefusal(f"no workload in {root / 'workloads'} -- `bench workload --session` first")
     built = sorted(int(p.name[1:]) for p in root.glob("x*") if p.name[1:].isdigit()
                    and (p / MANIFEST).exists())
-    todo = [k for k in (tiers or ls["tiers"]) if k in built]
-    if not todo:
-        raise BenchRefusal(f"no built tier among {tiers or ls['tiers']} in {root}")
-    parser = build_parser()
-    limit = int(float(settings["memory_limit_gb"]) * 1024 ** 3)
     cap = int(steps or ls["steps"])
-    pace = float(ls["pace"])
-    ceiling = memory_ceiling_kb(ls)
+    if plan:
+        d = plan["defs"].get(plan["key"])
+        if d is None:
+            raise BenchRefusal(f"no perf_load {plan['key']!r} on the graph "
+                               f"(the loads: {', '.join(sorted(plan['defs'])) or 'none'})")
+        if d.get("lane") and d["lane"] != lane["name"]:
+            raise BenchRefusal(f"load {plan['key']} runs on lane {d['lane']}, not {lane['name']}")
+        want = tiers or ([d["tier"]] if d.get("tier") else [])
+        if not want:
+            raise BenchRefusal(f"load {plan['key']} names no tier -- assert its perf_load_tier or pass --tier")
+        roster(plan, ls, root, cap)  # refuses a role with no source before anything runs
+    else:
+        names = workloads or ls["workloads"] or sorted(p.stem for p in (root / "workloads").glob("*.json"))
+        loaded = [w for w in (_read_json(root / "workloads" / f"{n}.json") for n in names) if w]
+        if not loaded:
+            raise BenchRefusal(f"no workload in {root / 'workloads'} -- `bench workload --session` first")
+        want = tiers or ls["tiers"]
+    todo = [k for k in want if k in built]
+    if not todo:
+        raise BenchRefusal(f"no built tier among {want} in {root}")
+    ctx_base = {"lane": lane, "settings": settings, "ledger": ledger, "root": root,
+                "parser": build_parser(), "limit": int(float(settings["memory_limit_gb"]) * 1024 ** 3),
+                "ceiling": memory_ceiling_kb(ls), "pace": float(ls["pace"]),
+                "probe_s": float(ls["probe_interval_s"])}
     out: Dict[str, Any] = {"lane": lane["name"], "loads": []}
     for k in todo:
-        tm = _read_json(root / f"x{k}" / MANIFEST)
         tier = inside(root / f"x{k}", root.parent)
         (tier / "runs").mkdir(exist_ok=True)
-        for n in clients or ls["clients"]:
-            load_id = str(uuid.uuid4())
-            decided: Dict[int, List[str]] = {}
-            rows: List[Dict[str, Any]] = []
-            lock = threading.Lock()
-
-            stop, aborted = threading.Event(), [None]
-
-            def client(i: int) -> None:
-                w = loaded[i % len(loaded)]
-                rekey, minted = rekeyer(i % k), {}
-                marker = f"[bench load {load_id} client {i}]"
-                for step in w["steps"][:cap]:
-                    if stop.is_set():
-                        break
-                    if pace and step.get("gap_s"):
-                        time.sleep(min(step["gap_s"] * pace, 60.0))
-                    made = _client_argv(parser, step, rekey, minted, marker)
-                    if made["argv"] is None:
-                        continue
-                    run_id = str(uuid.uuid4())
-                    env = {**os.environ, "CJM_RUN_ID": run_id, "CJM_BENCH_TIER": str(k),
-                           "CJM_BENCH_LANE": lane["name"], "CJM_BENCH_LOAD": load_id,
-                           "CJM_BENCH_CLIENTS": str(n), "CJM_BENCH_CLIENT": str(i),
-                           "CJM_ACTOR": f"bench:load:{i}", "CJM_T0": repr(time.time())}
-                    cmd = [sys.executable, "-m", "cjm_context_graph_projection.cli",
-                           "--graph-db-path", tm["db"], "--manifests-dir", lane["manifests_dir"],
-                           "--timings-path", ledger]
-                    for fam, flag in (("writes", "--journal-path"), ("source", "--source-journal-path")):
-                        if fam in tm["journals"]:
-                            cmd += [flag, tm["journals"][fam]["live"]]
-                    if step["kind"] == "read":
-                        cmd.append("--read-only")
-                    res = measure(cmd + made["argv"], env, limit, float(settings["timeout_s"]),
-                                  inside(tier / "runs" / f"{run_id}.out", root.parent))
-                    if res["outcome"] == 0:
-                        (tier / "runs" / f"{run_id}.out").unlink()
-                        if made["mints"]:
-                            with lock:
-                                decided.setdefault(i, []).append(made["mints"])
-                    _event(ledger, step["verb"], res["wall_s"], lane, k,
-                           {"peak_rss_kb": res["peak_rss_kb"], "out_bytes": res["out_bytes"],
-                            "read_bytes": res["read_bytes"], "write_bytes": res["write_bytes"]},
-                           attrs={"load": load_id, "clients": n, "client": i},
-                           run_id=run_id, outcome=res["outcome"], cli_verb=step["verb"])
-                    with lock:
-                        rows.append({"client": i, "verb": step["verb"], "outcome": res["outcome"],
-                                     "wall_s": res["wall_s"]})
-
-            peak, done = [0], threading.Event()
-
-            def sample() -> None:  # the clients' summed RSS: every live descendant of the harness
-                me = os.getpid()
-                page_kb = os.sysconf("SC_PAGE_SIZE") // 1024
-                while not done.is_set():
-                    try:
-                        own = int(Path(f"/proc/{me}/statm").read_text().split()[1]) * page_kb
-                    except (OSError, ValueError):
-                        own = 0
-                    peak[0] = max(peak[0], tree_rss_kb(me) - own)
-                    if peak[0] > ceiling and not stop.is_set():
-                        aborted[0] = (f"the clients' summed RSS {peak[0] / 1024 ** 2:.1f} GB passed the "
-                                      f"{ceiling / 1024 ** 2:.1f} GB ceiling")
-                        stop.set()
-                    if stop.is_set():
-                        _kill_descendants()
-                    done.wait(0.05)
-            sampler = threading.Thread(target=sample, daemon=True)
-            t0 = time.perf_counter()
-            sampler.start()
-            with ThreadPoolExecutor(max_workers=n) as pool:
-                for f in [pool.submit(client, i) for i in range(n)]:
-                    f.result()
-            done.set()
-            sampler.join()
-            wall = time.perf_counter() - t0
-            check = _integrity(tm, load_id, decided)
-            extra = {"peak_rss_kb": peak[0] or None, "integrity": check,
-                     "workloads": [w["name"] for w in loaded], "steps": len(rows),
-                     "aborted": aborted[0]}
-            _event(ledger, "bench-load", wall, lane, k, extra, attrs={"load": load_id, "clients": n})
-            out["loads"].append({"tier": k, "clients": n, "load": load_id, "wall_s": wall,
-                                 "steps": len(rows),
-                                 "failed": sum(1 for r in rows if r["outcome"] != 0),
-                                 "peak_rss_kb": peak[0] or None, "integrity": check,
-                                 "aborted": aborted[0]})
+        ctx = {**ctx_base, "tm": _read_json(tier / MANIFEST), "tier": tier, "k": k}
+        if not plan:
+            for n in clients or ls["clients"]:
+                cl = [{"i": i, "steps": loaded[i % len(loaded)]["steps"][:cap], "rekey": rekeyer(i % k)}
+                      for i in range(n)]
+                out["loads"].append(_drive(cl, ctx, {}))
+            continue
+        solos, seen = [], set()
+        for c in roster(plan, ls, root, cap)["clients"]:
+            if c["interactive"] and (c["of_load"], c["role"]) not in seen:
+                seen.add((c["of_load"], c["role"]))
+                solos.append(c)
+        for c in solos:  # 7i's baseline: one client of the role, alone
+            out["loads"].append(_drive([{**c, "i": 0, "rekey": rekeyer(0)}], ctx,
+                                       {"perf_load": plan["key"], "solo": c["role"]}))
+        for scale in scales or [1.0]:
+            ros = roster(plan, ls, root, cap, scale)
+            for c in ros["clients"]:
+                c["rekey"] = rekeyer(c["i"] % k) if c["sharing"] == "partitioned" else rekeyer(0)
+            out["loads"].append(_drive(ros["clients"], ctx, {"perf_load": plan["key"], "scale": scale,
+                                                             "composed": ros["composed"]}))
     return out
 
 
@@ -1240,6 +1641,8 @@ def render_bench(
         return "\n".join(out)
     if action == "workload":  # design detail 2f5033bf (2)
         src = res["source"]
+        if res.get("kind") == "ingest":  # 2c4bad75 (3)
+            out.append(f"- the pulls replay the transcript {res['transcript']} onto copies of spine {res['session_key']}")
         out.append(f"- workload `{res['name']}` from session {src['session']}"
                    + (f" (actor {src['actor']})" if src.get("actor") else "")
                    + f": {res['reads']} read(s) · {res['writes']} write(s)")
@@ -1247,13 +1650,21 @@ def render_bench(
         out += [f"- dropped {k}: {n}" for k, n in sorted(res["dropped"].items())]
         return "\n".join(out)
     if action == "load":
-        out += ["| tier | clients | steps | failed | wall s | summed peak RSS | integrity |",
-                "|---:|---:|---:|---:|---:|---:|---|"]
+        out += ["| tier | run | clients | steps | failed | wall s | summed peak RSS | visibility p99 | integrity |",
+                "|---:|---|---:|---:|---:|---:|---:|---:|---|"]
         for r in res["loads"]:
             rss = r["peak_rss_kb"] and r["peak_rss_kb"] * 1024
             check = r["integrity"] or {}
-            out.append(f"| x{r['tier']} | {r['clients']} | {r['steps']} | {r['failed']} | "
-                       f"{r['wall_s']:.1f} | {_gb(rss)} | {'ok' if check.get('ok') else check} |")
+            name = "-"  # design detail 2c4bad75: a named load's run, its solo pass, its scale
+            if r.get("perf_load"):
+                name = r["perf_load"] + (f" solo {r['solo']}" if r.get("solo") else
+                                         f" ×{r.get('scale', 1.0):g}" + (" (composed)" if r.get("composed") else ""))
+            vis = (r.get("visibility") or {}).get("p99_s")
+            out.append(f"| x{r['tier']} | {name} | {r['clients']} | {r['steps']} | {r['failed']} | "
+                       f"{r['wall_s']:.1f} | {_gb(rss)} | {'-' if vis is None else f'{vis:.3f} s'} | "
+                       f"{'ok' if check.get('ok') else check} |")
+            if r.get("aborted"):
+                out.append(f"- **ABORTED**: {r['aborted']}")
         out += ["", "_perf reads each run: per verb p50 / p99, throughput, failures by outcome._"]
         return "\n".join(out)
     if res.get("base"):

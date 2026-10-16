@@ -18,6 +18,7 @@ write that read most of the graph. Nothing it reports is stored.
 import json
 import math
 import os
+import re
 import statistics
 import time
 from contextlib import asynccontextmanager
@@ -162,6 +163,7 @@ SLOPE_RATIO = 2.0          # a replay verb's late-bin mean cost over its early-b
 GRAPH_SHARE = 0.5          # a write's rows read over the graph's nodes
 READ_WROTE_SLACK = 256 * 1024  # bytes a read-only run may write net beyond its own journal appends
 PAGE_BYTES = 4096  # a disk write's grain: a written-bytes curve's floor, so a zero is a reading (634fa576)
+KNEE_GAIN = 1.1  # 7b's knee: a sweep step that gains less ops/s than this ratio has stopped scaling (2c4bad75)
 
 
 def _covariate(ev: Dict[str, Any], name: str) -> Optional[float]:  # One covariate of an event
@@ -543,15 +545,52 @@ def _quantile(
     return xs[min(len(xs) - 1, max(0, math.ceil(q * len(xs)) - 1))]
 
 
+def knee(
+    sweep: List[Dict[str, Any]],  # One load's runs across a scale sweep, by client count ascending
+) -> Optional[Dict[str, Any]]:  # {clients, ops_per_s}: where throughput stops scaling, or None
+    """7b's KNEE (ruling 110c662f (2), design detail 2c4bad75 (5)): the client count after which
+    the next step of the sweep gains less than KNEE_GAIN in ops per second -- the most clients
+    still worth adding. Reported, never a target; None under two runs. A sweep that never
+    flattens puts the knee at its last run (the knee lies beyond it)."""
+    rs = [r for r in sweep if r.get("clients") and r.get("ops_per_s")]
+    if len(rs) < 2:
+        return None
+    for prev, nxt in zip(rs, rs[1:]):
+        if nxt["ops_per_s"] < prev["ops_per_s"] * KNEE_GAIN:
+            return {"clients": prev["clients"], "ops_per_s": prev["ops_per_s"], "beyond": False}
+    return {"clients": rs[-1]["clients"], "ops_per_s": rs[-1]["ops_per_s"], "beyond": True}
+
+
+def parse_roles(
+    value: Any,  # A perf_load_roles value: "main=1 ingest=1 sub=4"
+) -> Dict[str, int]:  # role -> count, in the order written
+    """A load's role counts (design detail 2c4bad75 (1)): role=count pairs, space- or
+    comma-separated; a malformed pair refuses (ValueError), never guessed."""
+    out: Dict[str, int] = {}
+    for part in re.split(r"[\s,]+", str(value or "").strip()):
+        if not part:
+            continue
+        role, sep, n = part.partition("=")
+        if not (role and sep and n.isdigit()):
+            raise ValueError(f"not a role count: {part!r} (role=count)")
+        out[role] = int(n)
+    return out
+
+
 def load_report(
     events: List[Dict[str, Any]],  # The ledger's load-run events (attrs.load set)
-) -> List[Dict[str, Any]]:  # The latest load run per (lane, tier, clients)
+) -> List[Dict[str, Any]]:  # The latest load run per (lane, tier, load, solo role, scale, clients)
     """The concurrent replay mode's read (design detail 2f5033bf (2)): per load run -- its lane,
     tier and client count -- each verb's end-to-end seconds as the harness saw them (p50 / p99)
     with the CLI's own verb seconds beside them, the run's throughput (ops and writes per second
     over its window), its failures by outcome, the net bytes its clients wrote (their own
     counters), and from the load's own event the clients' summed peak RSS and the integrity
-    check. The latest run per (lane, tier, clients)."""
+    check. Design detail 2c4bad75: a NAMED load's run (its perf_load key, scale and composed
+    label) reports each role's p50 / p99, the INTERACTIVE clients' verbs apart (7i reads them),
+    the held reader's visibility readings (7v), and its LARGEST op (110c662f (4)): its journal
+    bytes, verb and seconds, with the other clients' p99 while it ran over their p99 overall. A
+    SOLO pass (one client of an interactive role alone, 7i's baseline) is a run of its own. The
+    latest run per (lane, tier, load, solo role, scale, clients)."""
     cli = {e.get("run_id"): e for e in events if e.get("kind") == "cli" and e.get("run_id")}
     runs: Dict[str, Dict[str, Any]] = {}
     for e in events:
@@ -559,7 +598,9 @@ def load_report(
         if not a.get("load") or e.get("kind") != "bench":
             continue
         r = runs.setdefault(a["load"], {"load": a["load"], "lane": a.get("lane"), "tier": a.get("tier"),
-                                        "clients": a.get("clients"), "calls": [], "summary": {}})
+                                        "clients": a.get("clients"), "perf_load": a.get("perf_load"),
+                                        "solo": a.get("solo"), "scale": a.get("scale"),
+                                        "composed": a.get("composed"), "calls": [], "summary": {}})
         if e.get("verb") == "bench-load":
             r["summary"] = e
         elif e.get("run_id"):
@@ -569,9 +610,14 @@ def load_report(
         if not r["calls"]:
             continue
         r["ts"] = max(c.get("ts") or 0 for c in r["calls"])
-        key = (str(r["lane"]), r["tier"] or 0, r["clients"] or 0)
+        key = (str(r["lane"]), r["tier"] or 0, str(r["perf_load"] or ""), str(r["solo"] or ""),
+               r["scale"] or 0, r["clients"] or 0)
         if key not in latest or r["ts"] > latest[key]["ts"]:
             latest[key] = r
+
+    def quantiles(cs: List[Dict[str, Any]]) -> Dict[str, Any]:
+        walls = sorted(c.get("wall_s") or 0.0 for c in cs)
+        return {"n": len(cs), "p50_s": _quantile(walls, 0.5), "p99_s": _quantile(walls, 0.99)}
     out = []
     for _, r in sorted(latest.items()):
         calls = r["calls"]
@@ -585,21 +631,44 @@ def load_report(
             if c.get("outcome") != 0:
                 fails[str(c.get("outcome"))] = fails.get(str(c.get("outcome")), 0) + 1
         by_verb: Dict[str, List[Dict[str, Any]]] = {}
+        by_role: Dict[str, List[Dict[str, Any]]] = {}
+        inter: Dict[str, List[Dict[str, Any]]] = {}
         for c in ok:
+            a = c.get("attrs") or {}
             by_verb.setdefault(str(c.get("verb")), []).append(c)
+            if a.get("role"):
+                by_role.setdefault(str(a["role"]), []).append(c)
+            if a.get("interactive"):
+                inter.setdefault(str(c.get("verb")), []).append(c)
         verbs = []
         for v, cs in sorted(by_verb.items()):
-            walls = sorted(c.get("wall_s") or 0.0 for c in cs)
             own = sorted(s for s in ((((cli.get(c["run_id"]) or {}).get("phases") or {}).get("verb") or {})
                                      .get("s") for c in cs) if s is not None)
-            verbs.append({"verb": v, "n": len(cs), "p50_s": _quantile(walls, 0.5),
-                          "p99_s": _quantile(walls, 0.99), "verb_p50_s": _quantile(own, 0.5),
+            verbs.append({"verb": v, **quantiles(cs), "verb_p50_s": _quantile(own, 0.5),
                           "verb_p99_s": _quantile(own, 0.99)})
         written = [net_written(c.get("io")) for c in mine if c]
+        # the largest op (110c662f (4)): the most journal bytes one successful call appended
+        big, sizes = None, [(appended_bytes(cli.get(c["run_id"]) or {}), c) for c in ok]
+        top = max(sizes, key=lambda s: s[0], default=(0, None))
+        if top[0] > 0:
+            b, c = top
+            end = c.get("ts") or 0
+            start, me = end - (c.get("wall_s") or 0), (c.get("attrs") or {}).get("client")
+            others = [o for o in ok if (o.get("attrs") or {}).get("client") != me]
+            during = [o for o in others
+                      if (o.get("ts") or 0) > start and (o.get("ts") or 0) - (o.get("wall_s") or 0) < end]
+            big = {"verb": c.get("verb"), "bytes": b, "wall_s": c.get("wall_s"),
+                   "others_during_p99_s": quantiles(during)["p99_s"],
+                   "others_p99_s": quantiles(others)["p99_s"]}
         s = r["summary"]
         out.append({"load": r["load"], "lane": r["lane"], "tier": r["tier"], "clients": r["clients"],
+                    "perf_load": r["perf_load"], "solo": r["solo"], "scale": r["scale"],
+                    "composed": r["composed"], "ts": r["ts"],
                     "ops": len(calls), "window_s": window, "ops_per_s": len(ok) / window,
                     "writes_per_s": writes / window, "failures": fails, "verbs": verbs,
+                    "roles": [{"role": k, **quantiles(cs)} for k, cs in sorted(by_role.items())],
+                    "interactive": [{"verb": k, **quantiles(cs)} for k, cs in sorted(inter.items())],
+                    "largest_op": big, "visibility": s.get("visibility"),
                     "written": sum(w for w in written if w is not None) if written else None,
                     "peak_rss_kb": s.get("peak_rss_kb"), "integrity": s.get("integrity"),
                     "aborted": s.get("aborted")})  # the machine guard's reading, when it fired
@@ -642,26 +711,36 @@ def target_standing(
     loads: List[Dict[str, Any]],    # `load_report`'s result
     classes: List[Dict[str, Any]],  # `load_targets`'s result: [{key, name, position, targets, members}]
     rebuilds: Optional[List[Dict[str, Any]]] = None,  # `perf_report`'s rebuild rows (the full build's seat)
+    load_defs: Optional[Dict[str, Dict[str, Any]]] = None,  # `load_definitions`'s result (a class's members that are loads)
 ) -> Dict[str, Any]:  # {seats, loads, counts, ready}
     """Each seat against its class's targets (ruling dba17ca8, design detail 2f5033bf (3)).
     SHAPE targets read the growth exponents across the tiers -- the cost's (the verb's own
     seconds; per answer when the class says so: b of the cost less b of the answer), the peak
     RSS's, the net bytes written's; ABSOLUTE targets read the x32 cell -- the verb's own seconds
     (the launch floor excluded until A), peak RSS, net bytes written; a failed x32 run fails
-    them. LOAD targets read the load runs: each member verb's p99 at the most clients over its
-    p99 at one, the summed RSS's growth in N, write throughput at the most clients. A target not
-    set is not checked; a set one with no reading is UNMEASURED. A seat in no class is NO TARGET
-    -- shown, never silently passed (6752db0a (9)). Promotion reads every gate holding.
-    Ruling 9af0e42e: a WRITE seat (a run in write mode, or one that appended or replayed journal
-    bytes) is held to its x32 write amplification and never to the MB ceiling, which holds the
-    read-only seats; the full build (`cg-rebuild`, a seat per lane) to its build phase's bytes
-    over the db it produced."""
-    load_preds = (P.PERF_LOAD_P99_RATIO, P.PERF_LOAD_RSS_B_MAX, P.PERF_LOAD_WRITES_MIN)
+    them. A target not set is not checked; a set one with no reading is UNMEASURED. A seat in no
+    class is NO TARGET -- shown, never silently passed (6752db0a (9)). Promotion reads every gate
+    holding. Ruling 9af0e42e: a WRITE seat (a run in write mode, or one that appended or
+    replayed journal bytes) is held to its x32 write amplification and never to the MB ceiling,
+    which holds the read-only seats; the full build (`cg-rebuild`, a seat per lane) to its build
+    phase's bytes over the db it produced.
+
+    THE LOADS (ruling 110c662f (2), design detail 2c4bad75 (5)): a class whose members are loads
+    reads each load's latest full run at its tier. 7i -- the interactive clients' p99 on the
+    verbs of classes (1)-(2) (their members, read here, never restated) over the same verbs'
+    p99 in the load's SOLO pass; 7b -- write throughput against the load's own floor (else the
+    class's), no failure and no integrity break, and over a scale sweep the summed RSS's growth
+    in N with the KNEE beside it; 7v -- the held reader's visibility p99. A COMPOSED load is a
+    projection (60681b4f): its checks are shown, its gate never counted."""
+    load_preds = (P.PERF_LOAD_P99_RATIO, P.PERF_LOAD_RSS_B_MAX, P.PERF_LOAD_WRITES_MIN,
+                  P.PERF_LOAD_VISIBILITY_P99_S)
+    defs = load_defs or {}
     by_seat: Dict[str, Dict[str, Any]] = {}
-    for c in classes:  # a class carrying only load targets names the verbs its load rows read
+    for c in classes:  # a class carrying only load targets holds loads, never seats
         if any(v is not None for p, v in c["targets"].items() if p not in load_preds + (P.PERF_GATES,)):
             for m in c["members"]:
-                by_seat[m] = c
+                if m not in defs:
+                    by_seat[m] = c
     seats = []
     for lane in tiers:
         for v in lane["verbs"]:
@@ -715,68 +794,102 @@ def target_standing(
             _target_check("build amplification", amp, t.get(P.PERF_WRITE_AMP_MAX), "absolute"),) if c]
         seats.append({**row, "class": cls["key"], "checks": checks,
                       **_target_verdict(checks, str(t.get(P.PERF_GATES, "")).lower() == "true")})
+    fast = {m for c in classes if c.get("position") in (1, 2) for m in c["members"]}  # classes (1)-(2)
     load_rows = []
     for cls in classes:
         t = cls["targets"]
-        if not any(t.get(p) is not None for p in (P.PERF_LOAD_P99_RATIO, P.PERF_LOAD_RSS_B_MAX,
-                                                    P.PERF_LOAD_WRITES_MIN)):
-            continue
-        groups: Dict[tuple, List[Dict[str, Any]]] = {}
-        for r in loads:
-            groups.setdefault((str(r["lane"]), r["tier"]), []).append(r)
-        if not groups:
-            load_rows.append({"class": cls["key"], "lane": None, "tier": None, "checks": [],
-                              "status": "unmeasured", "gate": False})
-        for (lane, tier), rs in sorted(groups.items(), key=lambda kv: (kv[0][0], kv[0][1] or 0)):
-            rs = sorted(rs, key=lambda r: r["clients"] or 0)
-            one = next((r for r in rs if r["clients"] == 1), None)
-            most = rs[-1]
-            ratios = []
-            for v in (most["verbs"] if one is not None and most is not one else []):
-                if v["verb"] not in cls["members"]:
-                    continue
-                base = next((b for b in one["verbs"] if b["verb"] == v["verb"]), None)
-                if base and base["p99_s"]:
-                    ratios.append(v["p99_s"] / base["p99_s"])
-            rss = growth([{"tier": r["clients"], "outcome": 0, "peak_rss_kb": r["peak_rss_kb"]}
-                          for r in rs if r["clients"]], "peak_rss_kb")
-            checks = [c for c in (
-                _target_check("load p99 ratio", max(ratios) if ratios else None, t.get(P.PERF_LOAD_P99_RATIO), "load"),
-                _target_check("load RSS b", rss["b"] if rss else None, t.get(P.PERF_LOAD_RSS_B_MAX), "load"),
-            ) if c]
-            floor = _target_number(t.get(P.PERF_LOAD_WRITES_MIN))
-            if floor is not None:  # a floor: the reading must reach it
-                checks.append({"target": "load writes/s", "value": most["writes_per_s"], "limit": floor,
-                               "kind": "load", "ok": most["writes_per_s"] >= floor})
-            load_rows.append({"class": cls["key"], "lane": lane, "tier": tier,
-                              "clients": most["clients"], "checks": checks, **_target_verdict(checks, True)})
+        for key in (m for m in cls["members"] if m in defs):
+            d = defs[key]
+            row = {"class": cls["key"], "load": key, "lane": d.get("lane"), "tier": d.get("tier")}
+            mine = [r for r in loads if r.get("perf_load") == key
+                    and (d.get("tier") is None or r["tier"] == d["tier"])]
+            runs = [r for r in mine if not r.get("solo")]
+            if not runs:
+                load_rows.append({**row, "clients": None, "checks": [], "composed": None, "knee": None,
+                                  "status": "unmeasured", "gate": False})
+                continue
+            full = max((r for r in runs if (r.get("scale") or 1.0) == 1.0), key=lambda r: r["ts"],
+                       default=None) or max(runs, key=lambda r: r["ts"])
+            sweep: Dict[Any, Dict[str, Any]] = {}  # the latest run per scale
+            for r in runs:
+                if r.get("tier") == full["tier"] and (r["scale"] not in sweep or r["ts"] > sweep[r["scale"]]["ts"]):
+                    sweep[r["scale"]] = r
+            # an aborted run (the machine guard's) is its own reading: its RSS is the ceiling and
+            # its throughput a killed run's, so the knee and the RSS growth read the rest
+            sweep_rows = sorted((r for r in sweep.values() if not r.get("aborted")), key=lambda r: r["clients"] or 0)
+            guard_at = min((r["clients"] or 0 for r in sweep.values() if r.get("aborted")), default=None)
+            checks = []
+            if t.get(P.PERF_LOAD_P99_RATIO) is not None:  # 7i: the solo pass is the baseline
+                solo: Dict[str, float] = {}
+                for r in mine:
+                    if r.get("solo") and r["tier"] == full["tier"]:
+                        for v in r["verbs"]:
+                            if v["p99_s"]:
+                                solo[v["verb"]] = max(solo.get(v["verb"], 0.0), v["p99_s"])
+                ratios = [v["p99_s"] / solo[v["verb"]] for v in full.get("interactive") or []
+                          if v["verb"] in fast and solo.get(v["verb"]) and v["p99_s"] is not None]
+                checks.append(_target_check("interactive p99 ratio", max(ratios) if ratios else None,
+                                            t.get(P.PERF_LOAD_P99_RATIO), "load"))
+            batch = t.get(P.PERF_LOAD_WRITES_MIN) is not None or t.get(P.PERF_LOAD_RSS_B_MAX) is not None
+            # 7b: the load's own floor wins over its class's -- read only where a class asks for throughput
+            floor = (d.get("writes_min") if d.get("writes_min") is not None
+                     else _target_number(t.get(P.PERF_LOAD_WRITES_MIN))) if batch else None
+            if batch:
+                if floor is not None:  # a floor: the reading must reach it
+                    checks.append({"target": "load writes/s", "value": full["writes_per_s"], "limit": floor,
+                                   "kind": "load", "ok": full["writes_per_s"] >= floor})
+                rss = growth([{"tier": r["clients"], "outcome": 0, "peak_rss_kb": r["peak_rss_kb"]}
+                              for r in sweep_rows if r["clients"] and r["peak_rss_kb"]], "peak_rss_kb")
+                checks += [c for c in (
+                    _target_check("load RSS b", rss["b"] if rss else None, t.get(P.PERF_LOAD_RSS_B_MAX), "load"),
+                    _target_check("failures", sum(full["failures"].values()), 0, "load"),
+                    _target_check("integrity breaks", None if (full.get("integrity") or {}).get("ok") is None
+                                  else 0 if full["integrity"]["ok"] else 1, 0, "load")) if c]
+            if t.get(P.PERF_LOAD_VISIBILITY_P99_S) is not None:  # 7v
+                checks.append(_target_check("visibility p99 s", (full.get("visibility") or {}).get("p99_s"),
+                                            t.get(P.PERF_LOAD_VISIBILITY_P99_S), "load"))
+            verdict = _target_verdict(checks, True)
+            if full.get("composed"):  # a projection: shown, never gating (110c662f (6))
+                verdict = {"status": f"projection: {verdict['status']}", "gate": None}
+            load_rows.append({**row, "clients": full["clients"], "checks": checks,
+                              "composed": bool(full.get("composed")), "knee": knee(sweep_rows),
+                              "guard_at": guard_at, **verdict})
     counts: Dict[str, int] = {}
     for s in seats:
         counts[s["status"]] = counts.get(s["status"], 0) + 1
     return {"seats": seats, "loads": load_rows, "counts": counts,
             "ready": bool(seats) and all(s["gate"] for s in seats)
-                     and all(r["gate"] for r in load_rows)}
+                     and all(r["gate"] for r in load_rows if r["gate"] is not None)}
+
+
+async def _entity_facts(
+    gx: GraphHandle,  # The open dev graph
+    kind: str,        # An Entity sub-kind (perf_class | perf_load)
+) -> List[tuple]:  # [(entity, [its ACTIVE assertions])]
+    """Every Entity of a kind and its ACTIVE facts, supersession applied -- the entities by kind,
+    then their assertions by subject in one batch read (da6cdab6)."""
+    from . import factlayer as F
+    ents = await F.load_label_where(gx, DevNodeKinds.ENTITY,
+                                    [PropertyPredicate("entity_kind", "eq", kind)])
+    if not ents:
+        return []
+    facts = await F.load_label_where(gx, DevNodeKinds.ASSERTION,
+                                     [PropertyPredicate("subject_id", "in", [F.nid(e) for e in ents])])
+    supers = await F.load_supersedes(gx)
+    active = [a for slot in F.group_by_slot(facts).values() for a in F.active_assertions(slot, supers)]
+    return [(e, [a for a in active if F.prop(a, "subject_id") == F.nid(e)]) for e in ents]
 
 
 async def load_targets(
     gx: GraphHandle,  # The open dev graph (the planning graph holds the targets)
 ) -> List[Dict[str, Any]]:  # [{key, name, position, targets: {predicate: value}, members: [seat]}]
-    """The target classes (design detail 2f5033bf (3)): every perf_class Entity and its ACTIVE
-    facts, supersession applied -- the classes by kind, then their assertions by subject in one
-    batch read (da6cdab6). Ordered by position."""
+    """The target classes (design detail 2f5033bf (3)): every perf_class Entity not retired and its
+    ACTIVE facts (a retired class's facts stay as its history, a7617bd4). Ordered by position."""
     from . import factlayer as F
-    ents = await F.load_label_where(gx, DevNodeKinds.ENTITY,
-                                    [PropertyPredicate("entity_kind", "eq", P.ENTITY_PERF_CLASS)])
-    if not ents:
-        return []
-    ids = [F.nid(e) for e in ents]
-    facts = await F.load_label_where(gx, DevNodeKinds.ASSERTION,
-                                     [PropertyPredicate("subject_id", "in", ids)])
-    supers = await F.load_supersedes(gx)
-    active = [a for slot in F.group_by_slot(facts).values() for a in F.active_assertions(slot, supers)]
     out = []
-    for e in ents:
-        mine = [a for a in active if F.prop(a, "subject_id") == F.nid(e)]
+    for e, mine in await _entity_facts(gx, P.ENTITY_PERF_CLASS):
+        if F.prop(e, "retired"):
+            continue
         out.append({"key": F.prop(e, "key"), "name": F.prop(e, "name"),
                     "position": F.prop(e, "position"),
                     "targets": {F.prop(a, "predicate"): F.prop(a, "value") for a in mine
@@ -787,12 +900,49 @@ async def load_targets(
                                       str(c["key"])))
 
 
+async def load_definitions(
+    gx: GraphHandle,  # The open dev graph (the planning graph holds the loads)
+) -> Dict[str, Dict[str, Any]]:  # load key -> {key, name, position, roles, groups, interactive, lane, tier, sharing, pace, with, writes_min}
+    """The planning loads (ruling 110c662f (5), design detail 2c4bad75 (1)): every perf_load
+    Entity not retired, its ACTIVE facts read into the load's shape -- the role counts of one
+    group, the groups, the roles read as interactive, the lane, tier, sharing (shared by
+    default, 110c662f (3)) and pace, the loads it runs beside, its own write floor. A malformed
+    fact refuses (ValueError) naming the load, never guessed."""
+    from . import factlayer as F
+    out: Dict[str, Dict[str, Any]] = {}
+    for e, mine in await _entity_facts(gx, P.ENTITY_PERF_LOAD):
+        if F.prop(e, "retired"):
+            continue
+        key = str(F.prop(e, "key"))
+        one = {F.prop(a, "predicate"): F.prop(a, "value") for a in mine
+               if F.prop(a, "predicate") != P.PERF_LOAD_WITH}
+        try:
+            roles = parse_roles(one.get(P.PERF_LOAD_ROLES))
+        except ValueError as err:
+            raise ValueError(f"load {key}: {err}") from None
+        sharing = str(one.get(P.PERF_LOAD_SHARING) or P.LOAD_SHARINGS[0])
+        if sharing not in P.LOAD_SHARINGS:
+            raise ValueError(f"load {key}: sharing {sharing!r} is not one of {', '.join(P.LOAD_SHARINGS)}")
+        tier, groups = _target_number(one.get(P.PERF_LOAD_TIER)), _target_number(one.get(P.PERF_LOAD_GROUPS))
+        out[key] = {"key": key, "name": F.prop(e, "name"), "position": F.prop(e, "position"),
+                    "roles": roles, "groups": int(groups) if groups else 1,
+                    "interactive": [r for r in re.split(r"[\s,]+", str(one.get(P.PERF_LOAD_INTERACTIVE) or ""))
+                                    if r],
+                    "lane": one.get(P.PERF_LOAD_LANE), "tier": int(tier) if tier else None,
+                    "sharing": sharing, "pace": _target_number(one.get(P.PERF_LOAD_PACE)) or 0.0,
+                    "with": sorted(str(F.prop(a, "value")) for a in mine
+                                   if F.prop(a, "predicate") == P.PERF_LOAD_WITH),
+                    "writes_min": _target_number(one.get(P.PERF_LOAD_WRITES_MIN))}
+    return out
+
+
 def perf_report(
     path: str,                   # The timings ledger
     verb: Optional[str] = None,  # Only this verb (or app:gesture)
     runs: int = 50,              # History kept per verb (the newest N)
     since: Optional[float] = None,  # Only events at or after this unix time
     targets: Optional[List[Dict[str, Any]]] = None,  # `load_targets`'s classes: the standing is read when given
+    load_defs: Optional[Dict[str, Dict[str, Any]]] = None,  # `load_definitions`'s loads (a class's load members)
 ) -> Dict[str, Any]:  # {ledger, events, verbs, gestures, polls, fits, regressions, guards, rebuilds, tiers, tier_regressions, load, standing, unmeasured}
     """The ledger read: per verb the latest / median / p90 END-TO-END seconds (launch + import
     + wall), the latest run's heaviest phases by self time and storage by method; per app
@@ -887,7 +1037,7 @@ def perf_report(
             "polls": poll_rows(polls, runs=runs), "fits": fits,
             "regressions": regressions, "guards": found, "rebuilds": rebuild_rows,
             "tiers": curves, "tier_regressions": tier_regressions(tiered), "load": loads,
-            "standing": (target_standing(curves, loads, targets, rebuild_rows)
+            "standing": (target_standing(curves, loads, targets, rebuild_rows, load_defs)
                          if targets is not None else None),
             "unmeasured": ["journal op counts per family (B's journal index)",
                            "Qt-side delivery and paint (the shell's, after its migration; "
@@ -1028,14 +1178,30 @@ def render_perf(
     for r in res.get("load") or []:
         fails = ", ".join(f"{k} x{n}" for k, n in sorted(r["failures"].items())) or "none"
         rss = r.get("peak_rss_kb")
-        out += ["", f"### Load — {r['lane']} · x{r['tier']} · {r['clients']} client(s) · "
+        named = ""  # design detail 2c4bad75: a named load, its solo pass, its scale, the composed label
+        if r.get("perf_load"):
+            named = f" · {r['perf_load']}" + (f" SOLO {r['solo']}" if r.get("solo") else "") \
+                + (f" ×{r['scale']:g}" if r.get("scale") not in (None, 1, 1.0) else "") \
+                + (" · COMPOSED (a projection, never gating)" if r.get("composed") else "")
+        out += ["", f"### Load — {r['lane']}{named} · x{r['tier']} · {r['clients']} client(s) · "
                     f"{r['ops']} ops in {_s(r['window_s'])} s · {r['ops_per_s']:.2f} ops/s · "
                     f"{r['writes_per_s']:.2f} writes/s", "",
                 f"- clients' summed peak RSS {_bytes_text(rss * 1024) if rss else '-'} · written "
                 f"{_bytes_text(r.get('written'))} · failures {fails} · integrity "
                 f"{(r.get('integrity') or {}).get('ok', '-')}"
-                + (f" · **ABORTED: {r['aborted']}**" if r.get("aborted") else ""), "",
-                "| verb | n | p50 | p99 | verb p50 | verb p99 |", "|---|---:|---:|---:|---:|---:|"]
+                + (f" · **ABORTED: {r['aborted']}**" if r.get("aborted") else "")]
+        if r.get("roles"):
+            out.append("- roles (p50 / p99 s): " + " · ".join(
+                f"{x['role']} {_s(x['p50_s'])} / {_s(x['p99_s'])} (n {x['n']})" for x in r["roles"]))
+        vis = r.get("visibility")
+        if vis:
+            out.append(f"- visibility (a held reader, 7v): p50 {_s(vis.get('p50_s'))} · p99 {_s(vis.get('p99_s'))}"
+                       f" · max {_s(vis.get('max_s'))} s over {vis.get('n')} write(s), {vis.get('unseen', 0)} unseen")
+        big = r.get("largest_op")
+        if big:
+            out.append(f"- largest op: {big['verb']} {_bytes_text(big['bytes'])} in {_s(big['wall_s'])} s; the "
+                       f"others' p99 while it ran {_s(big['others_during_p99_s'])} s vs {_s(big['others_p99_s'])} s")
+        out += ["", "| verb | n | p50 | p99 | verb p50 | verb p99 |", "|---|---:|---:|---:|---:|---:|"]
         out += [f"| {v['verb']} | {v['n']} | {_s(v['p50_s'])} | {_s(v['p99_s'])} | "
                 f"{_s(v['verb_p50_s'])} | {_s(v['verb_p99_s'])} |" for v in r["verbs"]]
     st = res.get("standing")
@@ -1051,7 +1217,14 @@ def render_perf(
                        f"{'✓' if s['gate'] else '-'} | {checks} |")
         for r in st["loads"]:
             checks = " · ".join(_check_cell(c) for c in r["checks"])
-            out.append(f"| {r['lane'] or '-'} | load x{r['tier'] or '-'} | {r['class']} | {r['status']} | "
-                       f"{'✓' if r['gate'] else '-'} | {checks} |")
+            kn = r.get("knee")
+            if kn:
+                checks += f" · knee {kn['clients']} client(s) at {kn['ops_per_s']:.2f} ops/s" \
+                    + (" (beyond the sweep)" if kn.get("beyond") else "")
+            if r.get("guard_at"):
+                checks += f" · the machine guard stopped {r['guard_at']} client(s)"
+            gate = "✓" if r["gate"] else "n/a" if r["gate"] is None else "-"
+            out.append(f"| {r['lane'] or '-'} | {r['load']} x{r['tier'] or '-'} | {r['class']} | {r['status']} | "
+                       f"{gate} | {checks} |")
     out += ["", "_Not yet measured: " + "; ".join(res["unmeasured"]) + "._"]
     return "\n".join(out)
