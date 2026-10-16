@@ -2270,7 +2270,10 @@ RUN_VERBS = ("judge-related", "judge-facets", "judge-roles", "judge-concepts", "
 # The own-shape verbs' no-change line (ruling 24fa72c2 (4)-(7)): what the graph already holds
 NOCHANGE_HOLDS = {"ingest-evidence": "this snapshot", "notes-render": "this render", "propose": "every draft",
                   "decide": "this decision", "oracle": "every version read", "entity": "this record",
-                  "relocate": "every page's destination", "confirm-proposal": "this confirmation"}
+                  "relocate": "every page's destination", "confirm-proposal": "this confirmation",
+                  "notes-accept": "every picked point", "notes-place": "this placement", "notes-outline": "this outline",
+                  "notes-retract-all": "no point of this deliverable", "notes-judge-draft": "these judgements",
+                  "notes-rehead": "every heading"}
 
 
 def _ingest_verb(obj: Dict[str, Any]) -> str:  # An evidence snapshot's receipt verb
@@ -2629,7 +2632,7 @@ def _render_notes_lane(kind: str, obj: Dict[str, Any]) -> str:
         acc = obj.get("accepted") or []
         lines.append(f"_accepted {len(acc)} · skipped {len(obj.get('skipped') or [])}_")
         for a in acc:
-            tag = " (re-accept, no-op)" if a.get("existing") else ""
+            tag = " (re-accept, no-op)" if a.get("noop") else " (re-accept, updated)" if a.get("existing") else ""
             lines.append(f"- ✓ `{str(a.get('point_id') or '')[:8]}` [{a.get('kind')}] {_short(a.get('text'), 120)}{tag}"
                          f" · refs {len(a.get('references') or [])}"
                          + (f" · ⚠ {len(a.get('refers_to_missing'))} back-link(s) wait on unaccepted point(s): "
@@ -2669,6 +2672,8 @@ def _render_notes_lane(kind: str, obj: Dict[str, Any]) -> str:
         return "\n".join(lines)
     if kind == "notes-retract-all":
         done = obj.get("retracted") or []
+        if obj.get("error"):
+            return f"**retract-point** `{obj.get('slug')}` — refused, nothing retracted"
         return (f"**retract-point ×{len(done)}** — every point of `{obj.get('slug')}` retracted "
                 f"(one journaled op each; render to drop the body)")
     if kind == "notes-rehome":

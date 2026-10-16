@@ -40,7 +40,6 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import yaml
 from cjm_context_graph_layer.ops import extend_graph, graph_task
-from cjm_context_graph_primitives.journal import op_now
 from cjm_context_graph_primitives.query import (EdgeQuery, NodeQuery, PropertyPredicate,
                                                 RelationPredicate)
 from cjm_dev_graph_schema import predicates as P
@@ -1836,9 +1835,23 @@ def extra_list(
              "parent": pkeys.get(p.get("parent_key") or "") or xkeys.get(p.get("parent_key") or "") or ""} for p in rows]
 
 
+PAIR_KEY_WIDTH = 8   # A pair key carries this many leading characters of each point's own key
+
+
+def pair_key(
+    a_id: str,  # Side a's proposal id (a point's key)
+    b_id: str,  # Side b's
+) -> str:  # `q<a>.<b>`: the pair named by its two points, never by its place in a list
+    """A pair's key (ruling c0f4fecc): the leading characters of
+    its two points' own keys, side a first -- stable whatever lands, so an answer resolves to the
+    same two points on any later read of the draft (a crashed run's retry included), and a fold
+    whose loser is gone still names the survivor that stands."""
+    return f"q{a_id[:PAIR_KEY_WIDTH]}.{b_id[:PAIR_KEY_WIDTH]}"
+
+
 def unjudged_pairs(
     proposals: List[Dict[str, Any]],  # A set's rows (a merged set), or a note's Points as `points_as_proposals` shapes them
-) -> List[Dict[str, Any]]:  # [{key, a: {key, proposal_id, …}, b: {…}, shared}] in index order — `q001`… are stable for the rows
+) -> List[Dict[str, Any]]:  # [{key, a: {key, proposal_id, …}, b: {…}, shared}] in index order — each key names its two points (pair_key)
     """STANDING DETECTION (ruling 1798a796 (1)): the pairs of points that leave a draft
     UNCLEAN — two rows deriving from shared segments, from different origins (no drafter cell
     contributed to both; a row with no origins counts as unknown, so it flags), with no
@@ -1881,9 +1894,8 @@ def unjudged_pairs(
             if _judged(a, b["proposal_id"]) or _judged(b, a["proposal_id"]):
                 continue
             out.append({"a": _entry(a), "b": _entry(b), "shared": shared, "same_kind": a.get("kind") == b.get("kind")})
-    width = max(3, len(str(len(out))))
-    for n, q in enumerate(out, start=1):
-        q["key"] = f"q{n:0{width}d}"
+    for q in out:
+        q["key"] = pair_key(q["a"]["proposal_id"], q["b"]["proposal_id"])
     return out
 
 
@@ -1980,10 +1992,10 @@ def render_pairs_brief(
              "two rows SAY on the lines they share; never rewrite anything. The full point list follows for context.", "",
              "## Output contract", "",
              "ONE JSON object per line, one per pair, in the order listed:", "",
-             '    {"pair": "q003", "verdict": "same", "keep": "a"}        one statement twice (a rewording, or the same statement at another grain): `keep` names the row that stands; the other folds into it, credited as an origin',
-             '    {"pair": "q003", "verdict": "contains", "keep": "b"}    one contains the other: `keep` names the row that stands — the FINER one by default when it is a complete statement (a compound is harder to check against its lines); the compound when the finer row is a fragment',
-             '    {"pair": "q003", "verdict": "different"}                different points that happen to share lines — both stand',
-             '    {"pair": "q003", "verdict": "related"}                  legitimately related — a term beside a claim, a question beside its answer, a detail beside a summary that does not repeat it; both stand', "",
+             '    {"pair": "q3fa2c1d0.9b07de11", "verdict": "same", "keep": "a"}        one statement twice (a rewording, or the same statement at another grain): `keep` names the row that stands; the other folds into it, credited as an origin',
+             '    {"pair": "q3fa2c1d0.9b07de11", "verdict": "contains", "keep": "b"}    one contains the other: `keep` names the row that stands — the FINER one by default when it is a complete statement (a compound is harder to check against its lines); the compound when the finer row is a fragment',
+             '    {"pair": "q3fa2c1d0.9b07de11", "verdict": "different"}                different points that happen to share lines — both stand',
+             '    {"pair": "q3fa2c1d0.9b07de11", "verdict": "related"}                  legitimately related — a term beside a claim, a question beside its answer, a detail beside a summary that does not repeat it; both stand', "",
              "* When in doubt between `same` and `different`, a shared statement on shared lines is `same`.",
              "* Rows only — no prose, no code fences.", "",
              f"## Pairs ({len(pairs)})", ""]
@@ -2003,7 +2015,7 @@ def render_pairs_brief(
 
 def apply_judgements(
     proposals: List[Dict[str, Any]],  # A set's rows (a block-merged set, judged or not), or a note's Points as `points_as_proposals` shapes them
-    answers: List[Dict[str, Any]],    # The judge's rows: {"extra": "x012", "verdict", "of", "keep"} | {"pair": "q003", "verdict", "keep"}
+    answers: List[Dict[str, Any]],    # The judge's rows: {"extra": "x012", "verdict", "of", "keep"} | {"pair": "q<a>.<b>", "verdict", "keep"}
 ) -> Dict[str, Any]:  # {"proposals": rows after the fold (survivors keep their ids), "folded": [{loser, into, verdict}], "stats": {...}}
     """THE FOLD (ruling 1798a796 (3)): apply a judge's answers mechanically, loud on the first
     bad row — a known extra or pair answered once, `of` naming shown points of this set, a
@@ -2017,11 +2029,23 @@ def apply_judgements(
     ADD the extra as a point and record the verdict on BOTH rows of each pairing, so standing
     detection never re-opens it. Nesting is re-checked after the fold: another header or a
     cycle detaches, a third level LIFTS the row beside its parent, both counted. An extra
-    never answered stays an extra; a pair never answered stays unjudged — the stats say so."""
+    never answered stays an extra; a pair never answered stays unjudged — the stats say so.
+
+    A PAIR resolves by its key's two points (`pair_key`), never by a list position: its points
+    must stand and share a line. An answer the rows already hold is NO CHANGE, so a run re-read
+    after part of it landed (a crashed run's retry) converges: a recorded verdict is recorded
+    once, a fold whose loser is gone while the kept side stands has landed; any other answer
+    naming a point that no longer stands refuses."""
     verdicts = ("same", "contains", "different", "related")
-    pkey = {e["key"]: e["proposal_id"] for e in points_index(proposals)}
+    index = points_index(proposals)
+    pkey = {e["key"]: e["proposal_id"] for e in index}
     xkey = {x["key"]: x["proposal_id"] for x in extra_list(proposals)}
     qkey = {q["key"]: (q["a"]["proposal_id"], q["b"]["proposal_id"]) for q in unjudged_pairs(proposals)}
+    by_prefix: Dict[str, List[str]] = {}
+    for e in index:
+        by_prefix.setdefault(str(e["proposal_id"])[:PAIR_KEY_WIDTH], []).append(str(e["proposal_id"]))
+    segs = {str(p["proposal_id"]): set(p.get("segment_ids") or []) for p in proposals}
+    landed = 0
     out = [json.loads(json.dumps(p)) for p in proposals]
     by_id = {p["proposal_id"]: p for p in out}
     seen: set = set()
@@ -2068,16 +2092,31 @@ def apply_judgements(
                 pairs += [(xid, t, verdict) for t in targets]
         elif a.get("pair"):
             qk = str(a["pair"])
-            if qk not in qkey:
-                raise ValueError(f"judgement {n}: unknown pair {qk!r}")
             if qk in seen:
                 raise ValueError(f"judgement {n}: {qk} answered twice")
             seen.add(qk)
-            pa, pb = qkey[qk]
+            head, _, tail = qk[1:].partition(".")
+            if not qk.startswith("q") or not head or not tail:
+                raise ValueError(f"judgement {n}: unknown pair {qk!r} (a pair key is q<a>.<b>)")
+            sides = []
+            for pre in (head, tail):
+                hits = by_prefix.get(pre) or []
+                if len(hits) > 1:
+                    raise ValueError(f"judgement {n}: pair {qk!r} — `{pre}` opens {len(hits)} points' keys")
+                sides.append(hits[0] if hits else None)
+            pa, pb = sides
+            keep = str(a.get("keep") or "")
+            if verdict in ("same", "contains") and keep not in ("a", "b"):
+                raise ValueError(f"judgement {n}: `{verdict}` on a pair names `keep` (a or b)")
+            if pa is None or pb is None:
+                kept = pa if keep == "a" else pb if keep == "b" else None
+                if verdict in ("same", "contains") and kept is not None and (pa is None) != (pb is None):
+                    landed += 1   # the fold landed: its loser is gone, the side it keeps stands
+                    continue
+                raise ValueError(f"judgement {n}: unknown pair {qk!r} — a point it names no longer stands")
+            if pa == pb or not segs.get(pa, set()) & segs.get(pb, set()):
+                raise ValueError(f"judgement {n}: unknown pair {qk!r} — its points share no line")
             if verdict in ("same", "contains"):
-                keep = str(a.get("keep") or "")
-                if keep not in ("a", "b"):
-                    raise ValueError(f"judgement {n}: `{verdict}` on a pair names `keep` (a or b)")
                 loser, survivor = (pb, pa) if keep == "a" else (pa, pb)
                 folds.append((loser, survivor, verdict))
             else:
@@ -2175,10 +2214,10 @@ def apply_judgements(
             changed = True
     out = _accept_order(out)
     answered_x = sum(1 for k in seen if k in xkey)
-    answered_q = sum(1 for k in seen if k in qkey)
+    answered_q = sum(1 for k in seen if k in qkey)   # the pairs standing detection flags (a pair judged since is answered again harmlessly)
     stats = {"extras": len(xkey), "answered": answered_x, "pending_extras": len(xkey) - answered_x,
              "folded": len(gone), "added": len(added), "pairs": len(qkey), "pairs_answered": answered_q,
-             "recorded": len(pairs), "lifted": lifted, "detached": detached,
+             "recorded": len(pairs), "landed": landed, "lifted": lifted, "detached": detached,
              "points": len(points_index(out)), "unjudged_pairs": len(unjudged_pairs(out))}
     return {"proposals": out, "stats": stats,
             "folded": [{"loser": l, "into": list(dict.fromkeys(_final(s) for s, _ in v)), "verdict": v[0][1]} for l, v in gone.items()]}
@@ -2453,6 +2492,7 @@ async def accept_point(
     actor: str = "user:cli",                # Who confirmed (the human — the accept IS the confirmation)
     proposal_set_id: str = "",              # Provenance: the set the point came from
     point_set: Optional[Dict[str, Any]] = None,  # The (Source, unit) the substance belongs to ({graph, source_id, unit}); None = the Note owns it (an op journaled before the re-home)
+    write: bool = True,                     # False = PLAN only (design detail 65f4a6c9 (1)): every refusal, then the op under "op", nothing written
 ) -> Dict[str, Any]:  # {point_id, owner_id, note_id, set_id, existing, args, written} | {error}
     """Land ONE accepted point: the Point node, its segment References (from observations —
     live accept observed them a moment ago, replay carries them), `HAS_POINT` from its OWNER,
@@ -2462,7 +2502,12 @@ async def accept_point(
     is the deliverable's own. The op CARRIES `point_set`, so an op journaled before the
     re-home replays under the Note exactly as it landed live and the journaled `rehome-points`
     op moves it. Idempotent: deterministic ids make a re-accept a verified no-op; a moved
-    observation refreshes the stand-in in place (as `link` does)."""
+    observation refreshes the stand-in in place (as `link` does).
+
+    THE PLAN (write=False): every refusal -- the PointSet addressed but never minted, so a
+    skipped point leaves nothing behind (ruling 547f4123) -- then the op, or None when the set,
+    the point, its References and every edge the apply would land already stand (ruling
+    17daa86b; a crashed accept's retry, an unchanged re-accept)."""
     note_id = note_node_id(slug)
     note = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=note_id)
     if note is None:
@@ -2470,11 +2515,10 @@ async def accept_point(
                 "slug": slug, "written": False}
     if len(observations) != len(point.get("segment_ids") or []):
         return {"error": "observations must match segment_ids one-to-one", "slug": slug, "written": False}
-    set_id: Optional[str] = None
-    if point_set:
-        set_id = await ensure_point_set(gx, note_id, {**dict(point.get("unit") or {}), **dict(point_set)}, actor=actor)
-        if set_id is None:
-            return {"error": "point_set names no Source (it needs `graph` + `source_id`)", "slug": slug, "written": False}
+    ps = point_set_of({**dict(point.get("unit") or {}), **dict(point_set)}, actor=actor) if point_set else None
+    if point_set and ps is None:
+        return {"error": "point_set names no Source (it needs `graph` + `source_id`)", "slug": slug, "written": False}
+    set_id: Optional[str] = ps.id if ps is not None else None
     owner = note_id if deliverable_owns(point) or set_id is None else set_id
     ref_owner = set_id or await key_owner(gx, note_id)   # cross-point keys name substance: the set once one stands
     node = point_from_args(owner, point, actor=str(point.get("actor") or actor))
@@ -2494,28 +2538,16 @@ async def accept_point(
                 return {"error": f"parent point `{node.parent_key[:8]}` is already a grandchild — two levels at most",
                         "skippable": True, "slug": slug, "written": False}
     existing = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=node.id)
-    nodes: List[Dict[str, Any]] = [] if existing is not None else [node.to_graph_node()]
-    changed = False
-    if existing is not None:
-        new_props = node.to_graph_node()["properties"]
-        changed = any(F.prop(existing, k) != new_props.get(k)
-                      for k in ("text", "kind", "lead", "attribution", "heading", "data", "parent_key",
-                                "speaker", "speakers", "refers_to", "origins", "judged",
-                                "provenance", "citations", "expands"))
-        if changed:
-            # A re-accept with edited content (the human's edit-on-accept) lands as a property
-            # update — same id, the journal carries the new state, last op wins on replay.
-            await graph_task(gx.queue, gx.graph_id, "update_node", node_id=node.id, properties=new_props)
-    ref_ids: List[str] = []
-    for obs in observations:
-        ref = ReferenceNode.from_observation(obs)
-        ref_ids.append(ref.id)
-        wire = ref.to_graph_node()
-        have = await graph_task(gx.queue, gx.graph_id, "get_node", node_id=ref.id)
-        if have is None:
-            nodes.append(wire)
-        elif F.prop(have, "observed_hash") != ref.observed_hash:
-            await graph_task(gx.queue, gx.graph_id, "update_node", node_id=ref.id, properties=wire["properties"])
+    new_props = node.to_graph_node()["properties"]
+    # A re-accept with edited content (the human's edit-on-accept) lands as a property update —
+    # same id, the journal carries the new state, last op wins on replay.
+    changed = existing is not None and any(
+        F.prop(existing, k) != new_props.get(k)
+        for k in ("text", "kind", "lead", "attribution", "heading", "data", "parent_key", "speaker", "speakers",
+                  "refers_to", "origins", "judged", "provenance", "citations", "expands"))
+    refs = [ReferenceNode.from_observation(obs) for obs in observations]
+    have_refs = [await graph_task(gx.queue, gx.graph_id, "get_node", node_id=ref.id) for ref in refs]
+    ref_ids = [ref.id for ref in refs]
     edges = [node.has_point_edge()] + node.derived_from_edges(ref_ids)
     nest = node.elaborates_edge()
     if nest is not None:
@@ -2536,16 +2568,36 @@ async def accept_point(
             edges.append(node.expands_edge(target_owner_id=ref_owner))
         else:
             expands_missing = True
-    res = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
     args = {"slug": slug, "point": {**point, "key": node.key}, "observations": list(observations),
             "actor": actor, "proposal_set_id": proposal_set_id,
             **({"point_set": dict(point_set)} if point_set else {})}
-    return {"point_id": node.id, "owner_id": owner, "note_id": note_id, "set_id": set_id, "key": node.key,
-            "kind": node.kind, "text": node.text, "existing": existing is not None, "changed": changed,
-            "references": ref_ids, "nodes_added": res.nodes_added, "edges_added": res.edges_added,
-            **({"refers_to_missing": refers_missing} if refers_missing else {}),
-            **({"expands_missing": node.expands} if expands_missing else {}),
-            "args": args, "written": True}
+    out = {"point_id": node.id, "owner_id": owner, "note_id": note_id, "set_id": set_id, "key": node.key,
+           "kind": node.kind, "text": node.text, "existing": existing is not None, "changed": changed,
+           "references": ref_ids,
+           **({"refers_to_missing": refers_missing} if refers_missing else {}),
+           **({"expands_missing": node.expands} if expands_missing else {})}
+    if not write:
+        lands = edges + ([ps.renders_edge(note_id)] if ps is not None else [])
+        stands = (existing is not None and not changed
+                  and all(h is not None and F.prop(h, "observed_hash") == ref.observed_hash
+                          for h, ref in zip(have_refs, refs))
+                  and (ps is None or await graph_task(gx.queue, gx.graph_id, "get_node", node_id=ps.id) is not None)
+                  and all([await graph_task(gx.queue, gx.graph_id, "get_edge", edge_id=e["id"]) is not None
+                           for e in lands]))
+        return {**out, "written": False, "noop": stands, "op": None if stands else args}
+    if ps is not None:
+        await ensure_point_set(gx, note_id, {**dict(point.get("unit") or {}), **dict(point_set or {})}, actor=actor)
+    nodes: List[Dict[str, Any]] = [] if existing is not None else [node.to_graph_node()]
+    if changed:
+        await graph_task(gx.queue, gx.graph_id, "update_node", node_id=node.id, properties=new_props)
+    for ref, have in zip(refs, have_refs):
+        if have is None:
+            nodes.append(ref.to_graph_node())
+        elif F.prop(have, "observed_hash") != ref.observed_hash:
+            await graph_task(gx.queue, gx.graph_id, "update_node", node_id=ref.id,
+                             properties=ref.to_graph_node()["properties"])
+    res = await extend_graph(gx.queue, gx.graph_id, nodes, edges)
+    return {**out, "nodes_added": res.nodes_added, "edges_added": res.edges_added, "args": args, "written": True}
 
 
 async def retract_point(
@@ -2587,15 +2639,21 @@ async def retract_point(
 async def retract_note_points(
     gx: GraphHandle,
     slug: str,                      # The deliverable Note's slug
+    writes: Any,                    # The invocation's writes-journal unit of work (writes.InvocationWrites)
     *,
     actor: str = "user:cli",
-) -> Dict[str, Any]:  # {slug, retracted: [retract results], written} | {error}
+) -> Dict[str, Any]:  # {slug, retracted: [retract results], written, noop} | {error}
     """Retract EVERY point a Note renders (the re-drive's clean slate — ruling e1fd4d64 (5)):
     its own AND the substance of the set it renders — the slate is the SOURCE's (96be1528
     (P)), so a set another deliverable also renders is REFUSED, naming the sharers (the case
-    that needs a shared re-drive names its own verb). One `retract_point` per point, children
-    before parents so no ELABORATES edge ever dangles; the caller journals one `retract-point`
-    op per result (replay-identical to singles)."""
+    that needs a shared re-drive names its own verb). One `retract-point` op per point, children
+    before parents so no ELABORATES edge ever dangles (replay-identical to singles).
+
+    THE ORDER (ruling 547f4123 (1)): the whole slate is checked first -- the sharers and every
+    point's retract planned, all reads -- then each retract is planned against the db the
+    previous one left, appended, applied through the replay's applier; a point already gone (a
+    crashed run's retry) is no change."""
+    await writes.begin()
     note_id = note_node_id(slug)
     for sid in await rendered_sets(gx, note_id):
         others = [n for n in await renderers_of(gx, sid) if n != note_id]
@@ -2613,13 +2671,18 @@ async def retract_note_points(
             d += 1
         return d
     order = sorted(points, key=lambda p: (-_depth(p), _sort_key(p)))   # deepest first
+    for p in order:
+        r = await retract_point(gx, p["id"], actor=actor, write=False)
+        if r.get("error"):
+            return {"error": r["error"], "slug": slug, "retracted": [], "written": False}
     out: List[Dict[str, Any]] = []
     for p in order:
-        r = await retract_point(gx, p["id"], actor=actor)
-        if r.get("error"):
-            return {"error": r["error"], "slug": slug, "retracted": out, "written": bool(out)}
-        out.append(r)
-    return {"slug": slug, "retracted": out, "written": bool(out)}
+        r = await retract_point(gx, p["id"], actor=actor, write=False)
+        if r.get("error"):   # the slate was checked whole: a refusal here is a defect, never data
+            raise RuntimeError(f"retract `{p['id'][:8]}`: {r['error']}")
+        if r["op"]:
+            out.append((await writes.write("retract-point", r["op"])).result)
+    return {"slug": slug, "retracted": out, "written": bool(out), "noop": not out}
 
 
 async def rehome_points(
@@ -2852,18 +2915,25 @@ async def rehead_points(
     gx: GraphHandle,
     slug: str,                      # The deliverable Note's slug
     pack: Dict[str, Any],           # A FRESH notes pack over the same source unit (its headers are the new structure)
+    writes: Any,                    # The invocation's writes-journal unit of work (writes.InvocationWrites)
     *,
     actor: str = "user:cli",
-) -> Dict[str, Any]:  # {slug, points, changed: [{point_id, key, old, new}], unmapped, results, written}
+) -> Dict[str, Any]:  # {slug, points, changed: [{point_id, key, old, new}], unmapped, results, written, noop} | {error}
     """Re-derive every Point's captured heading / heading_index from its segment run against a
     fresh pack — the per-point re-derivation a header RECLASSIFICATION upstream demands (ruling
     b398d73f; the b542896b (b) gap): a title that stops being a header (a cross-reference, a
     transition) leaves every Point under it carrying a stale heading, and the renderer groups
     by that heading. The rule is the pack's own (`heading_index` = the count of headers at or
     before the run's first line; `heading` = the last of them). Each changed Point lands as an
-    `edit_point` field set — the caller journals one edit-point per result — so every anchor
-    stands. A Point whose segments the pack no longer numbers (excluded upstream since) is
-    reported, never touched; the synopsis spans the unit and is skipped."""
+    `edit-point` field set, so every anchor stands. A Point whose segments the pack no longer
+    numbers (excluded upstream since) is reported, never touched; the synopsis spans the unit
+    and is skipped.
+
+    THE ORDER (ruling 547f4123 (1)): every edit is planned first, all reads, so a refusal lands
+    nothing; then each is re-planned against the db the previous one left, appended, applied
+    through the replay's applier -- a point already re-headed (a crashed run's retry) is no
+    change."""
+    await writes.begin()
     note_id = note_node_id(slug)
     points = await load_points(gx, note_id)
     by_seg = {str(r.get("id")): int(r.get("i") or 0) for r in (pack.get("segments") or [])}
@@ -2884,32 +2954,42 @@ async def rehead_points(
         h_index = len(before)
         if heading == str(p.get("heading") or "") and h_index == int(p.get("heading_index") or 0):
             continue
-        r = await edit_point(gx, p["id"], heading=heading, heading_index=h_index, actor=actor)
+        r = await edit_point(gx, p["id"], heading=heading, heading_index=h_index, actor=actor, write=False)
         if r.get("error"):
-            return {"error": r["error"], "slug": slug, "points": len(points), "changed": changed,
-                    "unmapped": unmapped, "results": results, "written": bool(results)}
-        results.append(r)
+            return {"error": r["error"], "slug": slug, "points": len(points), "changed": [],
+                    "unmapped": unmapped, "results": [], "written": False}
         changed.append({"point_id": p["id"], "key": p.get("key"),
                         "old": str(p.get("heading") or ""), "new": heading,
                         "old_index": int(p.get("heading_index") or 0), "new_index": h_index})
+    for c in changed:
+        r = await edit_point(gx, c["point_id"], heading=c["new"], heading_index=c["new_index"], actor=actor, write=False)
+        if r.get("error"):   # every edit was planned first: a refusal here is a defect, never data
+            raise RuntimeError(f"rehead `{c['point_id'][:8]}`: {r['error']}")
+        if r["op"]:
+            results.append((await writes.write("edit-point", r["op"])).result)
     return {"slug": slug, "points": len(points), "changed": changed, "unmapped": unmapped,
-            "results": results, "written": bool(results)}
+            "results": results, "written": bool(results), "noop": not results}
 
 
 async def judge_points(
     gx: GraphHandle,
     slug: str,                          # The deliverable Note's slug
     answers: List[Dict[str, Any]],      # The overlap judge's rows over the draft's pairs brief ({"pair", "verdict", "keep"})
+    writes: Any,                        # The invocation's writes-journal unit of work (writes.InvocationWrites)
     *,
     actor: str = "user:cli",
-) -> Dict[str, Any]:  # {slug, stats, folded, edited: [edit results], retracted: [retract results], written} | {error}
+) -> Dict[str, Any]:  # {slug, stats, folded, edited: [edit results], retracted: [retract results], written, noop} | {error}
     """Apply an overlap judge's answers to an ACCEPTED draft (ruling 1798a796; work item
     1561551e (4)): the same mechanical fold as a set (`apply_judgements` over the Points in
     proposal shape), landed as the lane's journaled ops — every survivor whose parent,
-    back-links, origins or judgements changed is an `edit_point` (the caller journals one
-    `edit-point` per result), every folded point a `retract_point` after the edits that moved
-    its children (the caller journals `retract-point`). A folded point is never lost: it is an
-    origin of its survivor. Loud on the first bad answer, before any write."""
+    back-links, origins or judgements changed is an `edit-point`, every folded point a
+    `retract-point` after the edits that moved its children. A folded point is never lost: it
+    is an origin of its survivor. Loud on the first bad answer, before any write.
+
+    THE ORDER (ruling 547f4123 (1)): each op planned against the db the previous one left,
+    appended, applied through the replay's applier; a refusal only the landed edits can raise
+    stops the chain with those ops standing, named in the result."""
+    await writes.begin()
     note_id = note_node_id(slug)
     points = await load_points(gx, note_id)
     rows = points_as_proposals(points)
@@ -2931,19 +3011,21 @@ async def judge_points(
             fields["judged"] = list(r.get("judged") or [])
         if not fields:
             continue
-        e = await edit_point(gx, old["id"], actor=actor, **fields)
+        e = await edit_point(gx, old["id"], actor=actor, write=False, **fields)
         if e.get("error"):
             return {"error": e["error"], "slug": slug, "edited": edited, "retracted": retracted, "written": bool(edited)}
-        edited.append(e)
+        if e["op"]:
+            edited.append((await writes.write("edit-point", e["op"])).result)
     for key in before:
         if key in after:
             continue
-        d = await retract_point(gx, before[key]["id"], actor=actor)
+        d = await retract_point(gx, before[key]["id"], actor=actor, write=False)
         if d.get("error"):
             return {"error": d["error"], "slug": slug, "edited": edited, "retracted": retracted, "written": bool(edited or retracted)}
-        retracted.append(d)
+        if d["op"]:
+            retracted.append((await writes.write("retract-point", d["op"])).result)
     return {"slug": slug, "stats": res["stats"], "folded": res["folded"], "edited": edited, "retracted": retracted,
-            "written": bool(edited or retracted)}
+            "written": bool(edited or retracted), "noop": not (edited or retracted)}
 
 
 # --------------------------------------------------------------------------------------
@@ -3074,6 +3156,7 @@ async def place_point(
     after: Optional[str] = None,     # The key it renders after ("" = the section's end; None = keep what stands — with nothing standing, the derived slot)
     refs_shown: Optional[List[str]] = None,  # The cross-reference verdicts (None = keep what stands)
     actor: str = "user:cli",
+    write: bool = True,              # False = PLAN only (design detail 65f4a6c9 (1)): every refusal, then the op under "op", nothing written
 ) -> Dict[str, Any]:  # {point_id, section_id, placed, removed, properties, args, written} | {error}
     """Land the deliverable's overlay on ONE point (ruling 96be1528 (3)/(7)): ONE `PLACED` edge
     from the point to the Note's section point, carrying `after` (the placement pass's move)
@@ -3084,19 +3167,24 @@ async def place_point(
     deterministic on the triple, so a changed property re-lands the edge cleanly.
     `section_key` "" removes the overlay (the compensating form). Journaled as
     `place-point`; a missing point or section is a tolerated no-op (retracted later in the
-    journal), never a dangling edge."""
+    journal), never a dangling edge.
+
+    THE PLAN (write=False): a missing point or section is REFUSED (a live placement names what
+    stands), then the op -- or None when the edge already stands with these fields, or nothing
+    stands to remove (ruling 17daa86b; a crashed placement's retry lands here). The standing
+    edge is deleted only at the apply, below every refusal (ruling 547f4123)."""
     note_id = note_node_id(slug)
     if await graph_task(gx.queue, gx.graph_id, "get_node", node_id=note_id) is None:
         return {"error": f"no note `{slug}`", "slug": slug, "written": False}
     points = await load_points(gx, note_id)
     by_key = {str(p.get("key")): p for p in points}
-    # `at` = when the human confirmed this placement: content of the event, and what keeps a re-placement
-    # after an undo distinct from the first (the journal dedups an op identical in verb + args)
-    args = {"slug": slug, "key": key, "section_key": section_key, "actor": actor, "at": round(op_now(), 3),
+    args = {"slug": slug, "key": key, "section_key": section_key, "actor": actor,
             **({"after": after} if after is not None else {}),
             **({"refs_shown": list(refs_shown)} if refs_shown is not None else {})}
     point = by_key.get(key)
     if point is None:
+        if not write:
+            return {"error": f"no point `{key[:8]}` on `{slug}`", "written": False}
         return {"point_id": None, "placed": False, "removed": False, "missing": True, "written": False, "args": args}
     if str(point.get("kind")) in STRUCTURE_KINDS:
         return {"error": f"`{key[:8]}` is a {point.get('kind')} — only a substance or research point is placed", "written": False}
@@ -3106,6 +3194,19 @@ async def place_point(
     standing = [e for e in await _edge_rows(gx, EdgeQuery(source_ids=[pid], relation_type=DevRelations.PLACED))
                 if str(e.get("target_id")) in sec_ids]
     kept = dict((standing[0].get("properties") or {})) if standing else {}
+    if not write:
+        sec = secs.get(section_key) if section_key else None
+        if section_key and sec is None:
+            return {"error": f"no section `{section_key[:8]}` on `{slug}`", "written": False}
+        edge = placed_edge(pid, str(sec.get("id")),
+                           after=(after if after is not None else kept.get("after")),
+                           refs_shown=(list(refs_shown) if refs_shown is not None else kept.get("refs_shown"))) if sec else None
+        stands = (not standing if edge is None else
+                  len(standing) == 1 and str(standing[0].get("id")) == edge["id"]
+                  and {k: (standing[0].get("properties") or {}).get(k) for k in ("after", "refs_shown")}
+                  == {k: edge["properties"].get(k) for k in ("after", "refs_shown")})
+        return {"point_id": pid, "section_id": str(sec.get("id")) if sec else None, "written": False,
+                "noop": stands, "op": None if stands else args}
     if standing:
         await graph_task(gx.queue, gx.graph_id, "delete_edges", edge_ids=[str(e["id"]) for e in standing])
     if not section_key:

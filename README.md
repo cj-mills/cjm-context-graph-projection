@@ -893,6 +893,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `open_reference_list` _function_ — Every hinted reference still open in a set, keyed `r01`… in the order of `points_index`
 - `overlapping_points` _function_ — Pure: the duplication candidates — two points deriving from a shared segment — and
 - `pack_digest` _function_ — Digest the READ content (source binding + numbered lines + headers) — what a proposal
+- `pair_key` _function_ — A pair's key (ruling c0f4fecc): the leading characters of
 - `pick_propset` _function_ — Choose a proposal set: newest by default, else the unique id/prefix match.
 - `place_point` _function_ — Land the deliverable's overlay on ONE point (ruling 96be1528 (3)/(7)): ONE `PLACED` edge
 - `plan_notes_blocks` _function_ — Cut the whole pack into BLOCKS (ruling 1798a796, fork 1): a block runs between COMMON

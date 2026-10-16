@@ -5,6 +5,7 @@ sibling graph — type -> pack -> ingest -> accept -> review -> render -> fronti
 
 import asyncio
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -396,18 +397,27 @@ def test_block_merge_shows_one_cell_whole_per_block_and_the_judge_folds_with_pro
              row("Z", "Z", ["s5"], "blind/opus", parent_key="X"), row("W", "W", ["s6"], "undivided/fable"),
              row("V", "V", ["s6", "s7"], "blind/fable", judged=[{"key": "Y", "verdict": "different"}])]
     qs = unjudged_pairs(rows2)
-    assert [(q["key"], q["a"]["text"], q["b"]["text"]) for q in qs] == [("q001", "X", "Y"), ("q002", "Z", "Y"), ("q003", "W", "V")]
+    assert [(q["key"], q["a"]["text"], q["b"]["text"]) for q in qs] == [("qX.Y", "X", "Y"), ("qZ.Y", "Z", "Y"), ("qW.V", "W", "V")]
     pb = render_pairs_brief(rows2, set_id="x", source="Lecture")
-    assert "3 pair(s) of points" in pb and "- `q001` · 1 shared line(s)" in pb and "  - b: `p003` [claim] 00:10 (Alice) · undivided/fable  Y" in pb
-    done2 = apply_judgements(rows2, [{"pair": "q001", "verdict": "contains", "keep": "b"}, {"pair": "q002", "verdict": "different"},
-                                     {"pair": "q003", "verdict": "related"}])
+    assert "3 pair(s) of points" in pb and "- `qX.Y` · 1 shared line(s)" in pb and "  - b: `p003` [claim] 00:10 (Alice) · undivided/fable  Y" in pb
+    answers2 = [{"pair": "qX.Y", "verdict": "contains", "keep": "b"}, {"pair": "qZ.Y", "verdict": "different"},
+                {"pair": "qW.V", "verdict": "related"}]
+    done2 = apply_judgements(rows2, answers2)
     out2 = {r["proposal_id"]: r for r in done2["proposals"]}
     assert "X" not in out2 and out2["Z"]["parent_key"] == "Y"                              # X folded into Y; its child follows
     assert [(o["proposal_id"], o["how"]) for o in out2["Y"]["origins"]] == [("Y", "shown"), ("X", "contains")]
     assert out2["Z"]["judged"] == [{"key": "Y", "verdict": "different"}] and {"key": "Z", "verdict": "different"} in out2["Y"]["judged"]
     assert done2["stats"]["unjudged_pairs"] == 0
+    # a pair is named by its two points (ruling c0f4fecc): the same answers re-read
+    # over the rows they left change nothing -- the fold landed (X gone, Y stands), the verdicts are recorded once
+    again = apply_judgements(done2["proposals"], answers2)
+    assert again["proposals"] == done2["proposals"] and again["stats"]["landed"] == 1
+    with pytest.raises(ValueError, match="no longer stands"):
+        apply_judgements(done2["proposals"], [{"pair": "qX.Y", "verdict": "contains", "keep": "a"}])   # the side it keeps is gone
+    with pytest.raises(ValueError, match="share no line"):
+        apply_judgements(rows2, [{"pair": "qX.W", "verdict": "different"}])
     with pytest.raises(ValueError):
-        apply_judgements(rows2, [{"pair": "q001", "verdict": "same"}])                     # a fold on a pair names keep
+        apply_judgements(rows2, [{"pair": "qX.Y", "verdict": "same"}])                     # a fold on a pair names keep
     # (6) the same detection over ACCEPTED points: flagged = cross-origin, unnested, unjudged
     pts = [dict(r, id=r["proposal_id"], key=r["proposal_id"]) for r in rows2]
     pairs = overlapping_points(pts)
@@ -1162,6 +1172,7 @@ def test_cli_points_belong_to_the_source_rehome_and_replay_parity(tmp_path):
     from cjm_context_graph_primitives.query import NodeQuery
     from cjm_context_graph_projection.purenotes import (accept_point, deliverable_owns, ensure_point_set, load_points,
                                                         rehome_points, retract_note_points)
+    from cjm_context_graph_projection.writes import InvocationWrites
     from cjm_dev_graph_schema.identity import note_node_id, point_set_node_id
     sib_dir, pri_dir = tmp_path / "sib", tmp_path / "pri"
     sib_dir.mkdir(); pri_dir.mkdir()
@@ -1297,7 +1308,7 @@ def test_cli_points_belong_to_the_source_rehome_and_replay_parity(tmp_path):
                                                       "sources": []}], [])
             assert await ensure_point_set(g, note_node_id(other), ops[0]["args"]["point"]["unit"]) == set_id
             assert len(await load_points(g, note_node_id(other))) == 5
-            r = await retract_note_points(g, slug, actor="user:test")
+            r = await retract_note_points(g, slug, InvocationWrites(g, None), actor="user:test")
             assert r.get("error") and "also rendered" in r["error"] and r["retracted"] == []
     asyncio.run(_own(pdb))
 
@@ -1406,10 +1417,11 @@ def test_cli_block_merge_judge_accept_and_standing_detection_replay(tmp_path):
     r = _run(*base, "notes-overlap", "--slug", "the-learning-game/ch01", "--brief", str(brief))
     assert r.returncode == 0 and "UNCLEAN — 2 unjudged cross-origin pair(s)" in r.stdout, r.stderr or r.stdout
     text = brief.read_text()
-    assert "2 pair(s) of points" in text and "- `q001`" in text and "- `q002`" in text
+    pair_keys = re.findall(r"^- `(q[^`]+)` · ", text, flags=re.M)   # each pair named by its two points
+    assert "2 pair(s) of points" in text and len(pair_keys) == 2
     # (5) the judge over the ACCEPTED draft: verdicts land as journaled edit-point ops; clean again; replay agrees
     ans2 = tmp_path / "judge2.jsonl"
-    ans2.write_text(json.dumps({"pair": "q001", "verdict": "different"}) + "\n" + json.dumps({"pair": "q002", "verdict": "related"}) + "\n")
+    ans2.write_text(json.dumps({"pair": pair_keys[0], "verdict": "different"}) + "\n" + json.dumps({"pair": pair_keys[1], "verdict": "related"}) + "\n")
     r = _run(*base, "notes-overlap", "--slug", "the-learning-game/ch01", "--rows", str(ans2))
     assert r.returncode == 0 and "3 point(s) edited · 0 retracted" in r.stdout and "unjudged pairs left: 0" in r.stdout, r.stderr or r.stdout
     assert len([o for o in read_journal(pj) if o["verb"] == "edit-point"]) == 3
@@ -1424,7 +1436,8 @@ def test_cli_block_merge_judge_accept_and_standing_detection_replay(tmp_path):
     assert "UNCLEAN — 1 unjudged cross-origin pair(s)" in r.stdout, r.stderr or r.stdout
     side = next(l.strip()[2] for l in brief.read_text().splitlines() if "Gatto quit in 1991." in l and l.strip()[:3] in ("- a", "- b"))
     ans3 = tmp_path / "judge3.jsonl"
-    ans3.write_text(json.dumps({"pair": "q001", "verdict": "same", "keep": side}) + "\n")
+    ans3.write_text(json.dumps({"pair": re.findall(r"^- `(q[^`]+)` · ", brief.read_text(), flags=re.M)[0], "verdict": "same",
+                                "keep": side}) + "\n")
     r = _run(*base, "notes-overlap", "--slug", "the-learning-game/ch01", "--rows", str(ans3))
     assert r.returncode == 0 and "0 point(s) edited · 1 retracted" in r.stdout, r.stderr or r.stdout
     assert len([o for o in read_journal(pj) if o["verb"] == "retract-point"]) == 1

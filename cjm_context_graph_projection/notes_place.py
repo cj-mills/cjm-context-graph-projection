@@ -9,9 +9,8 @@ journaled `assert` (point_role) and `place-point` ops the render reads live. Rol
 SHARED substance point (the classification is the point's); moves ride the deliverable's
 own edge (the placement is this page's)."""
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from cjm_context_graph_primitives.journal import op_now
 from cjm_dev_graph_schema import predicates as P
 from cjm_dev_graph_schema.identity import note_node_id
 
@@ -142,7 +141,7 @@ def _read_place_rows(
     rows: List[Dict[str, Any]],            # The pass's rows: role deltas and move deltas
     index: List[Dict[str, Any]],           # points_index output — the keys the rows may name
     sections: List[Dict[str, Any]],        # outline_of output — the section titles a move may name
-    elided: Optional[set] = None,          # index keys of the points the type elides (their children are TOP-LEVEL on the page)
+    elided: Optional[Callable[[Dict[str, str]], set]] = None,  # {index key: role} the rows land -> index keys of the points the type elides once they stand (their children are TOP-LEVEL on the page)
 ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:  # ({index key: {role, why}}, {index key: {section: section key | "", after}})
     """The pass's answer contract, checked loud on the first bad row: a row names a `point` of
     the index and carries EITHER a `role` (content | meta | aside, a `why` beside a departure)
@@ -150,9 +149,11 @@ def _read_place_rows(
     move) with `after` (a TOP-LEVEL key of the index, or "" = the section's end); a move's
     point is top-level; at most one role row and one move row per point. Top-level is what
     the PAGE renders (ruling 15657521 (2)): a child of an elided point stands as a root there,
-    so it may move; a child of a shown point still moves with its parent."""
+    so it may move; a child of a shown point still moves with its parent. The page is the one
+    the rows' roles leave (ruling 24fa72c2: a plan reads the state its own run lands), so every
+    row is read before a move is checked."""
     entry = {e["key"]: e for e in index}
-    gone = set(elided or ())
+    gone: set = set()
 
     def _shown_depth(k: str) -> int:   # the nesting the page gives the point: an elided parent makes it a root
         par = str(entry[k].get("parent") or "")
@@ -164,6 +165,7 @@ def _read_place_rows(
         by_title.setdefault(str(s["section"]).strip().casefold(), []).append(s)
     role_rows: Dict[str, Dict[str, Any]] = {}
     move_rows: Dict[str, Dict[str, Any]] = {}
+    moves: List[Tuple[int, str, Dict[str, Any]]] = []
     for n, a in enumerate(rows, start=1):
         if not isinstance(a, dict):
             raise ValueError(f"placement row {n}: not an object")
@@ -173,14 +175,18 @@ def _read_place_rows(
         has_role, has_move = a.get("role") is not None, a.get("section") is not None
         if has_role == has_move:
             raise ValueError(f"placement row {n}: a row carries EITHER `role` OR `section` (+ `after`)")
-        if has_role:
-            role = str(a.get("role") or "").strip().lower()
-            if role not in P.POINT_ROLES:
-                raise ValueError(f"placement row {n}: role {role!r} — one of {' | '.join(P.POINT_ROLES)}")
-            if key in role_rows:
-                raise ValueError(f"placement row {n}: a second role for {key}")
-            role_rows[key] = {"role": role, "why": str(a.get("why") or "").strip()}
+        if has_move:
+            moves.append((n, key, a))
             continue
+        role = str(a.get("role") or "").strip().lower()
+        if role not in P.POINT_ROLES:
+            raise ValueError(f"placement row {n}: role {role!r} — one of {' | '.join(P.POINT_ROLES)}")
+        if key in role_rows:
+            raise ValueError(f"placement row {n}: a second role for {key}")
+        role_rows[key] = {"role": role, "why": str(a.get("why") or "").strip()}
+    if elided is not None:
+        gone = set(elided({k: r["role"] for k, r in role_rows.items()}))
+    for n, key, a in moves:
         section = str(a.get("section") or "").strip()
         if _shown_depth(key):
             raise ValueError(f"placement row {n}: {key} is a child point — it moves with its parent")
@@ -228,7 +234,11 @@ def plan_placement(
     by_pid = {str(p.get("key")): p for p in points}
     kmap = {k: v for k, v in dict(kind_map or {}).items() if not str(k).startswith("_")}
     gone = {str(e["key"]) for e in index if elided_point(by_pid[str(e["proposal_id"])], have_roles, kmap)} if kmap else set()
-    role_rows, move_rows = _read_place_rows(rows, index, sections, elided=gone)
+
+    def _elided_after(planned: Dict[str, str]) -> set:   # {index key: role} -> the points elided once those roles stand
+        eff = {**have_roles, **{str(entry[k]["proposal_id"]): r for k, r in planned.items()}}
+        return {str(e["key"]) for e in index if elided_point(by_pid[str(e["proposal_id"])], eff, kmap)} if kmap else set()
+    role_rows, move_rows = _read_place_rows(rows, index, sections, elided=_elided_after)
     role_plan: List[Dict[str, Any]] = []
     for k, r in role_rows.items():
         pk = str(entry[k]["proposal_id"])
@@ -267,49 +277,58 @@ async def apply_placement_plan(
     gx: GraphHandle,
     slug: str,                  # The standing draft's slug
     plan: Dict[str, Any],       # plan_placement output
+    writes: Any,                # The invocation's writes-journal unit of work (writes.InvocationWrites)
     *,
     actor: str = "user:cli",
-) -> Dict[str, Any]:  # {slug, ops: [(verb, args)…] in landing order, roles, moves, unmoves, written} | {error, ops}
+) -> Dict[str, Any]:  # {slug, ops: [(verb, args)…] in landing order, roles, moves, unmoves, written, noop} | {error, ops}
     """Land a plan as the journaled ops it names: each role as ONE `assert` of `point_role` on
-    the shared point (a standing fact superseded explicitly — the predicate CHANGES, a flip is
-    a supersession, 14cafef6), each move as ONE `place-point` (the PLACED edge with `after`,
-    the standing `refs_shown` kept), each undo as a `place-point` with no section. Every op
-    that landed rides `ops` for the CLI to journal, a later failure notwithstanding."""
+    the shared point, named by its id (a standing fact superseded explicitly — the predicate
+    CHANGES, a flip is a supersession, 14cafef6), each move as ONE `place-point` (the PLACED
+    edge with `after`, the standing `refs_shown` kept), each undo as a `place-point` with no
+    section.
+
+    THE ORDER (ruling 547f4123 (1)): the whole plan is checked first -- every op planned against
+    the healed db, all reads, so a refusal lands nothing -- then each op is re-planned against the
+    db the previous one left, appended, applied through the replay's applier; an op standing by
+    now (a crashed run's retry) is no change."""
+    await writes.begin()
     if await gx_note_missing(gx, slug):
         return {"error": f"no note `{slug}`", "ops": [], "written": False}
     ops: List[Tuple[str, Dict[str, Any]]] = []
     out: Dict[str, Any] = {"slug": slug, "ops": ops, "roles": [], "moves": [], "unmoves": [], "written": False}
+    steps = ([("role", r) for r in plan.get("roles") or []] + [("move", m) for m in plan.get("moves") or []]
+             + [("unmove", u) for u in plan.get("unmoves") or []])
 
-    def _fail(msg: str) -> Dict[str, Any]:
-        out.update(error=msg, written=bool(ops))
-        return out
-    batch = await FactBatch.load(gx) if plan.get("roles") else None   # one read for every role (finding da6cdab6)
-    for r in plan.get("roles") or []:
-        st = await assert_value(gx, r["id"] or r["key"], P.POINT_ROLE, r["new"], actor=actor,
-                                supersede=([r["old"]] if r.get("old") else None), batch=batch)
-        if st.get("error"):
-            return _fail(st["error"])
-        # `at` keeps a flip back (meta -> content -> meta -> content) a NEW record: the journal dedups an op
-        # identical in verb + args over its whole history (replay stamps asserted_at from the envelope)
-        ops.append(("assert", {"subject": r["id"] or r["key"], "predicate": P.POINT_ROLE, "value": r["new"], "actor": actor,
-                               "evidence": None, "supersede": ([r["old"]] if r.get("old") else None),
-                               "subject_content_hash": st.get("subject_content_hash"), "at": round(op_now(), 3)}))
-        out["roles"].append({"point": r["point"], "key": r["key"], "old": r["old"], "new": r["new"], "why": r.get("why", "")})
-    for m in plan.get("moves") or []:
-        res = await place_point(gx, slug, m["key"], m["section"], after=m["after_key"], actor=actor)
+    async def _plan(step: str, r: Dict[str, Any], batch: Optional[FactBatch]) -> Dict[str, Any]:
+        if step == "role":
+            return await assert_value(gx, r["id"], P.POINT_ROLE, r["new"], actor=actor,
+                                      supersede=([r["old"]] if r.get("old") else None), batch=batch, write=False)
+        if step == "move":
+            return await place_point(gx, slug, r["key"], r["section"], after=r["after_key"], actor=actor, write=False)
+        return await place_point(gx, slug, r["key"], "", actor=actor, write=False)
+    # one read of the fact layer per pass (finding da6cdab6): a role planned in it lands in its view
+    batch = await FactBatch.load(gx) if plan.get("roles") else None
+    for step, r in steps:
+        res = await _plan(step, r, batch)
         if res.get("error"):
-            return _fail(res["error"])
-        if res.get("written"):
-            ops.append(("place-point", res["args"]))
-        out["moves"].append({"point": m["point"], "key": m["key"], "section": m["section_title"], "after": m["after"]})
-    for u in plan.get("unmoves") or []:
-        res = await place_point(gx, slug, u["key"], "", actor=actor)
-        if res.get("error"):
-            return _fail(res["error"])
-        if res.get("written"):
-            ops.append(("place-point", res["args"]))
-        out["unmoves"].append({"point": u["point"], "key": u["key"]})
-    out["written"] = bool(ops)
+            out.update(error=res["error"])
+            return out
+    batch = await FactBatch.load(gx) if plan.get("roles") else None
+    for step, r in steps:
+        res = await _plan(step, r, batch)
+        if res.get("error"):   # the plan was checked whole: a refusal here is a defect, never data
+            raise RuntimeError(f"{step} `{r['key'][:8]}`: {res['error']}")
+        if res["op"]:
+            verb = "assert" if step == "role" else "place-point"
+            await writes.write(verb, res["op"])
+            ops.append((verb, res["op"]))
+        if step == "role":
+            out["roles"].append({"point": r["point"], "key": r["key"], "old": r["old"], "new": r["new"], "why": r.get("why", "")})
+        elif step == "move":
+            out["moves"].append({"point": r["point"], "key": r["key"], "section": r["section_title"], "after": r["after"]})
+        else:
+            out["unmoves"].append({"point": r["point"], "key": r["key"]})
+    out.update(written=bool(ops), noop=not ops)
     return out
 
 

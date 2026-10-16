@@ -2655,7 +2655,6 @@ async def _notes_lane_command(
                             render_notes, render_notes_pack, resolve_sibling_source, retract_note_points,
                             retract_point, staging_index, validate_point_rows, work_promotion_status,
                             write_notes_propset, WORK_PAGE_KEY, render_work_page)
-    from .write import assert_value
     siblings = sibling_graphs(load_graph_config(args.graph_db_path))
 
     def _sibling_key(explicit: Optional[str]) -> Optional[str]:
@@ -2821,13 +2820,11 @@ async def _notes_lane_command(
         if not args.apply:
             print(render("notes-place", {"slug": args.slug, "plan": plan}, args.format))
             return 0
-        res = await apply_placement_plan(gx, args.slug, plan, actor=args.actor)
-        if args.journal_path:
-            for verb, op_args in res.get("ops") or []:
-                append_write(args.journal_path, verb, op_args)
+        res = await apply_placement_plan(gx, args.slug, plan, writes, actor=args.actor)
         if res.get("error"):
             print(f"error: {res['error']}", file=sys.stderr)
-        print(render("notes-place", {"slug": args.slug, "plan": plan, "applied": res}, args.format))
+        print(render("notes-place", {"slug": args.slug, "plan": plan, "applied": res, "noop": bool(res.get("noop"))},
+                     args.format))
         return 1 if res.get("error") else 0
     if cmd == "notes-outline" and getattr(args, "slug", None):
         # THE OUTLINE PASS over a STANDING DRAFT (81d6e669 (3); rulings 96be1528 (11), 776c13d3 (a)): no --rows =
@@ -2867,15 +2864,12 @@ async def _notes_lane_command(
         key = _sibling_key(args.sibling or str(unit.get("graph") or ""))
         if not key:
             return 1
-        res = await apply_outline_plan(gx, args.slug, plan, siblings=siblings, manifests_dir=args.manifests_dir,
+        res = await apply_outline_plan(gx, args.slug, plan, writes, siblings=siblings, manifests_dir=args.manifests_dir,
                                        graph_key=key, actor=args.actor)
-        if args.journal_path:
-            # every op that landed is journaled, a later failure notwithstanding — the db and the journal never diverge
-            for verb, op_args in res.get("ops") or []:
-                append_write(args.journal_path, verb, op_args)
         if res.get("error"):
             print(f"error: {res['error']}", file=sys.stderr)
-        print(render("notes-outline", {"slug": args.slug, "plan": plan, "applied": res}, args.format))
+        print(render("notes-outline", {"slug": args.slug, "plan": plan, "applied": res, "noop": bool(res.get("noop"))},
+                     args.format))
         return 1 if res.get("error") else 0
     if cmd in ("notes-index", "notes-merge", "notes-close", "notes-outline", "notes-judge"):
         # The drafting experiment's set verbs (work item 3a2c94eb) and the judge (1561551e): files in, files out — no graph write.
@@ -3117,17 +3111,13 @@ async def _notes_lane_command(
         type_fact = None
         tkey = await note_deliverable_type(gx, note_id)
         if tkey is None:
-            st = await assert_value(gx, note_id, "deliverable_type", args.type, actor=args.actor)
+            st = await _assert_journaled(gx, writes, note_id, "deliverable_type", args.type, actor=args.actor)
             if st.get("error"):
                 print(f"error: {st['error']}", file=sys.stderr)
                 return 1
             type_fact = args.type
-            if args.journal_path:
-                append_write(args.journal_path, "assert",
-                             {"subject": note_id, "predicate": "deliverable_type", "value": args.type,
-                              "actor": args.actor, "evidence": None, "supersede": None,
-                              "subject_content_hash": st.get("subject_content_hash")})
         accepted: list = []
+        landed = bool(type_fact) or bool(source_link and not source_link.get("noop"))
         # ruling 96be1528 (P): substance lands under the (Source, unit)'s PointSet — the op NAMES it, so a
         # pre-re-home op (no point_set) replays under the Note as it landed; every Source is one unit today
         point_set = {"graph": key, "source_id": str(source.get("source_id") or ""), "unit": ""}
@@ -3156,34 +3146,41 @@ async def _notes_lane_command(
                              # the fold's provenance and the judge's verdicts ride the point (ruling 1798a796)
                              **({"origins": list(p["origins"])} if p.get("origins") else {}),
                              **({"judged": list(p["judged"])} if p.get("judged") else {})}
+                    # each accept planned against the db the previous one left (ruling 547f4123 (1)): a child
+                    # sees the parent this loop just landed; a point already standing is no change
                     res = await accept_point(gx, args.slug, point, observations=obs["observations"],
-                                             actor=args.actor, proposal_set_id=set_id, point_set=point_set)
+                                             actor=args.actor, proposal_set_id=set_id, point_set=point_set, write=False)
                     if res.get("error") and res.get("skippable"):
                         skipped.append({"proposal_id": p["proposal_id"], "reason": res["error"]})
                         continue
                     if res.get("error"):
-                        print(f"error: {res['error']}", file=sys.stderr)
-                        return 1
+                        error = res["error"]
+                        break
+                    if res["op"]:
+                        res = (await writes.write("accept-point", res["op"])).result
+                        landed = True
                     accepted.append(res)
-                    if args.journal_path and (not res.get("existing") or res.get("changed")):
-                        append_write(args.journal_path, "accept-point", res["args"])
+                else:
+                    error = None
         except RuntimeError as e:
             print(f"error: sibling graph `{key}` unavailable: {e}", file=sys.stderr)
             return 1
         print(render("notes-accept", {"slug": args.slug, "set_id": set_id, "accepted": accepted,
-                                      "skipped": skipped, "type_fact": type_fact,
+                                      "skipped": skipped, "type_fact": type_fact, "noop": not landed and not error,
                                       "source_link": source_link if source_link and not source_link.get("noop") else None},
                      args.format))
+        if error:   # the points before it stand, named above
+            print(f"error: {error}", file=sys.stderr)
+            return 1
         return 0
     if cmd == "notes-retract":
         if args.all:
             if not args.slug:
                 print("error: --all needs --slug <post>", file=sys.stderr)
                 return 1
-            res = await retract_note_points(gx, args.slug, actor=args.actor)
-            for r in res.get("retracted") or []:
-                if args.journal_path and r.get("deleted"):
-                    append_write(args.journal_path, "retract-point", r["args"])
+            res = await retract_note_points(gx, args.slug, writes, actor=args.actor)
+            if res.get("error"):
+                print(f"error: {res['error']}", file=sys.stderr)
             print(render("notes-retract-all", res, args.format))
             return 1 if res.get("error") else 0
         if not args.point:
@@ -3212,17 +3209,13 @@ async def _notes_lane_command(
         if args.rows:
             # the judge over an ACCEPTED draft (ruling 1798a796; 1561551e (4)): the same fold, landed as edits + retracts
             try:
-                res = await judge_points(gx, args.slug, _read_rows_file(Path(args.rows).expanduser()), actor=args.actor)
+                res = await judge_points(gx, args.slug, _read_rows_file(Path(args.rows).expanduser()), writes,
+                                         actor=args.actor)
             except (ValueError, json.JSONDecodeError) as e:
                 print(f"error: {e}", file=sys.stderr)
                 return 1
-            if args.journal_path:
-                for e in res.get("edited") or []:
-                    if e.get("written"):
-                        append_write(args.journal_path, "edit-point", e["args"])
-                for d in res.get("retracted") or []:
-                    if d.get("deleted"):
-                        append_write(args.journal_path, "retract-point", d["args"])
+            if res.get("error"):
+                print(f"error: {res['error']}", file=sys.stderr)
             print(render("notes-judge-draft", res, args.format))
             return 1 if res.get("error") else 0
         if args.brief:
@@ -3250,12 +3243,10 @@ async def _notes_lane_command(
     if cmd == "notes-rehead":
         from .purenotes import rehead_points
         pack = json.loads(Path(args.pack).expanduser().read_text())
-        res = await rehead_points(gx, args.slug, pack, actor=args.actor)
+        res = await rehead_points(gx, args.slug, pack, writes, actor=args.actor)
+        if res.get("error"):
+            print(f"error: {res['error']}", file=sys.stderr)
         print(render("notes-rehead", res, args.format))
-        if args.journal_path:
-            for r in res.get("results") or []:
-                if r.get("written"):
-                    append_write(args.journal_path, "edit-point", r["args"])
         return 1 if res.get("error") else 0
     if cmd == "notes-render":
         if await note_deliverable_type(gx, note_node_id(args.slug)) == WORK_PAGE_KEY:

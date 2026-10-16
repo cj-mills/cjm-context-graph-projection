@@ -329,21 +329,27 @@ async def apply_outline_plan(
     gx: GraphHandle,
     slug: str,                          # The standing draft's slug
     plan: Dict[str, Any],               # plan_outline output
+    writes: Any,                        # The invocation's writes-journal unit of work (writes.InvocationWrites)
     *,
     siblings: Dict[str, str],           # {graph key: db path} — a new section's anchor segment is observed there
     manifests_dir: str = DEFAULT_MANIFESTS,
     graph_key: str,                     # The sibling the points' segments live in
     actor: str = "user:cli",
-) -> Dict[str, Any]:  # {slug, ops: [(verb, args)…] in landing order, retracted, added, retitled, reparented, synopsis, written} | {error, ops}
+) -> Dict[str, Any]:  # {slug, ops: [(verb, args)…] in landing order, retracted, added, retitled, reparented, synopsis, written, noop} | {error, ops}
     """Land a plan as the journaled ops it names, in an order every step of which stands on its
     own: RETRACTS first (a dropped section's points fall into the one before it), then ADDS in
     outline order (a parent row precedes its children, so a new child's parent already stands
     at accept — `accept_point` with a `section` point anchored at its first point's first
     segment, observed in the sibling like any accept, owned by the deliverable), then RETITLES
     and RE-PARENTS (`edit_point`: identity kept, the ELABORATES edge re-derived — a kept child of
-    a NEW parent re-parents here, after the add), then the synopsis edit. Every op that landed
-    rides `ops` for the CLI to journal, even when a later one fails — the journal and the db
-    never diverge. Then `notes-render` re-derives the page."""
+    a NEW parent re-parents here, after the add), then the synopsis edit. Then `notes-render`
+    re-derives the page.
+
+    THE ORDER (ruling 547f4123 (1)): the reads come first -- the sibling, and every add's anchor
+    point and segment observed -- so a missing one lands nothing; then each op is planned against
+    the db the previous one left, appended, applied through the replay's applier. A refusal only
+    the landed ops can raise stops the chain with them standing, named in `ops`."""
+    await writes.begin()
     note_id = note_node_id(slug)
     points = await load_points(gx, note_id)
     by_key = {str(p.get("key")): p for p in points}
@@ -354,13 +360,14 @@ async def apply_outline_plan(
     def _fail(msg: str) -> Dict[str, Any]:
         out.update(error=msg, written=bool(ops))
         return out
-    for r in plan.get("retract") or []:
-        res = await retract_point(gx, r["id"] or str(by_key.get(r["key"], {}).get("id") or r["key"]), actor=actor)
-        if res.get("error"):
-            return _fail(res["error"])
-        if res.get("deleted"):
-            ops.append(("retract-point", res["args"]))
-            out["retracted"].append({"key": r["key"], "section": r["section"]})
+
+    async def _land(verb: str, res: Dict[str, Any]) -> bool:   # a planned op written; False = it changes nothing
+        if not res.get("op"):
+            return False
+        await writes.write(verb, res["op"])
+        ops.append((verb, res["op"]))
+        return True
+    adds: List[Tuple[Dict[str, Any], Dict[str, Any], List[Dict[str, Any]]]] = []   # (plan row, point, observations)
     if plan.get("add"):
         path = siblings.get(graph_key)
         if not path:
@@ -381,36 +388,40 @@ async def apply_outline_plan(
                              "heading_index": int(first.get("heading_index") or 0), "segment_ids": sid,
                              "start_time": st, "end_time": st, "unit": dict(first.get("unit") or {}),
                              "parent_key": str(a.get("parent_key") or ""), "speaker": "", "speakers": [], "refers_to": []}
-                    res = await accept_point(gx, slug, point, observations=obs["observations"], actor=actor,
-                                             proposal_set_id=f"outline-pass:{slug}")
-                    if res.get("error"):
-                        return _fail(res["error"])
-                    if not res.get("existing") or res.get("changed"):
-                        ops.append(("accept-point", res["args"]))
-                    out["added"].append({"key": a["key"], "section": a["section"], "first": a["first"], "parent": a.get("parent") or ""})
+                    adds.append((a, point, obs["observations"]))
         except RuntimeError as e:
             return _fail(f"sibling graph `{graph_key}` unavailable: {e}")
-    for r in plan.get("retitle") or []:
-        res = await edit_point(gx, r["id"] or r["key"], text=r["new"], actor=actor)
+    for r in plan.get("retract") or []:
+        res = await retract_point(gx, r["id"] or str(by_key.get(r["key"], {}).get("id") or r["key"]), actor=actor, write=False)
         if res.get("error"):
             return _fail(res["error"])
-        if res.get("written"):
-            ops.append(("edit-point", res["args"]))
+        if await _land("retract-point", res):
+            out["retracted"].append({"key": r["key"], "section": r["section"]})
+    for a, point, observations in adds:
+        res = await accept_point(gx, slug, point, observations=observations, actor=actor,
+                                 proposal_set_id=f"outline-pass:{slug}", write=False)
+        if res.get("error"):
+            return _fail(res["error"])
+        await _land("accept-point", res)
+        out["added"].append({"key": a["key"], "section": a["section"], "first": a["first"], "parent": a.get("parent") or ""})
+    for r in plan.get("retitle") or []:
+        res = await edit_point(gx, r["id"] or r["key"], text=r["new"], actor=actor, write=False)
+        if res.get("error"):
+            return _fail(res["error"])
+        if await _land("edit-point", res):
             out["retitled"].append({"key": r["key"], "old": r["old"], "new": r["new"]})
     for r in plan.get("reparent") or []:
-        res = await edit_point(gx, r["id"] or r["key"], parent=str(r["new"] or ""), actor=actor)
+        res = await edit_point(gx, r["id"] or r["key"], parent=str(r["new"] or ""), actor=actor, write=False)
         if res.get("error"):
             return _fail(res["error"])
-        if res.get("written"):
-            ops.append(("edit-point", res["args"]))
+        if await _land("edit-point", res):
             out["reparented"].append({"key": r["key"], "section": r.get("section"), "old": r["old"], "new": r["new"]})
     if plan.get("synopsis"):
         s = plan["synopsis"]
-        res = await edit_point(gx, s["id"] or s["key"], text=s["new"], actor=actor)
+        res = await edit_point(gx, s["id"] or s["key"], text=s["new"], actor=actor, write=False)
         if res.get("error"):
             return _fail(res["error"])
-        if res.get("written"):
-            ops.append(("edit-point", res["args"]))
+        if await _land("edit-point", res):
             out["synopsis"] = {"old": s["old"], "new": s["new"]}
-    out["written"] = bool(ops)
+    out.update(written=bool(ops), noop=not ops)
     return out

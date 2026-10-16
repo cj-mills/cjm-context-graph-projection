@@ -16,7 +16,9 @@ marked NOCHANGE is a write whose plan finds the graph already there -- it journa
 24fa72c2). A step marked with a tuple of verbs writes those ops in that order: a scenario whose longest
 tuple has n ops runs n crashed variants, variant k killing each marked step at its k-th op
 (CJM_JOURNAL_FAULT=after_append@k; a shorter step dies at its last), and the retry heals that op while
-its plan writes the rest -- so a chain completes from every boundary (ruling 547f4123 (1)). The run verbs ask a local JUDGE double ({judge}) and a fake `gh`
+its plan writes the rest -- so a chain completes from every boundary (ruling 547f4123 (1)). A scenario in
+MINTED runs a verb that mints a random key (an outline's new section): its ids are compared by first appearance.
+The run verbs ask a local JUDGE double ({judge}) and a fake `gh`
 on the run's PATH; a scenario keyed in CONFIG gets that graph config, and one in SOURCED carries the
 code lane -- its CLI calls name a source journal and its rebuild ingests that journal before the
 replay."""
@@ -24,6 +26,7 @@ replay."""
 import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -436,6 +439,37 @@ CONFIG = {"ingest-evidence": {"evidence": {"root": "{run}/evidence", "host": HOS
 FILES.update({"entity-batch": {"batch.json": BATCH}, "library-survey": {"survey.tsv": SURVEY},
               "review-concepts-vocab": {"vocab.md": VOCAB_DOC}, "relocate": FILES["retire-source"]})
 SOURCED = {"propose", "confirm-proposal", "oracle"}   # scenarios on the code lane (their rebuild is an ingest)
+
+# The notes loops (ruling 547f4123, slice C2): a set accepted whole, the clean slate, a re-head against a fresh
+# pack, an outline (a nested section), a placement pass over it (a role and a move)
+PACK = json.dumps({"segments": [{"id": seg["id"], "i": i} for i, seg in enumerate(SEGMENTS)],
+                   "headers": [{"i_before": 0, "text": "Lessons"}, {"i_before": 2, "text": "Pictures"}]})
+OUTLINE = "".join(json.dumps(r) + "\n" for r in ({"section": "Teaching", "first": "p001"},
+                                                 {"section": "The picture", "first": "p003", "parent": "Teaching"}))
+PLACE = "".join(json.dumps(r) + "\n" for r in ({"point": "p002", "role": "aside", "why": "a digression"},
+                                               {"point": "p003", "section": "Teaching", "after": "p001"}))
+OUTLINED = [(("notes-outline", "--slug", POST_SLUG, "--rows", "{run}/outline.jsonl", "--apply"), ("accept-point",) * 2)]
+FILES.update({"notes-accept": PROPSET, "notes-retract-all": PROPSET, "notes-rehead": {**PROPSET, "pack.json": PACK},
+              "notes-outline": {**PROPSET, "outline.jsonl": OUTLINE},
+              "notes-place": {**PROPSET, "outline.jsonl": OUTLINE, "place.jsonl": PLACE}})
+# notes-overlap --rows: a second set's two points over the first set's lines -- one pair judged different, one folded
+SOLO = [f"0000000{i}-1111-4222-8333-444455556666" for i in (3, 4)]
+SOLO_ROWS = [{"proposal_id": k, "kind": "claim", "text": t, "segment_ids": [SEGMENTS[i]["id"]], "from_i": i, "to_i": i,
+              "heading": "", "heading_index": 0, "start_time": i + 0.5, "end_time": i + 1.0,
+              "origins": [{"set_id": "npropset_solo", "proposal_id": k, "cell": "solo/x", "how": "shown"}]}
+             for k, i, t in zip(SOLO, (0, 1), ("Gatto stopped teaching.", "Subjects come apart."))]
+SOLO_SET = {"purenotes/proposals/npropset_solo/manifest.json": json.dumps(
+                {"format": NOTES_PROPSET_FORMAT, "version": NOTES_PROPSET_VERSION, "proposal_set_id": "npropset_solo",
+                 "created_at": 2.0, "type": "pure-notes", "model": {"kind": "test"}, "source": UNIT,
+                 "files": {"proposals": "proposals.jsonl"}}),
+            "purenotes/proposals/npropset_solo/proposals.jsonl": "".join(json.dumps(p) + "\n" for p in SOLO_ROWS),
+            "judge.jsonl": "".join(json.dumps(r) + "\n" for r in (
+                {"pair": f"q{KEYS[0][:8]}.{SOLO[0][:8]}", "verdict": "different"},
+                {"pair": f"q{KEYS[1][:8]}.{SOLO[1][:8]}", "verdict": "same", "keep": "a"}))}
+FILES["notes-overlap"] = {**PROPSET, **SOLO_SET}
+NOTES |= {"notes-accept", "notes-retract-all", "notes-rehead", "notes-outline", "notes-place", "notes-overlap"}
+MINTED = {"notes-outline", "notes-place"}
+UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 REPO_MAP = {"oracle"}   # ... whose ingest keeps the repo map
 
 # Every scenario runs after the seed; a True step writes exactly ONE op and is the one crashed
@@ -601,6 +635,23 @@ SCENARIOS = {
                          (_code(NEW_F, edited=True), False), (("propose",), False), (_proposal, False),
                          (("confirm-proposal", "{proposal}"), ("section", "assert")),
                          (("confirm-proposal", "{proposal}"), NOCHANGE)],
+    "notes-accept": [(("notes-type", "pure-notes"), False)] + BORN + [
+        (("notes-accept", "--slug", POST_SLUG, "--set", "npropset_proof", "--accept-all"),
+         ("link", "assert") + ("accept-point",) * 3),
+        (("notes-accept", "--slug", POST_SLUG, "--set", "npropset_proof", "--accept-all"), NOCHANGE)],
+    "notes-retract-all": ACCEPTED + [(("notes-retract", "--slug", POST_SLUG, "--all"), ("retract-point",) * 3),
+                                     (("notes-retract", "--slug", POST_SLUG, "--all"), NOCHANGE)],
+    "notes-rehead": ACCEPTED + [(("notes-rehead", "--slug", POST_SLUG, "--pack", "{run}/pack.json"), ("edit-point",) * 3),
+                                (("notes-rehead", "--slug", POST_SLUG, "--pack", "{run}/pack.json"), NOCHANGE)],
+    "notes-outline": ACCEPTED + OUTLINED + [(OUTLINED[0][0], NOCHANGE)],
+    "notes-place": ACCEPTED + [(OUTLINED[0][0], False),
+                               (("notes-place", "--slug", POST_SLUG, "--rows", "{run}/place.jsonl", "--apply"),
+                                ("assert", "place-point")),
+                               (("notes-place", "--slug", POST_SLUG, "--rows", "{run}/place.jsonl", "--apply"), NOCHANGE)],
+    "notes-overlap": ACCEPTED + [
+        (("notes-accept", "--slug", POST_SLUG, "--set", "npropset_solo", "--accept-all"), False),
+        (("notes-overlap", "--slug", POST_SLUG, "--rows", "{run}/judge.jsonl"), ("edit-point",) * 3 + ("retract-point",)),
+        (("notes-overlap", "--slug", POST_SLUG, "--rows", "{run}/judge.jsonl"), NOCHANGE)],
     "transfer-path": [(("assert", ITEM_ID, "site_path", "/a/"), False),
                       (("transfer-path", ITEM_ID[:8], OTHER_ID[:8]), True),
                       (("transfer-path", OTHER_ID, ITEM_ID), True),
@@ -724,6 +775,9 @@ def _run(
                 args.get("observations") or []) + ([args] if o["verb"] == "relocate" else []):
             obs["observed_at"] = "{clock}"   # an observation's time is its run's own clock
         ops.append((o["verb"], args))
+    if scenario in MINTED:   # a minted key is random per run: each id compared by its first appearance
+        seen: dict = {}
+        ops = json.loads(UUID.sub(lambda m: seen.setdefault(m.group(0), f"{{id{len(seen)}}}"), json.dumps(ops)))
     return ops, counts
 
 

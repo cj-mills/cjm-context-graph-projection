@@ -204,11 +204,15 @@ def test_an_elided_kind_renders_no_line_and_its_children_stand_in_its_place():
     brief = render_place_brief(pts, slug="x", roles={}, placements={}, role_map=ROLE_MAP, kind_map=kind_map)
     assert "- `p006` [question] 00:24  Why launch twice?  [elided: no line on the page, its children stand in its place]" in brief
     assert "* ELIDED KINDS. A point tagged `elided` (question)" in brief
-    plan = plan_placement(pts, [{"point": "p006", "role": "content"}, {"point": "p007", "section": "Kernel launches", "after": ""}],
-                          roles={}, placements={}, kind_map=kind_map)
+    plan = plan_placement(pts, [{"point": "p006", "role": "content"}], roles={}, placements={}, kind_map=kind_map)
     assert [(r["key"], r["old"], r["new"]) for r in plan["roles"]] == [("q", "", "content")]                  # content on an elided question is load-bearing
+    plan = plan_placement(pts, [{"point": "p007", "section": "Kernel launches", "after": ""}], roles={}, placements={},
+                          kind_map=kind_map)
     assert [(m["key"], m["section"], m["after_key"]) for m in plan["moves"]] == [("q1", "S1", "")]            # the answer is top-level for a move
     assert plan["stats"]["elided"] == 1
+    with pytest.raises(ValueError, match="child point"):   # the page the rows' own roles leave (ruling 24fa72c2): content keeps the question, so its answer is a child
+        plan_placement(pts, [{"point": "p006", "role": "content"}, {"point": "p007", "section": "Kernel launches", "after": ""}],
+                       roles={}, placements={}, kind_map=kind_map)
     assert plan_placement(pts, [{"point": "p006", "role": "meta", "why": "logistics"}], roles={"q": "meta"}, placements={}, kind_map=kind_map)["roles"] == []
     with pytest.raises(ValueError, match="child point"):
         plan_placement(pts, [{"point": "p007", "section": "Kernel launches", "after": ""}], roles={}, placements={})   # no map: still a child
