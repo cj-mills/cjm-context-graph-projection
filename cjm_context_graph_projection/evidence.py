@@ -736,17 +736,24 @@ async def ingest_evidence(
     *,
     dry_run: bool = False,
     actor: str = "agent:session",
-) -> Dict[str, Any]:  # {snapshot, changes, foreign, unkeyed, written, run?, applied?} or {error}
+    write: bool = True,   # False = PLAN only (ruling 24fa72c2 (4)): the run under "op" (None = changes nothing), nothing written
+) -> Dict[str, Any]:  # {snapshot, changes, foreign, unkeyed, written, run?, applied?, op?, noop?} or {error}
     """Ingest one snapshot: its source's months are recomputed over every snapshot of that source
     on the graph plus this one (all hash-checked), and what changed lands. Nothing lands on any
-    refusal."""
+    refusal.
+
+    THE PLAN (write=False, or a dry run): the run and the op {run, actor} -- None when the snapshot
+    is already on the graph and its run lands no measure (ruling 24fa72c2 (4): a crashed ingest's
+    retry, a named re-ingest). The op applies through the replay's applier (apply_evidence)."""
     snap = read_snapshot(conf["root"], key)
     if snap.get("error"):
         return {"error": snap["error"], "written": False}
+    ingested = await ingested_snapshots(gx)
     if snap["source"] not in P.TRAFFIC_SOURCES:   # an export or a links snapshot (ruling a3c02fb1)
         from .inbound import ingest_links
-        return await ingest_links(gx, conf, snap, dry_run=dry_run, actor=actor)
-    keys = sorted({k for k in await ingested_snapshots(gx) if k.startswith(snap["source"] + "/")} | {key})
+        return await ingest_links(gx, conf, snap, dry_run=dry_run, actor=actor, write=write,
+                                  ingested=key in ingested)
+    keys = sorted({k for k in ingested if k.startswith(snap["source"] + "/")} | {key})
     snaps = []
     for k in keys:
         s = snap if k == key else read_snapshot(conf["root"], k)
@@ -759,8 +766,9 @@ async def ingest_evidence(
     out = {"snapshot": key, "source": snap["source"], "window": snap["window"], "computed": len(got["measures"]),
            "changes": len(run["measures"]), "superseding": sum(1 for m in run["measures"] if m["supersede"]),
            "foreign": got["foreign"], "unkeyed": got["unkeyed"], "written": False}
-    if dry_run:
-        return out
+    if dry_run or not write:
+        noop = key in ingested and not run["measures"]
+        return {**out, "run": run, "noop": noop, "op": None if noop else {"run": run, "actor": actor}}
     applied = await apply_evidence(gx, run, actor=actor)
     return {**out, "written": True, "run": run, "applied": applied}
 

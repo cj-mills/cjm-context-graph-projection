@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from cjm_context_graph_layer.ops import extend_graph, graph_task
-from cjm_context_graph_primitives.journal import append_write, op_clock, op_now, read_journal
+from cjm_context_graph_primitives.journal import append_write, op_clock, read_journal
 from cjm_context_graph_primitives.timings import span
 from cjm_context_graph_primitives.writer import CursorMismatch, NoCursor
 
@@ -611,7 +611,7 @@ async def _dispatch(args) -> int:
             if args.journal_path:
                 # Replay born-on-graph writes on top of the fresh projection so
                 # `rm db && ingest` fully reconstructs the graph (the migration story).
-                rc = await replay_journal(gx, args.journal_path, notes=lane or None)
+                rc = await replay_journal(gx, args.journal_path, emit_root=args.emit_root, notes=lane or None)
                 print(f"replayed journal: {rc}")
             return 0
         if args.command == "ingest-notes":
@@ -1556,7 +1556,9 @@ async def _dispatch(args) -> int:
         elif args.command == "ingest-evidence":
             # The evidence (design 7f315830): an ingest reads the pulled files and its op carries
             # the computed run, so replay reads no file. No snapshot named = every snapshot on disk
-            # the graph does not hold yet, each source in pull order, one op each (56c17a80).
+            # the graph does not hold yet, each source in pull order, one op each (56c17a80): each
+            # snapshot planned against the db the previous one's apply left, then written (ruling
+            # 24fa72c2 (4)); a snapshot the graph already holds whole is no change.
             from .evidence import evidence_config, ingest_evidence, ingested_snapshots, pending_snapshots
             ev = evidence_config(load_graph_config(args.graph_db_path))
             if ev["errors"]:
@@ -1568,10 +1570,10 @@ async def _dispatch(args) -> int:
                 print(render("ingest-evidence", {"pending": []}, args.format))
                 return 0
             for key in keys:
-                res = await ingest_evidence(gx, ev["config"], key, dry_run=args.dry_run, actor=args.actor)
+                res = await ingest_evidence(gx, ev["config"], key, actor=args.actor, write=False)
+                if res.get("op") and not args.dry_run:
+                    res = {**res, "written": True, "applied": (await writes.write("ingest-evidence", res["op"])).result}
                 print(render("ingest-evidence", res, args.format))
-                if args.journal_path and res.get("written"):
-                    append_write(args.journal_path, "ingest-evidence", {"run": res["run"], "actor": args.actor})
                 if res.get("error"):
                     return 1
             return 0
@@ -1793,41 +1795,38 @@ async def _dispatch(args) -> int:
             print(render("retract-session", res, args.format))
             return 1 if res.get("error") else 0
         elif args.command == "pull-transcript":
-            # Scratchpad-v2 pull (fc6a0cdc): mint the active path's user-facing
-            # messages onto the session spine. Journal-first with the NEW-message
-            # PAYLOAD (transcripts are prunable external files — the journal must
-            # reconstruct alone); nothing new = nothing journaled, the
-            # watcher-cadence guarantee.
+            # Scratchpad-v2 pull (fc6a0cdc): mint the active path's user-facing messages onto the
+            # session spine. The op carries its messages' PAYLOAD (transcripts are prunable
+            # external files -- the journal must reconstruct alone). PLANNED (ruling 24fa72c2 (5)):
+            # the new messages plus every one whose expected inbound edge is absent, the
+            # cc_session_uuid fact only when it would change; then the chain re-link's
+            # compensating `unlink` ops (finding e358fe97), each planned -> appended -> applied.
+            # Nothing to land = nothing journaled, the watcher-cadence guarantee.
             from .pull_transcript import pull_transcript
             res = await pull_transcript(gx, args.key,
                                         str(Path(args.transcript_dir).expanduser()),
                                         require_signal=not args.any_boot,
-                                        actor=args.actor)
+                                        actor=args.actor, write=False)
             if res.get("error"):
                 print(f"error: {res['error']}", file=sys.stderr)
                 return 1
+            applied: Dict[str, Any] = {}
+            if res.get("op"):
+                applied = (await writes.write("pull-transcript", res["op"])).result or {}
             print(f"**pulled** `{args.key}` <- transcript `{res['cc_session_uuid']}`: "
                   f"{res['messages_new']} new / {res['messages_total']} total message(s) "
-                  f"({res['nodes_added']} node(s), {res['edges_added']} edge(s) added)")
+                  f"({applied.get('nodes_added', 0)} node(s), {applied.get('edges_added', 0)} edge(s) added)")
+            relinked = len(res["messages"]) - res["messages_new"]
+            if relinked:
+                print(f"  re-linked: {relinked} message(s) already on the graph missing their chain edge")
             if res.get("other_candidates"):
                 print(f"  other candidate transcript(s): {res['other_candidates']}")
-            if args.journal_path and res.get("new_messages"):
-                append_write(args.journal_path, "pull-transcript",
-                             {"session_key": args.key,
-                              "cc_session_uuid": res.get("cc_session_uuid", ""),
-                              "messages": res["new_messages"], "actor": args.actor})
-            # Chain re-link (finding e358fe97): a wider extraction that inserts
-            # a message MID-chain leaves the stale prev->next edge beside the
-            # new ones; the pull retracts it and reports it here — journal the
-            # compensating `unlink` ops AFTER the pull op so a rebuild converges
-            # (independent of new_messages: a repair pull may mint nothing).
-            for e in res.get("retracted_edges") or []:
+            for u in res["unlinks"]:
+                await writes.write("unlink", u)
                 print(f"  re-linked: retracted stale NEXT "
-                      f"{e['source_id'][:8]} -> {e['target_id'][:8]}")
-                if args.journal_path:
-                    append_write(args.journal_path, "unlink",
-                                 {"source_id": e["source_id"], "target_id": e["target_id"],
-                                  "relation": e["relation"], "actor": args.actor})
+                      f"{u['source_id'][:8]} -> {u['target_id'][:8]}")
+            if res.get("noop"):
+                print("  no change: the graph already holds this transcript (nothing journaled)")
             return 0
         elif args.command == "edit-message":
             # In-place Message edit (DEC 91c47b4a pt 3, CLI dual of the
@@ -1950,15 +1949,14 @@ async def _dispatch(args) -> int:
                     print(f"error: no node `{subj}` — `locate` the deliverable first", file=sys.stderr)
                     return 1
                 subj = node.get("id") if isinstance(node, dict) else getattr(node, "id", subj)
-            res = await propose_updates(gx, jp, subject=subj, depth=args.depth, actor=args.actor,
-                                        write=not args.no_write)
+            # PLANNED (ruling 24fa72c2 (7)): one `propose` op per draft, carrying the exact mint
+            # args, appended then applied through the replay's applier; a draft already proposed
+            # is the frontier's own skip, so a re-run journals nothing.
+            res = await propose_updates(gx, jp, subject=subj, depth=args.depth, actor=args.actor, write=False)
+            if not args.no_write:
+                res["proposals"] = [{**p, **(await writes.write("propose", p["op"])).result, "dry_run": False}
+                                    for p in res["proposals"]]
             print(render("propose", res, args.format))
-            # One `propose` op per NEW draft, carrying the exact mint args (replay re-lands
-            # the same node); an existing proposal (re-run) journals nothing.
-            if args.journal_path and not args.no_write:
-                for p in res.get("proposals", []):
-                    if p.get("written") and not p.get("existing"):
-                        append_write(args.journal_path, "propose", p["args"])
             return 0
         elif args.command == "confirm-proposal":
             res = await confirm_proposal(gx, args.proposal, actor=args.actor)
@@ -3273,22 +3271,20 @@ async def _notes_lane_command(
                                                    "work Entity, replaced it (design 638b7b85 (6))",
                                           "slug": args.slug, "written": False}, args.format))
             return 1
+        # PLANNED (ruling 24fa72c2 (6)): no op when the rendered text equals the note text the db
+        # reconstructs; the op applies graph-only through the replay's applier, and the staging
+        # file is written AFTER it, from the applied text (--no-write journals and applies, skipping
+        # only the file).
         res = await render_notes(gx, args.slug, rendering=args.rendering, timestamps=args.timestamps,
-                                 write_md=not args.no_write, actor=args.actor,
-                                 siblings=siblings, manifests_dir=args.manifests_dir)
+                                 actor=args.actor, siblings=siblings, manifests_dir=args.manifests_dir,
+                                 write=False)
+        if res.get("op"):
+            res = {**(await writes.write("render-notes", res["op"])).result, "noop": False}
+            if not args.no_write and res.get("path"):
+                Path(res["path"]).write_text(res["text"])
+                res["written"] = True
         print(render("notes-render", res, args.format))
-        if res.get("error"):
-            return 1
-        if args.journal_path and not args.no_write:
-            # A re-render is journaled unless it repeats the LAST render of this draft (a true no-op). The
-            # journal dedups an op identical in verb + args over its WHOLE history (finding 4aa5d5b4), which
-            # would drop a render whose state toggled back to an earlier one, so the op carries `at`.
-            from cjm_context_graph_primitives.journal import read_journal as _read_journal
-            prev = [o for o in _read_journal(args.journal_path)
-                    if o.get("verb") == "render-notes" and (o.get("args") or {}).get("slug") == args.slug]
-            if not prev or (prev[-1].get("args") or {}).get("substance") != res["args"].get("substance"):
-                append_write(args.journal_path, "render-notes", {**res["args"], "at": round(op_now(), 3)})
-        return 0
+        return 1 if res.get("error") else 0
     if cmd == "notes-promotion":
         res = await work_promotion_status(gx, siblings=siblings, graph_key=args.sibling,
                                           manifests_dir=args.manifests_dir, work_title=args.work)
@@ -3550,6 +3546,9 @@ def build_parser() -> argparse.ArgumentParser:  # The CLI's parser, every verb
     sub = ap.add_subparsers(dest="command", required=True)
 
     p_ing = sub.add_parser("ingest", help="Build/refresh the dev graph (idempotent)")
+    p_ing.add_argument("--emit-root", default=None,
+                       help="Where born posts live — the journal's replay derives each one's file location from "
+                            "it, as `replay` does (default: the sibling config's emit_root; DEC 98293e72)")
     p_ing.add_argument("--memory-dir", default=DEFAULT_MEMORY)
     p_ing.add_argument("--repos-dir", default=DEFAULT_REPOS)
     p_ing.add_argument("--no-repo-map", action="store_true", help="Skip the repo map")

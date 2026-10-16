@@ -529,7 +529,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `html_total` _function_ — The drill-down's total from the kept bytes (the snapshot is the source): the first bare
 - `import_export` _function_ — Keep hand exports as a dated snapshot, byte for byte (ruling a3c02fb1 (4)): each file copied
 - `inbound_report` _function_ — Each page's inbound links DERIVED across every path it holds or held: per linking site, the
-- `ingest_links` _function_
+- `ingest_links` _function_ — One links or export snapshot. An already-ingested one plans no change (ruling 24fa72c2 (4)):
 - `normalize_url` _function_
 - `plan_links` _function_ — What one snapshot observed, computed from its files alone (the op carries it whole):
 - `pull_drilldowns` _function_ — Walk the Links drill-downs: the top linked pages, each page's linking sites, each (page,
@@ -846,6 +846,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `derive_message` _function_ — The compose-send aggregation seam (DEC fc6a0cdc pt 5): the sent message
 - `edit_message` _function_ — In-place body edit of a Message — the journaled edit-op half of the
 - `mint_pulled_messages` _function_ — Land pulled messages on the spine — the code path live pull AND replay share.
+- `plan_pull` _function_ — THE PULL'S PLAN (ruling 24fa72c2 (5)), read before anything lands: the op's messages are
 - `pull_transcript` _function_ — The live pull: derive the mapping, extract the active path, mint the delta.
 - `stale_next_edges` _function_ — The chain re-link plan (finding e358fe97) — pure, so the live pull and
 

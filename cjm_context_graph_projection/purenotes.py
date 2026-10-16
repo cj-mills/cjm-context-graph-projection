@@ -4170,7 +4170,8 @@ async def render_notes(
     manifests_dir: Optional[str] = None,              # Capability manifests dir
     references: Optional[List[Dict[str, Any]]] = None,  # Raw Reference rows to render (REPLAY passes the journaled ones; None = read live, else the unit snapshot)
     facts: Optional[Dict[str, Any]] = None,             # The source facts to render (REPLAY passes the journaled ones; None = read live, else the unit snapshot)
-) -> Dict[str, Any]:  # {slug, points, added, updated, removed, written, text} | {error}
+    write: bool = True,                 # False = PLAN only (ruling 24fa72c2 (6)): the op under "op" (None = the page already reads this), nothing written
+) -> Dict[str, Any]:  # {slug, points, added, updated, removed, written, text} | the plan {slug, points, text, path, op, noop} | {error}
     """Derive the Note's body from its Points and APPLY it: the authored preamble stays, the
     frontmatter's type-owned lines (title / description) are re-derived per the type's
     presentation policy, everything after is re-derived, the diff lands as Section
@@ -4179,14 +4180,17 @@ async def render_notes(
     render the same bytes. The source card carries the unit's human-added links (ruling
     a7ca900d (3)): read LIVE from the sibling when one is at hand, else the points' unit
     snapshot; the op JOURNALS the rows it observed so replay renders the same card with no
-    sibling open (the accept-point observations pattern), and the substance digest covers
-    the RESOLVED hrefs so a re-render after a cross-work target is born lands a new op. A
-    type that asks for the SOURCE FACTS (finding baa640e8: `frontmatter.title =
-    series-lecture-notes` or `source_card = "lecture"`) reads them the same way — series,
-    public title, public URL, dates — merges them over the unit snapshot for the title and
-    the card, journals them, and digests them; a book type never asks, so its ops and
-    digests are the ones it always had. The type's `render_style` reaches the body the same
-    way and rides the digest when set."""
+    sibling open (the accept-point observations pattern). A type that asks for the SOURCE
+    FACTS (finding baa640e8: `frontmatter.title = series-lecture-notes` or `source_card =
+    "lecture"`) reads them the same way — series, public title, public URL, dates — merges
+    them over the unit snapshot for the title and the card, and journals them; a book type
+    never asks, so its ops are the ones it always had.
+
+    THE PLAN (write=False, ruling 24fa72c2 (6)): the rendered text and the op {slug, rendering,
+    timestamps, actor, references?, facts?} -- None when the text equals the note text the db
+    reconstructs (every input the render reads is covered: the points, the options, the type's
+    policy, the resolved hrefs -- and the db, never the journal, is the comparand). The op
+    applies through the replay's applier, graph-only; the CLI writes the staging file after."""
     from .authoring import _note_section_wires
     from .structure import _apply_note_text
     note_id = note_node_id(slug)
@@ -4260,6 +4264,16 @@ async def render_notes(
         pre = pre.rstrip("\n") + "\n\n"
     new_text = fm + pre + BODY_MARKER + "\n\n" + (card + "\n" if card else "") + body
     path = str(F.prop(note, "path") or "")
+    if not write:
+        from cjm_markdown_decompose_core.project import note_text_from_graph_nodes
+        from .authoring import _as_wire
+        noop = note_text_from_graph_nodes(_as_wire(note, DevNodeKinds.NOTE), wires) == new_text
+        op = {"slug": slug, "rendering": rendering, "timestamps": timestamps, "actor": actor,
+              **({"references": [dict(r) for r in references]} if references else {}),
+              **({"facts": facts} if facts else {})}
+        return {"slug": slug, "path": path, "points": len(points), "rendering": rendering, "timestamps": timestamps,
+                "text": new_text, "references": resolved, "facts": facts, "written": False, "noop": noop,
+                "op": None if noop else op}
     res = await _apply_note_text(gx, note, slug, new_text, path, write=True, write_md=write_md)
     removed = list(res.get("removed") or [])
     if removed:
@@ -4267,34 +4281,8 @@ async def render_notes(
         await graph_task(gx.queue, gx.graph_id, "delete_nodes",
                          node_ids=[section_node_id(note_id, a) for a in removed], cascade=True)
         res["removed_applied"] = removed
-    # The journaled op carries a SUBSTANCE digest: replay ignores it, but `append_write` dedups
-    # identical ops — without it a re-render after an accept/retract would be dropped as a
-    # duplicate of the first render and a rebuild would stop at the stale body. A true no-op
-    # re-render (same points) still dedups.
-    # The RESOLVED hrefs ride the digest too (ae103970): the same rows resolve differently once a
-    # cross-work target is born, and that re-render must land as a new op, not dedup away.
-    # What the LECTURE shapes print rides it as well (work item e370e5db (6)): a point's derived
-    # speaker and its back-link keys, and the unit's speaker roster — appended only where a point
-    # carries them, so a book's digest is the one it always had. The source FACTS and the render
-    # STYLE join the same way (baa640e8): only when the type asked for them.
-    roster0 = list(unit0.get("speaker_roster") or []) if points else []
-    digest = hashlib.sha256(json.dumps(
-        [[[p.get("key"), p.get("kind"), p.get("text"), p.get("lead"), p.get("heading"), p.get("data"),
-           p.get("parent_key")] + ([p.get("speaker"), list(p.get("refers_to") or [])]
-                                   if p.get("speaker") or p.get("refers_to") else []) for p in points],
-         [[r.get("label"), r.get("href")] for r in resolved]] + ([roster0] if roster0 else [])
-        + ([facts] if facts else []) + ([style] if style else []) + ([fm_policy] if wants_facts else [])
-        # the placement pass's inputs join only once a draft carries them (96be1528 (1)/(3)), so every
-        # earlier digest is the one it always had
-        + ([sorted(roles.items())] if roles else [])
-        + ([sorted((k, v.get("section"), v.get("after"), v.get("refs_shown")) for k, v in placements.items())] if placements else []),
-        sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")).hexdigest()
     res.update(points=len(points), rendering=rendering, timestamps=timestamps, text=new_text,
-               references=resolved, facts=facts,
-               args={"slug": slug, "rendering": rendering, "timestamps": timestamps, "actor": actor,
-                     "substance": f"sha256:{digest}",
-                     **({"references": [dict(r) for r in references]} if references else {}),
-                     **({"facts": facts} if facts else {})})
+               references=resolved, facts=facts)
     return res
 
 

@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from cjm_context_graph_layer.grammar import make_edge, SpineRelations
 from cjm_context_graph_layer.ops import extend_graph, graph_task
-from cjm_context_graph_primitives.query import EdgeQuery
+from cjm_context_graph_primitives.query import EdgeQuery, NodeQuery
 from cjm_dev_graph_schema.nodes import MessageNode, SessionNode
 from cjm_dev_graph_schema.vocab import DevRelations
 
@@ -221,6 +221,71 @@ async def derive_message(
             "written": True}
 
 
+async def _inbound_next(
+    gx: GraphHandle,
+    ids: List[str],   # Message node ids
+) -> Dict[str, List[str]]:  # Message node id -> the source ids of its on-graph inbound NEXT edges
+    inbound: Dict[str, List[str]] = {}
+    for i in range(0, len(ids), 500):
+        eres = await graph_task(gx.queue, gx.graph_id, "query_edges",
+                                query=EdgeQuery(relation_type=SpineRelations.NEXT,
+                                                target_ids=ids[i:i + 500],
+                                                project=["id"]).to_dict())
+        for row in (eres.rows or []):
+            inbound.setdefault(row["target_id"], []).append(row["source_id"])
+    return inbound
+
+
+async def plan_pull(
+    gx: GraphHandle,
+    session_key: str,                # The session spine key to pull for
+    cc_session_uuid: str,            # The best-matching transcript's uuid
+    payload: List[Dict[str, Any]],   # build_pull_payload over the whole active path
+    *,
+    actor: str = "agent:session",
+) -> Dict[str, Any]:  # {new_messages, messages, cc_session_uuid_changes, op, unlinks, noop}
+    """THE PULL'S PLAN (ruling 24fa72c2 (5)), read before anything lands: the op's messages are
+    the NEW ones plus every message already on the graph whose expected inbound edge is absent
+    (a NEXT from its payload predecessor, or the Session's STARTS_WITH at a chain head) -- a
+    mid-chain insert's successor re-links on replay too, the applier unchanged; a cc_session_uuid
+    fact that would change is itself a write (an op with no message journals it); the op always
+    names the matched transcript -- provenance its readers take (the bench's ingest workload), and
+    a standing value re-asserts to the same Assertion, a verified no-op; the stale NEXT pairs (the
+    same before the mint as after it) are planned `unlink` ops after it. Nothing to land = no op."""
+    sess = SessionNode(key=session_key)
+    ids = [MessageNode(source_uuid=m["uuid"], role="", text="").id for m in payload]
+    present = set()
+    for i in range(0, len(ids), 500):
+        res = await graph_task(gx.queue, gx.graph_id, "query_nodes",
+                               query=NodeQuery(ids=ids[i:i + 500]).to_dict())
+        present |= {str(n.id) for n in (res.nodes or [])}
+    inbound = await _inbound_next(gx, ids)
+    eres = await graph_task(gx.queue, gx.graph_id, "query_edges",
+                            query=EdgeQuery(relation_type=SpineRelations.STARTS_WITH,
+                                            source_ids=[sess.id], project=["id"]).to_dict())
+    heads = {row["target_id"] for row in (eres.rows or [])}
+    new, riding = [], []
+    for m, mid in zip(payload, ids):
+        if mid not in present:
+            new.append(m)
+            riding.append(m)
+        elif m.get("prev_uuid"):
+            if MessageNode(source_uuid=m["prev_uuid"], role="", text="").id not in inbound.get(mid, []):
+                riding.append(m)
+        elif mid not in heads:
+            riding.append(m)
+    fact_changes = bool(cc_session_uuid)
+    if fact_changes and await graph_task(gx.queue, gx.graph_id, "get_node", node_id=sess.id) is not None:
+        fact = await assert_value(gx, sess.id, "cc_session_uuid", cc_session_uuid, actor=actor, write=False)
+        fact_changes = bool(fact.get("op")) and not fact.get("error")
+    unlinks = [{"source_id": src, "target_id": dst, "relation": SpineRelations.NEXT, "actor": actor}
+               for src, dst in stale_next_edges(payload, inbound)]
+    op = ({"session_key": session_key, "cc_session_uuid": cc_session_uuid, "messages": riding, "actor": actor}
+          if riding or fact_changes else None)
+    return {"new_messages": new, "messages": riding, "cc_session_uuid_changes": fact_changes,
+            "op": op, "unlinks": unlinks, "noop": op is None and not unlinks}
+
+
 async def pull_transcript(
     gx: GraphHandle,
     session_key: str,          # The session spine key to pull for
@@ -228,6 +293,7 @@ async def pull_transcript(
     *,
     require_signal: bool = True,   # Only match boot prompts carrying the mint signal
     actor: str = "agent:session",
+    write: bool = True,        # False = PLAN only (ruling 24fa72c2 (5)): plan_pull's op + unlinks, nothing written
 ) -> Dict[str, Any]:  # The pull result (incl. the NEW-message payload for journaling)
     """The live pull: derive the mapping, extract the active path, mint the delta.
 
@@ -235,7 +301,11 @@ async def pull_transcript(
     watermark optimization can come later without touching correctness. The
     result's `new_messages` payload is exactly what the CLI journals — messages
     already on-graph re-mint as no-ops and stay OUT of the journal, so a
-    watcher-cadence pull with nothing new journals nothing."""
+    watcher-cadence pull with nothing new journals nothing.
+
+    write=False is the CLI's PLAN (plan_pull): the op it appends and applies through the
+    replay's applier, then each planned unlink. The write=True path is the scratchpad's
+    apply-then-append mirror, until its op moves with the Qt seats (L4)."""
     try:
         from cjm_harness_transcripts.extract import extract_messages
         from cjm_harness_transcripts.mapping import find_transcripts_for_key
@@ -252,6 +322,12 @@ async def pull_transcript(
                 "written": False}
     best = matches[0]
     payload = build_pull_payload(extract_messages(TranscriptDag.load(best.path)))
+    found = {"session_key": session_key, "cc_session_uuid": best.cc_session_uuid,
+             "transcript_path": str(best.path), "messages_total": len(payload),
+             "other_candidates": [m.cc_session_uuid for m in matches[1:]]}
+    if not write:
+        plan = await plan_pull(gx, session_key, best.cc_session_uuid, payload, actor=actor)
+        return {**found, **plan, "messages_new": len(plan["new_messages"]), "written": False}
     new_payload: List[Dict[str, Any]] = []
     for m in payload:
         existing = await graph_task(gx.queue, gx.graph_id, "get_node",
@@ -268,15 +344,7 @@ async def pull_transcript(
     # retract the ones the payload's prev_uuid does not vouch for, and report
     # them — the caller journals the compensating unlinks after the pull op.
     # Runs even when nothing new minted: that is the repair pull.
-    ids = [MessageNode(source_uuid=m["uuid"], role="", text="").id for m in payload]
-    inbound: Dict[str, List[str]] = {}
-    for i in range(0, len(ids), 500):
-        eres = await graph_task(gx.queue, gx.graph_id, "query_edges",
-                                query=EdgeQuery(relation_type=SpineRelations.NEXT,
-                                                target_ids=ids[i:i + 500],
-                                                project=["id"]).to_dict())
-        for row in (eres.rows or []):
-            inbound.setdefault(row["target_id"], []).append(row["source_id"])
+    inbound = await _inbound_next(gx, [MessageNode(source_uuid=m["uuid"], role="", text="").id for m in payload])
     retracted: List[Dict[str, Any]] = []
     for src, dst in stale_next_edges(payload, inbound):
         ures = await unlink(gx, src, dst, SpineRelations.NEXT, actor=actor)

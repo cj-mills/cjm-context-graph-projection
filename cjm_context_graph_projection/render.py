@@ -308,12 +308,12 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                  ""]
         for p in obj.get("proposals", []):
             a, d, u = p.get("args", {}), p.get("deliverable", {}), p.get("upstream", {})
-            pid = str(p.get("proposal_id") or "")[:8] or "(dry)"
-            tag = " (already existed)" if p.get("existing") else ""
+            pid = str(p.get("proposal_id") or "")[:8]
+            tag = (" (dry)" if p.get("dry_run") else "") + (" (already existed)" if p.get("existing") else "")
             lines.append(f"📝 **{_short(d.get('label'), 70)}** `{(d.get('id') or '')[:8]}` — section `{a.get('anchor')}` "
                          f"← **{_short(u.get('label'), 50)}** `{(u.get('id') or '')[:8]}`: proposal `{pid}`{tag}")
             lines.append(f"    {a.get('summary')}")
-            if p.get("proposal_id"):
+            if pid and not p.get("dry_run"):
                 lines.append(f"    confirm: `confirm-proposal {pid}` · reject: `assert {(d.get('id') or '')[:8]} "
                              f"review_verdict {a.get('key')}` · read: `read {pid}`")
         for s in obj.get("skipped", []):
@@ -1739,7 +1739,7 @@ def _render_evidence(kind: str, obj: Dict[str, Any]) -> str:
     if kind == "ingest-evidence" and "pending" in obj:
         return "**nothing to ingest** · every evidence snapshot on disk is on the graph"
     if kind == "ingest-evidence":
-        head = (f"**{'ingested' if obj.get('written') else 'would ingest'}** `{obj['snapshot']}` · "
+        head = (f"**{_ingest_verb(obj)}** `{obj['snapshot']}` · "
                 f"{obj['computed']} (path, month) measure(s) computed · {obj['changes']} to land "
                 f"({obj['superseding']} superseding a prior value)")
         lines = [head]
@@ -1786,7 +1786,7 @@ def _render_inbound(kind: str, obj: Dict[str, Any]) -> str:
                 + "\nnext, in a session: `ingest-evidence` (registers the snapshot and what it lists)")
     if kind == "ingest-evidence":
         r = obj.get("report") or {}
-        lines = [f"**{'ingested' if obj.get('written') else 'would ingest'}** `{obj['snapshot']}` · "
+        lines = [f"**{_ingest_verb(obj)}** `{obj['snapshot']}` · "
                  f"{obj['references']} linking page(s) · {obj['edges']} inbound edge(s) · "
                  f"{obj['observations']} observation(s) · {obj['counts']} Google total(s)"]
         ap = obj.get("applied")
@@ -2262,6 +2262,13 @@ def _render_coverage(obj: Dict[str, Any]) -> str:
 RUN_VERBS = ("judge-related", "judge-facets", "judge-roles", "judge-concepts", "review-facets", "review-roles",
              "review-concepts", "harvest-discussions")
 
+# The own-shape verbs' no-change line (ruling 24fa72c2 (4)-(7)): what the graph already holds
+NOCHANGE_HOLDS = {"ingest-evidence": "this snapshot", "notes-render": "this render", "propose": "every draft"}
+
+
+def _ingest_verb(obj: Dict[str, Any]) -> str:  # An evidence snapshot's receipt verb
+    return "ingested" if obj.get("written") else "already ingested" if obj.get("noop") else "would ingest"
+
 
 def render(
     kind: str,         # Command kind: schema | state | relevant | show
@@ -2279,6 +2286,8 @@ def render(
     # A run verb's plan that changes nothing (ruling 24fa72c2): one uniform line -- nothing journaled
     if isinstance(obj, dict) and obj.get("noop") and kind in RUN_VERBS and not obj.get("error"):
         out += "\n  no change: the graph already holds this run (nothing journaled)"
+    elif isinstance(obj, dict) and obj.get("noop") and kind in NOCHANGE_HOLDS and not obj.get("error"):
+        out += f"\n  no change: the graph already holds {NOCHANGE_HOLDS[kind]} (nothing journaled)"
     # Only a journaled_emit RECEIPT (it carries `journal_first`) gets the line — a read
     # verb's journal TRACE (`show`'s axis-D metadata) is a different dict under the same
     # key and used to print 'PREVIEW — would journal' on every show (da9ea508 (3)).
@@ -2769,7 +2778,8 @@ def _render_notes_lane(kind: str, obj: Dict[str, Any]) -> str:
                     f"{obj.get('chapters_born')} of {obj.get('chapters')} chapter(s) born ({obj.get('units')} unit(s)) · "
                     f"+{len(obj.get('added') or [])} ~{len(obj.get('updated') or [])} −{len(obj.get('removed_applied') or [])} section(s) · "
                     f"{status} → `{obj.get('path')}`")
-        return (f"**rendered** `{obj.get('slug')}` ({obj.get('rendering')}) from {obj.get('points')} point(s) — "
+        return (f"**{'already rendered' if obj.get('noop') else 'rendered'}** `{obj.get('slug')}` ({obj.get('rendering')}) "
+                f"from {obj.get('points')} point(s) — "
                 f"+{len(obj.get('added') or [])} ~{len(obj.get('updated') or [])} −{len(obj.get('removed_applied') or [])} section(s) · "
                 f"{status} → `{obj.get('path')}`")
     return json.dumps(obj, indent=2, default=str)

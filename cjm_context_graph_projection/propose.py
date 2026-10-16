@@ -28,6 +28,7 @@ projector's.
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from cjm_context_graph_layer.identity import derive_node_id
 from cjm_context_graph_layer.ops import graph_task
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
 from cjm_markdown_decompose_core.parse import fenced_code_spans
@@ -123,8 +124,8 @@ async def propose_updates(
     subject: Optional[str] = None,   # Restrict to one deliverable (id) or a label substring — as review-frontier
     depth: int = 3,                  # Upstream walk depth
     actor: str = "agent:session",    # The drafter
-    write: bool = True,              # Mint the proposals (else a dry run: report what WOULD be drafted)
-) -> Dict[str, Any]:  # {proposals: [mint results + draft args], skipped: [{deliverable, upstream, key, reason}], counts}
+    write: bool = True,              # Mint the proposals (else the PLAN: each draft's op, nothing minted -- ruling 24fa72c2 (7))
+) -> Dict[str, Any]:  # {proposals: [mint results + draft args], skipped: [{deliverable, upstream, key, reason}], counts, noop}
     """Draft a proposal for every actionable, unacknowledged, not-yet-proposed change on the
     review frontier (bb015d12 (a)+(c)).
 
@@ -134,7 +135,10 @@ async def propose_updates(
     Section hop first, else every section of the deliverable), re-render the block from
     the live body (`draft_code_block_update`) and mint the Proposal. Everything else is
     reported under `skipped` with its reason. The returned `proposals` carry the exact
-    mint args the CLI journals (`propose` op) so replay re-lands the same draft."""
+    mint args the CLI journals (`propose` op) so replay re-lands the same draft.
+
+    THE PLAN (write=False): each draft's op (its mint args) and its deterministic proposal id;
+    a draft already proposed is the frontier's own skip, so a plan with no draft is no change."""
     fr = await review_frontier(gx, journal_paths, subject=subject, depth=depth)
     rows_by_ref: Dict[str, List[Dict[str, Any]]] = {}
     for p in (journal_paths or []):
@@ -203,12 +207,13 @@ async def propose_updates(
                     "summary": f"re-rendered `{name}`'s code block from the live body ({ch.get('detail')})",
                     "approval": {"predicate": ap.get("predicate"), "value": ap.get("value")},
                     "actor": actor}
-            res = ({"proposal_id": None, "written": False, "dry_run": True} if not write
+            res = ({"proposal_id": derive_node_id("proposal", d, sid, ch["key"]), "written": False, "dry_run": True,
+                    "op": args} if not write
                    else await mint_proposal(gx, args["deliverable_id"], args["section_id"], args["key"],
                                             args["raw"], slug=args["slug"], anchor=args["anchor"],
                                             upstream_ids=args["upstream_ids"], summary=args["summary"],
                                             approval=args["approval"], actor=actor))
             proposals.append({**res, "args": args, "upstream": up, "deliverable": row["deliverable"]})
-    return {"proposals": proposals, "skipped": skipped,
+    return {"proposals": proposals, "skipped": skipped, "noop": not proposals,
             "counts": {"stale": len(fr.get("stale", [])), "proposed": len(proposals),
                        "skipped": len(skipped)}, "frontier_counts": fr.get("counts", {})}

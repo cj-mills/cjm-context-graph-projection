@@ -771,13 +771,17 @@ async def ingest_links(
     *,
     dry_run: bool = False,
     actor: str = "agent:session",
-) -> Dict[str, Any]:  # {snapshot, source, kind, report, written, run?, applied?}
+    write: bool = True,      # False = PLAN only: the op {run, actor} under "op" (None = changes nothing)
+    ingested: bool = False,  # The snapshot is already on the graph
+) -> Dict[str, Any]:  # {snapshot, source, kind, report, written, run?, applied?, op?, noop?}
+    """One links or export snapshot. An already-ingested one plans no change (ruling 24fa72c2 (4)):
+    its every write is idempotent, and an older observation never regresses a Reference."""
     run = plan_links(snap, conf["host"])
     out = {"snapshot": snap["key"], "source": snap["source"], "kind": "links", "report": run["report"],
            "references": len(run["references"]), "edges": len(run["edges"]),
            "observations": len(run["observations"]), "counts": len(run["counts"]), "written": False}
-    if dry_run:
-        return out
+    if dry_run or not write:
+        return {**out, "run": run, "noop": ingested, "op": None if ingested else {"run": run, "actor": actor}}
     applied = await apply_links(gx, run, actor=actor)
     return {**out, "written": True, "run": run, "applied": applied}
 

@@ -13,7 +13,11 @@ NOTES) gets the sibling graph a cross-graph link observes, and one keyed in FILE
 its run. A step whose first element is a function is a HARNESS action (a git commit, a journal written
 by an earlier release, a review document written), run in both runs alike and never counted; a step
 marked NOCHANGE is a write whose plan finds the graph already there -- it journals nothing (ruling
-24fa72c2). The run verbs ask a local JUDGE double ({judge}) and a fake `gh` on the run's PATH."""
+24fa72c2). A step marked with a tuple of verbs writes those ops in that order: run B crashes its first
+and the retry's plan writes the rest. The run verbs ask a local JUDGE double ({judge}) and a fake `gh`
+on the run's PATH; a scenario keyed in CONFIG gets that graph config, and one in SOURCED carries the
+code lane -- its CLI calls name a source journal and its rebuild ingests that journal before the
+replay."""
 
 import asyncio
 import json
@@ -30,10 +34,12 @@ import pytest
 from cjm_context_graph_layer.ops import extend_graph
 from cjm_context_graph_primitives.journal import append_record, read_journal
 from cjm_context_graph_primitives.writer import FAULT_EXIT, JOURNAL_FAULT_ENV
+from cjm_context_graph_projection.evidence import write_snapshot
 from cjm_context_graph_projection.purenotes import NOTES_PROPSET_FORMAT, NOTES_PROPSET_VERSION
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS, open_graph
 from cjm_dev_graph_schema import predicates as P
-from cjm_dev_graph_schema.identity import note_node_id, point_node_id, point_set_node_id
+from cjm_dev_graph_schema.identity import (code_module_node_id, code_symbol_node_id, note_node_id,
+                                           point_node_id, point_set_node_id, section_node_id)
 from cjm_dev_graph_schema.nodes import DecisionNode, ReferenceNode
 
 # Drives the real CLI, which needs the graph-storage worker capability installed.
@@ -89,13 +95,15 @@ ACCEPTED = [(("notes-type", "pure-notes"), False)] + BORN + [
     (("notes-accept", "--slug", POST_SLUG, "--set", "npropset_proof", "--accept-all"), False)]
 NOCHANGE = "nochange"   # a step whose plan finds the graph already there: run once, journals nothing
 FILES = {"edit-message": {"transcripts/aaaa1111-2222-3333-4444-555566667777.jsonl": TRANSCRIPT},
+         "pull-transcript": {"transcripts/aaaa1111-2222-3333-4444-555566667777.jsonl": TRANSCRIPT},
+         "notes-render": PROPSET,
          "notes-retract": PROPSET, "notes-edit": PROPSET,
          "retire-source": {"site/posts/index.qmd": "---\ntitle: Posts\nlisting: default\n---\n"}}   # the website clone
 RUN_VERBS = {"judge-related", "judge-facets", "judge-roles", "judge-concepts", "review-facets", "review-roles",
              "review-concepts"}
-NOTES = {"notes-retract", "notes-edit", "notes-rehome"} | RUN_VERBS   # scenarios on the notes lane's sibling + config
+NOTES = {"notes-retract", "notes-edit", "notes-rehome", "notes-render"} | RUN_VERBS   # on the notes lane's sibling + config
 JOURNALED_AS = {"notes-type": "deliverable-type", "notes-retract": "retract-point", "notes-rehome": "rehome-points",
-                "notes-edit": "edit-point"}   # a CLI verb whose op journals under another name
+                "notes-edit": "edit-point", "notes-render": "render-notes"}   # a CLI verb whose op journals under another name
 
 
 def _legacy_accepts(
@@ -234,6 +242,87 @@ FILES["harvest-discussions"] = {"site/_quarto.yml": (
     "website:\n  title: The Site\npost-comments:\n  repo: o/r\n  repo-id: R_1\n  category: Comments\n"
     "  category-id: C_1\n  base-paths: [old-project]\n")}
 
+# pull-transcript: a wider extraction yields a message BETWEEN the boot prompt and the reply (finding
+# e358fe97) -- the new one rides the op with the reply, whose NEXT edge from it is absent; the stale
+# boot -> reply edge is the planned unlink after it
+TRANSCRIPT_FILE = "transcripts/aaaa1111-2222-3333-4444-555566667777.jsonl"
+PULL = ("pull-transcript", KEY, "--transcript-dir", "{run}/transcripts")
+
+
+def _insert_mid(
+    run: Path,  # This run's directory
+    jp: str,    # Its writes journal (unused)
+) -> None:
+    boot, reply = (json.loads(line) for line in TRANSCRIPT.splitlines())
+    mid = {"type": "assistant", "isSidechain": False, "uuid": "u-mid", "parentUuid": "u-boot",
+           "timestamp": (BOOT + timedelta(seconds=2)).isoformat().replace("+00:00", "Z"),
+           "message": {"role": "assistant", "content": [{"type": "text", "text": "Reading the surface."}]}}
+    (run / TRANSCRIPT_FILE).write_text("".join(json.dumps(r) + "\n" for r in (boot, mid, {**reply, "parentUuid": "u-mid"})))
+
+
+# ingest-evidence: a traffic snapshot and a hand export, then October re-read (a supersession)
+HOST = "example.com"
+
+
+def _cf_row(day: str, path: str, count: int, visits: int) -> dict:
+    return {"count": count, "sum": {"visits": visits}, "avg": {"sampleInterval": 1},
+            "dimensions": {"date": day, "requestHost": HOST, "requestPath": path, "bot": 0}}
+
+
+def _traffic(
+    pulled: str,   # The pull date
+    window: list,  # [first day, last day]
+    rows: list,    # The daily-path rows
+) -> object:  # A harness action writing the cloudflare snapshot under {run}/evidence
+    def write(run: Path, jp: str) -> None:
+        write_snapshot(str(run / "evidence"), "cloudflare", pulled, {f"daily-path-{window[0]}.json": {
+            "shape": "daily-path", "window": window, "pulled_at": f"{pulled}T12:00:00+00:00", "row_count": len(rows),
+            "response": {"data": {"viewer": {"accounts": [{"rows": rows}]}}}}})
+    return write
+
+
+def _export(
+    run: Path,  # This run's directory
+    jp: str,    # Its writes journal (unused)
+) -> None:
+    """A Search Console hand export, as import_export keeps it -- at a fixed time, so both runs agree."""
+    csvs = {"Latest links.csv": "Linking page,Last crawled\nhttps://devtalk.com/t/one/1,2026-09-23\n",
+            "Top target pages.csv": f"Target page,Incoming links,Linking sites\nhttps://{HOST}/posts/a/,3,2\n"}
+    write_snapshot(str(run / "evidence"), "search-console-export", "2026-10-08", {"export.json": {
+        "source": "search-console-export", "shape": "export", "pulled_at": "2026-10-08T09:00:00+00:00",
+        "files": [{"file": n} for n in sorted(csvs)]}}, blobs={n: t.encode() for n, t in csvs.items()})
+
+
+# propose: a born post whose section carries `f`'s body, approved, then `f` edited on the code lane. The
+# review frontier verifies code against whole-module `source` snapshots only (finding: the element-grain
+# lane is unverifiable there), so the seed journals the module as such snapshots, folded live by
+# replay-source as cg-rebuild's delta folds them
+OLD_F, NEW_F = "def f():\n    return 1\n", "def f():\n    return 2\n"
+SYM_ID = code_symbol_node_id(code_module_node_id("r", "m.py"), "f")
+TUTORIAL = ("---\ntitle: \"Tutorial\"\ndate: 2026-09-04\n---\n\nLede.\n\n## Use\n\nCall it:\n\n```python\n"
+            + OLD_F + "```\n\nAfter.\n")
+
+
+def _code(
+    body: str,          # m.py's `f`
+    edited: bool = False,  # The snapshot an `author` of f's body wrote (the frontier names the op)
+) -> object:  # A harness action journaling m.py's snapshot and folding it into the live db
+    def capture(run: Path, jp: str) -> None:
+        (run / "repos" / "r").mkdir(parents=True, exist_ok=True)
+        sj = run / "source.jsonl"
+        offset = len(read_journal(str(sj))) if sj.exists() else 0
+        append_record(str(sj), {"verb": "source", "ts": 1.0 if not edited else datetime.now().timestamp(),
+                                "args": {"repo_key": "r", "module_path": "m.py", "text": "import os\n\n\n" + body},
+                                **({"op": {"node_id": SYM_ID, "op": "author", "slot": "body"}} if edited else {})})
+        r = _cli(str(run / "live.db"), jp, "replay-source", "--offset", str(offset), "--repos-dir", str(run / "repos"))
+        assert r.returncode == 0, r.stderr or r.stdout
+    return capture
+
+
+CONFIG = {"ingest-evidence": {"evidence": {"root": "{run}/evidence", "host": HOST}},
+          "propose": {"notes_profile": "quarto_post", "emit_root": "{run}/staging"}}
+SOURCED = {"propose"}   # scenarios on the code lane
+
 # Every scenario runs after the seed; a True step writes exactly ONE op and is the one crashed
 # between its append and its apply in run B (a False step may write several: an Entity's category
 # path rides its op) ({run} = the run's own directory)
@@ -336,6 +425,27 @@ SCENARIOS = {
                                         (_fake_gh, False),
                                         (("harvest-discussions", "--website-root", "{run}/site"), True),
                                         (("harvest-discussions", "--website-root", "{run}/site"), NOCHANGE)],
+    "pull-transcript": [(PULL, True), (PULL, NOCHANGE), (_insert_mid, False), (PULL, ("pull-transcript", "unlink")),
+                        (PULL, NOCHANGE)],
+    "ingest-evidence": [(_traffic("2026-10-01", ["2026-09-01", "2026-10-01"],
+                                  [_cf_row("2026-09-02", "/posts/a/", 100, 90), _cf_row("2026-10-01", "/posts/a/", 10, 10)]),
+                         False), (_export, False),
+                        (("ingest-evidence",), ("ingest-evidence", "ingest-evidence")),   # the export, then the traffic
+                        (("ingest-evidence", "cloudflare/2026-10-01"), NOCHANGE),
+                        (("ingest-evidence", "search-console-export/2026-10-08"), NOCHANGE),
+                        (_traffic("2026-10-08", ["2026-10-01", "2026-10-08"], [_cf_row("2026-10-01", "/posts/a/", 12, 11)]),
+                         False),
+                        (("ingest-evidence",), True)],
+    "notes-render": ACCEPTED + [(("notes-render", "--slug", POST_SLUG), True),
+                                (("notes-render", "--slug", POST_SLUG), NOCHANGE),
+                                (("notes-render", "--slug", POST_SLUG, "--rendering", "outline"), True),
+                                (("notes-render", "--slug", POST_SLUG), True),
+                                (("notes-edit", PT[2], "--text", "Kids never see the whole."), False),
+                                (("notes-render", "--slug", POST_SLUG, "--no-write"), True)],
+    "propose": [(_code(OLD_F), False), (("new-note", "--slug", "tutorial", "--content", TUTORIAL), False),
+                (("link", section_node_id(note_node_id("tutorial"), "use"), "REFERENCES", SYM_ID), False),
+                (("assert", note_node_id("tutorial"), "publish_state", "published"), False),
+                (_code(NEW_F, edited=True), False), (("propose",), True), (("propose",), NOCHANGE)],
     "transfer-path": [(("assert", ITEM_ID, "site_path", "/a/"), False),
                       (("transfer-path", ITEM_ID[:8], OTHER_ID[:8]), True),
                       (("transfer-path", OTHER_ID, ITEM_ID), True),
@@ -349,12 +459,14 @@ def _cli(
     *args: str,    # The verb and its arguments
     crash: bool = False,  # Arm the crash between append and apply
 ) -> subprocess.CompletedProcess:
-    # Every call sees the run's harness: the judge's key and the run's bin/ (a fake gh) ahead of PATH
+    # Every call sees the run's harness: the judge's key and the run's bin/ (a fake gh) ahead of PATH,
+    # and on the code lane (a run with repos/) its source journal
     run = Path(db).parent
+    sourced = ("--source-journal-path", str(run / "source.jsonl")) if (run / "repos").exists() else ()
     env = {**os.environ, "TYPESAFE_API_KEY": "test-key", "PATH": f"{run / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}",
            **({JOURNAL_FAULT_ENV: "after_append"} if crash else {})}
     proc = subprocess.Popen([sys.executable, "-m", "cjm_context_graph_projection.cli",
-                             "--graph-db-path", db, "--journal-path", journal, *args],
+                             "--graph-db-path", db, "--journal-path", journal, *sourced, *args],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
     out, err = proc.communicate()
     if crash:
@@ -409,6 +521,8 @@ def _run(
     steps = SEED + SCENARIOS[scenario]
     if scenario in NOTES or any(a.startswith("tx:") for args, _ in steps if not callable(args) for a in args):
         _sibling(run, notes=scenario in NOTES)
+    if scenario in CONFIG:
+        (run / "graph.config.json").write_text(json.dumps(CONFIG[scenario]).replace("{run}", str(run)))
     for rel, text in FILES.get(scenario, {}).items():
         (run / rel).parent.mkdir(parents=True, exist_ok=True)
         (run / rel).write_text(text)
@@ -433,11 +547,12 @@ def _run(
             assert "healed: 1 journaled op(s)" in r.stderr, f"{args}: the retry healed nothing"
         new = _ops(jp)[before:]
         if crash_it:
-            assert [o["verb"] for o in new] == [JOURNALED_AS.get(args[0], args[0])], \
-                f"{args}: a crashed step journals ONE op: {new}"
+            want = list(crash_it) if isinstance(crash_it, tuple) else [JOURNALED_AS.get(args[0], args[0])]
+            assert [o["verb"] for o in new] == want, f"{args}: the step journals {want}: {new}"
         counts.append(len(new))
     rebuilt = str(run / "rebuilt.db")
-    r = _cli(rebuilt, jp, "replay")
+    r = (_cli(rebuilt, jp, "ingest", "--memory-dir", str(run / "no-memory"), "--no-repo-map", "--no-seed",
+              "--repos-dir", str(run / "repos")) if scenario in SOURCED else _cli(rebuilt, jp, "replay"))
     assert r.returncode == 0, r.stderr or r.stdout
     r = subprocess.run([sys.executable, "-m", "cjm_context_graph_projection.cli",
                         "--graph-db-path", db, "rebuild-diff", "--against", rebuilt],
