@@ -26,10 +26,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from cjm_context_graph_layer.identity import derive_node_id
 from cjm_context_graph_layer.ops import GraphCursorStore, observe_writes, PROVENANCE_TS
-from cjm_context_graph_primitives.journal import journal_segments, read_journal, read_segment
+from cjm_context_graph_primitives.journal import (family_lock, journal_segments, read_journal,
+                                                  read_segment)
 from cjm_context_graph_primitives.timings import record_replay, record_series, timed
-from cjm_context_graph_primitives.writer import (CursorMismatch, family_lock, family_name, ORIGIN,
-                                                 read_tail)
+from cjm_context_graph_primitives.writer import CursorMismatch, family_name, ORIGIN, read_tail
 from cjm_dev_graph_schema.identity import (code_module_node_id, entity_node_id, note_node_id,
                                            section_node_id, series_node_id, session_node_id)
 from cjm_dev_graph_schema.nodes import DecisionNode
