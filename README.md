@@ -185,15 +185,18 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `assemble_tier` _function_ — Build tier xK: a fresh db holding the snapshot's rows plus copies 1 .. k-1 (plain row
 - `bench_config` _function_ — The harness's settings as DATA; `bench_dir` has no default (a path on one machine is
 - `build` _function_ — Snapshot (once), stage the copies the tiers need (missing or from another snapshot, in
+- `busiest_window` _function_ — THE SPAN A RECORDED CLIENT REPLAYS (ruling 6f7a4013, design detail 6a2b88c5 (1) / (2)): the
 - `compose_steps` _function_ — A COMPOSED role's steps (ruling 110c662f (6), design detail 2c4bad75 (2)): RECORDED op
 - `env_python` _function_ — The interpreter of the env an app runs in (design detail 4389a579: a gesture driver runs
 - `extract_ingest_workload` _function_ — A recorded session's transcript INGEST as a workload (design detail 2c4bad75 (3)): its
 - `extract_workload` _function_ — A recorded session as a WORKLOAD (design detail 2f5033bf (2)): its reads-ledger requests
 - `family_ops` _function_ — Ops in a tier's family as it stands: the cold segments counted at assembly (immutable),
+- `floor_of` _function_ — A named load's write floor as its traces derive it, nothing run (ruling 6f7a4013 (2),
 - `inside` _function_ — The path guard (design detail 3bd8673d (3)): every write resolves inside the bench.
 - `invert_request` _function_ — A recorded request back to its argv by the verb's OWN parser (design detail 2f5033bf (2)):
 - `lane_dir` _function_ — The lane's directory under the bench directory, refused if the lane's own graph or
 - `load` _function_ — THE CONCURRENT REPLAY MODE (design detail 2f5033bf (2)): at each tier, clients replay
+- `load_floor` _function_ — THE WRITE FLOOR'S VALUE, DERIVED (ruling 6f7a4013 (2), design detail 6a2b88c5 (3)): the
 - `load_settings` _function_ — The concurrent replay mode's settings as DATA: the bench config's `load` object.
 - `measure` _function_ — Run one invocation under the limits: its peak RSS is the process tree's (the graph
 - `memory_ceiling_kb` _function_ — The machine guard (design detail 2f5033bf (2)): a load must never push the machine into
@@ -209,6 +212,7 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `tree_rss_kb` _function_ — The tree's resident set, read from /proc (statm + each task's children). An invocation's
 - `verb_parser` _function_ — One verb's subparser, read off the parser's subcommands.
 - `verb_specs` _function_ — The canonical verbs for a lane: the configured `verbs` replace the default list (the
+- `windowed` _function_ — A recorded client's steps as its BUSIEST WINDOW (ruling 6f7a4013, design detail 6a2b88c5
 
 ### `cjm_context_graph_projection.bornnotes`
 

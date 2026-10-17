@@ -12,10 +12,10 @@ from pathlib import Path
 
 import pytest
 from cjm_context_graph_primitives.journal import append_op, read_journal
-from cjm_context_graph_projection.perf import (fit, guards, io_row, knee, load_report, net_written,
-                                               parse_roles, perf_report, render_perf, self_times,
-                                               series_trend, target_standing, tier_curves,
-                                               tier_regressions)
+from cjm_context_graph_projection.perf import (_check_cell, fit, guards, io_row, knee, load_report,
+                                               net_written, parse_roles, perf_report, render_perf,
+                                               self_times, series_trend, target_standing,
+                                               tier_curves, tier_regressions)
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS
 
 
@@ -369,7 +369,8 @@ def test_the_named_loads_read_7i_7b_7v_and_a_composed_load_never_gates():
     with pytest.raises(ValueError):
         parse_roles("main=one")
 
-    def run(load_id, perf_load, clients, calls, t0, solo=None, scale=1.0, composed=False, aborted=None):
+    def run(load_id, perf_load, clients, calls, t0, solo=None, scale=1.0, composed=False, aborted=None,
+            floor=None):
         base = {"lane": "dev", "tier": 32, "load": load_id, "clients": clients, "perf_load": perf_load,
                 "scale": scale, "composed": composed, **({"solo": solo} if solo else {})}
         evs = []
@@ -383,11 +384,16 @@ def test_the_named_loads_read_7i_7b_7v_and_a_composed_load_never_gates():
                         "appended": {"w.jsonl": {"ops": 1, "bytes": appended}} if appended else {}})
         evs.append({"verb": "bench-load", "kind": "bench", "ts": t0 + 100, "wall_s": 10.0,
                     "peak_rss_kb": 1000, "integrity": {"ok": True}, "attrs": base, "aborted": aborted,
-                    "visibility": {"n": 2, "p50_s": 0.01, "p99_s": 0.05, "max_s": 0.05, "unseen": 0}})
+                    "visibility": {"n": 2, "p50_s": 0.01, "p99_s": 0.05, "max_s": 0.05, "unseen": 0},
+                    **({"floor": {"writes_per_s": floor}} if floor is not None else {})})
         return evs
     l1 = [(0, "main", True, "show", 0.4, 0), (0, "main", True, "show", 0.6, 0),
           (1, "sub", True, "show", 0.5, 0), (2, "ingest", False, "pull-transcript", 2.0, 5000)]
-    events = (run("a", "load-L1", 3, l1, 0.0)
+    # 6a2b88c5 (2): a seed call is read apart -- never in the span's ops, failures or quantiles
+    seed = {"verb": "decide", "kind": "bench", "run_id": "a-seed", "ts": 0.5, "wall_s": 0.5, "outcome": 1,
+            "attrs": {"lane": "dev", "tier": 32, "load": "a", "clients": 3, "perf_load": "load-L1",
+                      "scale": 1.0, "composed": False, "client": 0, "role": "main", "phase": "seed"}}
+    events = [seed] + (run("a", "load-L1", 3, l1, 0.0, floor=0.1)
               + run("s", "load-L1", 1, [(0, "main", True, "show", 0.4, 0)], 200.0, solo="main")
               + run("b", "load-L1", 6, l1 * 2, 300.0, scale=2.0)
               + run("c", "load-L1", 12, l1 * 4, 500.0, scale=4.0)
@@ -398,11 +404,13 @@ def test_the_named_loads_read_7i_7b_7v_and_a_composed_load_never_gates():
     assert full["largest_op"]["verb"] == "pull-transcript" and full["largest_op"]["bytes"] == 5000
     assert [x["role"] for x in full["roles"]] == ["ingest", "main", "sub"]
     assert [v["verb"] for v in full["interactive"]] == ["show"] and full["visibility"]["p99_s"] == 0.05
+    assert full["seed"] == {"calls": 1, "failed": 1} and full["ops"] == 4 and not full["failures"]
     classes = [{"key": "class-1", "position": 1, "targets": {"perf_b_max": "0.2"}, "members": ["show"]},
-               {"key": "class-7i", "position": 7, "targets": {"perf_load_p99_ratio": "2"}, "members": ["load-L1"]},
-               {"key": "class-7b", "position": 7, "targets": {"perf_load_rss_b_max": "0.2"},
+               {"key": "class-7i", "position": 7, "targets": {"perf_load_p99_ratio": "2", "perf_gates": "true"},
+                "members": ["load-L1"]},
+               {"key": "class-7b", "position": 7, "targets": {"perf_load_rss_b_max": "0.2", "perf_gates": "false"},
                 "members": ["load-L1", "load-S4"]},
-               {"key": "class-7v", "position": 7, "targets": {"perf_load_visibility_p99_s": "1"},
+               {"key": "class-7v", "position": 7, "targets": {"perf_load_visibility_p99_s": "1", "perf_gates": "true"},
                 "members": ["load-L1"]}]
     defs = {"load-L1": {"tier": 32, "lane": "dev", "writes_min": 0.1},
             "load-S4": {"tier": 32, "lane": "dev", "writes_min": None}}
@@ -414,8 +422,17 @@ def test_the_named_loads_read_7i_7b_7v_and_a_composed_load_never_gates():
     seven_b = rows[("class-7b", "load-L1")]
     assert {c["target"] for c in seven_b["checks"]} == {"load writes/s", "load RSS b", "failures",
                                                          "integrity breaks"}
-    # the aborted run is the guard's reading: never in the knee or the RSS growth
-    assert seven_b["status"] == "pass" and seven_b["knee"]["clients"] in (3, 6, 12) and seven_b["guard_at"] == 24
+    # the aborted run is the guard's reading: never in the knee or the RSS growth; 7b's class does
+    # not gate (6f7a4013 (4)): reported, never counted toward promotion
+    assert seven_b["status"] == "reported: pass" and seven_b["gate"] is None
+    assert seven_b["knee"]["clients"] in (3, 6, 12) and seven_b["guard_at"] == 24
+    assert rows[("class-7i", "load-L1")]["gate"] is True
+    # 6a2b88c5 (3): a floor that is not the one the run's windows derive judges nothing
+    stale = target_standing([], loads, classes, load_defs={**defs, "load-L1": {**defs["load-L1"], "writes_min": 0.5}})
+    floor = next(c for r in stale["loads"] if r["class"] == "class-7b" and r["load"] == "load-L1"
+                 for c in r["checks"] if c["target"] == "load writes/s")
+    assert floor["stale"] and floor["ok"] is None and floor["derived"] == 0.1
+    assert "STALE floor" in _check_cell(floor)
     assert knee([{"clients": 1, "ops_per_s": 1.0}, {"clients": 2, "ops_per_s": 1.9},
                  {"clients": 4, "ops_per_s": 2.0}]) == {"clients": 2, "ops_per_s": 1.9, "beyond": False}
     assert knee([{"clients": 1, "ops_per_s": 1.0}, {"clients": 2, "ops_per_s": 2.0}])["beyond"]

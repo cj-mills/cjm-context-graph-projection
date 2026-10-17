@@ -589,8 +589,10 @@ def load_report(
     label) reports each role's p50 / p99, the INTERACTIVE clients' verbs apart (7i reads them),
     the held reader's visibility readings (7v), and its LARGEST op (110c662f (4)): its journal
     bytes, verb and seconds, with the other clients' p99 while it ran over their p99 overall. A
-    SOLO pass (one client of an interactive role alone, 7i's baseline) is a run of its own. The
-    latest run per (lane, tier, load, solo role, scale, clients)."""
+    SOLO pass (one client of an interactive role alone, 7i's baseline) is a run of its own. A
+    run's SEED calls (phase seed, design detail 6a2b88c5 (2)) are counted apart, never in its
+    throughput, quantiles or failures; its clients' windows and derived floor ride from its event
+    (ruling 6f7a4013). The latest run per (lane, tier, load, solo role, scale, clients)."""
     cli = {e.get("run_id"): e for e in events if e.get("kind") == "cli" and e.get("run_id")}
     runs: Dict[str, Dict[str, Any]] = {}
     for e in events:
@@ -603,6 +605,8 @@ def load_report(
                                         "composed": a.get("composed"), "calls": [], "summary": {}})
         if e.get("verb") == "bench-load":
             r["summary"] = e
+        elif e.get("run_id") and a.get("phase") == "seed":  # 6a2b88c5 (2): read apart, never the span's
+            r.setdefault("seeds", []).append(e)
         elif e.get("run_id"):
             r["calls"].append(e)
     latest: Dict[tuple, Dict[str, Any]] = {}
@@ -671,7 +675,11 @@ def load_report(
                     "largest_op": big, "visibility": s.get("visibility"),
                     "written": sum(w for w in written if w is not None) if written else None,
                     "peak_rss_kb": s.get("peak_rss_kb"), "integrity": s.get("integrity"),
-                    "aborted": s.get("aborted")})  # the machine guard's reading, when it fired
+                    "aborted": s.get("aborted"),  # the machine guard's reading, when it fired
+                    # 6f7a4013 / 6a2b88c5: what the run replayed -- its seed, windows and derived floor
+                    "seed": {"calls": len(r.get("seeds") or []),
+                             "failed": sum(1 for c in r.get("seeds") or [] if c.get("outcome") != 0)},
+                    "windows": s.get("windows"), "floor": s.get("floor")})
     return out
 
 
@@ -697,12 +705,13 @@ def _target_check(
 
 def _target_verdict(checks: List[Dict[str, Any]], gates: bool) -> Dict[str, Any]:  # {status, gate}
     """A seat's status (fail / unmeasured / pass, or no target set) and whether its gate holds:
-    every shape check passed and, where its class gates, every absolute one."""
+    every shape check passed and, where its class gates, every absolute and load one (a load's
+    class whose perf_gates is false is reported, never gating: 6f7a4013 (4))."""
     if not checks:
         return {"status": "no target set", "gate": False}
     status = ("fail" if any(c["ok"] is False for c in checks) else
               "unmeasured" if any(c["ok"] is None for c in checks) else "pass")
-    gating = [c for c in checks if c["kind"] != "absolute" or gates]
+    gating = [c for c in checks if c["kind"] == "shape" or gates]
     return {"status": status, "gate": all(c["ok"] is True for c in gating)}
 
 
@@ -731,7 +740,10 @@ def target_standing(
     p99 in the load's SOLO pass; 7b -- write throughput against the load's own floor (else the
     class's), no failure and no integrity break, and over a scale sweep the summed RSS's growth
     in N with the KNEE beside it; 7v -- the held reader's visibility p99. A COMPOSED load is a
-    projection (60681b4f): its checks are shown, its gate never counted."""
+    projection (60681b4f): its checks are shown, its gate never counted. A load's checks gate
+    only where its class's perf_gates is true, else they are REPORTED (ruling 6f7a4013 (4)); a
+    floor that differs from the one its run's windows derive reads UNMEASURED, both values shown
+    (design detail 6a2b88c5 (3)) -- a floor never judges a span the load did not offer."""
     load_preds = (P.PERF_LOAD_P99_RATIO, P.PERF_LOAD_RSS_B_MAX, P.PERF_LOAD_WRITES_MIN,
                   P.PERF_LOAD_VISIBILITY_P99_S)
     defs = load_defs or {}
@@ -835,9 +847,12 @@ def target_standing(
             floor = (d.get("writes_min") if d.get("writes_min") is not None
                      else _target_number(t.get(P.PERF_LOAD_WRITES_MIN))) if batch else None
             if batch:
-                if floor is not None:  # a floor: the reading must reach it
+                if floor is not None:  # a floor: the reading must reach it -- one naming the span the run offered
+                    derived = (full.get("floor") or {}).get("writes_per_s")  # 6a2b88c5 (3): the run's traces derive it
+                    stale = derived is not None and abs(derived - floor) > 1e-3
                     checks.append({"target": "load writes/s", "value": full["writes_per_s"], "limit": floor,
-                                   "kind": "load", "ok": full["writes_per_s"] >= floor})
+                                   "kind": "load", "derived": derived, "stale": stale,
+                                   "ok": None if stale else full["writes_per_s"] >= floor})
                 rss = growth([{"tier": r["clients"], "outcome": 0, "peak_rss_kb": r["peak_rss_kb"]}
                               for r in sweep_rows if r["clients"] and r["peak_rss_kb"]], "peak_rss_kb")
                 checks += [c for c in (
@@ -848,9 +863,12 @@ def target_standing(
             if t.get(P.PERF_LOAD_VISIBILITY_P99_S) is not None:  # 7v
                 checks.append(_target_check("visibility p99 s", (full.get("visibility") or {}).get("p99_s"),
                                             t.get(P.PERF_LOAD_VISIBILITY_P99_S), "load"))
-            verdict = _target_verdict(checks, True)
+            gates = str(t.get(P.PERF_GATES, "")).lower() == "true"
+            verdict = _target_verdict(checks, gates)
             if full.get("composed"):  # a projection: shown, never gating (110c662f (6))
                 verdict = {"status": f"projection: {verdict['status']}", "gate": None}
+            elif not gates:  # 6f7a4013 (4): its class reports, never gates (7b until A)
+                verdict = {"status": f"reported: {verdict['status']}", "gate": None}
             load_rows.append({**row, "clients": full["clients"], "checks": checks,
                               "composed": bool(full.get("composed")), "knee": knee(sweep_rows),
                               "guard_at": guard_at, **verdict})
@@ -1074,7 +1092,8 @@ def _tier_cell(c: Optional[Dict[str, Any]]) -> str:  # One tier's cell: seconds,
 def _check_cell(c: Dict[str, Any]) -> str:  # One target check: reading / target, a miss marked
     v = c["value"]
     shown = "-" if v is None else ("failed" if v == math.inf else f"{v:.3g}")
-    return f"{c['target']} {shown} / {c['limit']:g}" + (" ✗" if c["ok"] is False else "")
+    stale = f" (STALE floor: the run's windows derive {c['derived']:.3g})" if c.get("stale") else ""  # 6a2b88c5 (3)
+    return f"{c['target']} {shown} / {c['limit']:g}" + (" ✗" if c["ok"] is False else "") + stale
 
 
 def _growth_text(g: Optional[Dict[str, float]]) -> str:  # A growth exponent, compact
@@ -1190,6 +1209,10 @@ def render_perf(
                 f"{_bytes_text(r.get('written'))} · failures {fails} · integrity "
                 f"{(r.get('integrity') or {}).get('ok', '-')}"
                 + (f" · **ABORTED: {r['aborted']}**" if r.get("aborted") else "")]
+        seed, fl = r.get("seed") or {}, r.get("floor")
+        if seed.get("calls") or fl:  # 6f7a4013 / 6a2b88c5: what the run replayed, read apart
+            out.append(f"- seed (read apart): {seed.get('calls', 0)} call(s), {seed.get('failed', 0)} failed"
+                       + (f" · the windows derive a floor of {fl['writes_per_s']:.3f} writes/s" if fl else ""))
         if r.get("roles"):
             out.append("- roles (p50 / p99 s): " + " · ".join(
                 f"{x['role']} {_s(x['p50_s'])} / {_s(x['p99_s'])} (n {x['n']})" for x in r["roles"]))

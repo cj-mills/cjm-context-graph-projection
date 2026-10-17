@@ -15,12 +15,14 @@ from pathlib import Path
 
 import pytest
 from cjm_context_graph_primitives.journal import journal_segments, read_journal, write_segment
+from cjm_context_graph_primitives.writer import JournalPosition, read_tail
 from cjm_context_graph_projection.bench import (_client_argv, _ingest_key, _integrity, _normalized,
-                                                bench_config, BenchRefusal, build, compose_steps,
-                                                DROP_KEYS, extract_ingest_workload,
+                                                bench_config, BenchRefusal, build, busiest_window,
+                                                compose_steps, DROP_KEYS, extract_ingest_workload,
                                                 extract_workload, inside, invert_request, lane_dir,
-                                                load, measure, rekeyer, roster, run, status,
-                                                tree_rss_kb, UUID_RE, VisibilityProbe)
+                                                load, load_floor, measure, rekeyer, roster, run,
+                                                status, tree_rss_kb, UUID_RE, VisibilityProbe,
+                                                windowed)
 from cjm_context_graph_projection.perf import (growth, PAGE_BYTES, perf_report, render_perf,
                                                tier_curves)
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS
@@ -151,6 +153,10 @@ def test_a_tier_is_k_self_consistent_copies_and_its_journals(tmp_path):
         cited = {o["args"].get("id") or o["args"].get("source_id") or o["args"].get("subject")
                  for o in ops}
         assert len(cited & {r[0] for r in _rows(tdb, "SELECT id FROM nodes")}) == len(cited)
+        # the db's applied cursor stands at its own family's end: a writer on the tier heals nothing
+        (seg, off, ordinal, digest), = _rows(tdb, "SELECT segment, byte_offset, ordinal, digest FROM "
+                                                  "journal_cursors WHERE family = 'g.writes.jsonl'")
+        assert ordinal == 3 * k and read_tail(str(tier_live), JournalPosition(seg, off, ordinal, digest)) == []
         cfg = json.loads((bench / "g" / f"x{k}" / "graph.config.json").read_text())
         for key in ("repos_dir", "memory_dir"):
             assert Path(cfg[key]).resolve().is_relative_to(bench.resolve())
@@ -444,6 +450,51 @@ def test_a_named_load_s_roster_composition_and_composed_roles(tmp_path):
     with pytest.raises(BenchRefusal):
         roster({"key": "load-L", "defs": defs}, {"roles": {"main": {"workloads": ["m"]}}}, root, cap=3)
     assert _ingest_key("2026-10-01_10-00-00", 0) == "2026-10-01_09-59-59"
+
+
+def test_a_recorded_client_replays_its_busiest_window_with_its_seed_and_the_floor_reads_the_same(tmp_path):
+    """Ruling 6f7a4013, design detail 6a2b88c5: a recorded client replays the cap steps around its
+    trace's peak minute by the floor's own measure (its writes, else every step), never its head;
+    the decides before the span that the span names are its seed, an ingest client's seed the
+    transcript line the recording had reached; the floor is twice the clients' peak write rates,
+    read off the same windows."""
+    minted = "44444444-4444-5444-8444-444444444444"
+    read = {"kind": "read", "verb": "show", "request": {"ref": A}}
+
+    def at(step, gap, ts=None):
+        return {**step, "gap_s": gap, **({"ts": ts} if ts is not None else {})}
+    steps = ([at(read, 0.0 if i == 0 else 30.0, 1000.0 + 30 * i) for i in range(6)]
+             + [at({"kind": "write", "verb": "decide", "request": {"statement": "s"}, "mints": minted}, 30.0)]
+             + [at(read, 120.0)]
+             + [at({"kind": "write", "verb": "assert", "request": {"subject": minted}}, 5.0) for _ in range(4)]
+             + [at({"kind": "write", "verb": "link", "request": {"source_id": minted, "target_id": A}}, 5.0)]
+             + [at(read, 300.0) for _ in range(5)])
+    main = {"name": "m", "steps": steps}
+    win = busiest_window(main, 7)  # the peak minute is steps 8-12 (five writes), one step either side
+    assert (win["first"], win["last"], win["measure"], win["peak"]) == (7, 13, "writes", 5)
+    assert win["seed"] == [6] and win["peak_writes_per_s"] == pytest.approx(5 / 60)
+    assert (busiest_window(main, 3)["first"], busiest_window(main, 3)["last"]) == (8, 10)  # a minute over cap
+    assert (busiest_window(main, 50)["first"], busiest_window(main, 50)["last"]) == (0, 17)
+    reads = busiest_window({"steps": steps[:6]}, 2)  # no write: the peak minute by every step
+    assert reads["measure"] == "events" and reads["peak_writes_per_s"] == 0 and reads["first_ts"] == 1000.0
+    pulls = {"name": "i", "kind": "ingest", "transcript": "/t/x.jsonl", "session_key": "2026-10-01_10-00-00",
+             "steps": [{"kind": "write", "verb": "pull-transcript", "upto": u, "gap_s": g}
+                       for u, g in ((2, 0.0), (4, 100.0), (6, 5.0), (8, 5.0))]}
+    c = windowed({"i": 0}, pulls, 2)
+    assert [s["upto"] for s in c["steps"]] == [4, 6] and c["seed_upto"] == 2 and c["window"]["seed"] == 1
+    c = windowed({"i": 1}, main, 7)
+    assert [s["verb"] for s in c["seed"]] == ["decide"] and len(c["steps"]) == 7 and c["window"]["workload"] == "m"
+    root = tmp_path / "lane"
+    (root / "workloads").mkdir(parents=True)
+    for w in (main, pulls):
+        (root / "workloads" / f"{w['name']}.json").write_text(json.dumps(w))
+    defs = {"load-L": {"roles": {"main": 1, "ingest": 1}, "groups": 1, "interactive": ["main"],
+                       "sharing": "shared", "pace": 0.0, "with": []}}
+    ls = {"roles": {"main": {"workloads": ["m"]}, "ingest": {"workloads": ["i"]}}}
+    ros = roster({"key": "load-L", "defs": defs}, ls, root, cap=2)
+    assert all(c.get("window") for c in ros["clients"])
+    fl = load_floor(ros["clients"])
+    assert fl["writes_per_s"] == pytest.approx(2 * (5 + 3) / 60) and [r["workload"] for r in fl["clients"]] == ["m", "i"]
 
 
 def test_the_held_reader_sees_an_id_land():

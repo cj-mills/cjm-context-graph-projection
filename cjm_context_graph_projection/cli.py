@@ -440,6 +440,16 @@ async def _dispatch(args) -> int:
                     raise BenchRefusal("bench workload replays a recorded session -- pass --session")
                 extract = extract_ingest_workload if args.ingest else extract_workload  # 2c4bad75 (3)
                 res = extract(lane, settings, args.session, actor=args.from_actor, name=args.name)
+            elif args.action == "floor":  # ruling 6f7a4013 (2): a named load's floor as its traces derive it
+                from .bench import floor_of
+                if not args.load:
+                    raise BenchRefusal("bench floor reads a NAMED load -- pass --load")
+                async with open_graph(args.graph_db_path, args.manifests_dir, readonly=True) as gx:
+                    try:
+                        defs = await load_definitions(gx)
+                    except ValueError as e:
+                        raise BenchRefusal(str(e)) from None
+                res = floor_of(lane, settings, {"key": args.load, "defs": defs}, steps=args.steps)
             elif args.action == "load":
                 if not args.timings_path:
                     raise BenchRefusal("bench load records into the timings ledger -- pass "
@@ -3737,10 +3747,11 @@ def build_parser() -> argparse.ArgumentParser:  # The CLI's parser, every verb
                                   "of a lane's graph and journals in the bench directory, run the "
                                   "canonical verbs at each into the timings ledger (perf reads the "
                                   "curves), or show what the bench holds")
-    p_bench.add_argument("action", choices=("build", "run", "status", "workload", "load"),
+    p_bench.add_argument("action", choices=("build", "run", "status", "workload", "load", "floor"),
                          help="build / run / status the tiers; workload: a recorded session as a "
                               "replayable workload; load: the concurrent replay mode (design "
-                              "detail 2f5033bf (2))")
+                              "detail 2f5033bf (2)); floor --load K: the write floor its traces "
+                              "derive, each client's busiest window beside it, nothing run (6f7a4013)")
     p_bench.add_argument("--lane", default=None,
                          help="A sibling_graphs key (default: the invoking graph)")
     p_bench.add_argument("--tier", type=int, action="append", default=None,
