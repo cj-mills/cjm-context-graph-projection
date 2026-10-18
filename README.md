@@ -186,7 +186,10 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `bench_config` _function_ — The harness's settings as DATA; `bench_dir` has no default (a path on one machine is
 - `build` _function_ — Snapshot (once), stage the copies the tiers need (missing or from another snapshot, in
 - `busiest_window` _function_ — THE SPAN A RECORDED CLIENT REPLAYS (ruling 6f7a4013, design detail 6a2b88c5 (1) / (2)): the
+- `code_for` _function_ — What a run launches (ruling dba3f272): a pin's copied client interpreter, its manifests and
+- `code_python` _function_ — A gesture driver's interpreter under `code`: its env's copy in the pin, else (live) the env
 - `compose_steps` _function_ — A COMPOSED role's steps (ruling 110c662f (6), design detail 2c4bad75 (2)): RECORDED op
+- `env_editables` _function_ — The env's EDITABLE dists, each with the checkout it imports from (its direct_url.json) --
 - `env_python` _function_ — The interpreter of the env an app runs in (design detail 4389a579: a gesture driver runs
 - `extract_ingest_workload` _function_ — A recorded session's transcript INGEST as a workload (design detail 2c4bad75 (3)): its
 - `extract_workload` _function_ — A recorded session as a WORKLOAD (design detail 2f5033bf (2)): its reads-ledger requests
@@ -197,10 +200,17 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `lane_dir` _function_ — The lane's directory under the bench directory, refused if the lane's own graph or
 - `load` _function_ — THE CONCURRENT REPLAY MODE (design detail 2f5033bf (2)): at each tier, clients replay
 - `load_floor` _function_ — THE WRITE FLOOR'S VALUE, DERIVED (ruling 6f7a4013 (2), design detail 6a2b88c5 (3)): the
+- `load_pin` _function_ — The pin a run measures (ruling dba3f272): the lane's current one, or one named by id. No
 - `load_settings` _function_ — The concurrent replay mode's settings as DATA: the bench config's `load` object.
+- `machine_busy_s` _function_ — /proc/stat's first line -- user + nice + system + irq + softirq + steal jiffies over the clock
 - `measure` _function_ — Run one invocation under the limits: its peak RSS is the process tree's (the graph
 - `memory_ceiling_kb` _function_ — The machine guard (design detail 2f5033bf (2)): a load must never push the machine into
+- `pin` _function_ — THE CODE A RUN MEASURES, PINNED (ruling dba3f272, finding 2682d8cc): every env the lane's
+- `pin_envs` _function_ — The envs a lane's measured invocations run in (ruling dba3f272): the client's (this
+- `pin_manifests` _function_ — The pin's MANIFESTS (ruling dba3f272): the lane's whole set, since a graph run needs more than
+- `pin_proof` _function_ — THE PIN'S PROOF, run inside the copy (ruling dba3f272): every sys.path entry inside the copy
 - `placeholders_of` _function_ — The default targets of the canonical verbs, read off the snapshot once.
+- `recorded_outcome` _function_ — A recorded step's OWN OUTCOME, DECLARED DATA (ruling 57f6c2a8 (1), finding 5bd6c25e): the CLI
 - `rekeyer` _function_ — The copy's id map, applied to any value: a string has every UUID token replaced by
 - `render_bench` _function_ — Render a bench result: tables for a person, the result as JSON for an agent.
 - `resolve_lane` _function_ — A lane: the graph a tier copies and the journal families beside it. The invoking graph
@@ -209,6 +219,8 @@ Projection and navigation core for context graphs: bounded, ranked, provenance-c
 - `snapshot` _function_ — Copy 0: the live db through SQLite's backup API (a consistent snapshot under a live
 - `stage_copy` _function_ — Re-key copy `copy` of the snapshot once: its rows (nodes, edges -- no indexes, the
 - `status` _function_ — What the bench holds for a lane: the snapshot, the staged copies, the built tiers.
+- `step_attrs` _function_ — A load call's STEP IDENTITY and EXPECTED OUTCOME (ruling 57f6c2a8 (1)): the recorded workload
+- `tier_env` _function_ — The tier's substrate data root as each client's CJM_DATA_DIR (finding 08441cae): a client's
 - `tree_rss_kb` _function_ — The tree's resident set, read from /proc (statm + each task's children). An invocation's
 - `verb_parser` _function_ — One verb's subparser, read off the parser's subcommands.
 - `verb_specs` _function_ — The canonical verbs for a lane: the configured `verbs` replace the default list (the
