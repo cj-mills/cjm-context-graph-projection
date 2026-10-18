@@ -23,8 +23,9 @@ from cjm_context_graph_projection.bench import (_client_argv, _ingest_key, _inte
                                                 extract_ingest_workload, extract_workload, inside,
                                                 invert_request, lane_dir, load, load_floor,
                                                 load_pin, machine_busy_s, measure, pin_envs,
-                                                pin_proof, rekeyer, roster, run, status, tier_env,
-                                                tree_rss_kb, UUID_RE, VisibilityProbe, windowed)
+                                                pin_manifests, pin_proof, rekeyer, roster, run,
+                                                status, tier_env, tree_rss_kb, UUID_RE,
+                                                VisibilityProbe, windowed)
 from cjm_context_graph_projection.perf import (growth, PAGE_BYTES, perf_report, render_perf,
                                                tier_curves)
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS
@@ -727,6 +728,23 @@ def test_a_pin_is_the_lanes_current_until_pruned_and_live_names_itself(tmp_path)
     with pytest.raises(BenchRefusal):
         code_python(code, "an-env-the-pin-never-copied")
     assert code_for(lane, None)["id"] == "live" and machine_busy_s() > 0
+
+
+def test_a_pin_carries_the_lanes_manifests_with_nothing_live(tmp_path):
+    """Ruling dba3f272: a graph run needs its capability AND the binding manifests beside it -- a
+    pin carries the whole set, each env-bound manifest re-pointed at the env's copy, a binding
+    kept as it is, a manifest naming an env the pin did not copy left out."""
+    src = tmp_path / "manifests"
+    src.mkdir()
+    (src / "graph.json").write_text(json.dumps({"install": {"python_path": "/envs/worker/bin/python"}}))
+    (src / "adapter.json").write_text(json.dumps({"binds": "graph-storage"}))
+    (src / "other.json").write_text(json.dumps({"install": {"python_path": "/envs/gpu/bin/python"}}))
+    got = pin_manifests(src, tmp_path / "pinned", {"worker": {"python": "/pin/envs/worker/bin/python"}})
+    assert got == {"kept": ["adapter.json", "graph.json"], "left_out": ["other.json"]}
+    pinned = json.loads((tmp_path / "pinned" / "graph.json").read_text())
+    assert pinned["install"]["python_path"] == "/pin/envs/worker/bin/python"
+    assert json.loads((tmp_path / "pinned" / "adapter.json").read_text()) == {"binds": "graph-storage"}
+    assert not (tmp_path / "pinned" / "other.json").exists()
 
 
 # The gesture leg's fixture driver (design detail 4389a579): a session that measures one gesture

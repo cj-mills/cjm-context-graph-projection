@@ -775,6 +775,31 @@ def load_pin(
     return p
 
 
+def pin_manifests(
+    src: Path,                          # The lane's manifests directory
+    dst: Path,                          # The pin's
+    copies: Dict[str, Dict[str, str]],  # The pin's env copies by name ({python, ...})
+) -> Dict[str, List[str]]:  # {kept, left_out}: manifest file names
+    """The pin's MANIFESTS (ruling dba3f272): the lane's whole set, since a graph run needs more than
+    its capability (the adapter manifests bind its tasks) -- each manifest naming an env the pin
+    copied re-pointed at the copy's interpreter, an env-free one (a binding) kept as it is, and one
+    naming an env the pin did not copy LEFT OUT, so nothing a pinned run loads can import live code."""
+    dst.mkdir(parents=True, exist_ok=True)
+    out: Dict[str, List[str]] = {"kept": [], "left_out": []}
+    for f in sorted(src.glob("*.json")):
+        man = _read_json(f) or {}
+        py = (man.get("install") or {}).get("python_path")
+        if py:
+            name = Path(py).parent.parent.name
+            if name not in copies:
+                out["left_out"].append(f.name)
+                continue
+            man["install"]["python_path"] = copies[name]["python"]
+        _write_json(dst / f.name, man)
+        out["kept"].append(f.name)
+    return out
+
+
 def pin(
     lane: Dict[str, Any],          # `resolve_lane`'s result
     settings: Dict[str, Any],      # `bench_config`'s result
@@ -782,8 +807,9 @@ def pin(
 ) -> Dict[str, Any]:  # The pin's manifest
     """THE CODE A RUN MEASURES, PINNED (ruling dba3f272, finding 2682d8cc): every env the lane's
     process tree runs in (`pin_envs`) COPIED inside the bench, its editable dists replaced by
-    NON-EDITABLE installs of wheels built from their checkouts' HEAD commits (`_wheel`); the graph
-    capability's manifest re-pointed at the copied worker env; then THE PROOF in each copy
+    NON-EDITABLE installs of wheels built from their checkouts' HEAD commits (`_wheel`); the lane's
+    manifests carried over, each env-bound one re-pointed at its copy (`pin_manifests`); then THE
+    PROOF in each copy
     (`pin_proof`) -- a leak writes no pin. The id derives from the env set and the commit set, so
     the same code pins once; a checkout with uncommitted edits is named `dirty` (the edit is never
     measured). The lane's current pin becomes it; one `bench-pin` event carries the commit set
@@ -810,7 +836,9 @@ def pin(
         d["commit"] = _git(d["repo"], "rev-parse", "HEAD")
         d["dirty"] = bool(_git(d["repo"], "status", "--porcelain", "--untracked-files=no"))
     commits = {k: d["commit"] for k, d in sorted(dists.items())}
-    pid = hashlib.sha256(json.dumps({"envs": envs, "dists": commits}, sort_keys=True).encode()).hexdigest()[:12]
+    # the layout version rides the identity: a pin made by an older layout never answers for this one
+    pid = hashlib.sha256(json.dumps({"layout": 2, "envs": envs, "dists": commits},
+                                    sort_keys=True).encode()).hexdigest()[:12]
     pdir = inside(root / pid, bench)
     have = _read_json(pdir / "pin.json")
     if have and not have.get("pruned"):
@@ -837,12 +865,11 @@ def pin(
             raise BenchRefusal(f"the pin's copy of {name} is not sealed: {leaks[:5]}")
         copies[name] = {"source": prefix, "prefix": str(dst), "python": py}
     mdir = pdir / "manifests"
-    mdir.mkdir(parents=True)
-    man = _read_json(Path(lane["manifests_dir"]) / f"{DEFAULT_GRAPH_ID}.json")
-    man["install"]["python_path"] = copies[Path(man["install"]["python_path"]).parent.parent.name]["python"]
-    _write_json(mdir / f"{DEFAULT_GRAPH_ID}.json", man)  # the one capability a graph run loads, nothing live
+    mans = pin_manifests(Path(lane["manifests_dir"]), mdir, copies)
+    if f"{DEFAULT_GRAPH_ID}.json" not in mans["kept"]:
+        raise BenchRefusal(f"the pin's manifests lack {DEFAULT_GRAPH_ID}: {mans}")
     out = {"id": pid, "lane": lane["name"], "made_at": time.time(), "client": Path(sys.prefix).name,
-           "envs": copies, "dists": dists, "manifests_dir": str(mdir),
+           "envs": copies, "dists": dists, "manifests_dir": str(mdir), "manifests": mans,
            "dirty": sorted(k for k, d in dists.items() if d["dirty"]), "wall_s": time.perf_counter() - t0}
     _write_json(pdir / "pin.json", out)
     _set_current(settings, lane, pid)
