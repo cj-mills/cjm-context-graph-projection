@@ -444,3 +444,32 @@ def test_the_named_loads_read_7i_7b_7v_and_a_composed_load_never_gates():
     assert "load-S4 x32" in render_perf({"ledger": "g.timings.jsonl", "events": 0, "verbs": [], "rebuilds": [],
                                           "load": loads, "standing": st, "regressions": [], "fits": [],
                                           "guards": [], "unmeasured": []})
+
+
+def test_a_load_failure_the_recording_saw_is_attributed_never_counted(tmp_path):
+    """Ruling 57f6c2a8 (1): a failed call is the trace's own when its step failed the same way
+    when recorded -- its declared expected outcome, else the solo pass's reading of the same
+    (workload, step) -- attributed apart; any other failure counts, 7b's check reads the count."""
+    def run(load_id, calls, t0, solo=None):
+        base = {"lane": "dev", "tier": 32, "load": load_id, "clients": 1, "perf_load": "load-L1",
+                "scale": 1.0, **({"solo": solo} if solo else {})}
+        evs = [{"verb": "read", "kind": "bench", "run_id": f"{load_id}-{i}", "ts": t0 + i, "wall_s": 0.5,
+                "outcome": outcome, "attrs": {**base, "client": 0, "role": "main", **extra}}
+               for i, (outcome, extra) in enumerate(calls)]
+        return evs + [{"verb": "bench-load", "kind": "bench", "ts": t0 + 50, "wall_s": 9.0, "attrs": base}]
+    w = "main-s1"
+    solo = run("s", [(1, {"workload": w, "step": 5}), (0, {"workload": w, "step": 6})], 0.0, solo="main")
+    full = run("a", [(1, {"workload": w, "step": 4, "expected": 1}),  # recorded failing: attributed
+                     (1, {"workload": w, "step": 5}),                 # the solo reading failed: attributed
+                     (1, {"workload": w, "step": 6}),                 # failed alone? no: counted
+                     ("timeout", {"workload": w, "step": 8, "expected": 1}),  # failed otherwise: counted
+                     (1, {"workload": w, "step": 7}),                 # no reading at all: counted
+                     (0, {"workload": w, "step": 9})], 100.0)
+    loads = load_report(solo + full)
+    a = next(r for r in loads if not r["solo"])
+    s = next(r for r in loads if r["solo"])
+    assert a["failures"] == {"1": 2, "timeout": 1} and a["attributed"] == {"1": 2}
+    assert s["failures"] == {"1": 1} and s["attributed"] == {}  # the solo pass is its own baseline
+    ledger = tmp_path / "g.timings.jsonl"
+    ledger.write_text("".join(json.dumps(e) + "\n" for e in solo + full))
+    assert "attributed (failed as recorded) 1 x2" in render_perf(perf_report(str(ledger)))

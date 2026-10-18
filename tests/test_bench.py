@@ -17,12 +17,14 @@ import pytest
 from cjm_context_graph_primitives.journal import journal_segments, read_journal, write_segment
 from cjm_context_graph_primitives.writer import JournalPosition, read_tail
 from cjm_context_graph_projection.bench import (_client_argv, _ingest_key, _integrity, _normalized,
-                                                bench_config, BenchRefusal, build, busiest_window,
-                                                compose_steps, DROP_KEYS, extract_ingest_workload,
-                                                extract_workload, inside, invert_request, lane_dir,
-                                                load, load_floor, measure, rekeyer, roster, run,
-                                                status, tree_rss_kb, UUID_RE, VisibilityProbe,
-                                                windowed)
+                                                _prune_pins, _set_current, _wheel, bench_config,
+                                                BenchRefusal, build, busiest_window, code_for,
+                                                code_python, compose_steps, DROP_KEYS,
+                                                extract_ingest_workload, extract_workload, inside,
+                                                invert_request, lane_dir, load, load_floor,
+                                                load_pin, machine_busy_s, measure, pin_envs,
+                                                pin_proof, rekeyer, roster, run, status, tier_env,
+                                                tree_rss_kb, UUID_RE, VisibilityProbe, windowed)
 from cjm_context_graph_projection.perf import (growth, PAGE_BYTES, perf_report, render_perf,
                                                tier_curves)
 from cjm_context_graph_projection.runtime import DEFAULT_GRAPH_ID, DEFAULT_MANIFESTS
@@ -161,6 +163,10 @@ def test_a_tier_is_k_self_consistent_copies_and_its_journals(tmp_path):
         for key in ("repos_dir", "memory_dir"):
             assert Path(cfg[key]).resolve().is_relative_to(bench.resolve())
         assert cfg["sibling_graphs"] == {}
+        # the tier's substrate data root: every client's CJM_DATA_DIR, inside the bench (08441cae)
+        tm = json.loads((bench / "g" / f"x{k}" / "manifest.json").read_text())
+        assert Path(tm["substrate_dir"]).is_dir() and tier_env(tm) == {"CJM_DATA_DIR": tm["substrate_dir"]}
+        assert Path(tm["substrate_dir"]).resolve().is_relative_to(bench.resolve())
     # copy 0 is the live graph; a tier's cold segments are links to the staged copies: copy 0's
     # one cold segment, then each further copy's two (its cold segment and the tail, stored cold)
     assert {r[0] for r in _rows(bench / "g" / "x1" / "g.db", "SELECT id FROM nodes")} == {A, B, C}
@@ -170,6 +176,15 @@ def test_a_tier_is_k_self_consistent_copies_and_its_journals(tmp_path):
     # a second build reuses every tier of the same snapshot; status reads them current
     again = build(lane, {"bench_dir": str(bench), "tiers": [2, 4], "workers": 1})
     assert all(t["reused"] for t in again["tiers"]) and not again["copies"]
+    # a tier assembled before its substrate root refuses to run and is reassembled, never reused
+    old = bench / "g" / "x4" / "manifest.json"
+    tm = json.loads(old.read_text())
+    del tm["substrate_dir"]
+    old.write_text(json.dumps(tm))
+    with pytest.raises(BenchRefusal):
+        tier_env(tm)
+    healed = build(lane, {"bench_dir": str(bench), "tiers": [2, 4], "workers": 1})
+    assert [(t["k"], t["reused"]) for t in healed["tiers"]] == [(1, True), (2, True), (4, False)]
     # a fresh build reassembles the tiers asked for from the same snapshot, copies untouched
     fresh = build(lane, {"bench_dir": str(bench), "tiers": [2], "workers": 1}, tiers=[2], fresh=True)
     assert [(t["k"], t["reused"]) for t in fresh["tiers"]] == [(1, False), (2, False)] and not fresh["copies"]
@@ -276,6 +291,9 @@ def test_a_run_measures_each_verb_at_each_tier_apart_from_the_live_history(tmp_p
     assert {s["verb"] for s in res["skipped"]} == {"nothing"}
     # the writes landed in the tier's journal, never the live one
     assert len(read_journal(journal)) == 2
+    # and each client's graph worker wrote its diagnostics inside its tier (08441cae)
+    for k in (1, 2):
+        assert (tmp_path / "bench" / "g" / f"x{k}" / "substrate" / "diagnostics.db").exists()
     # x2's two copies' ops, then decide cold and warm (two mints) and link (the warm repeat's
     # identical op dedups): b7b3976f (B) runs every verb cold, then warm
     assert len(read_journal(str(tmp_path / "bench" / "g" / "x2" / "journals" / "g.writes.jsonl"))) == 7
@@ -289,6 +307,18 @@ def test_a_run_measures_each_verb_at_each_tier_apart_from_the_live_history(tmp_p
     assert curves["lane"] == "g" and curves["tiers"] == [1, 2]
     assert {v["verb"] for v in curves["verbs"]} == {"locate", "decide", "link"}
     assert "### Scale tiers — g" in render_perf(rep)
+    # ruling dba3f272: a run names the code it measured -- 'live' (the editable checkouts) by
+    # default, a pin's id under a pin, on the CLI's events and the harness's alike; each harness
+    # event carries the concurrent load
+    calls = [e for e in events if e.get("run_id") and (e.get("attrs") or {}).get("tier")]
+    assert calls and all(e["attrs"].get("pin") == "live" for e in calls)
+    me = Path(sys.prefix).name
+    fake = {"id": "pin0", "client": me, "envs": {me: {"python": sys.executable}},
+            "manifests_dir": lane["manifests_dir"]}
+    assert run(lane, settings, ledger, tiers=[1], verbs=["locate"], pin=fake)["pin"] == "pin0"
+    tagged = [e for e in read_journal(ledger) if (e.get("attrs") or {}).get("pin") == "pin0"]
+    assert {e["kind"] for e in tagged} == {"bench", "cli"}
+    assert all(e["concurrent"]["machine_cpu_s"] is not None for e in tagged if e["kind"] == "bench")
 
 
 def test_tier_curves_carry_each_gesture_with_its_driver_peak():
@@ -532,22 +562,34 @@ def test_a_recorded_session_replays_as_a_concurrent_load(tmp_path):
     base = [sys.executable, "-m", "cjm_context_graph_projection.cli", "--graph-db-path", db,
             "--journal-path", journal]
     env = {**os.environ, "CJM_SESSION": "s1"}
+    live = str(src / "g.timings.jsonl")  # the live lane's ledger: each recorded step's own outcome
     for s in ("the widgets render lazily", "the widgets cache their layout"):
-        assert subprocess.run([*base, "decide", s], capture_output=True, env=env).returncode == 0
-    (src / "g.reads.jsonl").write_text(json.dumps(
-        {"verb": "locate", "request": {"term": "widgets"}, "session": "s1", "ts": time.time()}) + "\n")
+        assert subprocess.run([*base, "--timings-path", live, "decide", s], capture_output=True,
+                              env=env).returncode == 0
+    # 57f6c2a8 (1): a recorded read that FAILED (a key naming no spine) -- the trace's own failure
+    gone = ["--read-only", "read", "--session", "2026-01-01_00-00-00"]
+    assert subprocess.run([*base, "--timings-path", live, *gone], capture_output=True, env=env).returncode == 1
+    failed = next(e for e in read_journal(live) if e["verb"] == "read")
+    (src / "g.reads.jsonl").write_text("".join(json.dumps(e) + "\n" for e in [
+        {"verb": "read", "request": {"session": "2026-01-01_00-00-00"}, "session": "s1",
+         "ts": failed["ts"] + failed["wall_s"] / 2},
+        {"verb": "locate", "request": {"term": "widgets"}, "session": "s1", "ts": time.time()}]))
     settings = {"bench_dir": str(tmp_path / "bench"), "tiers": [2], "workers": 1,
                 "memory_limit_gb": 16, "timeout_s": 300, "replay_tail": 10}
     lane = _lane(db, journal)
     build(lane, settings, ledger=ledger)
     w = extract_workload(lane, settings, "s1")
-    assert (w["reads"], w["writes"]) == (1, 2) and all(s.get("mints") for s in w["steps"] if s["verb"] == "decide")
+    assert (w["reads"], w["writes"]) == (2, 2) and all(s.get("mints") for s in w["steps"] if s["verb"] == "decide")
+    # the decides and the failed read joined their live invocations; the hand-written locate did not
+    assert w["expected"] == {"recorded": 3, "failed": 1}
     res = load(lane, settings, ledger, tiers=[1, 2], clients=[2])
-    assert [(r["tier"], r["clients"], r["steps"], r["failed"]) for r in res["loads"]] == [(1, 2, 6, 0), (2, 2, 6, 0)]
+    assert [(r["tier"], r["clients"], r["steps"], r["failed"]) for r in res["loads"]] == [(1, 2, 8, 2), (2, 2, 8, 2)]
     assert all(r["integrity"]["ok"] and r["integrity"]["decides"] == 4 for r in res["loads"]), res["loads"]
     assert len(read_journal(journal)) == 2  # the live journal untouched
     rep = perf_report(ledger)
     assert sorted((r["tier"], r["clients"]) for r in rep["load"]) == [(1, 2), (2, 2)]
+    # each client's replay of the recorded failure is attributed, never counted as the store's
+    assert all(r["failures"] == {} and r["attributed"] == {"1": 2} for r in rep["load"]), rep["load"]
     assert not rep["tiers"] or all(v["verb"] != "decide" for t in rep["tiers"] for v in t["verbs"])
     assert "### Load — g" in render_perf(rep)
 
@@ -618,6 +660,73 @@ def test_a_named_load_runs_its_solo_pass_then_its_roster_with_an_ingest_client(t
     assert len(named) == 1 and {x["role"] for x in named[0]["roles"]} == {"main", "ingest", "sub"}
     assert any(v["verb"] == "pull-transcript" for v in named[0]["verbs"])
     assert len(read_journal(journal)) == 5  # the live journal untouched
+
+
+def test_a_pin_wheel_is_built_from_the_commit_never_the_working_tree(tmp_path):
+    """Ruling dba3f272: a dist's wheel comes from `git archive` of the pinned commit -- an
+    uncommitted edit is never in it -- and is built once per (dist, commit)."""
+    import zipfile
+    repo = tmp_path / "tiny"
+    (repo / "tinypkg").mkdir(parents=True)
+    (repo / "pyproject.toml").write_text('[build-system]\nrequires = ["setuptools"]\n'
+                                         'build-backend = "setuptools.build_meta"\n'
+                                         '[project]\nname = "tinypkg"\nversion = "0.0.1"\n'
+                                         '[tool.setuptools]\npackages = ["tinypkg"]\n')
+    (repo / "tinypkg" / "__init__.py").write_text("VALUE = 1\n")
+    git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run([*git, "init", "-q"], check=True)
+    subprocess.run([*git, "add", "."], check=True)
+    subprocess.run([*git, "commit", "-qm", "one"], check=True)
+    commit = subprocess.run([*git, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    (repo / "tinypkg" / "__init__.py").write_text("VALUE = 2\n")  # the uncommitted edit
+    cache, tmp = tmp_path / "wheels", tmp_path / "tmp"
+    tmp.mkdir()
+    whl = _wheel("tinypkg", str(repo), commit, sys.executable, cache, tmp)
+    assert whl.parent == cache / "tinypkg" / commit
+    with zipfile.ZipFile(whl) as z:
+        assert z.read("tinypkg/__init__.py").decode() == "VALUE = 1\n"
+    stamp = whl.stat().st_mtime_ns
+    assert _wheel("tinypkg", str(repo), commit, sys.executable, cache, tmp) == whl and whl.stat().st_mtime_ns == stamp
+
+
+def test_the_pin_proof_names_an_editable_env_and_the_envs_a_lane_runs_in(tmp_path):
+    """Ruling dba3f272: the proof run inside an env names every editable dist (this test env is the
+    developer's: editables, by construction); a lane's envs are the client's, the graph worker's
+    and each driver's, a driver with no env being the client's own."""
+    leaks = pin_proof(sys.executable, sys.prefix, [], tmp_path)
+    assert any(x == "editable cjm-context-graph-projection" for x in leaks), leaks
+    db, live = _graph(tmp_path)
+    lane = _lane(db, live, verbs=[{"name": "g", "driver": "m:f"}])
+    envs = pin_envs(lane)
+    assert envs[Path(sys.prefix).name] == sys.prefix and len(envs) == 2  # the client (its driver too) + the worker
+
+
+def test_a_pin_is_the_lanes_current_until_pruned_and_live_names_itself(tmp_path):
+    """Ruling dba3f272: `bench pin` sets the lane's current pin; a run resolves it, or an id; the
+    pin_keep newest pins and every current one keep their env copies, an older one is pruned
+    (its manifest stays) and refuses; with no pin a run is 'live', the editable checkouts."""
+    db, live = _graph(tmp_path)
+    lane = _lane(db, live)
+    settings = {"bench_dir": str(tmp_path / "bench"), "pin_keep": 1}
+    with pytest.raises(BenchRefusal):
+        load_pin(settings, lane)  # no current pin yet
+    for i, pid in enumerate(("aaa", "bbb", "ccc")):
+        p = tmp_path / "bench" / "pins" / pid
+        (p / "envs" / "e").mkdir(parents=True)
+        (p / "pin.json").write_text(json.dumps({"id": pid, "made_at": i, "client": "e",
+                                                "envs": {"e": {"python": sys.executable}},
+                                                "manifests_dir": lane["manifests_dir"]}))
+    _set_current(settings, lane, "aaa")
+    assert load_pin(settings, lane)["id"] == "aaa" and load_pin(settings, lane, "bbb")["id"] == "bbb"
+    assert _prune_pins(settings) == ["bbb"]  # ccc is the newest, aaa the lane's current
+    assert not (tmp_path / "bench" / "pins" / "bbb" / "envs").exists()
+    with pytest.raises(BenchRefusal):
+        load_pin(settings, lane, "bbb")
+    code = code_for(lane, load_pin(settings, lane))
+    assert (code["id"], code["python"], code_python(code, None)) == ("aaa", sys.executable, sys.executable)
+    with pytest.raises(BenchRefusal):
+        code_python(code, "an-env-the-pin-never-copied")
+    assert code_for(lane, None)["id"] == "live" and machine_busy_s() > 0
 
 
 # The gesture leg's fixture driver (design detail 4389a579): a session that measures one gesture

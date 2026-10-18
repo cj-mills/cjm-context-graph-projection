@@ -1433,6 +1433,8 @@ def _human(kind: str, obj: Dict[str, Any]) -> str:
                              f"{obj.get('transcript_total', '?')} transcript message(s) "
                              f"were unreachable from the tip (a chain repair cut the "
                              f"active path) and are delivered tagged _(recovered)_")
+            if obj.get("note"):  # 57f6c2a8 (2): an empty spine reads clean, saying why it is empty
+                parts.append(f"_{obj['note']}_")
             parts.append("")
             for m in obj.get("items", []):
                 tag = "" if m.get("on_active_path", True) else " _(superseded branch)_"

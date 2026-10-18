@@ -253,10 +253,22 @@ async def read_session_messages(
     Message). Plain bodies, no markdown dressing — the exporter lens is the presentation
     projection; this is the delivery one. Default = the ACTIVE transcript path only (a
     superseded branch is a rewind the reader did not take), sent messages only (a
-    composer part is a draft of a message that is already on the spine)."""
+    composer part is a draft of a message that is already on the spine). A spine holding no
+    Message yet reads CLEAN -- an empty delivery with a note; a key naming no spine is the error
+    (ruling 57f6c2a8 (2))."""
     loaded = await _load_session_messages(gx, session_key)
     if loaded.get("error"):
-        return loaded
+        sess = await graph_task(gx.queue, gx.graph_id, "get_node",
+                                node_id=session_node_id(session_key))
+        if sess is None:
+            return {"error": f"no session {session_key} on the graph (no spine node)",
+                    "session_key": session_key}
+        sprops = (sess.get("properties") if isinstance(sess, dict)
+                  else getattr(sess, "properties", None)) or {}
+        return {"kind": "messages", "session_key": session_key,
+                "title": str(sprops.get("display_title") or ""), "role": role, "count": 0,
+                "items": [], "transcript_total": 0, "recovered": 0,
+                "note": "the spine holds no Message nodes yet (nothing pulled or composed)"}
     entries = derive_entries(loaded["messages"], loaded["next_pairs"])
     transcript_total = sum(1 for m in entries
                            if m.get("source") != MESSAGE_SOURCE_COMPOSER)

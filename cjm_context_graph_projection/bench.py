@@ -9,20 +9,22 @@ into a fresh db (indexes built after the rows, then ANALYZE) and hard links to t
 journal segments, so reaching 32x rewrites 31 copies, never 62.
 
 A tier is SAFE BY CONSTRUCTION: its own graph.config.json names an empty repos and memory
-sandbox and its own journals, and every path the harness writes resolves inside the bench
-directory (anything else refuses). The canonical verbs run against each tier as real CLI
+sandbox, its own journals and its own substrate data root (every client's CJM_DATA_DIR, so a
+client's graph worker writes its diagnostics and stores inside the tier, 08441cae), and every
+path the harness writes resolves inside the bench directory (anything else refuses). The canonical verbs run against each tier as real CLI
 invocations under an address-space limit -- one timing event each in the lane's ledger, tagged
 with the tier, beside the harness's own event (wall, peak RSS, outcome) -- so a cost that
 appears only at 32x shows as a curve, never a crash. `perf` reads the curves.
 
 THE LAYOUT (<bench_dir>/<lane>/): base/ the snapshot, never run against · copies/cNNNN/ the
 re-keyed copies (rows without indexes, all-cold compressed journal segments) · xK/ a tier (its
-db, config, journals, sandbox and manifest). The bench directory, the tier list, the verbs and
+db, config, journals, sandbox, substrate/ root and manifest). The bench directory, the tier list, the verbs and
 the limits are DATA in the graph-sibling config's `bench` object; nothing here names a path on
 this machine.
 """
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -51,6 +53,7 @@ BENCH_DEFAULTS: Dict[str, Any] = {
     "timeout_s": 3600,           # Each measured invocation's wall limit
     "replay_tail": 2000,         # Ops the delta replay re-applies at a tier
     "workers": 8,                # Copies re-keyed in parallel
+    "pin_keep": 2,               # Pins that keep their env copies (ruling dba3f272); every lane's current pin too
 }
 REKEY_NS = uuid.uuid5(uuid.NAMESPACE_URL, "cjm:bench:rekey")  # Every copy's ids derive under it
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -422,8 +425,9 @@ def assemble_tier(
     copies; the snapshot's own indexes created after the rows, then ANALYZE), the journal
     families as hard links to every copy's segments with the snapshot's live tail as the
     tier's own live tail, the db's APPLIED CURSOR at each family's end (`_stamp_cursors`: a write
-    on the tier plans against a db holding its whole journal, e4b2dfbb), and the tier's config --
-    every path inside the bench."""
+    on the tier plans against a db holding its whole journal, e4b2dfbb), the tier's config, and its
+    substrate data root (`tier_env`: every client's CJM_DATA_DIR, 08441cae) -- every path inside
+    the bench."""
     t0 = time.perf_counter()
     phases: Dict[str, float] = {}
     base = root / "base"
@@ -431,7 +435,7 @@ def assemble_tier(
     tier = inside(root / f"x{k}", root.parent)
     if tier.exists():
         shutil.rmtree(tier)
-    for d in ("journals", "repos", "memory"):
+    for d in ("journals", "repos", "memory", "substrate"):
         (tier / d).mkdir(parents=True)
     os.environ["SQLITE_TMPDIR"] = str(tier)  # index sorts spill beside the tier, never to /tmp
     db = tier / man["db"]
@@ -521,6 +525,7 @@ def assemble_tier(
     manifest = {"k": k, "lane": lane["name"], "kind": lane["kind"], "base_id": man["base_id"],
                 "db": str(db), "built_at": time.time(), "nodes": nodes, "edges": edges,
                 "db_bytes": db.stat().st_size, "journals": families, "cursors": cursors, "phases": phases,
+                "substrate_dir": str(tier / "substrate"),
                 "wall_s": time.perf_counter() - t0, "placeholders": man.get("placeholders") or {}}
     _write_json(tier / MANIFEST, manifest)
     return manifest
@@ -565,7 +570,9 @@ def build(
                        {"peak_rss_kb": m["peak_rss_kb"]})
     for k in wanted:
         tm = _read_json(root / f"x{k}" / MANIFEST)
-        if tm and tm.get("base_id") == base["base_id"] and not (resnapshot or fresh):
+        # a tier assembled before its substrate data root (08441cae) is reassembled, never reused
+        if tm and tm.get("base_id") == base["base_id"] and tm.get("substrate_dir") \
+                and not (resnapshot or fresh):
             out["tiers"].append({**_tier_row(tm), "reused": True})
             continue
         tm = assemble_tier(root, k, lane)
@@ -584,6 +591,294 @@ def _tier_row(tm: Dict[str, Any]) -> Dict[str, Any]:  # A tier manifest's summar
             jb += p.stat().st_size if p.exists() else 0
     return {"k": tm["k"], "nodes": tm["nodes"], "edges": tm["edges"], "db_bytes": tm["db_bytes"],
             "journal_bytes": jb, "wall_s": tm["wall_s"], "built_at": tm["built_at"]}
+
+
+def _in_env(
+    python: str,  # An env's interpreter
+    script: str,  # Python source, run isolated
+    cwd: Path,    # The neutral directory it runs from (inside the bench)
+    *args: str,   # Its argv
+) -> Any:  # The JSON the script printed
+    """A probe run inside an env -- isolated (-I: no user site, no PYTHON* variables, no cwd on
+    sys.path) from a directory inside the bench, so nothing outside the env answers for it."""
+    res = subprocess.run([python, "-I", "-c", script, *args], cwd=cwd, capture_output=True, text=True)
+    if res.returncode != 0:
+        raise BenchRefusal(f"a probe in {python} failed: {res.stderr.strip()[-400:]}")
+    return json.loads(res.stdout)
+
+
+def env_editables(
+    python: str,  # An env's interpreter
+    cwd: Path,    # A neutral directory inside the bench
+) -> Dict[str, str]:  # {dist: its checkout} for every editable install in the env
+    """The env's EDITABLE dists, each with the checkout it imports from (its direct_url.json) --
+    the live code a pin replaces (ruling dba3f272)."""
+    return _in_env(python, (
+        "import importlib.metadata as md, json\n"
+        "out = {}\n"
+        "for d in md.distributions():\n"
+        "    t = d.read_text('direct_url.json')\n"
+        "    u = json.loads(t) if t else {}\n"
+        "    if u.get('dir_info', {}).get('editable') and u.get('url', '').startswith('file://'):\n"
+        "        out[d.metadata['Name']] = u['url'][len('file://'):]\n"
+        "print(json.dumps(out))\n"), cwd)
+
+
+def pin_proof(
+    python: str,         # A copied env's interpreter
+    prefix: str,         # The copy's prefix
+    pinned: List[str],   # The dists installed from the pin's wheels
+    cwd: Path,           # A neutral directory inside the bench
+) -> List[str]:  # What leaks ([] = sealed)
+    """THE PIN'S PROOF, run inside the copy (ruling dba3f272): every sys.path entry inside the copy
+    (a .pth naming a path outside would import from it), no editable dist left, and every .py file
+    of every pinned dist resolving inside the copy."""
+    return _in_env(python, (
+        "import importlib.metadata as md, json, os, sys\n"
+        "prefix, pinned = os.path.realpath(sys.argv[1]), json.loads(sys.argv[2])\n"
+        "def inside(p):\n"
+        "    p = os.path.realpath(str(p))\n"
+        "    return p == prefix or p.startswith(prefix + os.sep)\n"
+        "bad = ['sys.path ' + p for p in sys.path if p and not inside(p)]\n"
+        "for d in md.distributions():\n"
+        "    t = d.read_text('direct_url.json')\n"
+        "    if t and json.loads(t).get('dir_info', {}).get('editable'):\n"
+        "        bad.append('editable ' + d.metadata['Name'])\n"
+        "for name in pinned:\n"
+        "    d = md.distribution(name)\n"
+        "    bad += [name + ': ' + str(f) for f in (d.files or [])\n"
+        "            if str(f).endswith('.py') and not inside(d.locate_file(f))]\n"
+        "print(json.dumps(bad))\n"), cwd, prefix, json.dumps(pinned))
+
+
+def _git(repo: str, *args: str) -> str:  # One git query's output, stripped (a failure refuses)
+    res = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True)
+    if res.returncode != 0:
+        raise BenchRefusal(f"git {' '.join(args)} in {repo} failed: {res.stderr.strip()}")
+    return res.stdout.strip()
+
+
+def _wheel(
+    dist: str,     # The dist
+    repo: str,     # Its checkout
+    commit: str,   # The commit pinned
+    python: str,   # An env holding the dist (its own build backend builds the wheel)
+    cache: Path,   # <bench_dir>/wheels: one directory per (dist, commit)
+    tmp: Path,     # Scratch inside the bench
+) -> Path:  # The wheel
+    """A dist's wheel at a commit, built once (ruling dba3f272): `git archive` of the commit -- never
+    the working tree, so an uncommitted edit is never in it -- built without isolation by the env's
+    own backend (offline); the cache keys on (dist, commit), so a re-pin rebuilds only what moved
+    (ee35f222: rebuild cost scales with what changed)."""
+    import io
+    import tarfile
+    out = cache / dist / commit
+    got = sorted(out.glob("*.whl")) if out.exists() else []
+    if got:
+        return got[0]
+    src = tmp / f"{dist}-{commit}"
+    shutil.rmtree(src, ignore_errors=True)
+    src.mkdir(parents=True)
+    arch = subprocess.run(["git", "-C", repo, "archive", "--format=tar", commit], capture_output=True)
+    if arch.returncode != 0:
+        raise BenchRefusal(f"git archive {commit} in {repo} failed: {arch.stderr.decode(errors='replace')}")
+    with tarfile.open(fileobj=io.BytesIO(arch.stdout)) as tf:
+        tf.extractall(src, filter="data")
+    building = out.with_name(out.name + ".building")
+    shutil.rmtree(building, ignore_errors=True)
+    building.mkdir(parents=True)
+    res = subprocess.run([python, "-I", "-m", "pip", "wheel", "--no-deps", "--no-build-isolation",
+                          "--no-cache-dir", "--wheel-dir", str(building), str(src)],
+                         cwd=tmp, capture_output=True, text=True, env={**os.environ, "TMPDIR": str(tmp)})
+    shutil.rmtree(src, ignore_errors=True)
+    if res.returncode != 0 or not list(building.glob("*.whl")):
+        raise BenchRefusal(f"building {dist} at {commit[:12]} failed: {(res.stdout + res.stderr)[-600:]}")
+    os.replace(building, out)
+    return next(out.glob("*.whl"))
+
+
+def pin_envs(
+    lane: Dict[str, Any],  # `resolve_lane`'s result
+) -> Dict[str, str]:  # {env name: prefix}: every env the lane's measured process tree runs in
+    """The envs a lane's measured invocations run in (ruling dba3f272): the client's (this
+    interpreter's -- every CLI invocation is `<python> -m ...cli`), the graph capability's worker
+    env (its manifest's install.python_path: the one capability a graph run loads) and each gesture
+    driver's env (DATA on its spec). An env is named by its prefix; two prefixes sharing a name
+    refuse, never guessed."""
+    from .runtime import DEFAULT_GRAPH_ID
+    man = _read_json(Path(lane["manifests_dir"]) / f"{DEFAULT_GRAPH_ID}.json") or {}
+    py = (man.get("install") or {}).get("python_path")
+    if not py:
+        raise BenchRefusal(f"no {DEFAULT_GRAPH_ID} manifest naming an install.python_path in "
+                           f"{lane['manifests_dir']} -- its worker env cannot be pinned")
+    prefixes = [Path(sys.prefix), Path(py).parent.parent]
+    prefixes += [Path(env_python(s.get("env"))).parent.parent for s in verb_specs(lane) if s.get("driver")]
+    out: Dict[str, str] = {}
+    for p in prefixes:
+        if out.get(p.name, str(p)) != str(p):
+            raise BenchRefusal(f"two envs named {p.name!r}: {out[p.name]} and {p}")
+        out[p.name] = str(p)
+    return out
+
+
+def _set_current(
+    settings: Dict[str, Any],  # `bench_config`'s result
+    lane: Dict[str, Any],      # The lane
+    pid: str,                  # The pin it now measures
+) -> None:
+    """The lane's CURRENT pin -- what `bench run` / `bench load` measure unless told otherwise."""
+    d = lane_dir(settings, lane)
+    d.mkdir(parents=True, exist_ok=True)
+    (inside(d / "pin", settings["bench_dir"])).write_text(pid + "\n")
+
+
+def _prune_pins(
+    settings: Dict[str, Any],  # `bench_config`'s result
+) -> List[str]:  # The pins whose env copies were removed
+    """The env copies older pins hold, removed: the `pin_keep` newest pins and every lane's current
+    pin keep theirs; a pruned pin keeps its manifest (its commit set stays readable) and refuses to
+    run until pinned again."""
+    bench = Path(settings["bench_dir"])
+    root = bench / "pins"
+    current = {f.read_text().strip() for f in bench.glob("*/pin") if f.is_file()}
+    pins = [p for p in (_read_json(d / "pin.json") for d in sorted(root.glob("*"))
+                        if d.is_dir() and not d.name.startswith(".")) if p and not p.get("pruned")]
+    pins.sort(key=lambda p: p["made_at"], reverse=True)
+    pruned = []
+    for p in pins[int(settings.get("pin_keep", BENCH_DEFAULTS["pin_keep"])):]:
+        if p["id"] in current:
+            continue
+        shutil.rmtree(inside(root / p["id"] / "envs", bench), ignore_errors=True)
+        _write_json(root / p["id"] / "pin.json", {**p, "pruned": time.time()})
+        pruned.append(p["id"])
+    return pruned
+
+
+def load_pin(
+    settings: Dict[str, Any],  # `bench_config`'s result
+    lane: Dict[str, Any],      # The lane
+    ref: str = "current",      # "current" (the lane's) or a pin's id
+) -> Dict[str, Any]:  # The pin's manifest
+    """The pin a run measures (ruling dba3f272): the lane's current one, or one named by id. No
+    current pin, an unknown id or a pruned pin refuses, naming the remedy."""
+    if ref == "current":
+        f = lane_dir(settings, lane) / "pin"
+        if not f.exists():
+            raise BenchRefusal(f"lane {lane['name']} has no current pin -- `bench pin` first (or "
+                               "measure the editable checkouts with --live)")
+        ref = f.read_text().strip()
+    p = _read_json(Path(settings["bench_dir"]) / "pins" / ref / "pin.json")
+    if not p:
+        raise BenchRefusal(f"no pin {ref!r} in {Path(settings['bench_dir']) / 'pins'}")
+    if p.get("pruned"):
+        raise BenchRefusal(f"pin {ref} was pruned (its env copies removed) -- `bench pin` makes it again")
+    return p
+
+
+def pin(
+    lane: Dict[str, Any],          # `resolve_lane`'s result
+    settings: Dict[str, Any],      # `bench_config`'s result
+    ledger: Optional[str] = None,  # The timings ledger: one `bench-pin` event carrying the commit set
+) -> Dict[str, Any]:  # The pin's manifest
+    """THE CODE A RUN MEASURES, PINNED (ruling dba3f272, finding 2682d8cc): every env the lane's
+    process tree runs in (`pin_envs`) COPIED inside the bench, its editable dists replaced by
+    NON-EDITABLE installs of wheels built from their checkouts' HEAD commits (`_wheel`); the graph
+    capability's manifest re-pointed at the copied worker env; then THE PROOF in each copy
+    (`pin_proof`) -- a leak writes no pin. The id derives from the env set and the commit set, so
+    the same code pins once; a checkout with uncommitted edits is named `dirty` (the edit is never
+    measured). The lane's current pin becomes it; one `bench-pin` event carries the commit set
+    into the ledger, every later event its id; then older pins' copies are pruned (`_prune_pins`).
+
+    A COPY, NOT A CLONE: a conda env's interpreter resolves its prefix from its own location, so a
+    copied prefix runs as itself (the proof checks it); an offline clone needs the source's package
+    cache, which a micromamba root may no longer hold, and an online one the network."""
+    from .runtime import DEFAULT_GRAPH_ID
+    t0 = time.perf_counter()
+    bench = Path(settings["bench_dir"])
+    root = inside(bench / "pins", bench)
+    tmp = inside(root / ".tmp", bench)
+    tmp.mkdir(parents=True, exist_ok=True)
+    envs = pin_envs(lane)
+    dists: Dict[str, Dict[str, Any]] = {}
+    for name, prefix in envs.items():
+        for dist, repo in env_editables(str(Path(prefix) / "bin" / "python"), tmp).items():
+            d = dists.setdefault(dist, {"repo": repo, "envs": []})
+            if d["repo"] != repo:
+                raise BenchRefusal(f"{dist} is editable from two checkouts: {d['repo']} and {repo}")
+            d["envs"].append(name)
+    for d in dists.values():
+        d["commit"] = _git(d["repo"], "rev-parse", "HEAD")
+        d["dirty"] = bool(_git(d["repo"], "status", "--porcelain", "--untracked-files=no"))
+    commits = {k: d["commit"] for k, d in sorted(dists.items())}
+    pid = hashlib.sha256(json.dumps({"envs": envs, "dists": commits}, sort_keys=True).encode()).hexdigest()[:12]
+    pdir = inside(root / pid, bench)
+    have = _read_json(pdir / "pin.json")
+    if have and not have.get("pruned"):
+        _set_current(settings, lane, pid)
+        return {**have, "reused": True}
+    shutil.rmtree(pdir, ignore_errors=True)
+    for dist, d in dists.items():
+        d["wheel"] = str(_wheel(dist, d["repo"], d["commit"], str(Path(envs[d["envs"][0]]) / "bin" / "python"),
+                                inside(bench / "wheels", bench), tmp))
+    copies: Dict[str, Dict[str, str]] = {}
+    for name, prefix in envs.items():
+        dst = pdir / "envs" / name
+        shutil.copytree(prefix, dst, symlinks=True)
+        py = str(dst / "bin" / "python")
+        mine = sorted(k for k, d in dists.items() if name in d["envs"])
+        if mine:
+            res = subprocess.run([py, "-I", "-m", "pip", "install", "--no-deps", "--force-reinstall", "--no-index",
+                                  "--no-cache-dir", "--no-warn-script-location", *(dists[k]["wheel"] for k in mine)],
+                                 cwd=tmp, capture_output=True, text=True, env={**os.environ, "TMPDIR": str(tmp)})
+            if res.returncode != 0:
+                raise BenchRefusal(f"installing the pinned wheels into {name}'s copy failed: {res.stderr[-600:]}")
+        leaks = pin_proof(py, str(dst), mine, tmp)
+        if leaks:
+            raise BenchRefusal(f"the pin's copy of {name} is not sealed: {leaks[:5]}")
+        copies[name] = {"source": prefix, "prefix": str(dst), "python": py}
+    mdir = pdir / "manifests"
+    mdir.mkdir(parents=True)
+    man = _read_json(Path(lane["manifests_dir"]) / f"{DEFAULT_GRAPH_ID}.json")
+    man["install"]["python_path"] = copies[Path(man["install"]["python_path"]).parent.parent.name]["python"]
+    _write_json(mdir / f"{DEFAULT_GRAPH_ID}.json", man)  # the one capability a graph run loads, nothing live
+    out = {"id": pid, "lane": lane["name"], "made_at": time.time(), "client": Path(sys.prefix).name,
+           "envs": copies, "dists": dists, "manifests_dir": str(mdir),
+           "dirty": sorted(k for k, d in dists.items() if d["dirty"]), "wall_s": time.perf_counter() - t0}
+    _write_json(pdir / "pin.json", out)
+    _set_current(settings, lane, pid)
+    _event(ledger, "bench-pin", out["wall_s"], lane, 0,
+           {"commits": commits, "dirty": out["dirty"], "envs": sorted(envs)}, attrs={"pin": pid})
+    out["pruned"] = _prune_pins(settings)
+    return out
+
+
+def code_for(
+    lane: Dict[str, Any],             # The lane
+    pin: Optional[Dict[str, Any]],    # The pin measured (`load_pin`), or None
+) -> Dict[str, Any]:  # {id, python, manifests_dir, envs, client}
+    """What a run launches (ruling dba3f272): a pin's copied client interpreter, its manifests and
+    its env copies by name -- or, with no pin, the editable checkouts ('live': this interpreter and
+    the lane's manifests), named so a curve never mistakes the one for the other."""
+    if not pin:
+        return {"id": "live", "python": sys.executable, "manifests_dir": lane["manifests_dir"],
+                "envs": None, "client": None}
+    return {"id": pin["id"], "python": pin["envs"][pin["client"]]["python"],
+            "manifests_dir": pin["manifests_dir"], "client": pin["client"],
+            "envs": {n: e["python"] for n, e in pin["envs"].items()}}
+
+
+def code_python(
+    code: Dict[str, Any],  # `code_for`'s result
+    env: Optional[str],    # A gesture driver's env (None = the client's)
+) -> str:  # The interpreter it runs in
+    """A gesture driver's interpreter under `code`: its env's copy in the pin, else (live) the env
+    itself. A pin holding no copy of it refuses -- it was pinned before the driver was configured."""
+    if code["envs"] is None:
+        return env_python(env)
+    name = env or code["client"]
+    if name not in code["envs"]:
+        raise BenchRefusal(f"pin {code['id']} holds no copy of env {name!r} -- `bench pin` again")
+    return code["envs"][name]
 
 
 def _event(
@@ -657,6 +952,20 @@ def env_python(
     return str(py)
 
 
+def tier_env(
+    tm: Dict[str, Any],  # A tier's manifest
+) -> Dict[str, str]:  # The environment every process the harness launches on the tier carries
+    """The tier's substrate data root as each client's CJM_DATA_DIR (finding 08441cae): a client's
+    graph worker writes its diagnostics, its substrate journal and its stores there, inside the
+    tier, never the live data root its cwd's cjm.yaml names -- the every-write-inside-the-bench
+    guarantee (3bd8673d (3)) reaching the worker. A tier assembled before its root refuses."""
+    root = tm.get("substrate_dir")
+    if not root:
+        raise BenchRefusal(f"tier x{tm.get('k')} has no substrate data root (assembled before "
+                           "08441cae) -- `bench build` reassembles it")
+    return {"CJM_DATA_DIR": root}
+
+
 def tree_rss_kb(
     pid: int,  # The root of a process tree
 ) -> int:  # Resident KB of the process and every live descendant now (0 when unreadable)
@@ -679,23 +988,45 @@ def tree_rss_kb(
     return total
 
 
+def machine_busy_s() -> Optional[float]:  # The machine's busy CPU seconds since boot, every core (None off Linux)
+    """/proc/stat's first line -- user + nice + system + irq + softirq + steal jiffies over the clock
+    tick, idle and iowait left out: two readings around a call give the machine's busy CPU seconds
+    while it ran, the concurrent-load covariate (finding 2682d8cc, ruling dba3f272)."""
+    try:
+        f = [int(x) for x in Path("/proc/stat").read_text().split("\n", 1)[0].split()[1:9]]
+        user, nice, system, _idle, _iowait, irq, softirq, steal = f
+        return (user + nice + system + irq + softirq + steal) / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError):
+        return None
+
+
 def measure(
     argv: List[str],         # The full command line
     env: Dict[str, str],     # Its environment
     limit_bytes: int,        # Address-space limit
     timeout_s: float,        # Wall limit
     out_path: Path,          # Where its stdout lands (inside the bench)
-) -> Dict[str, Any]:  # {outcome, wall_s, peak_rss_kb, maxrss_kb, out_bytes}
+    cwd: Optional[Path] = None,  # Where it runs (a tier: no checkout's package dir lands on its sys.path)
+) -> Dict[str, Any]:  # {outcome, wall_s, peak_rss_kb, maxrss_kb, out_bytes, read_bytes, write_bytes, concurrent}
     """Run one invocation under the limits: its peak RSS is the process tree's (the graph
-    worker included), sampled from /proc while it runs; wait4's own maxrss rides beside it."""
+    worker included), sampled from /proc while it runs; wait4's own maxrss rides beside it.
+    THE CONCURRENT LOAD rides as a covariate (ruling dba3f272): the 1-minute loadavg at its start,
+    the machine's busy CPU seconds while it ran, its own tree's CPU seconds, and the others' (the
+    difference -- other clients included). `cwd` matters to a pin: `python -m` puts the cwd first on
+    sys.path, so a run launched inside a checkout imports that checkout over the pinned install."""
     def limit():
         resource.setrlimit(resource.RLIMIT_AS, (limit_bytes, limit_bytes))
+    try:
+        load0: Optional[float] = os.getloadavg()[0]
+    except OSError:
+        load0 = None
+    busy0 = machine_busy_s()
     t0 = time.perf_counter()
     # the answer reaches the harness through a pipe, as a caller's does, and the HARNESS writes
     # the file: the measured process's disk bytes are its own, never its answer's (7345f40d)
     with open(out_path, "wb") as out:
         proc = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                preexec_fn=limit)
+                                preexec_fn=limit, cwd=cwd)
         drain = threading.Thread(target=shutil.copyfileobj, args=(proc.stdout, out), daemon=True)
         drain.start()
         status, usage, timed_out, peak = None, None, False, 0
@@ -717,7 +1048,11 @@ def measure(
     maxrss = usage.ru_maxrss if usage else None
     # the tree's block I/O (design detail 2f5033bf (1)): wait4 counts every reaped descendant,
     # GROSS -- a cancelled write still counts; the net figure is the invocation's own event
-    return {"outcome": outcome, "wall_s": time.perf_counter() - t0,
+    busy1, own = machine_busy_s(), (usage.ru_utime + usage.ru_stime) if usage else None
+    busy = busy1 - busy0 if busy0 is not None and busy1 is not None else None
+    concurrent = {"loadavg_1m": load0, "machine_cpu_s": busy, "own_cpu_s": own,
+                  "others_cpu_s": max(0.0, busy - own) if busy is not None and own is not None else None}
+    return {"outcome": outcome, "wall_s": time.perf_counter() - t0, "concurrent": concurrent,
             "peak_rss_kb": max(peak, maxrss or 0) or None, "maxrss_kb": maxrss,
             "out_bytes": out_path.stat().st_size,
             "read_bytes": usage.ru_inblock * 512 if usage else None,
@@ -731,7 +1066,8 @@ def run(
     tiers: Optional[List[int]] = None,  # Tiers to run (default: every built tier)
     verbs: Optional[List[str]] = None,  # Spec names to run (default: all)
     repeat: int = 1,            # Runs per verb per tier
-) -> Dict[str, Any]:  # {lane, runs: [...], skipped: [...]}
+    pin: Optional[Dict[str, Any]] = None,  # The pin measured (`load_pin`); None = the editable checkouts ('live')
+) -> Dict[str, Any]:  # {lane, pin, runs: [...], skipped: [...]}
     """Run the canonical verbs against each tier: real CLI invocations with the tier's db,
     journals and config, the lane's ledger, the tier's tags in the environment, under the
     address-space and wall limits; one harness event per invocation beside the CLI's own.
@@ -740,7 +1076,12 @@ def run(
     the kit's gesture runner in the app's `env`, the driver given the spec's filled `params`
     plus the tier's db, manifests and journals; each gesture is one event from the session's
     own seam (CJM_TIMINGS_PATH names the lane's ledger), the harness's event beside them
-    carrying the driver process's wall and peak RSS."""
+    carrying the driver process's wall and peak RSS.
+
+    THE CODE MEASURED (ruling dba3f272): a pin's copied interpreters and manifests (`code_for`),
+    every process launched from its tier's directory, every event carrying the pin's id -- or
+    'live', the editable checkouts."""
+    code = code_for(lane, pin)
     root = lane_dir(settings, lane)
     built = sorted(int(p.name[1:]) for p in root.glob("x*") if p.name[1:].isdigit()
                    and (p / MANIFEST).exists())
@@ -749,7 +1090,7 @@ def run(
         raise BenchRefusal(f"no built tier to run in {root} -- `bench build` first")
     specs = [s for s in verb_specs(lane) if verbs is None or s["name"] in verbs]
     limit = int(float(settings["memory_limit_gb"]) * 1024 ** 3)
-    out: Dict[str, Any] = {"lane": lane["name"], "runs": [], "skipped": []}
+    out: Dict[str, Any] = {"lane": lane["name"], "pin": code["id"], "runs": [], "skipped": []}
     for k in todo:
         tm = _read_json(root / f"x{k}" / MANIFEST)
         tier = inside(root / f"x{k}", root.parent)
@@ -768,7 +1109,8 @@ def run(
                     values["tail_offset"] = max(0, family_ops(fams["writes"])
                                                 - int(settings["replay_tail"]))
                 run_id = str(uuid.uuid4())
-                env = {**os.environ, "CJM_RUN_ID": run_id, "CJM_BENCH_TIER": str(k),
+                env = {**os.environ, **tier_env(tm), "CJM_BENCH_PIN": code["id"], "CJM_RUN_ID": run_id,
+                       "CJM_BENCH_TIER": str(k),
                        "CJM_BENCH_LANE": lane["name"], "CJM_ACTOR": "bench:harness",
                        "CJM_BENCH_CACHE": cache, "CJM_T0": repr(time.time())}
                 if spec.get("driver"):
@@ -778,9 +1120,9 @@ def run(
                         out["skipped"].append({"tier": k, "verb": spec["name"],
                                                "reason": "a placeholder did not resolve"})
                         break  # nor will it on the warm repeat
-                    params.update({"db": db, "manifests_dir": lane["manifests_dir"],
+                    params.update({"db": db, "manifests_dir": code["manifests_dir"],
                                    "journals": {name: fam["live"] for name, fam in fams.items()}})
-                    cmd = [env_python(spec.get("env")), "-m", "cjm_substrate_qt_kit.gesturebench",
+                    cmd = [code_python(code, spec.get("env")), "-m", "cjm_substrate_qt_kit.gesturebench",
                            spec["driver"], "--params", json.dumps(params)]
                     env["CJM_TIMINGS_PATH"] = ledger
                     what = {"driver": spec["driver"]}
@@ -790,8 +1132,8 @@ def run(
                         out["skipped"].append({"tier": k, "verb": spec["name"],
                                                "reason": "a placeholder did not resolve"})
                         break  # nor will it on the warm repeat
-                    cmd = [sys.executable, "-m", "cjm_context_graph_projection.cli",
-                           "--graph-db-path", db, "--manifests-dir", lane["manifests_dir"],
+                    cmd = [code["python"], "-m", "cjm_context_graph_projection.cli",
+                           "--graph-db-path", db, "--manifests-dir", code["manifests_dir"],
                            "--timings-path", ledger]
                     if "writes" in fams:
                         cmd += ["--journal-path", fams["writes"]["live"]]
@@ -805,7 +1147,7 @@ def run(
                     what = {"cli_verb": argv[0]}
                 (tier / "runs").mkdir(exist_ok=True)
                 res = measure(cmd, env, limit, float(settings["timeout_s"]),
-                              inside(tier / "runs" / f"{run_id}.out", root.parent))
+                              inside(tier / "runs" / f"{run_id}.out", root.parent), cwd=tier)
                 if spec.get("capture") and res["outcome"] == 0:
                     m = UUID_RE.search((tier / "runs" / f"{run_id}.out").read_text(errors="replace"))
                     values[spec["capture"]] = m.group(0) if m else None
@@ -818,7 +1160,8 @@ def run(
                 _event(ledger, spec["name"], res["wall_s"], lane, k,
                        {"peak_rss_kb": res["peak_rss_kb"], "maxrss_kb": res["maxrss_kb"],
                         "out_bytes": res["out_bytes"], "read_bytes": res["read_bytes"],
-                        "write_bytes": res["write_bytes"]}, attrs={"cache": cache},
+                        "write_bytes": res["write_bytes"], "concurrent": res["concurrent"]},
+                       attrs={"cache": cache, "pin": code["id"]},
                        run_id=run_id, outcome=res["outcome"], **what)
     return out
 
@@ -934,6 +1277,29 @@ def _unknown_ids(
     return out
 
 
+def recorded_outcome(
+    events: List[Dict[str, Any]],  # The session's live CLI events (the timings ledger's, kind cli, no tier)
+    actor: Optional[str],          # The step's recorded actor
+    verb: str,                     # The step's verb
+    ts: float,                     # The step's recorded ts (its ledger line or journal op, written mid-invocation)
+    slack_s: float = 0.25,         # Tolerance on each side of an invocation's span
+) -> Optional[Any]:  # The invocation's recorded outcome (0, an exit code, an exception's name), or None
+    """A recorded step's OWN OUTCOME, DECLARED DATA (ruling 57f6c2a8 (1), finding 5bd6c25e): the CLI
+    event of the same verb and actor whose invocation span holds the step's ts -- a reads-ledger
+    line or a journal op is written inside its invocation -- the latest-starting such event when
+    several do. An event that names no actor (CJM_ACTOR unset at the time) matches any. None when
+    no event holds it: the ledger predates the trace, or the step ran outside the CLI."""
+    best = None
+    for e in events:
+        if e.get("verb") != verb or (e.get("actor") and actor and e["actor"] != actor):
+            continue
+        start = float(e.get("ts") or 0.0)
+        if start - slack_s <= ts <= start + float(e.get("wall_s") or 0.0) + slack_s:
+            if best is None or start > float(best.get("ts") or 0.0):
+                best = e
+    return None if best is None else best.get("outcome")
+
+
 def extract_workload(
     lane: Dict[str, Any],       # `resolve_lane`'s result
     settings: Dict[str, Any],   # `bench_config`'s result
@@ -946,8 +1312,11 @@ def extract_workload(
     the verb's dests (inverted to argv at load time, per client), id prefixes expanded against
     the snapshot so a client's re-keying reaches them; a decide records the id it minted (its
     canonical statement's) so a later step naming it follows the client's own. Each step keeps its
-    recorded ts, and the workload its busiest window at the settings' cap (ruling 6f7a4013). Derived
-    and regenerable; what did not invert is counted, never guessed."""
+    recorded ts, and the workload its busiest window at the settings' cap (ruling 6f7a4013). Each
+    step joined to its live CLI event in the lane's timings ledger carries that invocation's outcome
+    as `expected` (`recorded_outcome`, ruling 57f6c2a8 (1)): a step the recording saw fail is
+    attributed under load, never counted as the store's. Derived and regenerable; what did not
+    invert is counted, never guessed."""
     from cjm_dev_graph_schema.nodes import DecisionNode
     from .cli import build_parser
     root = lane_dir(settings, lane)
@@ -967,12 +1336,16 @@ def extract_workload(
                   (e.get("args") or {}).get("actor") or e.get("actor"))
                  for e in read_journal(lane["journals"]["writes"]) if e.get("session") == session]
     rows = sorted((r for r in rows if actor is None or r[4] == actor), key=lambda r: r[3])
+    # 57f6c2a8 (1): the session's live invocations, each step's own outcome read off them
+    recorded = [e for e in read_journal(str(db.with_name(db.stem + ".timings.jsonl")))
+                if e.get("kind") == "cli" and e.get("session") == session
+                and not (e.get("attrs") or {}).get("tier")]
     parser = build_parser()
     con = sqlite3.connect(f"file:{root / 'base' / base['db']}?mode=ro", uri=True)
     steps, skipped, dropped, minted = [], {}, {}, set()
     try:
         prev = None
-        for kind, verb, request, ts, _ in rows:
+        for kind, verb, request, ts, who in rows:
             if verb not in keep:
                 skipped[f"{verb} (not kept)"] = skipped.get(f"{verb} (not kept)", 0) + 1
                 continue
@@ -992,6 +1365,9 @@ def extract_workload(
                 continue
             step = {"kind": kind, "verb": verb, "request": req, "drop": sorted(drop),
                     "gap_s": round(ts - prev, 3) if prev is not None else 0.0, "ts": ts}
+            got = recorded_outcome(recorded, who, verb, ts)
+            if got is not None:  # 57f6c2a8 (1): the step's own recorded outcome, declared
+                step["expected"] = got
             if verb == "decide" and req.get("statement"):
                 step["mints"] = DecisionNode(statement=str(req["statement"])).id
                 minted.add(step["mints"])
@@ -1005,6 +1381,8 @@ def extract_workload(
            "reads": sum(1 for s in steps if s["kind"] == "read"),
            "writes": sum(1 for s in steps if s["kind"] == "write"),
            "skipped": skipped, "dropped": dropped, "made_at": time.time(),
+           "expected": {"recorded": sum(1 for s in steps if "expected" in s),
+                        "failed": sum(1 for s in steps if s.get("expected") not in (None, 0))},
            "window": busiest_window({"steps": steps}, int(ls["steps"]))}  # 6f7a4013: at the settings' cap
     (root / "workloads").mkdir(exist_ok=True)
     _write_json(inside(root / "workloads" / f"{name}.json", root.parent), out)
@@ -1521,24 +1899,44 @@ def _call(
     own timing event in the ledger and the harness's beside it (design detail 2f5033bf (2))."""
     tm, lane = ctx["tm"], ctx["lane"]
     run_id = str(uuid.uuid4())
-    env = {**os.environ, "CJM_RUN_ID": run_id, "CJM_BENCH_TIER": str(ctx["k"]),
-           "CJM_BENCH_LANE": lane["name"], "CJM_T0": repr(time.time()), **env}
-    cmd = [sys.executable, "-m", "cjm_context_graph_projection.cli", "--graph-db-path", tm["db"],
-           "--manifests-dir", lane["manifests_dir"], "--timings-path", ctx["ledger"]]
+    code = ctx["code"]  # ruling dba3f272: the pin measured, or 'live'
+    env = {**os.environ, **tier_env(tm), "CJM_BENCH_PIN": code["id"], "CJM_RUN_ID": run_id,
+           "CJM_BENCH_TIER": str(ctx["k"]), "CJM_BENCH_LANE": lane["name"], "CJM_T0": repr(time.time()), **env}
+    cmd = [code["python"], "-m", "cjm_context_graph_projection.cli", "--graph-db-path", tm["db"],
+           "--manifests-dir", code["manifests_dir"], "--timings-path", ctx["ledger"]]
     for fam, flag in (("writes", "--journal-path"), ("source", "--source-journal-path")):
         if fam in tm["journals"]:
             cmd += [flag, tm["journals"][fam]["live"]]
     if read_only:
         cmd.append("--read-only")
     out = inside(ctx["tier"] / "runs" / f"{run_id}.out", ctx["root"].parent)
-    res = measure(cmd + argv, env, ctx["limit"], float(ctx["settings"]["timeout_s"]), out)
+    res = measure(cmd + argv, env, ctx["limit"], float(ctx["settings"]["timeout_s"]), out, cwd=ctx["tier"])
     if res["outcome"] == 0:
         out.unlink()
     _event(ctx["ledger"], argv[0], res["wall_s"], lane, ctx["k"],
            {"peak_rss_kb": res["peak_rss_kb"], "out_bytes": res["out_bytes"],
-            "read_bytes": res["read_bytes"], "write_bytes": res["write_bytes"]},
+            "read_bytes": res["read_bytes"], "write_bytes": res["write_bytes"],
+            "concurrent": res["concurrent"]},
            attrs=attrs, run_id=run_id, outcome=res["outcome"], cli_verb=argv[0])
     return res
+
+
+def step_attrs(
+    c: Dict[str, Any],     # The client (its `window`, when it replays a recorded span)
+    j: int,                # The step's index within the client's span
+    step: Dict[str, Any],  # The step
+) -> Dict[str, Any]:  # The call's step identity and declared expectation
+    """A load call's STEP IDENTITY and EXPECTED OUTCOME (ruling 57f6c2a8 (1)): the recorded workload
+    and the step's index in its trace -- the key the solo pass's reading of the same step is found
+    by -- and the step's recorded outcome where its extraction joined one. A composed step carries
+    its expectation alone (it holds no trace position)."""
+    out: Dict[str, Any] = {}
+    win = c.get("window")
+    if win and not step.get("composed"):
+        out.update({"workload": win["workload"], "step": int(win["first"]) + j})
+    if "expected" in step:
+        out["expected"] = step["expected"]
+    return out
 
 
 def _drive(
@@ -1564,7 +1962,7 @@ def _drive(
     lock = threading.Lock()
     stop, aborted = threading.Event(), [None]
     probe = VisibilityProbe(ctx["tm"]["db"], ctx["probe_s"])
-    run_attrs = {"load": load_id, "clients": n, **attrs}
+    run_attrs = {"load": load_id, "clients": n, "pin": ctx["code"]["id"], **attrs}
 
     def record(c: Dict[str, Any], verb: str, res: Dict[str, Any], into: Optional[List] = None) -> None:
         with lock:
@@ -1639,7 +2037,7 @@ def _drive(
                 argv, read_only, mints = made["argv"], step["kind"] == "read", made["mints"]
                 if mints:
                     probe.watch(mints)
-            res = _call(ctx, argv, read_only, env, mine)
+            res = _call(ctx, argv, read_only, env, {**mine, **step_attrs(c, j, step)})
             if res["outcome"] == 0 and mints:
                 with lock:
                     decided.setdefault(i, []).append(mints)
@@ -1707,7 +2105,8 @@ def load(
     steps: Optional[int] = None,          # Steps per client, at most (default: the settings')
     plan: Optional[Dict[str, Any]] = None,  # {key, defs}: a NAMED load and every load on the graph
     scales: Optional[List[float]] = None,   # A named load's role-count multipliers (default: 1)
-) -> Dict[str, Any]:  # {lane, loads: [...]}
+    pin: Optional[Dict[str, Any]] = None,   # The pin measured (`load_pin`); None = the editable checkouts ('live')
+) -> Dict[str, Any]:  # {lane, pin, loads: [...]}
     """THE CONCURRENT REPLAY MODE (design detail 2f5033bf (2)): at each tier, clients replay
     recorded workloads concurrently as real CLI invocations under the harness's limits -- every
     call a tier-tagged event carrying the run's load id, the client count and the client -- the
@@ -1754,8 +2153,9 @@ def load(
     ctx_base = {"lane": lane, "settings": settings, "ledger": ledger, "root": root,
                 "parser": build_parser(), "limit": int(float(settings["memory_limit_gb"]) * 1024 ** 3),
                 "ceiling": memory_ceiling_kb(ls), "pace": float(ls["pace"]),
-                "probe_s": float(ls["probe_interval_s"])}
-    out: Dict[str, Any] = {"lane": lane["name"], "loads": []}
+                "probe_s": float(ls["probe_interval_s"]),
+                "code": code_for(lane, pin)}  # ruling dba3f272: what every client launches
+    out: Dict[str, Any] = {"lane": lane["name"], "pin": ctx_base["code"]["id"], "loads": []}
     for k in todo:
         tier = inside(root / f"x{k}", root.parent)
         (tier / "runs").mkdir(exist_ok=True)
@@ -1839,7 +2239,17 @@ def render_bench(
     """Render a bench result: tables for a person, the result as JSON for an agent."""
     if fmt == "agent":
         return json.dumps(res, indent=1, default=str)
-    out = [f"## Bench {action} — lane {res['lane']}", ""]
+    out = [f"## Bench {action} — lane {res['lane']}" + (f" · pin {res['pin']}" if res.get("pin") else ""), ""]
+    if action == "pin":  # ruling dba3f272: the code every later run measures
+        if res.get("reused"):
+            out.append(f"- the code is already pinned as `{res['id']}` -- now the lane's current pin")
+        else:
+            out.append(f"- pinned `{res['id']}` in {res['wall_s']:.1f} s: {len(res['dists'])} dist(s) from their "
+                       f"HEAD commits, non-editable in copies of {', '.join(sorted(res['envs']))} -- sealed")
+        out += [f"- {k} {d['commit'][:12]}" + (" (DIRTY: the uncommitted edit is not measured)" if d["dirty"] else "")
+                for k, d in sorted(res["dists"].items())]
+        out += [f"- pruned pin {p} (its env copies)" for p in res.get("pruned") or []]
+        return "\n".join(out)
     if action == "run":
         out += ["| tier | verb | outcome | wall s | peak RSS | output |", "|---:|---|---|---:|---:|---:|"]
         for r in res["runs"]:

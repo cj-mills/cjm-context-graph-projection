@@ -419,7 +419,7 @@ async def _dispatch(args) -> int:
         # every measured run is its own CLI invocation against one -- no graph opens here
         from .bench import BenchRefusal, bench_config, render_bench, resolve_lane
         from .bench import build as bench_build, run as bench_run, status as bench_status
-        from .bench import extract_ingest_workload, extract_workload, load as bench_load
+        from .bench import extract_ingest_workload, extract_workload, load as bench_load, load_pin, pin as bench_pin
         try:
             settings = bench_config(args.graph_db_path)
             journals = {"writes": args.journal_path, "source": args.source_journal_path,
@@ -434,7 +434,10 @@ async def _dispatch(args) -> int:
                     raise BenchRefusal("bench run records into the timings ledger -- pass "
                                        "--timings-path (cg-read bakes it)")
                 res = bench_run(lane, settings, args.timings_path, tiers=args.tier,
-                                verbs=args.verb, repeat=args.repeat)
+                                verbs=args.verb, repeat=args.repeat,
+                                pin=None if args.live else load_pin(settings, lane, args.pin))
+            elif args.action == "pin":  # ruling dba3f272: the code later runs measure
+                res = bench_pin(lane, settings, ledger=args.timings_path)
             elif args.action == "workload":
                 if not args.session:
                     raise BenchRefusal("bench workload replays a recorded session -- pass --session")
@@ -463,7 +466,8 @@ async def _dispatch(args) -> int:
                             raise BenchRefusal(str(e)) from None
                 res = bench_load(lane, settings, args.timings_path, tiers=args.tier,
                                  clients=args.clients, workloads=args.workload, steps=args.steps,
-                                 plan=plan, scales=args.scale)
+                                 plan=plan, scales=args.scale,
+                                 pin=None if args.live else load_pin(settings, lane, args.pin))
             else:
                 res = bench_status(lane, settings)
         except BenchRefusal as e:
@@ -3747,11 +3751,13 @@ def build_parser() -> argparse.ArgumentParser:  # The CLI's parser, every verb
                                   "of a lane's graph and journals in the bench directory, run the "
                                   "canonical verbs at each into the timings ledger (perf reads the "
                                   "curves), or show what the bench holds")
-    p_bench.add_argument("action", choices=("build", "run", "status", "workload", "load", "floor"),
+    p_bench.add_argument("action", choices=("build", "run", "status", "workload", "load", "floor", "pin"),
                          help="build / run / status the tiers; workload: a recorded session as a "
                               "replayable workload; load: the concurrent replay mode (design "
                               "detail 2f5033bf (2)); floor --load K: the write floor its traces "
-                              "derive, each client's busiest window beside it, nothing run (6f7a4013)")
+                              "derive, each client's busiest window beside it, nothing run (6f7a4013); "
+                              "pin: the code runs measure -- the lane's envs copied into the bench with "
+                              "their editable dists installed from HEAD-commit wheels (ruling dba3f272)")
     p_bench.add_argument("--lane", default=None,
                          help="A sibling_graphs key (default: the invoking graph)")
     p_bench.add_argument("--tier", type=int, action="append", default=None,
@@ -3781,6 +3787,12 @@ def build_parser() -> argparse.ArgumentParser:  # The CLI's parser, every verb
                          help="load: a NAMED load -- a perf_load key on the graph (ruling 110c662f); its "
                               "roster, tier, sharing and pace are its facts, its roles' sources the bench "
                               "config's load.roles; a solo pass first, then the roster")
+    p_bench.add_argument("--pin", default="current",
+                         help="run / load: the pin measured -- 'current' (the lane's, set by `bench pin`; "
+                              "the default) or a pin's id (ruling dba3f272)")
+    p_bench.add_argument("--live", action="store_true",
+                         help="run / load: measure the editable checkouts instead of a pin (the developer's "
+                              "own loop; every event names it 'live')")
     p_bench.add_argument("--scale", type=float, action="append", default=None,
                          help="load --load: a role-count multiplier (repeatable: 7b's sweep; default 1)")
     p_bench.add_argument("--ingest", action="store_true",

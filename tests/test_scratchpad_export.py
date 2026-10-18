@@ -149,3 +149,18 @@ def test_read_session_messages_orders_filters_role_and_hides_branches(monkeypatc
                                                       include_parts=True))
     assert [m["id"] for m in everything["items"]] == ["n1", "p1", "n2", "n3"]
     assert everything["items"][2]["on_active_path"] is False
+
+
+def test_read_session_of_an_empty_spine_reads_clean_and_an_unknown_key_errors(tmp_path):
+    """Ruling 57f6c2a8 (2): `read --session` of a spine holding no Message exits 0 with a note
+    (a trace's empty read is no failure); a key naming no spine still exits 1."""
+    import subprocess
+    import sys
+    base = [sys.executable, "-m", "cjm_context_graph_projection.cli", "--graph-db-path",
+            str(tmp_path / "g.db"), "--journal-path", str(tmp_path / "g.writes.jsonl")]
+    assert subprocess.run([*base, "session", KEY], capture_output=True).returncode == 0
+    empty = subprocess.run([*base, "--read-only", "read", "--session", KEY], capture_output=True, text=True)
+    assert empty.returncode == 0 and "no Message nodes yet" in empty.stdout, empty.stdout + empty.stderr
+    unknown = subprocess.run([*base, "--read-only", "read", "--session", "2026-01-01_00-00-00"],
+                             capture_output=True, text=True)
+    assert unknown.returncode == 1 and "no session 2026-01-01_00-00-00" in unknown.stdout + unknown.stderr

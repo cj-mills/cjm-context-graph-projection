@@ -592,7 +592,10 @@ def load_report(
     SOLO pass (one client of an interactive role alone, 7i's baseline) is a run of its own. A
     run's SEED calls (phase seed, design detail 6a2b88c5 (2)) are counted apart, never in its
     throughput, quantiles or failures; its clients' windows and derived floor ride from its event
-    (ruling 6f7a4013). The latest run per (lane, tier, load, solo role, scale, clients)."""
+    (ruling 6f7a4013). A failed call whose step failed the same way when recorded -- its declared
+    `expected`, else the solo pass's reading of the same (workload, step) -- is the trace's own:
+    ATTRIBUTED apart, never in the failures (ruling 57f6c2a8 (1)). The latest run per (lane, tier,
+    load, solo role, scale, clients)."""
     cli = {e.get("run_id"): e for e in events if e.get("kind") == "cli" and e.get("run_id")}
     runs: Dict[str, Dict[str, Any]] = {}
     for e in events:
@@ -602,7 +605,8 @@ def load_report(
         r = runs.setdefault(a["load"], {"load": a["load"], "lane": a.get("lane"), "tier": a.get("tier"),
                                         "clients": a.get("clients"), "perf_load": a.get("perf_load"),
                                         "solo": a.get("solo"), "scale": a.get("scale"),
-                                        "composed": a.get("composed"), "calls": [], "summary": {}})
+                                        "composed": a.get("composed"), "pin": a.get("pin"),
+                                        "calls": [], "summary": {}})
         if e.get("verb") == "bench-load":
             r["summary"] = e
         elif e.get("run_id") and a.get("phase") == "seed":  # 6a2b88c5 (2): read apart, never the span's
@@ -618,6 +622,16 @@ def load_report(
                r["scale"] or 0, r["clients"] or 0)
         if key not in latest or r["ts"] > latest[key]["ts"]:
             latest[key] = r
+    # 57f6c2a8 (1): the solo pass's reading of each recorded step -- the expectation of a step
+    # whose recording holds no outcome
+    solo_out: Dict[tuple, Dict[tuple, Any]] = {}
+    for r in latest.values():
+        if r["solo"]:
+            got = solo_out.setdefault((str(r["lane"]), r["tier"] or 0, str(r["perf_load"] or "")), {})
+            for c in r["calls"]:
+                a = c.get("attrs") or {}
+                if a.get("workload") is not None and a.get("step") is not None:
+                    got[(a["workload"], a["step"])] = c.get("outcome")
 
     def quantiles(cs: List[Dict[str, Any]]) -> Dict[str, Any]:
         walls = sorted(c.get("wall_s") or 0.0 for c in cs)
@@ -631,9 +645,17 @@ def load_report(
         mine = [cli.get(c["run_id"]) or {} for c in ok]
         writes = sum(1 for c in mine if c and not (c.get("attrs") or {}).get("read_only"))
         fails: Dict[str, int] = {}
+        attributed: Dict[str, int] = {}
+        solo = {} if r["solo"] else solo_out.get((str(r["lane"]), r["tier"] or 0, str(r["perf_load"] or "")), {})
         for c in calls:
-            if c.get("outcome") != 0:
-                fails[str(c.get("outcome"))] = fails.get(str(c.get("outcome")), 0) + 1
+            if c.get("outcome") == 0:
+                continue
+            a = c.get("attrs") or {}
+            exp = a["expected"] if "expected" in a else solo.get((a.get("workload"), a.get("step")))
+            # 57f6c2a8 (1): failing as its recording (or its solo reading) failed, the step is the
+            # trace's own -- attributed; failing otherwise (a timeout where it exited 1) it counts
+            into = attributed if exp not in (None, 0) and exp == c.get("outcome") else fails
+            into[str(c.get("outcome"))] = into.get(str(c.get("outcome")), 0) + 1
         by_verb: Dict[str, List[Dict[str, Any]]] = {}
         by_role: Dict[str, List[Dict[str, Any]]] = {}
         inter: Dict[str, List[Dict[str, Any]]] = {}
@@ -667,9 +689,10 @@ def load_report(
         s = r["summary"]
         out.append({"load": r["load"], "lane": r["lane"], "tier": r["tier"], "clients": r["clients"],
                     "perf_load": r["perf_load"], "solo": r["solo"], "scale": r["scale"],
-                    "composed": r["composed"], "ts": r["ts"],
+                    "composed": r["composed"], "ts": r["ts"], "pin": r["pin"],  # dba3f272: the code it measured
                     "ops": len(calls), "window_s": window, "ops_per_s": len(ok) / window,
-                    "writes_per_s": writes / window, "failures": fails, "verbs": verbs,
+                    "writes_per_s": writes / window, "failures": fails, "attributed": attributed,
+                    "verbs": verbs,
                     "roles": [{"role": k, **quantiles(cs)} for k, cs in sorted(by_role.items())],
                     "interactive": [{"verb": k, **quantiles(cs)} for k, cs in sorted(inter.items())],
                     "largest_op": big, "visibility": s.get("visibility"),
@@ -1204,9 +1227,12 @@ def render_perf(
                 + (" · COMPOSED (a projection, never gating)" if r.get("composed") else "")
         out += ["", f"### Load — {r['lane']}{named} · x{r['tier']} · {r['clients']} client(s) · "
                     f"{r['ops']} ops in {_s(r['window_s'])} s · {r['ops_per_s']:.2f} ops/s · "
-                    f"{r['writes_per_s']:.2f} writes/s", "",
+                    f"{r['writes_per_s']:.2f} writes/s" + (f" · pin {r['pin']}" if r.get("pin") else ""), "",
                 f"- clients' summed peak RSS {_bytes_text(rss * 1024) if rss else '-'} · written "
-                f"{_bytes_text(r.get('written'))} · failures {fails} · integrity "
+                f"{_bytes_text(r.get('written'))} · failures {fails}"
+                + (" · attributed (failed as recorded) " + ", ".join(
+                    f"{k} x{n}" for k, n in sorted(r["attributed"].items())) if r.get("attributed") else "")
+                + " · integrity "
                 f"{(r.get('integrity') or {}).get('ok', '-')}"
                 + (f" · **ABORTED: {r['aborted']}**" if r.get("aborted") else "")]
         seed, fl = r.get("seed") or {}, r.get("floor")
